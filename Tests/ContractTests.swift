@@ -2,6 +2,38 @@ import XCTest
 @testable import SweatCaster
 
 final class ContractTests: XCTestCase {
+    func testV2ChatKeepsQueueStatusAndCompletionMetadata() throws {
+        let stream = """
+        data: {"type":"tool_status","content":"Venter på modelplads."}
+
+        data: {"type":"text","content":"Kort svar."}
+
+        data: {"type":"done","content":"","message_id":"msg-1","model_id":"qwen25-7b"}
+
+
+        """
+        var parser = V2ChatParser()
+        var events: [V2ChatEvent] = []
+        for byte in stream.utf8 {
+            if let event = try parser.feed(byte) { events.append(event) }
+        }
+        XCTAssertEqual(events.map(\.type), [.tool_status, .text, .done])
+        XCTAssertEqual(events.last?.model_id, "qwen25-7b")
+        XCTAssertEqual(events.last?.message_id, "msg-1")
+        XCTAssertNil(events.last?.usage)
+        XCTAssertNoThrow(try parser.end())
+        XCTAssertThrowsError(try V2ChatParser().end())
+    }
+
+    func testV2ChatRequestEncodesOnlySupportedFields() throws {
+        let request = try V2ChatRequest(message: "  Hej  ", sessionID: "phone-1")
+        let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request))
+        let fields = try XCTUnwrap(body as? [String: Any])
+        XCTAssertEqual(Set(fields.keys), ["message", "session_id", "request_id"])
+        XCTAssertEqual(fields["message"] as? String, "Hej")
+        XCTAssertThrowsError(try V2ChatRequest(message: " ", sessionID: "phone-1"))
+        XCTAssertThrowsError(try V2ChatRequest(message: "Hej", sessionID: "phone/1"))
+    }
     func testTailscaleRangeAndPublicAddressRejection() throws {
         for ip in ["100.64.0.0", "100.100.1.5", "100.127.255.255"] {
             XCTAssertEqual(try Server(ip).profile, .tailscale)

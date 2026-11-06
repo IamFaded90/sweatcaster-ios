@@ -293,6 +293,293 @@ struct LiveAPI: SweatAPI, ChatAPI {
     }
 }
 
+
+struct V2Models: Decodable, Sendable {
+    let default_model_id: String
+    let models: [Entry]
+    struct Entry: Decodable, Identifiable, Sendable {
+        let id, label: String
+        let available, loaded: Bool
+        let capabilities: [String]
+    }
+
+    static let preview = Self(default_model_id: "qwen25-7b", models: [
+        .init(id: "qwen25-7b", label: "Qwen 2.5 7B", available: true, loaded: true, capabilities: ["chat", "video"]),
+        .init(id: "llama31-8b", label: "Llama 3.1 8B", available: true, loaded: false, capabilities: ["chat", "video"])
+    ])
+}
+
+struct V2ChatRequest: Encodable, Sendable {
+    let message: String
+    let session_id: String?
+    let model_id: String?
+    let request_id: UUID
+
+    init(message: String, sessionID: String? = nil, modelID: String? = nil, requestID: UUID = UUID()) throws {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...2000).contains(trimmed.unicodeScalars.count),
+              sessionID.map({ $0.utf8.count <= 64 && $0.utf8.allSatisfy {
+                  (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95
+              } }) ?? true else { throw V2Failure.invalidInput }
+        self.message = trimmed
+        session_id = sessionID
+        model_id = modelID
+        request_id = requestID
+    }
+}
+
+enum V2Failure: Error, Equatable {
+    case invalidInput, invalidResponse, interrupted
+    case http(status: Int, code: String?, message: String?)
+}
+
+struct V2ChatEvent: Decodable, Sendable, Equatable {
+    enum Kind: String, Decodable, Sendable { case tool_status, text, done }
+    let type: Kind
+    let content: String
+    let message_id: String?
+    let model_id: String?
+    let usage: Usage?
+
+    struct Usage: Decodable, Sendable, Equatable {
+        let input_tokens, output_tokens, elapsed_ms: Int?
+    }
+}
+
+struct V2SSEFrames {
+    private var line = Data()
+    private var fields: [Data] = []
+    private var eventBytes = 0
+    private var afterCR = false
+
+    mutating func feed(_ byte: UInt8) throws -> Data? {
+        let skip = afterCR && byte == 10
+        afterCR = byte == 13
+        if skip { return nil }
+        guard byte == 10 || byte == 13 else {
+            guard line.count < 262_144 else { throw V2Failure.invalidResponse }
+            line.append(byte)
+            return nil
+        }
+        defer { line.removeAll(keepingCapacity: true) }
+        if line.isEmpty {
+            guard !fields.isEmpty else { return nil }
+            defer { fields.removeAll(keepingCapacity: true); eventBytes = 0 }
+            var event = Data()
+            for (index, field) in fields.enumerated() {
+                if index > 0 { event.append(10) }
+                event.append(field)
+            }
+            return event
+        }
+        if line.starts(with: "data:".utf8) {
+            var field = line.dropFirst(5)
+            if field.first == 32 { field = field.dropFirst() }
+            eventBytes += field.count + 1
+            guard eventBytes <= 262_144 else { throw V2Failure.invalidResponse }
+            fields.append(Data(field))
+        }
+        return nil
+    }
+}
+
+struct V2ChatParser {
+    private var frames = V2SSEFrames()
+    private(set) var finished = false
+
+    mutating func feed(_ byte: UInt8) throws -> V2ChatEvent? {
+        guard let payload = try frames.feed(byte) else { return nil }
+        guard !finished else { throw V2Failure.invalidResponse }
+        let event = try JSONDecoder().decode(V2ChatEvent.self, from: payload)
+        if event.type == .done {
+            guard event.message_id?.isEmpty == false, event.model_id?.isEmpty == false else {
+                throw V2Failure.invalidResponse
+            }
+            finished = true
+        }
+        return event
+    }
+
+    func end() throws {
+        guard finished else { throw V2Failure.interrupted }
+    }
+}
+
+struct V2Hub: Decodable, Sendable {
+    let revision: Int
+    let rooms: [Room]
+    let agents: [Agent]
+    let summary: Summary
+
+    struct Room: Decodable, Identifiable, Sendable {
+        let id, name, icon: String
+    }
+    struct Agent: Decodable, Identifiable, Sendable {
+        enum Status: String, Decodable, Sendable { case working, thinking, ready, offline }
+        let id, room_id, name, icon: String
+        let status: Status
+        let xp, level, xp_in_level, xp_for_next_level: Int
+        let recent_quests: [Quest]
+    }
+    struct Quest: Decodable, Identifiable, Sendable {
+        enum State: String, Decodable, Sendable { case queued, running, completed, failed }
+        let id, title: String
+        let state: State
+        let updated_at: Date
+    }
+    struct Summary: Decodable, Sendable {
+        let active_agents, active_jobs, total_xp, streak_days: Int
+    }
+}
+
+struct V2Page<Item: Decodable & Sendable>: Decodable, Sendable {
+    let items: [Item]
+    let next_cursor: String?
+}
+struct V2History: Decodable, Identifiable, Sendable {
+    let id, kind, title, state: String
+    let at: Date
+    let tool_name, summary: String?
+}
+struct V2Memory: Decodable, Identifiable, Sendable {
+    let id, title, summary: String
+    let updated_at: Date
+}
+struct V2Achievements: Decodable, Sendable {
+    let items: [Item]
+    struct Item: Decodable, Identifiable, Sendable {
+        let id, title, description, icon: String
+        let current, target: Int
+        let earned_at: Date?
+    }
+}
+struct V2HubEvent: Decodable, Sendable {
+    enum Kind: String, Decodable, Sendable { case hub_updated, resync_required }
+    let type: Kind
+    let revision: Int?
+}
+
+extension LiveAPI {
+    func v2Models() async throws -> V2Models { try await v2JSON("models") }
+    func v2Hub() async throws -> V2Hub { try await v2JSON("agent-hub") }
+    func v2Achievements() async throws -> V2Achievements { try await v2JSON("achievements") }
+
+    func v2History(agentID: String, cursor: String? = nil) async throws -> V2Page<V2History> {
+        try await v2JSON("agents/\(v2AgentSegment(agentID))/history", query: v2PageQuery(cursor))
+    }
+    func v2Memory(agentID: String, cursor: String? = nil) async throws -> V2Page<V2Memory> {
+        try await v2JSON("agents/\(v2AgentSegment(agentID))/memory", query: v2PageQuery(cursor))
+    }
+
+    private func v2AgentSegment(_ id: String) throws -> String {
+        guard !id.isEmpty, id != ".", id != "..",
+              let segment = id.addingPercentEncoding(withAllowedCharacters:
+                  CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"))
+        else { throw V2Failure.invalidInput }
+        return segment
+    }
+
+    private func v2PageQuery(_ cursor: String?) -> [URLQueryItem] {
+        [URLQueryItem(name: "limit", value: "50")] + (cursor.map { [URLQueryItem(name: "cursor", value: $0)] } ?? [])
+    }
+
+    private func v2Request(_ path: String, method: String = "GET", query: [URLQueryItem] = []) throws -> URLRequest {
+        guard var components = URLComponents(url: server.origin, resolvingAgainstBaseURL: false) else {
+            throw V2Failure.invalidInput
+        }
+        components.percentEncodedPath = "/api/v2/" + path
+        if !query.isEmpty { components.queryItems = query }
+        guard let url = components.url else { throw V2Failure.invalidInput }
+        return request(url, method: method)
+    }
+
+    private func v2JSON<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
+        let (data, response) = try await session.data(for: v2Request(path, query: query))
+        guard let http = response as? HTTPURLResponse else { throw V2Failure.invalidResponse }
+        guard http.statusCode == 200 else { throw v2HTTPError(http.statusCode, data: data) }
+        return try contractDecoder().decode(T.self, from: data)
+    }
+
+    private func v2HTTPError(_ status: Int, data: Data) -> V2Failure {
+        let problem = (try? JSONDecoder().decode(Envelope.self, from: data))?.error
+        return .http(status: status, code: problem.map { redact($0.code) },
+                     message: problem.map { redact($0.message) })
+    }
+
+    private func v2Stream(_ request: URLRequest) async throws -> URLSession.AsyncBytes {
+        var req = request
+        req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        let (bytes, response) = try await session.bytes(for: req)
+        guard let http = response as? HTTPURLResponse else {
+            bytes.task.cancel()
+            throw V2Failure.invalidResponse
+        }
+        guard http.statusCode == 200 else {
+            defer { bytes.task.cancel() }
+            var data = Data()
+            if http.mimeType == "application/json" {
+                for try await byte in bytes {
+                    guard data.count < 65_536 else { break }
+                    data.append(byte)
+                }
+            }
+            throw v2HTTPError(http.statusCode, data: data)
+        }
+        guard http.mimeType == "text/event-stream" else {
+            bytes.task.cancel()
+            throw V2Failure.invalidResponse
+        }
+        return bytes
+    }
+
+    func v2Chat(_ input: V2ChatRequest, receive: @Sendable (V2ChatEvent) async -> Void) async throws {
+        var req = try v2Request("chat", method: "POST")
+        req.httpBody = try JSONEncoder().encode(input)
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let bytes = try await v2Stream(req)
+        defer { bytes.task.cancel() }
+        var parser = V2ChatParser()
+        do {
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                if let event = try parser.feed(byte) {
+                    await receive(event)
+                    try Task.checkCancellation()
+                    if parser.finished { return }
+                }
+            }
+        } catch is URLError {
+            try Task.checkCancellation()
+            throw V2Failure.interrupted
+        }
+        try parser.end()
+    }
+
+    func v2HubEvents(after revision: Int, receive: @Sendable (V2HubEvent) async -> Void) async throws {
+        let request = try v2Request("agent-hub/events", query: [
+            URLQueryItem(name: "after_revision", value: String(revision))
+        ])
+        let bytes = try await v2Stream(request)
+        defer { bytes.task.cancel() }
+        var frames = V2SSEFrames()
+        var latest = revision
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            guard let payload = try frames.feed(byte) else { continue }
+            let event = try JSONDecoder().decode(V2HubEvent.self, from: payload)
+            if event.type == .resync_required {
+                await receive(event)
+                return
+            }
+            guard let next = event.revision else { throw V2Failure.invalidResponse }
+            if next > latest {
+                latest = next
+                await receive(event)
+            }
+        }
+    }
+}
+
 enum Pairing {
     static let addressKey = "server.address"
     private static func query(_ address: String) -> [String: Any] {

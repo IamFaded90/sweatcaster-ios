@@ -140,7 +140,7 @@ struct Home: View {
             Text("Videoerne og jobhistorikken bliver liggende på PC’en.")
         }
         .sheet(isPresented: $showAgentHub) {
-            AgentHub(model: model)
+            AgentHub()
         }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
@@ -536,72 +536,32 @@ struct Home: View {
 }
 
 
-private enum OfficeRoom: String, CaseIterable, Identifiable {
-    case research = "Research Lab"
-    case video = "Video Studio"
-    case memory = "Memory Vault"
-
-    var id: Self { self }
-    var icon: String {
-        switch self {
-        case .research: "magnifyingglass"
-        case .video: "film"
-        case .memory: "archivebox"
-        }
-    }
-
-    var agent: String {
-        switch self {
-        case .research: "Researcher"
-        case .video: "Video Director"
-        case .memory: "File Explorer"
-        }
-    }
-}
-
 private struct AgentHub: View {
     @Environment(\.dismiss) private var dismiss
-    let model: Model
-    @State private var room: OfficeRoom = .video
-    @State private var details: OfficeRoom?
+    @State private var selectedRoom = "research"
+    @State private var details: V2Hub.Agent?
     @State private var achievements = false
 
-    private var jobs: [Job] { model.jobs.sorted { $0.created_at > $1.created_at } }
-    private var active: Int { jobs.filter { $0.status.active }.count }
-    private var completed: [Job] { jobs.filter { $0.status == .completed } }
-    private var xp: Int { completed.count * 25 }
-
-    private var streak: Int {
-        let calendar = Calendar.current
-        let days = Set(completed.map { calendar.startOfDay(for: $0.updated_at) })
-        var day = calendar.startOfDay(for: .now)
-        var count = 0
-        while days.contains(day), let previous = calendar.date(byAdding: .day, value: -1, to: day) {
-            count += 1
-            day = previous
-        }
-        return count
-    }
+    private let snapshot = AgentHubPreview.snapshot
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    Text(model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")")
-                        .font(.subheadline)
-                    Text("Videostatus følger joblisten. Agenternes egne statusser afventer PC’en.")
+                    Label("Eksempeldata · Agent-Hub", systemImage: "info.circle").font(.headline)
+                    Text("Tallene viser et eksempel. Dine videojobs ligger i Video Studio.")
                         .foregroundStyle(.secondary)
                     missionHUD
-                    Picker("Rum", selection: $room) {
-                        ForEach(OfficeRoom.allCases) { item in Text(item.rawValue).tag(item) }
+                    Picker("Rum", selection: $selectedRoom) {
+                        ForEach(snapshot.rooms) { room in Text(room.name).tag(room.id) }
                     }.frame(minHeight: 48)
-                    officeFloor
-                    Button { achievements = true } label: {
-                        Label("Achievements", systemImage: "trophy").frame(minHeight: 48)
-                    }.buttonStyle(.bordered)
+                    ForEach(snapshot.agents.filter { $0.room_id == selectedRoom }) { agent in
+                        agentCard(agent)
+                    }
+                    Button("Achievements", systemImage: "trophy") { achievements = true }
+                        .frame(minHeight: 48)
                 }.padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
             }
-            .refreshable { await model.refresh() }
             .navigationTitle("Agent-Hub")
             .toolbar { Button("Luk") { dismiss() } }
             .sheet(item: $details) { agent in agentDetails(agent) }
@@ -610,113 +570,158 @@ private struct AgentHub: View {
     }
 
     private var missionHUD: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let summary = snapshot.summary
+        return VStack(alignment: .leading, spacing: 8) {
             Text("Mission HUD").font(.headline).accessibilityAddTraits(.isHeader)
-            Label("Aktive agenter · Afventer data", systemImage: "person.2")
-            Label("Aktive videojobs · \(active)", systemImage: "film")
-            Label("Video-XP · \(xp)", systemImage: "bolt")
-            Label("Streak · \(streak) dage", systemImage: "flame")
-            Text("Lokale point: 25 XP pr. færdig video i joblisten.")
-                .font(.caption).foregroundStyle(.secondary)
+            Label("Aktive agenter · \(summary.active_agents)", systemImage: "person.2")
+            Label("Aktive jobs · \(summary.active_jobs)", systemImage: "film")
+            Label("XP i alt · \(summary.total_xp)", systemImage: "bolt")
+            Label("Streak · \(summary.streak_days) dage", systemImage: "flame")
         }.frame(maxWidth: .infinity, alignment: .leading)
             .padding(16).background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
     }
 
-    private var officeFloor: some View {
+    private func agentCard(_ agent: V2Hub.Agent) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(room.rawValue).font(.title2.bold()).accessibilityAddTraits(.isHeader)
-            Button { details = room } label: {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: room.icon).font(.title2).frame(width: 48, height: 48)
-                        .background(.blue.opacity(0.15), in: Circle()).accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(room.agent).font(.headline)
-                        Text(status(for: room)).font(.subheadline)
-                            .padding(.horizontal, 8).padding(.vertical, 4)
-                            .background(.blue.opacity(0.12), in: Capsule())
-                    }
-                    Spacer(minLength: 0)
-                    Image(systemName: "chevron.right").accessibilityHidden(true)
-                }.frame(minHeight: 48)
-            }.buttonStyle(.plain)
-                .accessibilityHint("Åbner agentens detaljer")
-            if room == .video {
-                ProgressView(value: Double(xp % 100), total: 100) {
-                    Text("Niveau \(xp / 100 + 1) · \(xp % 100) / 100 XP")
-                }
-            } else { Text("XP · Afventer data").foregroundStyle(.secondary) }
+            Button { details = agent } label: {
+                Label(agent.name, systemImage: icon(agent.icon)).font(.headline)
+                    .frame(minHeight: 48)
+            }.buttonStyle(.bordered)
+            Text(status(agent.status)).font(.subheadline)
+            ProgressView(value: Double(agent.xp_in_level), total: Double(max(1, agent.xp_for_next_level))) {
+                Text("Niveau \(agent.level) · \(agent.xp_in_level) / \(agent.xp_for_next_level) XP")
+            }
             Text("Quest Log").font(.headline)
-            if room == .video, !jobs.isEmpty {
-                ForEach(jobs.prefix(3)) { job in Text(jobLabel(job)) }
-            } else { Text("Ingen opgaver at vise.").foregroundStyle(.secondary) }
+            let quests = agent.recent_quests.sorted { $0.updated_at > $1.updated_at }
+            if quests.isEmpty { Text("Ingen opgaver i eksemplet.") }
+            ForEach(quests.prefix(3)) { quest in
+                Text(quest.title + " · " + questStatus(quest.state))
+            }
         }.frame(maxWidth: .infinity, alignment: .leading)
             .padding(16).background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 20))
     }
 
-    private func status(for agent: OfficeRoom) -> String {
-        guard agent == .video else { return "Afventer data" }
-        guard model.isDemo || model.connected else { return "Forbindelse afbrudt" }
-        if jobs.contains(where: { $0.status.active && $0.status != .queued }) { return "Arbejder · Videokø" }
-        return active > 0 ? "Venter · Videokø" : "Ingen aktive videojobs"
-    }
-
-    private func jobLabel(_ job: Job) -> String {
-        let clip = model.clips.first { $0.id == job.clip_id }?.name ?? "Klip"
-        return "\(clip) · \(job.status.title)"
-    }
-
-    private func agentDetails(_ agent: OfficeRoom) -> some View {
-        NavigationStack {
+    private func agentDetails(_ agent: V2Hub.Agent) -> some View {
+        let history = AgentHubPreview.history(for: agent.id)
+        let memory = AgentHubPreview.memory(for: agent.id)
+        return NavigationStack {
             List {
-                Section("Status") { Text(status(for: agent)) }
+                Text("Eksempeldata")
+                Section("Status") { Text("\(status(agent.status)) · \(agent.xp) XP") }
                 Section("Historik") {
-                    if agent == .video, !jobs.isEmpty {
-                        ForEach(jobs) { job in
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(jobLabel(job))
-                                Text(job.updated_at.formatted(date: .abbreviated, time: .shortened))
-                                    .font(.caption).foregroundStyle(.secondary)
-                            }
+                    if history.items.isEmpty { Text("Ingen historik i eksemplet.") }
+                    ForEach(history.items) { item in
+                        VStack(alignment: .leading) {
+                            Text(item.title)
+                            Text(item.at.formatted(date: .abbreviated, time: .shortened)).font(.caption)
+                            if let summary = item.summary { Text(summary) }
                         }
-                    } else { Text("Ingen historik fra PC’en endnu.") }
+                    }
                 }
-                Section("Værktøjskald") { Text("Afventer data fra PC’en.") }
-                Section("Hukommelse") { Text("Afventer data fra PC’en.") }
-            }
-            .navigationTitle(agent.agent)
-            .toolbar { Button("Luk") { details = nil } }
+                Section("Værktøjskald") {
+                    let tools = history.items.filter { $0.kind == "tool_call" }
+                    if tools.isEmpty { Text("Ingen værktøjskald i eksemplet.") }
+                    ForEach(tools) { item in Text(item.tool_name ?? item.title) }
+                }
+                Section("Hukommelse") {
+                    if memory.items.isEmpty { Text("Ingen hukommelse i eksemplet.") }
+                    ForEach(memory.items) { item in
+                        VStack(alignment: .leading) {
+                            Text(item.title).font(.headline)
+                            Text(item.summary)
+                        }
+                    }
+                }
+            }.navigationTitle(agent.name)
+                .toolbar { Button("Luk") { details = nil } }
         }
     }
 
     private var achievementPage: some View {
         NavigationStack {
             List {
-                badge("Første video", icon: "film", result: completed.isEmpty ? "Låst" : "Optjent")
-                badge("10 chats", icon: "bubble.left.and.bubble.right", result: "Afventer chatstatistik")
-                badge("Natjob", icon: "moon.stars", result: nightJob ? "Optjent" : "Låst")
-                Text(model.isDemo ? "Demo · Badges baseret på testjobs."
-                    : "Videobadges beregnes fra de jobs, der vises på denne PC-profil.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-            .navigationTitle("Achievements")
-            .toolbar { Button("Luk") { achievements = false } }
+                Text("Eksempeldata")
+                ForEach(AgentHubPreview.achievements.items) { item in
+                    Label {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(item.title).font(.headline)
+                            Text(item.description)
+                            Text(item.earned_at == nil ? "\(item.current) / \(item.target) · Låst" : "Optjent i eksemplet")
+                                .foregroundStyle(.secondary)
+                        }
+                    } icon: {
+                        Image(systemName: icon(item.icon))
+                            .foregroundStyle(item.earned_at == nil ? Color.secondary : Color.orange)
+                    }.frame(minHeight: 56)
+                }
+            }.navigationTitle("Achievements")
+                .toolbar { Button("Luk") { achievements = false } }
         }
     }
 
-    private var nightJob: Bool {
-        completed.contains { Calendar.current.component(.hour, from: $0.created_at) < 6 }
+    private func icon(_ value: String) -> String {
+        value == "search" ? "magnifyingglass" : value
     }
 
-    private func badge(_ title: String, icon: String, result: String) -> some View {
-        Label {
-            VStack(alignment: .leading) {
-                Text(title).font(.headline)
-                Text(result).font(.subheadline).foregroundStyle(.secondary)
-            }
-        } icon: {
-            Image(systemName: icon).foregroundStyle(result == "Optjent" ? Color.orange : Color.secondary)
-        }.frame(minHeight: 56)
+    private func status(_ value: V2Hub.Agent.Status) -> String {
+        switch value {
+        case .working: "Arbejder"
+        case .thinking: "Tænker"
+        case .ready: "Klar"
+        case .offline: "Offline"
+        }
     }
+
+    private func questStatus(_ value: V2Hub.Quest.State) -> String {
+        switch value {
+        case .queued: "I kø"
+        case .running: "I gang"
+        case .completed: "Færdig"
+        case .failed: "Fejlede"
+        }
+    }
+}
+
+private enum AgentHubPreview {
+    private static let date = Date(timeIntervalSince1970: 1_793_966_400)
+    static let snapshot = V2Hub(revision: 12, rooms: [
+        .init(id: "research", name: "Research Lab", icon: "search"),
+        .init(id: "video", name: "Video Studio", icon: "film"),
+        .init(id: "memory", name: "Memory Vault", icon: "archivebox")
+    ], agents: [
+        .init(id: "researcher", room_id: "research", name: "Researcher", icon: "search", status: .thinking,
+              xp: 35, level: 1, xp_in_level: 35, xp_for_next_level: 100, recent_quests: [
+                .init(id: "q1", title: "Søgning", state: .running, updated_at: date)
+              ]),
+        .init(id: "director", room_id: "video", name: "Video Director", icon: "film", status: .working,
+              xp: 120, level: 2, xp_in_level: 20, xp_for_next_level: 100, recent_quests: [
+                .init(id: "q2", title: "Klip et højdepunkt", state: .running, updated_at: date)
+              ]),
+        .init(id: "explorer", room_id: "memory", name: "File Explorer", icon: "archivebox", status: .ready,
+              xp: 10, level: 1, xp_in_level: 10, xp_for_next_level: 100, recent_quests: [])
+    ], summary: .init(active_agents: 2, active_jobs: 2, total_xp: 165, streak_days: 3))
+
+    static func history(for agentID: String) -> V2Page<V2History> {
+        .init(items: agentID == "researcher" ? [
+            .init(id: "e1", kind: "tool_call", title: "Søgning", state: "completed",
+                  at: date, tool_name: "search", summary: "Fandt 2 resultater")
+        ] : [], next_cursor: nil)
+    }
+
+    static func memory(for agentID: String) -> V2Page<V2Memory> {
+        .init(items: agentID == "researcher" ? [
+            .init(id: "m1", title: "Søgepræferencer", summary: "Foretrækker korte svar på dansk.", updated_at: date)
+        ] : [], next_cursor: nil)
+    }
+
+    static let achievements = V2Achievements(items: [
+        .init(id: "first_video", title: "Første video", description: "Færdiggør en video",
+              icon: "film", current: 1, target: 1, earned_at: date),
+        .init(id: "ten_chats", title: "10 chats", description: "Afslut 10 chats",
+              icon: "bubble.left.and.bubble.right", current: 4, target: 10, earned_at: nil),
+        .init(id: "night_job", title: "Natjob", description: "Fuldfør et job om natten",
+              icon: "moon.stars", current: 0, target: 1, earned_at: nil)
+    ])
 }
 
 private struct Preview: View {
@@ -796,9 +801,15 @@ private struct ModelPickerBar: View {
 
     var body: some View {
         DisclosureGroup("Modeller") {
-            Picker("Aktiv model", selection: .constant("PC’ens standardmodel")) {
-                Text("PC’ens standardmodel").tag("PC’ens standardmodel")
+            Picker("Model · Eksempel", selection: .constant(V2Models.preview.default_model_id)) {
+                ForEach(V2Models.preview.models) { model in
+                    Text(model.label).tag(model.id)
+                }
             }.disabled(true)
+            ForEach(V2Models.preview.models) { model in
+                Text("\(model.label) · \(model.loaded ? "Indlæst i eksemplet" : "Ikke indlæst i eksemplet")")
+                    .font(.caption)
+            }
             Text("PC’en vælger modellen. Modelvalg i appen kommer senere.")
                 .font(.caption)
             Button("Se eksempel på sammenligning") { comparison = true }.frame(minHeight: 48)

@@ -1,5 +1,7 @@
 # Backend To-Do til Grok
 
+Den godkendte første v2-kontrakt erstatter de tidligere forslag til modeller og chat nedenfor. Første version accepterer kun tom eller udeladt `context` og null eller udeladt `parent_message_id`. Chat-SSE bruger kun `tool_status`, `text` og `done`. Agent-Hub er foreløbig en lokal forhåndsvisning af kontraktforslaget. Appen bruger v1, indtil serverens v2-endpoints er klar og testet.
+
 Forslag til en ny kontrakt. iOS-klienten kalder kun den nuværende v1-kontrakt, indtil vi har aftalt og testet udvidelserne. Bevar token i Bearer-headeren og adgangen via den valgte PC-profil. Nye ID’er skal være stabile, uigennemsigtige strenge. Eksponér hverken filstier, tokens eller interne serverfejl.
 
 | Funktion | Foreslået request | Foreslået response |
