@@ -32,12 +32,12 @@ import Observation
         self.defaults = defaults
         self.api = api ?? demo
         if api == nil, !address.isEmpty {
+            isDemo = false
             do {
                 let token = try Pairing.load(address)
                 self.api = try LiveAPI(server: Server(address), token: token)
                 pendingKey = "pending." + address
                 uncertain = defaults.object(forKey: "pending." + address) != nil
-                isDemo = false
             } catch { self.error = error as? APIError ?? .storage }
         }
     }
@@ -100,6 +100,7 @@ import Observation
     }
 
     func refresh() async {
+        guard isDemo || !(api is MockAPI) else { return }
         guard !busy, !refreshing, cancelling.isEmpty else { return }
         revision += 1
         refreshing = true

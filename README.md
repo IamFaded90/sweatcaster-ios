@@ -38,4 +38,10 @@ Vælg en destination fra første kommando, hvis modellen ikke er installeret. Af
 
 ## Frossen API v1
 
+Chat bruger den foreslåede `POST /api/v1/chat` med `message` og en valgfri klientgenereret `session_id`. ID'et gælder, mens chatvisningen er åben. Appen bruger SSE til status og svar og kræver en `done`-hændelse for at afslutte normalt. Stop lukker modtagelsen på telefonen. Backendens eksisterende jobstop bruges til videokøen. Chatdemoen simulerer svar lokalt.
+
+Afstem den endelige OpenAPI og ios-handoff før livegodkendelse. Bekræft især, om serveren accepterer `session_id`, hvilke HTTP-svar betyder at agenterne ikke er klar, og om værktøjsfejl sendes som `tool_status` eller som en særskilt hændelse. Klienten understøtter foreløbigt `tool_error` som en kort, generisk status. Den sender aldrig chatbeskeden igen automatisk.
+
+GitHub Actions forsøger at køre XCTest i en tilgængelig iPhone-simulator før kompilering og pakning af den usignerede IPA. På en fysisk iPhone skal både preview og den delte fil afprøves med en kendt MP4 med tale fra starten. Preview kan spoles tilbage med **Afspil fra starten**.
+
 Klienten følger handoff fra 6. november 2026. Standardområdet til tekstlæsning er nederst i midten, beskæring står på Automatisk, og støjfjernelse er slået fra. Appen forventer 200 med et opdateret job ved stop og 200 med `video/mp4` ved fuld download.

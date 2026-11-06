@@ -1,6 +1,87 @@
 import Foundation
 import Security
 
+struct ChatRequest: Codable, Sendable {
+    let message: String
+    let session_id: UUID?
+}
+
+struct ChatEvent: Decodable, Sendable, Equatable {
+    let type: String
+    let content: String
+}
+
+enum ChatFailure: Error, Equatable {
+    case unreachable, unauthorized, unavailable, rejected, interrupted
+
+    static func validate(status: Int, mime: String?) throws {
+        switch status {
+        case 200 where mime == "text/event-stream": return
+        case 401, 403: throw Self.unauthorized
+        case 404, 501, 502, 503, 504: throw Self.unavailable
+        default: throw Self.rejected
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .unreachable: "Kan ikke nå PC’en."
+        case .unauthorized: "PC’en afviste adgangskoden."
+        case .unavailable: "Agenttjenesten på PC’en er ikke klar."
+        case .rejected: "Chatten kunne ikke læse svaret fra PC’en."
+        case .interrupted: "Svaret blev afbrudt. Et job kan allerede være startet."
+        }
+    }
+}
+
+struct ChatSSEParser {
+    private var line = Data()
+    private var dataLines: [String] = []
+    private var eventSize = 0
+    private var afterCR = false
+    private(set) var finished = false
+
+    mutating func feed(_ byte: UInt8) throws -> ChatEvent? {
+        guard !finished else { return nil }
+        let skipLF = afterCR && byte == 10
+        afterCR = byte == 13
+        if skipLF { return nil }
+        guard byte == 10 || byte == 13 else {
+            guard line.count < 256 * 1024 else { throw ChatFailure.interrupted }
+            line.append(byte)
+            return nil
+        }
+        guard let text = String(data: line, encoding: .utf8) else { throw ChatFailure.interrupted }
+        line.removeAll(keepingCapacity: true)
+        if text.isEmpty {
+            guard !dataLines.isEmpty else { return nil }
+            let payload = dataLines.joined(separator: "\n")
+            dataLines.removeAll(keepingCapacity: true)
+            eventSize = 0
+            guard let event = try? JSONDecoder().decode(ChatEvent.self, from: Data(payload.utf8))
+            else { throw ChatFailure.interrupted }
+            finished = event.type == "done"
+            return ["tool_status", "text", "done", "tool_error"].contains(event.type) ? event : nil
+        }
+        if text == "data" || text.hasPrefix("data:") {
+            let field = text.dropFirst(5)
+            let value = field.first == " " ? field.dropFirst() : field
+            eventSize += value.utf8.count + 1
+            guard eventSize <= 256 * 1024 else { throw ChatFailure.interrupted }
+            dataLines.append(String(value))
+        }
+        return nil
+    }
+
+    func end() throws {
+        guard finished else { throw ChatFailure.interrupted }
+    }
+}
+
+protocol ChatAPI: Sendable {
+    func chat(_ input: ChatRequest, receive: @Sendable (ChatEvent) async -> Void) async throws
+}
+
 protocol SweatAPI: Sendable {
     func health() async throws -> Health
     func capabilities() async throws -> Capabilities
@@ -55,7 +136,7 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
                     newRequest request: URLRequest) async -> URLRequest? { nil }
 }
 
-struct LiveAPI: SweatAPI {
+struct LiveAPI: SweatAPI, ChatAPI {
     let server: Server
     private let token: String
     private let session: URLSession
@@ -98,6 +179,17 @@ struct LiveAPI: SweatAPI {
     private func redact(_ text: String) -> String {
         text.replacingOccurrences(of: token, with: "[skjult]")
     }
+    func redactChat(_ text: String, complete: Bool) -> String {
+        var safe = redact(text)
+        if complete { return safe }
+        let limit = min(safe.count, token.count - 1)
+        if limit > 0, let length = (1...limit).reversed().first(where: {
+            safe.hasSuffix(String(token.prefix($0)))
+        }) {
+            safe.removeLast(length)
+        }
+        return safe
+    }
     private func json<T: Decodable>(_ path: String, status: Int = 200, post: Bool = false,
                                      body: Batch? = nil, auth: Bool = true) async throws -> T {
         var req = request(server.endpoint(path), method: post ? "POST" : "GET", auth: auth)
@@ -127,6 +219,36 @@ struct LiveAPI: SweatAPI {
     func cancel(_ id: String) async throws -> Job {
         try await json("jobs/\(Server.segment(id))/cancel", post: true)
     }
+    func chat(_ input: ChatRequest, receive: @Sendable (ChatEvent) async -> Void) async throws {
+        var req = request(server.endpoint("chat"), method: "POST")
+        req.httpBody = try JSONEncoder().encode(input)
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        var receivedResponse = false
+        do {
+            let (bytes, response) = try await session.bytes(for: req)
+            defer { bytes.task.cancel() }
+            receivedResponse = true
+            guard let http = response as? HTTPURLResponse else { throw ChatFailure.rejected }
+            try ChatFailure.validate(status: http.statusCode, mime: http.mimeType)
+            var parser = ChatSSEParser()
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                if let event = try parser.feed(byte) {
+                    await receive(event)
+                    try Task.checkCancellation()
+                    if parser.finished { return }
+                }
+            }
+            try parser.end()
+        } catch let failure as URLError {
+            if Task.isCancelled || failure.code == .cancelled { throw CancellationError() }
+            if !receivedResponse, [.cannotConnectToHost, .cannotFindHost, .notConnectedToInternet].contains(failure.code) {
+                throw ChatFailure.unreachable
+            }
+            throw ChatFailure.interrupted
+        }
+    }
     func video(_ job: Job) async throws -> URL {
         let url = try server.videoURL(job)
         do {
@@ -139,9 +261,13 @@ struct LiveAPI: SweatAPI {
                 envelope = try? file.read(upToCount: 65536)
             } else { envelope = nil }
             try checked(response, expected: 200, data: envelope)
-            guard response.mimeType == "video/mp4" else {
+            guard response.mimeType == "video/mp4",
+                  let file = try? FileHandle(forReadingFrom: temporary) else {
                 throw APIError.unsafeVideo
             }
+            defer { try? file.close() }
+            let header = try file.read(upToCount: 8)
+            guard header?.dropFirst(4).elementsEqual("ftyp".utf8) == true else { throw APIError.unsafeVideo }
             let target = FileManager.default.temporaryDirectory.appendingPathComponent("Sweat-\(UUID()).mp4")
             do { try FileManager.default.moveItem(at: temporary, to: target) }
             catch { throw APIError.storage }

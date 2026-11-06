@@ -18,6 +18,7 @@ struct Home: View {
     @State private var address = ""
     @State private var token = ""
     @State private var media: Media?
+    @State private var showChat = false
     @State private var errorDetails = false
     @AccessibilityFocusState private var errorFocus: Bool
     @AccessibilityFocusState private var jobsFocus: Bool
@@ -29,6 +30,8 @@ struct Home: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 Text("AI Sweat-Caster").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+                action("Chat med AI-holdet") { showChat = true }
+                    .disabled(model.busy)
                 if model.isDemo {
                     Text("Demotilstand · Kun testdata").font(.headline)
                 }
@@ -104,6 +107,11 @@ struct Home: View {
         }
         .sheet(item: $media) { item in
             Preview(media: item)
+        }
+        .sheet(isPresented: $showChat, onDismiss: {
+            if !model.isDemo { Task { await model.refresh() } }
+        }) {
+            ChatView(api: model.api as? any ChatAPI, demo: model.isDemo)
         }
     }
 
@@ -282,6 +290,7 @@ private struct Preview: View {
     let media: Media
     @State private var player: AVPlayer?
     @State private var invalid = false
+    @State private var audioReady = false
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -292,6 +301,13 @@ private struct Preview: View {
                 else if let player {
                     VideoPlayer(player: player).aspectRatio(9.0 / 16.0, contentMode: .fit)
                         .frame(maxHeight: 540).accessibilityLabel("Videoafspiller")
+                    if !audioReady { Text("Lydudgangen kunne ikke aktiveres. Prøv igen.") }
+                    Button("Afspil fra starten") {
+                        activateAudio()
+                        player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { completed in
+                            if completed { player.play() }
+                        }
+                    }.frame(minHeight: 48)
                     ShareLink(item: media.url) { Text("Del video").frame(minHeight: 48) }
                         .buttonStyle(.bordered)
                 } else { ProgressView("Åbner video…") }
@@ -300,8 +316,150 @@ private struct Preview: View {
             let asset = AVURLAsset(url: media.url)
             do {
                 guard try await asset.load(.isPlayable) else { invalid = true; return }
-                player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+                try Task.checkCancellation()
+                let preview = AVPlayer(playerItem: AVPlayerItem(asset: asset))
+                preview.isMuted = false
+                preview.volume = 1
+                player = preview
+                activateAudio()
             } catch { if !Task.isCancelled { invalid = true } }
-        }.onDisappear { player?.pause() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { notice in
+            guard let raw = notice.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
+            if type == .began { player?.pause(); audioReady = false }
+            if type == .ended { activateAudio() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { notice in
+            if notice.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ==
+                AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue { player?.pause() }
+        }
+        .onDisappear {
+            player?.pause()
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        }
     }
+
+    private func activateAudio() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .moviePlayback)
+            try session.setActive(true)
+            audioReady = true
+        } catch { audioReady = false }
+    }
+}
+
+private struct ChatTurn: Identifiable {
+    let id = UUID()
+    let prompt: String
+    var reply = ""
+    var notice: String?
+}
+
+private struct ChatView: View {
+    @Environment(\.dismiss) private var dismiss
+    let api: (any ChatAPI)?
+    let demo: Bool
+    @State private var sessionID = UUID()
+    @State private var draft = ""
+    @State private var turns: [ChatTurn] = []
+    @State private var status: String?
+    @State private var streamedText = ""
+    @State private var task: Task<Void, Never>?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Chat med AI-holdet").font(.title.bold()).accessibilityAddTraits(.isHeader)
+                Button("Luk") { stop(); dismiss() }.frame(minHeight: 48)
+                if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
+                Text("AI’en arbejder på din PC. Researcher bruger internettet til websøgning.")
+                ForEach(turns) { turn in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(turn.prompt).font(.headline)
+                        if !turn.reply.isEmpty { Text(turn.reply).textSelection(.enabled) }
+                        if let notice = turn.notice { Text(notice).font(.callout) }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12).background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                }
+                if let status { Text(status).font(.callout) }
+                TextField("Din besked", text: $draft, axis: .vertical)
+                    .textFieldStyle(.roundedBorder).lineLimit(2...5).frame(minHeight: 48)
+                if task != nil {
+                    Button { stop() } label: { Text("Stop modtagelse").frame(minHeight: 48) }
+                        .buttonStyle(.bordered)
+                } else {
+                    Button { send() } label: { Text("Send besked").frame(minHeight: 48) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }.padding(20)
+        }.onDisappear { stop() }
+    }
+
+    private func send() {
+        let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard task == nil, !message.isEmpty else { return }
+        draft = ""
+        streamedText = ""
+        turns.append(ChatTurn(prompt: message))
+        let index = turns.count - 1
+        status = "Venter på svar…"
+        let input = ChatRequest(message: message, session_id: sessionID)
+        task = Task {
+            do {
+                if demo {
+                    status = "Demo · Finder et testklip…"
+                    try await Task.sleep(for: .milliseconds(600))
+                    turns[index].reply = "Jeg fandt et testklip. "
+                    try await Task.sleep(for: .milliseconds(600))
+                    turns[index].reply += "Demoen starter ikke et video-job."
+                } else {
+                    guard let api else { throw ChatFailure.unauthorized }
+                    await run(api, input: input, index: index)
+                }
+            } catch is CancellationError {
+                turns[index].notice = "Modtagelsen er stoppet."
+            } catch {
+                turns[index].notice = (error as? ChatFailure ?? .interrupted).message
+            }
+            status = nil
+            task = nil
+        }
+    }
+
+    private func run(_ api: any ChatAPI, input: ChatRequest, index: Int) async {
+        do {
+            try await api.chat(input) { event in
+                await MainActor.run {
+                    guard !Task.isCancelled else { return }
+                    switch event.type {
+                    case "tool_status": status = safeText(event.content)
+                    case "tool_error": status = "Et værktøj er ikke tilgængeligt."
+                    case "text":
+                        streamedText += event.content
+                        turns[index].reply = safeText(streamedText)
+                    case "done":
+                        turns[index].reply = safeText(streamedText, complete: true)
+                    default: break
+                    }
+                }
+            }
+            try Task.checkCancellation()
+        } catch {
+            turns[index].notice = Task.isCancelled ? "Modtagelsen er stoppet. Et job kan stadig køre."
+                : (error as? ChatFailure ?? .interrupted).message
+        }
+    }
+
+    private func safeText(_ text: String, complete: Bool = false) -> String {
+        let safe = (api as? LiveAPI)?.redactChat(text, complete: complete) ?? text
+        if safe.contains("Traceback (most recent call last)") { return "PC’en sendte en intern fejl." }
+        return safe.replacingOccurrences(of: #"(?i)(?:\b[A-Z]:[\\/]|\\\\)[^\r\n`"<>]+"#,
+                                         with: "[filsti skjult]", options: .regularExpression)
+    }
+
+    private func stop() { task?.cancel() }
 }

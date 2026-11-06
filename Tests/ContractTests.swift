@@ -2,6 +2,70 @@ import XCTest
 @testable import SweatCaster
 
 final class ContractTests: XCTestCase {
+    func testSSEAcrossBytesAndLineEndings() throws {
+        let frames = [
+            ": heartbeat\r\n\r\n",
+            "data: {\"type\":\"tool_status\",\r\ndata: \"content\":\"Søger…\"}\r\n\r\n",
+            "data: {\"type\":\"future\",\"content\":\"ignored\"}\n\n",
+            "data: {\"type\":\"text\",\"content\":\"Rød grød\"}\n\n",
+            "data: {\"type\":\"done\",\"content\":\"do not append\"}\n\n",
+            "data: {\"type\":\"text\",\"content\":\"too late\"}\n\n"
+        ]
+        var parser = ChatSSEParser()
+        var events: [ChatEvent] = []
+        for byte in frames.joined().utf8 {
+            if let event = try parser.feed(byte) { events.append(event) }
+        }
+        XCTAssertEqual(events.map(\.type), ["tool_status", "text", "done"])
+        XCTAssertEqual(events.prefix(2).map(\.content), ["Søger…", "Rød grød"])
+        XCTAssertNoThrow(try parser.end())
+    }
+
+    func testChatEOFWithoutDoneIsInterrupted() throws {
+        var parser = ChatSSEParser()
+        for byte in "data: {\"type\":\"text\",\"content\":\"Delvist\"}\n\n".utf8 {
+            _ = try parser.feed(byte)
+        }
+        XCTAssertThrowsError(try parser.end()) { XCTAssertEqual($0 as? ChatFailure, .interrupted) }
+    }
+
+    func testChatPOSTStopsLocallyDuringStream() async throws {
+        let api = try stubAPI()
+        let task = Task {
+            try await api.chat(ChatRequest(message: "Hej", session_id: UUID())) { event in
+                XCTAssertEqual(event.type, "tool_status")
+                withUnsafeCurrentTask { $0?.cancel() }
+            }
+        }
+        do {
+            try await task.value
+            XCTFail("Expected local cancellation")
+        } catch is CancellationError {}
+    }
+
+    func testChatRejectsJSONAndMapsHTTPFailures() throws {
+        XCTAssertNoThrow(try ChatFailure.validate(status: 200, mime: "text/event-stream"))
+        let cases: [(Int, ChatFailure)] = [(401, .unauthorized), (503, .unavailable), (200, .rejected)]
+        for (status, expected) in cases {
+            XCTAssertThrowsError(try ChatFailure.validate(status: status, mime: "application/json")) {
+                XCTAssertEqual($0 as? ChatFailure, expected)
+            }
+        }
+    }
+
+    @MainActor func testSavedLiveConnectionDoesNotFallBackToDemo() async throws {
+        let suite = "Tests.live.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("unconfigured-test-address", forKey: Pairing.addressKey)
+        let model = Model(defaults: defaults)
+        await model.refresh()
+        XCTAssertFalse(model.isDemo)
+        XCTAssertTrue(model.clips.isEmpty)
+        await model.useDemo()
+        XCTAssertTrue(model.isDemo)
+        XCTAssertFalse(model.clips.isEmpty)
+    }
     private let fixture = """
     {"id":"job-example","clip_id":"clip-example","mood":"hype","status":"completed",
     "progress":1,"message":"Ready","warnings":[],"created_at":"2026-11-06T16:00:00Z",
@@ -151,12 +215,18 @@ private final class Stub: URLProtocol {
         let auth = request.value(forHTTPHeaderField: "Authorization")
         let status: Int
         let body: String
+        var mime = "application/json"
         if url.path == "/api/v1/health", auth == nil {
             status = 200; body = #"{"api_version":"1","status":"ok"}"#
         } else if auth != "Bearer test-only-token" {
             status = 500; body = "{}"
         } else if url.path == "/api/v1/clips" {
             status = 200; body = "bad JSON"
+        } else if url.path == "/api/v1/chat", request.httpMethod == "POST",
+                  request.value(forHTTPHeaderField: "Accept") == "text/event-stream" {
+            status = 200
+            mime = "text/event-stream"
+            body = "data: {\"type\":\"tool_status\",\"content\":\"Søger\"}\n\ndata: {\"type\":\"done\",\"content\":\"\"}\n\n"
         } else if url.path == "/api/v1/jobs", request.httpMethod == "POST",
                   request.value(forHTTPHeaderField: "Content-Type") == "application/json" {
             status = 202
@@ -173,7 +243,7 @@ private final class Stub: URLProtocol {
             body = #"{"error":{"code":"TEST","message":"test-only-token"}}"#
         }
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil,
-                                       headerFields: ["Content-Type": "application/json"])!
+                                       headerFields: ["Content-Type": mime])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: Data(body.utf8))
         client?.urlProtocolDidFinishLoading(self)
