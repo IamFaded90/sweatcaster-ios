@@ -865,11 +865,12 @@ private struct ChatView: View {
     }
 
     private func localReference(for message: String) -> String? {
-        let words = Set(message.lowercased().split { !$0.isLetter }.filter { $0.count >= 5 })
+        let words = Set(message.lowercased().components(separatedBy: CharacterSet.letters.inverted)
+            .filter { $0.count >= 5 })
         guard !words.isEmpty else { return nil }
         return notes.split(whereSeparator: \.isNewline).first { line in
-            let candidates = line.lowercased().split { !$0.isLetter }
-            return candidates.contains { words.contains($0) }
+            let candidates = line.lowercased().components(separatedBy: CharacterSet.letters.inverted)
+            return !words.isDisjoint(with: candidates)
         }.map { String($0.prefix(240)) }
     }
 
