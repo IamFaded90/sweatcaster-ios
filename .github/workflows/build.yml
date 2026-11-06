@@ -1,0 +1,39 @@
+name: Build unsigned iOS IPA
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build for iPhone without signing
+        run: |
+          xcodebuild -version
+          xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
+            -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/SweatCasterBuild" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+      - name: Package IPA
+        run: |
+          app="$RUNNER_TEMP/SweatCasterBuild/Build/Products/Release-iphoneos/SweatCaster.app"
+          test -x "$app/SweatCaster"
+          test ! -e "$app/_CodeSignature"
+          staging="$(mktemp -d)"
+          mkdir "$staging/Payload"
+          ditto "$app" "$staging/Payload/SweatCaster.app"
+          cd "$staging"
+          zip -qr "$RUNNER_TEMP/SweatCaster-unsigned.ipa" Payload
+          unzip -tq "$RUNNER_TEMP/SweatCaster-unsigned.ipa"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SweatCaster-unsigned
+          path: ${{ runner.temp }}/SweatCaster-unsigned.ipa
+          if-no-files-found: error

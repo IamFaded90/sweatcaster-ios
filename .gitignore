@@ -1,0 +1,9 @@
+DerivedData/
+build/
+xcuserdata/
+*.xcuserstate
+*.ipa
+.env
+.DS_Store
+
+AI-Sweat-Caster-iOS.zip
