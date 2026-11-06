@@ -1,5 +1,44 @@
 import AVKit
+import AppIntents
 import SwiftUI
+
+struct OpenSweatCasterChat: AppIntent {
+    static let title: LocalizedStringResource = "Åbn SweatCaster-chat"
+    static let openAppWhenRun = true
+    @MainActor func perform() async throws -> some IntentResult {
+        UserDefaults.standard.set("chat", forKey: "spaces.shortcut")
+        return .result()
+    }
+}
+
+struct OpenSweatCasterVideo: AppIntent {
+    static let title: LocalizedStringResource = "Vælg klip i SweatCaster"
+    static let openAppWhenRun = true
+    @MainActor func perform() async throws -> some IntentResult {
+        UserDefaults.standard.set("video", forKey: "spaces.shortcut")
+        return .result()
+    }
+}
+
+struct SweatCasterShortcuts: AppShortcutsProvider {
+    static var appShortcuts: [AppShortcut] {
+        AppShortcut(intent: OpenSweatCasterChat(), phrases: ["Åbn chat i \(.applicationName)"],
+                    shortTitle: "Åbn chat", systemImageName: "bubble.left")
+        AppShortcut(intent: OpenSweatCasterVideo(), phrases: ["Vælg klip i \(.applicationName)"],
+                    shortTitle: "Vælg klip", systemImageName: "film")
+    }
+}
+
+private struct PromptExample: Identifiable {
+    let category: String
+    let text: String
+    var id: String { text }
+    static let examples = [
+        Self(category: "Video", text: "Foreslå en kort titel til mit næste klip."),
+        Self(category: "Planlægning", text: "Lav en tjekliste til min næste optagelse."),
+        Self(category: "Idéer", text: "Giv mig tre idéer til et sjovt gamingklip.")
+    ]
+}
 
 @main struct SweatCasterApp: App {
     var body: some Scene { WindowGroup { Home() } }
@@ -12,6 +51,11 @@ private struct Media: Identifiable {
 }
 
 struct Home: View {
+    private enum Space: String, CaseIterable, Identifiable {
+        case brain = "Brain", notes = "Notes", gallery = "Gallery", tasks = "Tasks", library = "Library"
+        var id: Self { self }
+    }
+
     @Environment(\.scenePhase) private var phase
     @State private var model = Model()
     @State private var setup = true
@@ -24,6 +68,21 @@ struct Home: View {
     @AccessibilityFocusState private var errorFocus: Bool
     @AccessibilityFocusState private var jobsFocus: Bool
     @State private var showJobs = 0
+    @State private var space: Space = .brain
+    @State private var showHelp = false
+    @State private var confirmClear = false
+    @State private var hiddenJobs = Set<String>()
+    @AppStorage("spaces.notes") private var notes = ""
+    @AppStorage("spaces.onboarded") private var onboarded = false
+    @AppStorage("spaces.theme") private var theme = "System"
+    @AppStorage("spaces.font") private var font = "Standard"
+    @AppStorage("spaces.motion") private var motion = false
+    @AppStorage("spaces.shortcut") private var shortcut = ""
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var backgroundPhase = false
+
+    private var visibleJobs: [Job] { model.jobs.filter { !hiddenJobs.contains($0.id) } }
+    private var pendingJobs: Int { model.jobs.filter { $0.status.active }.count }
 
     var body: some View {
         @Bindable var model = model
@@ -61,6 +120,23 @@ struct Home: View {
                 if model.isDemo {
                     Text("Demotilstand · Kun testdata").font(.headline)
                 }
+                Menu {
+                    ForEach(Space.allCases) { item in
+                        Button(item.rawValue) { space = item }
+                    }
+                } label: {
+                    Label("Spaces · \(space.rawValue)", systemImage: "square.grid.2x2")
+                        .frame(minHeight: 48)
+                }
+                action(pendingJobs == 0 ? "Video Studio" : "Video Studio · \(pendingJobs) aktive") { space = .gallery }
+                action("Hvad kan jeg?") { showHelp = true }
+                if !onboarded {
+                    VStack(alignment: .leading, spacing: 8) {
+                        heading("Kom godt i gang")
+                        Text("Åbn Brain for at vælge et klip eller chatte. Åbn indstillingerne for at forbinde din PC.")
+                        action("Forstået") { onboarded = true }
+                    }
+                }
                 if let error = model.error {
                     VStack(alignment: .leading, spacing: 6) {
                         Text(model.errorTitle ?? error.title).font(.headline).accessibilityFocused($errorFocus)
@@ -69,6 +145,7 @@ struct Home: View {
                                 Text(detail).textSelection(.enabled)
                             }
                         }
+                        action("Prøv igen") { Task { await model.refresh() } }.disabled(switchDisabled)
                     }
                 }
                 DisclosureGroup("Indstillinger · Forbindelse til PC", isExpanded: $setup) {
@@ -107,13 +184,58 @@ struct Home: View {
                 if model.busy || model.refreshing || model.mediaLoading {
                     ProgressView(model.mediaLoading ? "Henter video…" : "Vent et øjeblik…")
                 }
-                clipSection
-                moodSection
-                jobSection
-                advanced($model.options)
+                switch space {
+                case .brain:
+                    ModelPickerBar()
+                    if let latest = visibleJobs.max(by: { $0.created_at < $1.created_at }) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            heading("Fortsæt hvor du slap")
+                            Text(latest.mood.title + " · " + latest.status.title)
+                            action("Åbn Video Studio") { space = .gallery }
+                        }
+                    }
+                    clipSection
+                    moodSection
+                    advanced($model.options)
+                case .notes:
+                    heading("Noter")
+                    TextEditor(text: $notes).frame(minHeight: 180)
+                        .accessibilityLabel("Noter på denne enhed")
+                case .gallery:
+                    jobSection
+                case .tasks:
+                    heading("Aktive opgaver")
+                    if pendingJobs == 0 { Text("Ingen aktive videojobs.") }
+                    ForEach(model.jobs.filter { $0.status.active }) { job in
+                        Text(job.mood.title + " · " + job.status.title)
+                    }
+                case .library:
+                    heading("Promptbibliotek")
+                    ForEach(PromptExample.examples) { example in
+                        VStack(alignment: .leading) {
+                            Text(example.category).font(.headline)
+                            action(example.text) {
+                                chatDraft = example.text
+                                showChat = true
+                            }
+                        }
+                    }
+                }
+                DisclosureGroup("Visning og jobhistorik") {
+                    Picker("Tema", selection: $theme) {
+                        ForEach(["System", "Lys", "Mørk"], id: \.self) { Text($0) }
+                    }
+                    Picker("Skrift", selection: $font) {
+                        ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
+                    }
+                    Toggle("Bevægelse i baggrunden", isOn: $motion)
+                    Button("Ryd afsluttede jobs på denne telefon", role: .destructive) { confirmClear = true }
+                        .frame(minHeight: 48)
+                }
             }.padding(20).frame(maxWidth: 620).frame(maxWidth: .infinity)
-        }
+        }.refreshable { await model.refresh() }
         .onChange(of: showJobs) {
+            space = .gallery
             proxy.scrollTo("jobs", anchor: .top)
             jobsFocus = true
         }
@@ -122,10 +244,49 @@ struct Home: View {
             edit(model.activeProfile)
             setup = model.address.isEmpty || model.isDemo
             prunePreviews()
+            openShortcut()
         }
+        .onChange(of: shortcut) { openShortcut() }
         .onChange(of: model.error?.title) { _, title in
             errorDetails = false
             if title != nil { errorFocus = true }
+        }
+        .onChange(of: model.isDemo) { hiddenJobs.removeAll() }
+        .onChange(of: model.address) { hiddenJobs.removeAll() }
+        .sensoryFeedback(.selection, trigger: model.jobs.map { $0.id + $0.status.rawValue }) { old, new in
+            old.count == new.count && !old.isEmpty
+        }
+        .preferredColorScheme(theme == "Lys" ? .light : theme == "Mørk" ? .dark : nil)
+        .fontDesign(font == "Afrundet" ? .rounded : font == "Monospace" ? .monospaced : .default)
+        .background {
+            if motion && !reduceMotion {
+                LinearGradient(colors: [.blue.opacity(0.12), .clear],
+                               startPoint: backgroundPhase ? .topLeading : .bottomTrailing, endPoint: .center)
+                    .ignoresSafeArea()
+                    .onAppear {
+                        withAnimation(.easeInOut(duration: 5).repeatForever(autoreverses: true)) {
+                            backgroundPhase.toggle()
+                        }
+                    }
+            }
+        }
+        .confirmationDialog("Skjul afsluttede jobs på denne telefon?", isPresented: $confirmClear) {
+            Button("Skjul afsluttede jobs", role: .destructive) {
+                hiddenJobs.formUnion(model.jobs.filter { !$0.status.active }.map(\.id))
+            }
+        } message: {
+            Text("Videoerne og jobhistorikken bliver liggende på PC’en.")
+        }
+        .sheet(isPresented: $showHelp) {
+            NavigationStack {
+                List {
+                    Text("Brain: Vælg klip, vælg en stil, eller chat med din PC.")
+                    Text("Gallery: Følg dine jobs, og afspil eller del videoer.")
+                    Text("Tasks: Se videojobs, der stadig kører.")
+                    Text("Notes og Library: Skriv noter, og find forslag til chatten.")
+                }.navigationTitle("Hvad kan jeg?")
+                    .toolbar { Button("Luk") { showHelp = false } }
+            }
         }
         .task(id: phase) {
             if phase == .active { await model.refresh() }
@@ -141,10 +302,23 @@ struct Home: View {
             Preview(media: item)
         }
         .sheet(isPresented: $showChat, onDismiss: {
+            chatDraft = ""
             if !model.isDemo { Task { await model.refresh() } }
         }) {
-            ChatView(api: model.api as? any ChatAPI, demo: model.isDemo)
+            ChatView(api: model.api as? any ChatAPI, demo: model.isDemo, initialDraft: chatDraft,
+                     connection: model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
+                     storageKey: "spaces.chat." + (model.isDemo ? "demo" : model.address))
         }
+    }
+
+    @State private var chatDraft = ""
+
+    private func openShortcut() {
+        guard !shortcut.isEmpty else { return }
+        let destination = shortcut
+        shortcut = ""
+        space = .brain
+        if destination == "chat" { showChat = true }
     }
 
     private func edit(_ profile: ConnectionProfile) {
@@ -242,8 +416,8 @@ struct Home: View {
                     Task { await model.acknowledgeAfterReview() }
                 }.disabled(switchDisabled)
             }
-            if model.jobs.isEmpty { Text("Ingen videoer endnu.") }
-            ForEach(model.jobs.sorted { $0.created_at > $1.created_at }) { job in
+            if visibleJobs.isEmpty { Text("Ingen videoer endnu.") }
+            ForEach(visibleJobs.sorted { $0.created_at > $1.created_at }) { job in
                 VStack(alignment: .leading, spacing: 8) {
                     Text(model.clips.first { $0.id == job.clip_id }?.name ?? "Klip")
                         .font(.headline).accessibilityAddTraits(.isHeader)
@@ -269,6 +443,11 @@ struct Home: View {
                                 if let url = await model.video(job) { media = Media(url: url, demo: demo) }
                             }
                         }.disabled(model.mediaLoading)
+                        action("Del job-resultat") {
+                            Task {
+                                if let url = await model.video(job) { shareResult = Media(url: url, demo: model.isDemo) }
+                            }
+                        }.disabled(model.mediaLoading)
                     }
                     if !job.warnings.isEmpty || job.error != nil {
                         DisclosureGroup("Detaljer om jobbet") {
@@ -282,7 +461,14 @@ struct Home: View {
                     .padding(14).background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
             }
         }.id("jobs")
+            .sheet(item: $shareResult) { result in
+                ShareLink(item: result.url) {
+                    Label("Del video", systemImage: "square.and.arrow.up").frame(minHeight: 48)
+                }.padding()
+            }
     }
+
+    @State private var shareResult: Media?
 
     private func advanced(_ options: Binding<Options>) -> some View {
         DisclosureGroup("Avancerede indstillinger") {
@@ -388,41 +574,169 @@ private struct Preview: View {
     }
 }
 
-private struct ChatTurn: Identifiable {
-    let id = UUID()
+private struct ChatTurn: Identifiable, Codable {
+    var id = UUID()
     let prompt: String
     var reply = ""
     var notice: String?
+}
+
+private struct ModelPickerBar: View {
+    @AppStorage("spaces.referenceModel") private var model = "PC’ens standardmodel"
+    @State private var comparison = false
+
+    var body: some View {
+        DisclosureGroup("Modeller") {
+            Picker("Sammenligningsreference", selection: $model) {
+                Text("PC’ens standardmodel").tag("PC’ens standardmodel")
+                Text("Lokal model B · Eksempel").tag("Lokal model B · Eksempel")
+            }
+            Text("Valget gælder denne visning. PC’en styrer den aktive chatmodel.")
+                .font(.caption)
+            Button("Sammenlign modeller") { comparison = true }.frame(minHeight: 48)
+        }
+        .sheet(isPresented: $comparison) {
+            NavigationStack {
+                ScrollView {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(alignment: .top, spacing: 24) { comparisonCards }
+                        VStack(alignment: .leading, spacing: 16) { comparisonCards }
+                    }.padding()
+                }.navigationTitle("Modelsammenligning")
+                    .toolbar { Button("Luk") { comparison = false } }
+            }
+        }
+    }
+
+    @ViewBuilder private var comparisonCards: some View {
+        VStack(alignment: .leading) {
+            Text("PC’ens standardmodel").font(.headline)
+            Text("Bruges af den eksisterende chat.")
+        }.fixedSize(horizontal: true, vertical: false)
+        VStack(alignment: .leading) {
+            Text("Model B · Eksempel").font(.headline)
+            Text("Afventer modelvalg på PC’en.")
+        }.fixedSize(horizontal: true, vertical: false)
+    }
+}
+
+private struct StatsBar: View {
+    let turns: Int
+    let streaming: Bool
+
+    var body: some View {
+        Text(streaming ? "\(turns) beskeder · Modtager svar" : "\(turns) beskeder")
+            .font(.caption)
+    }
+}
+
+private struct ChatTranscriptView: View {
+    let reply: String
+
+    var body: some View {
+        let blocks = reply.components(separatedBy: "```")
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(blocks.indices, id: \.self) { index in
+                if index.isMultiple(of: 2) {
+                    if let formatted = try? AttributedString(markdown: blocks[index],
+                        options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+                        Text(formatted)
+                    } else { Text(blocks[index]) }
+                } else {
+                    let lines = blocks[index].split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+                    ScrollView(.horizontal) {
+                        Text(highlight(lines.count == 2 ? String(lines[1]) : blocks[index]))
+                            .font(.system(.body, design: .monospaced)).padding(8)
+                    }.background(.secondary.opacity(0.10))
+                }
+            }
+        }.textSelection(.enabled)
+    }
+
+    private func highlight(_ code: String) -> AttributedString {
+        var result = AttributedString(code)
+        let words = ["let", "var", "func", "return", "if", "else", "for", "import", "class", "def", "async", "await"]
+        for word in words {
+            var cursor = code.startIndex
+            while let match = code.range(of: "\\b" + word + "\\b", options: .regularExpression,
+                                         range: cursor..<code.endIndex),
+                  let range = Range(match, in: result) {
+                result[range].foregroundColor = .purple
+                cursor = match.upperBound
+            }
+        }
+        return result
+    }
 }
 
 private struct ChatView: View {
     @Environment(\.dismiss) private var dismiss
     let api: (any ChatAPI)?
     let demo: Bool
+    let initialDraft: String
+    let connection: String
+    let storageKey: String
     @State private var sessionID = UUID()
     @State private var draft = ""
     @State private var turns: [ChatTurn] = []
     @State private var status: String?
     @State private var streamedText = ""
     @State private var task: Task<Void, Never>?
+    @State private var searchSteps: [String] = []
+    @State private var loaded = false
+    @AppStorage("spaces.notes") private var notes = ""
+    @State private var sourceExcerpt: String?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+        List {
                 Text("Chat med AI-holdet").font(.title.bold()).accessibilityAddTraits(.isHeader)
                 Button("Luk") { stop(); dismiss() }.frame(minHeight: 48)
+                Text(connection).font(.subheadline)
+                Button("Ny samtale") { newConversation() }.frame(minHeight: 48).disabled(task != nil)
+                StatsBar(turns: turns.count, streaming: task != nil)
                 if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
                 Text("AI’en arbejder på din PC. Researcher bruger internettet til websøgning.")
                 ForEach(turns) { turn in
                     VStack(alignment: .leading, spacing: 8) {
                         Text(turn.prompt).font(.headline)
-                        if !turn.reply.isEmpty { Text(turn.reply).textSelection(.enabled) }
+                        if !turn.reply.isEmpty { ChatTranscriptView(reply: turn.reply) }
                         if let notice = turn.notice { Text(notice).font(.callout) }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(12).background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+                    .contextMenu {
+                        Button("Kopiér svar") { UIPasteboard.general.string = turn.reply }
+                        Button("Prøv igen") { draft = turn.prompt }.disabled(task != nil)
+                        Button("Start ny gren") { newConversation(); draft = turn.prompt }.disabled(task != nil)
+                    }
+                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                        Button("Kopiér") { UIPasteboard.general.string = turn.reply }
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button("Prøv igen") { draft = turn.prompt }.disabled(task != nil)
+                        Button("Ny gren") { newConversation(); draft = turn.prompt }.disabled(task != nil)
+                    }
+                }
+                if !searchSteps.isEmpty {
+                    DisclosureGroup("Deep Search · \(searchSteps.count) trin") {
+                        ForEach(searchSteps.indices, id: \.self) { index in
+                            Label(searchSteps[index], systemImage: index + 1 == searchSteps.count ? "circle.fill" : "arrow.down.circle")
+                        }
+                    }
                 }
                 if let status { Text(status).font(.callout) }
+                if let sourceExcerpt {
+                    DisclosureGroup("Lokal reference · Notes") {
+                        Text(sourceExcerpt)
+                        Text("Fundet på telefonen. Referencen blev ikke sendt til PC’en.")
+                            .font(.caption)
+                    }
+                }
+        }
+        .listStyle(.plain)
+        .refreshable { if task == nil { loadHistory() } }
+        .safeAreaInset(edge: .bottom) {
+            VStack(alignment: .leading, spacing: 8) {
                 TextField("Din besked", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder).lineLimit(2...5).frame(minHeight: 48)
                 if task != nil {
@@ -433,14 +747,23 @@ private struct ChatView: View {
                         .buttonStyle(.borderedProminent)
                         .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
-            }.padding(20)
-        }.onDisappear { stop() }
+            }.padding(12).background(.regularMaterial)
+        }
+        .onAppear {
+            guard !loaded else { return }
+            loaded = true
+            draft = initialDraft
+            loadHistory()
+        }
+        .onDisappear { stop() }
     }
 
     private func send() {
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard task == nil, !message.isEmpty else { return }
         draft = ""
+        searchSteps = []
+        sourceExcerpt = localReference(for: message)
         streamedText = ""
         turns.append(ChatTurn(prompt: message))
         let index = turns.count - 1
@@ -465,6 +788,7 @@ private struct ChatView: View {
             }
             status = nil
             task = nil
+            save()
         }
     }
 
@@ -474,7 +798,10 @@ private struct ChatView: View {
                 await MainActor.run {
                     guard !Task.isCancelled else { return }
                     switch event.type {
-                    case "tool_status": status = safeText(event.content)
+                    case "tool_status":
+                        let step = safeText(event.content)
+                        status = step
+                        if searchSteps.last != step { searchSteps.append(step) }
                     case "text":
                         streamedText += event.content
                         turns[index].reply = safeText(streamedText)
@@ -499,4 +826,38 @@ private struct ChatView: View {
     }
 
     private func stop() { task?.cancel() }
+
+    private func newConversation() {
+        if !turns.isEmpty, let data = try? JSONEncoder().encode(turns) {
+            UserDefaults.standard.set(data, forKey: storageKey + ".previous")
+        }
+        turns = []
+        draft = ""
+        searchSteps = []
+        sourceExcerpt = nil
+        sessionID = UUID()
+        save()
+    }
+
+    private func localReference(for message: String) -> String? {
+        let words = Set(message.lowercased().split { !$0.isLetter }.filter { $0.count >= 5 })
+        guard !words.isEmpty else { return nil }
+        return notes.split(whereSeparator: \.isNewline).first { line in
+            let candidates = line.lowercased().split { !$0.isLetter }
+            return candidates.contains { words.contains($0) }
+        }.map { String($0.prefix(240)) }
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(turns) {
+            UserDefaults.standard.set(data, forKey: storageKey)
+        }
+    }
+
+    private func loadHistory() {
+        if let data = UserDefaults.standard.data(forKey: storageKey),
+           let saved = try? JSONDecoder().decode([ChatTurn].self, from: data) {
+            turns = saved
+        }
+    }
 }
