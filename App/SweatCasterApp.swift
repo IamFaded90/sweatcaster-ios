@@ -657,7 +657,7 @@ private struct AgentHub: View {
         guard agent == .video else { return "Afventer data" }
         guard model.isDemo || model.connected else { return "Forbindelse afbrudt" }
         if jobs.contains(where: { $0.status.active && $0.status != .queued }) { return "Arbejder · Videokø" }
-        return active > 0 ? "Venter · Videokø" : "Klar · Videokø"
+        return active > 0 ? "Venter · Videokø" : "Ingen aktive videojobs"
     }
 
     private func jobLabel(_ job: Job) -> String {
@@ -792,18 +792,16 @@ private struct ChatTurn: Identifiable, Codable {
 }
 
 private struct ModelPickerBar: View {
-    @AppStorage("spaces.referenceModel") private var model = "PC’ens standardmodel"
     @State private var comparison = false
 
     var body: some View {
         DisclosureGroup("Modeller") {
-            Picker("Sammenligningsreference", selection: $model) {
+            Picker("Aktiv model", selection: .constant("PC’ens standardmodel")) {
                 Text("PC’ens standardmodel").tag("PC’ens standardmodel")
-                Text("Lokal model B · Eksempel").tag("Lokal model B · Eksempel")
-            }
-            Text("Valget gælder denne visning. PC’en styrer den aktive chatmodel.")
+            }.disabled(true)
+            Text("PC’en vælger modellen. Modelvalg i appen kommer senere.")
                 .font(.caption)
-            Button("Sammenlign modeller") { comparison = true }.frame(minHeight: 48)
+            Button("Se eksempel på sammenligning") { comparison = true }.frame(minHeight: 48)
         }
         .sheet(isPresented: $comparison) {
             NavigationStack {
