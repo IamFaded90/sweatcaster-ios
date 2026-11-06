@@ -17,6 +17,7 @@ struct Home: View {
     @State private var setup = true
     @State private var address = ""
     @State private var token = ""
+    @State private var editedProfile: ConnectionProfile = .home
     @State private var media: Media?
     @State private var showChat = false
     @State private var errorDetails = false
@@ -30,6 +31,31 @@ struct Home: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 Text("AI Sweat-Caster").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+                if !model.isDemo {
+                    Label("\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
+                          systemImage: model.connected ? "checkmark.circle" : "exclamationmark.circle")
+                        .font(.subheadline)
+                }
+                if !model.savedAddresses.isEmpty {
+                    Menu {
+                        ForEach(ConnectionProfile.allCases) { profile in
+                            Button(profile.title) {
+                                if model.savedAddresses[profile] == nil {
+                                    edit(profile)
+                                    setup = true
+                                } else {
+                                    Task {
+                                        await model.selectProfile(profile)
+                                        edit(profile)
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        Label("Skift forbindelse", systemImage: "arrow.left.arrow.right")
+                            .frame(minHeight: 48)
+                    }.disabled(switchDisabled)
+                }
                 action("Chat med AI-holdet") { showChat = true }
                     .disabled(model.busy)
                 if model.isDemo {
@@ -37,7 +63,7 @@ struct Home: View {
                 }
                 if let error = model.error {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text(error.title).font(.headline).accessibilityFocused($errorFocus)
+                        Text(model.errorTitle ?? error.title).font(.headline).accessibilityFocused($errorFocus)
                         if let detail = error.detail {
                             DisclosureGroup("Tekniske detaljer", isExpanded: $errorDetails) {
                                 Text(detail).textSelection(.enabled)
@@ -45,9 +71,15 @@ struct Home: View {
                         }
                     }
                 }
-                DisclosureGroup("Forbindelse til PC", isExpanded: $setup) {
+                DisclosureGroup("Indstillinger · Forbindelse til PC", isExpanded: $setup) {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Brug adressen og adgangskoden, som vises på PC’en.")
+                        Picker("Profil", selection: $editedProfile) {
+                            ForEach(ConnectionProfile.allCases) { profile in
+                                Text(profile.title).tag(profile)
+                            }
+                        }.disabled(switchDisabled)
+                        .onChange(of: editedProfile) { _, profile in edit(profile) }
+                        Text(editedProfile == .home ? "Indtast PC’ens lokale adresse." : "Indtast PC’ens IPv4-adresse fra Tailscale.")
                         TextField("Adresse fra PC’en", text: $address)
                             .accessibilityLabel("PC-adresse")
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -56,9 +88,9 @@ struct Home: View {
                         SecureField("Adgangskode fra PC’en", text: $token)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                             .textFieldStyle(.roundedBorder).frame(minHeight: 48)
-                        action("Test forbindelse") {
+                        action("Test og gem profil") {
                             Task {
-                                await model.connect(address: address, token: token)
+                                await model.saveProfile(editedProfile, address: address, token: token)
                                 if model.error == nil && !model.isDemo { token = ""; setup = false }
                             }
                         }.disabled(switchDisabled)
@@ -87,7 +119,7 @@ struct Home: View {
         }
         }
         .onAppear {
-            if !model.address.isEmpty { address = "http://\(model.address):8765/api/v1" }
+            edit(model.activeProfile)
             setup = model.address.isEmpty || model.isDemo
             prunePreviews()
         }
@@ -113,6 +145,12 @@ struct Home: View {
         }) {
             ChatView(api: model.api as? any ChatAPI, demo: model.isDemo)
         }
+    }
+
+    private func edit(_ profile: ConnectionProfile) {
+        editedProfile = profile
+        address = model.savedAddresses[profile] ?? ""
+        token = ""
     }
 
     private var switchDisabled: Bool {

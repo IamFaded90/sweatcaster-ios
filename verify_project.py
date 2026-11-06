@@ -29,6 +29,6 @@ assert info["NSLocalNetworkUsageDescription"]
 ats = info["NSAppTransportSecurity"]
 assert ats["NSAllowsLocalNetworking"] is True
 assert "NSAllowsArbitraryLoads" not in ats
-assert set(ats["NSExceptionDomains"]) == {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+assert set(ats["NSExceptionDomains"]) == {"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"}
 assert all(v == {"NSExceptionAllowsInsecureHTTPLoads": True} for v in ats["NSExceptionDomains"].values())
 print(f"OK: {len(rows)} Xcode objects, source references, shared test scheme and LAN Info.plist.")

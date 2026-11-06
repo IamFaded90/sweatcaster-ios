@@ -38,6 +38,10 @@ Vælg en destination fra første kommando, hvis modellen ikke er installeret. Af
 
 ## Frossen API v1
 
+Under **Indstillinger · Forbindelse til PC** kan du teste og gemme **Hjem (Lokal IP)** og **Ekstern (Tailscale IP)**. Gem hver profil med adressen og adgangskoden til PC’en. Derefter kan du skifte via **Skift forbindelse** øverst. Adresserne gemmes lokalt, og adgangskoderne ligger i Keychain adskilt efter adresse. En eksisterende lokal adresse overføres til Hjem-profilen.
+
+Brug PC’ens Tailscale-IPv4 i intervallet `100.64.0.0/10`. Tailscale skal være aktivt på både iPhone og PC, og iPhone skal have adgang til backendens TCP-port 8765 via Tailscale. Test den eksterne profil fra mobilnet eller et andet Wi-Fi.
+
 Chat bruger den foreslåede `POST /api/v1/chat` med `message` og en valgfri klientgenereret `session_id`. ID'et gælder, mens chatvisningen er åben. Appen bruger SSE til status og svar og kræver en `done`-hændelse for at afslutte normalt. Stop lukker modtagelsen på telefonen. Backendens eksisterende jobstop bruges til videokøen. Chatdemoen simulerer svar lokalt.
 
 Backendens bekræftede chatkontrakt accepterer `session_id`. Samtalehukommelsen forsvinder ved genstart af agenttjenesten. Hvis agenterne ikke er klar, viser klienten serverens forklaring fra HTTP 200 SSE efterfulgt af `done`. Håndterede værktøjsfejl kommer også som tekst. JSON-svar med 401, 403 og 422 vises som forskellige fejl. Klienten genafsender aldrig chatbeskeden automatisk. Forbindelsen fra en fysisk iPhone mangler stadig at blive testet.

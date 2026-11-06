@@ -2,6 +2,28 @@ import XCTest
 @testable import SweatCaster
 
 final class ContractTests: XCTestCase {
+    func testTailscaleRangeAndPublicAddressRejection() throws {
+        for ip in ["100.64.0.0", "100.100.1.5", "100.127.255.255"] {
+            XCTAssertEqual(try Server(ip).profile, .tailscale)
+            XCTAssertEqual(try Server("http://\(ip):8765/api/v1").profile, .tailscale)
+        }
+        for ip in ["100.63.255.255", "100.128.0.0", "100.1.2.3", "8.8.8.8"] {
+            XCTAssertThrowsError(try Server(ip))
+        }
+        XCTAssertEqual(try Server("192.168.1.50").profile, .home)
+    }
+
+    @MainActor func testLegacyHomeAddressMigratesWithoutReplacingExternalProfile() throws {
+        let suite = "Tests.profiles.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("192.168.1.50", forKey: Pairing.addressKey)
+        defaults.set("100.100.1.5", forKey: ConnectionProfile.tailscale.storageKey)
+        let model = Model(api: MockAPI(), defaults: defaults)
+        XCTAssertEqual(model.activeProfile, .home)
+        XCTAssertEqual(model.savedAddresses[.home], "192.168.1.50")
+        XCTAssertEqual(model.savedAddresses[.tailscale], "100.100.1.5")
+    }
     func testSSEAcrossBytesAndLineEndings() throws {
         let frames = [
             ": heartbeat\r\n\r\n",

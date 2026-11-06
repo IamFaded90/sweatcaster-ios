@@ -22,6 +22,18 @@ import Observation
     var error: APIError?
     var options = Options()
     var address: String { defaults.string(forKey: Pairing.addressKey) ?? "" }
+    private(set) var activeProfile: ConnectionProfile = .home
+    private(set) var savedAddresses: [ConnectionProfile: String] = [:]
+    var errorTitle: String? {
+        if activeProfile == .tailscale, !isDemo, let error {
+            switch error {
+            case .offline, .transport, .localNetwork:
+                return "Tailscale-forbindelse mistet. Tjek at Tailscale er aktivt på din telefon og PC."
+            default: break
+            }
+        }
+        return error?.title
+    }
     var hasActive: Bool { jobs.contains { $0.status.active } }
     var blocked: Bool { !(capabilities?.missingRequired.isEmpty ?? true) }
     var canSubmit: Bool {
@@ -31,6 +43,16 @@ import Observation
     init(api: (any SweatAPI)? = nil, defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.api = api ?? demo
+        for profile in ConnectionProfile.allCases {
+            savedAddresses[profile] = defaults.string(forKey: profile.storageKey)
+        }
+        if let server = try? Server(address) {
+            activeProfile = server.profile
+            if savedAddresses[server.profile] == nil {
+                savedAddresses[server.profile] = server.address
+                defaults.set(server.address, forKey: server.profile.storageKey)
+            }
+        }
         if api == nil, !address.isEmpty {
             isDemo = false
             do {
@@ -62,24 +84,45 @@ import Observation
         await refresh()
     }
 
-    func connect(address: String, token input: String) async {
+    func saveProfile(_ profile: ConnectionProfile, address: String, token: String) async {
+        await connect(address: address, token: token, profile: profile, activateBeforeTest: false)
+    }
+
+    func selectProfile(_ profile: ConnectionProfile) async {
+        guard let address = savedAddresses[profile] else { return }
+        await connect(address: address, token: "", profile: profile, activateBeforeTest: true)
+    }
+
+    private func connect(address: String, token input: String, profile: ConnectionProfile, activateBeforeTest: Bool) async {
         guard !busy, !refreshing, cancelling.isEmpty, !mediaLoading else { return }
         busy = true
         defer { busy = false }
         error = nil
         do {
             let server = try Server(address)
+            if profile != server.profile {
+                error = .address
+                return
+            }
             let token: String
-            if input.isEmpty && server.address == self.address {
+            if input.isEmpty {
                 token = try Pairing.load(server.address)
             } else { token = input.trimmingCharacters(in: .whitespacesAndNewlines) }
             let live = try LiveAPI(server: server, token: token)
+            if activateBeforeTest { activate(live) }
             let result = try await initial(live)
             try Pairing.save(token, for: server.address)
-            defaults.set(server.address, forKey: Pairing.addressKey)
-            install(live, demo: false)
+            savedAddresses[server.profile] = server.address
+            defaults.set(server.address, forKey: server.profile.storageKey)
+            if !activateBeforeTest { activate(live) }
             apply(result)
         } catch { report(error) }
+    }
+
+    private func activate(_ live: LiveAPI) {
+        defaults.set(live.server.address, forKey: Pairing.addressKey)
+        activeProfile = live.server.profile
+        install(live, demo: false)
     }
 
     private func initial(_ api: any SweatAPI) async throws -> (Capabilities, [Clip], [Job]) {
@@ -175,8 +218,15 @@ import Observation
             let result = try await api.jobs()
             guard snapshot == revision, !busy, !refreshing, cancelling.isEmpty, !Task.isCancelled else { return }
             replaceJobs(result.jobs)
+            if !connected {
+                connected = true
+                error = nil
+            }
         } catch {
-            if snapshot == revision, !busy, !refreshing, !Task.isCancelled { report(error) }
+            if snapshot == revision, !busy, !refreshing, !Task.isCancelled {
+                connected = false
+                report(error)
+            }
         }
     }
 

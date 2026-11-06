@@ -100,6 +100,7 @@ protocol SweatAPI: Sendable {
 struct Server: Sendable {
     let address: String
     let origin: URL
+    let profile: ConnectionProfile
     init(_ input: String) throws {
         let input = input.trimmingCharacters(in: .whitespacesAndNewlines)
         let address: String
@@ -115,10 +116,11 @@ struct Server: Sendable {
         let n = parts.compactMap { UInt8($0) }
         guard parts.count == 4, n.count == 4, n.map({ String($0) }).joined(separator: ".") == address,
               n[0] == 10 || (n[0] == 172 && (16...31).contains(n[1])) ||
-              (n[0] == 192 && n[1] == 168),
+              (n[0] == 192 && n[1] == 168) || (n[0] == 100 && (64...127).contains(n[1])),
               let origin = URL(string: "http://\(address):8765") else { throw APIError.address }
         self.address = address
         self.origin = origin
+        self.profile = n[0] == 100 ? .tailscale : .home
     }
     func endpoint(_ path: String) -> URL {
         URL(string: origin.absoluteString + "/api/v1/" + path)!
@@ -132,6 +134,14 @@ struct Server: Sendable {
               job.output_url == "/api/v1/jobs/\(job.id)/video" else { throw APIError.unsafeVideo }
         return endpoint("jobs/\(job.id)/video")
     }
+}
+
+enum ConnectionProfile: String, CaseIterable, Identifiable, Sendable {
+    case home, tailscale
+    var id: Self { self }
+    var storageKey: String { "server.profile." + rawValue }
+    var title: String { self == .home ? "Hjem (Lokal IP)" : "Ekstern (Tailscale IP)" }
+    var route: String { self == .home ? "Lokal" : "Tailscale" }
 }
 
 final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
@@ -150,7 +160,7 @@ struct LiveAPI: SweatAPI, ChatAPI {
         self.token = token
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 300
-        configuration.allowsCellularAccess = false
+        configuration.allowsCellularAccess = server.profile == .tailscale
         configuration.urlCache = nil
         configuration.httpShouldSetCookies = false
         session = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
