@@ -85,153 +85,14 @@ struct Home: View {
     private var pendingJobs: Int { model.jobs.filter { $0.status.active }.count }
 
     var body: some View {
-        @Bindable var model = model
         ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text("AI Sweat-Caster").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-                if !model.isDemo {
-                    Label("\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
-                          systemImage: model.connected ? "checkmark.circle" : "exclamationmark.circle")
-                        .font(.subheadline)
-                }
-                if !model.savedAddresses.isEmpty {
-                    Menu {
-                        ForEach(ConnectionProfile.allCases) { profile in
-                            Button(profile.title) {
-                                if model.savedAddresses[profile] == nil {
-                                    edit(profile)
-                                    setup = true
-                                } else {
-                                    Task {
-                                        await model.selectProfile(profile)
-                                        edit(profile)
-                                    }
-                                }
-                            }
-                        }
-                    } label: {
-                        Label("Skift forbindelse", systemImage: "arrow.left.arrow.right")
-                            .frame(minHeight: 48)
-                    }.disabled(switchDisabled)
-                }
-                action("Chat med AI-holdet") { showChat = true }
-                    .disabled(model.busy)
-                if model.isDemo {
-                    Text("Demotilstand · Kun testdata").font(.headline)
-                }
-                Menu {
-                    ForEach(Space.allCases) { item in
-                        Button(item.rawValue) { space = item }
-                    }
-                } label: {
-                    Label("Spaces · \(space.rawValue)", systemImage: "square.grid.2x2")
-                        .frame(minHeight: 48)
-                }
-                action(pendingJobs == 0 ? "Video Studio" : "Video Studio · \(pendingJobs) aktive") { space = .gallery }
-                action("Hvad kan jeg?") { showHelp = true }
-                if !onboarded {
-                    VStack(alignment: .leading, spacing: 8) {
-                        heading("Kom godt i gang")
-                        Text("Åbn Brain for at vælge et klip eller chatte. Åbn indstillingerne for at forbinde din PC.")
-                        action("Forstået") { onboarded = true }
-                    }
-                }
-                if let error = model.error {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(model.errorTitle ?? error.title).font(.headline).accessibilityFocused($errorFocus)
-                        if let detail = error.detail {
-                            DisclosureGroup("Tekniske detaljer", isExpanded: $errorDetails) {
-                                Text(detail).textSelection(.enabled)
-                            }
-                        }
-                        action("Prøv igen") { Task { await model.refresh() } }.disabled(switchDisabled)
-                    }
-                }
-                DisclosureGroup("Indstillinger · Forbindelse til PC", isExpanded: $setup) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Picker("Profil", selection: $editedProfile) {
-                            ForEach(ConnectionProfile.allCases) { profile in
-                                Text(profile.title).tag(profile)
-                            }
-                        }.disabled(switchDisabled)
-                        .onChange(of: editedProfile) { _, profile in edit(profile) }
-                        Text(editedProfile == .home ? "Indtast PC’ens lokale adresse." : "Indtast PC’ens IPv4-adresse fra Tailscale.")
-                        TextField("Adresse fra PC’en", text: $address)
-                            .accessibilityLabel("PC-adresse")
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .keyboardType(.URL).textFieldStyle(.roundedBorder)
-                            .frame(minHeight: 48)
-                        SecureField("Adgangskode fra PC’en", text: $token)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .textFieldStyle(.roundedBorder).frame(minHeight: 48)
-                        action("Test og gem profil") {
-                            Task {
-                                await model.saveProfile(editedProfile, address: address, token: token)
-                                if model.error == nil && !model.isDemo { token = ""; setup = false }
-                            }
-                        }.disabled(switchDisabled)
-                        if model.isDemo {
-                            action("Prøv demo") { setup = false }
-                        } else {
-                            Text(model.connected ? "Forbundet til PC" : "Ingen forbindelse").font(.headline)
-                            action("Skift til demo") {
-                                Task { await model.useDemo(); setup = false }
-                            }.disabled(switchDisabled)
-                        }
-                    }.padding(.top, 12)
-                }.font(.body)
-                if model.busy || model.refreshing || model.mediaLoading {
-                    ProgressView(model.mediaLoading ? "Henter video…" : "Vent et øjeblik…")
-                }
-                switch space {
-                case .brain:
-                    ModelPickerBar()
-                    if let latest = visibleJobs.max(by: { $0.created_at < $1.created_at }) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            heading("Fortsæt hvor du slap")
-                            Text(latest.mood.title + " · " + latest.status.title)
-                            action("Åbn Video Studio") { space = .gallery }
-                        }
-                    }
-                    clipSection
-                    moodSection
-                    advanced($model.options)
-                case .notes:
-                    heading("Noter")
-                    TextEditor(text: $notes).frame(minHeight: 180)
-                        .accessibilityLabel("Noter på denne enhed")
-                case .gallery:
-                    jobSection
-                case .tasks:
-                    heading("Aktive opgaver")
-                    if pendingJobs == 0 { Text("Ingen aktive videojobs.") }
-                    ForEach(model.jobs.filter { $0.status.active }) { job in
-                        Text(job.mood.title + " · " + job.status.title)
-                    }
-                case .library:
-                    heading("Promptbibliotek")
-                    ForEach(PromptExample.examples) { example in
-                        VStack(alignment: .leading) {
-                            Text(example.category).font(.headline)
-                            action(example.text) {
-                                chatDraft = example.text
-                                showChat = true
-                            }
-                        }
-                    }
-                }
-                DisclosureGroup("Visning og jobhistorik") {
-                    Picker("Tema", selection: $theme) {
-                        ForEach(["System", "Lys", "Mørk"], id: \.self) { Text($0) }
-                    }
-                    Picker("Skrift", selection: $font) {
-                        ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
-                    }
-                    Toggle("Bevægelse i baggrunden", isOn: $motion)
-                    Button("Ryd afsluttede jobs på denne telefon", role: .destructive) { confirmClear = true }
-                        .frame(minHeight: 48)
-                }
+                header
+                connectionSettings
+                loadingStatus
+                spaceContent
+                appearanceSettings
             }.padding(20).frame(maxWidth: 620).frame(maxWidth: .infinity)
         }.refreshable { await model.refresh() }
         .onChange(of: showJobs) {
@@ -308,6 +169,166 @@ struct Home: View {
             ChatView(api: model.api as? any ChatAPI, demo: model.isDemo, initialDraft: chatDraft,
                      connection: model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
                      storageKey: "spaces.chat." + (model.isDemo ? "demo" : model.address))
+        }
+    }
+
+
+    @ViewBuilder private var header: some View {
+        Text("AI Sweat-Caster").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+        if !model.isDemo {
+            Label("\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
+                  systemImage: model.connected ? "checkmark.circle" : "exclamationmark.circle")
+                .font(.subheadline)
+        }
+        if !model.savedAddresses.isEmpty {
+            Menu {
+                ForEach(ConnectionProfile.allCases) { profile in
+                    Button(profile.title) {
+                        if model.savedAddresses[profile] == nil {
+                            edit(profile)
+                            setup = true
+                        } else {
+                            Task {
+                                await model.selectProfile(profile)
+                                edit(profile)
+                            }
+                        }
+                    }
+                }
+            } label: {
+                Label("Skift forbindelse", systemImage: "arrow.left.arrow.right")
+                    .frame(minHeight: 48)
+            }.disabled(switchDisabled)
+        }
+        action("Chat med AI-holdet") { showChat = true }
+            .disabled(model.busy)
+        if model.isDemo {
+            Text("Demotilstand · Kun testdata").font(.headline)
+        }
+        Menu {
+            ForEach(Space.allCases) { item in
+                Button(item.rawValue) { space = item }
+            }
+        } label: {
+            Label("Spaces · \(space.rawValue)", systemImage: "square.grid.2x2")
+                .frame(minHeight: 48)
+        }
+        action(pendingJobs == 0 ? "Video Studio" : "Video Studio · \(pendingJobs) aktive") { space = .gallery }
+        action("Hvad kan jeg?") { showHelp = true }
+        if !onboarded {
+            VStack(alignment: .leading, spacing: 8) {
+                heading("Kom godt i gang")
+                Text("Åbn Brain for at vælge et klip eller chatte. Åbn indstillingerne for at forbinde din PC.")
+                action("Forstået") { onboarded = true }
+            }
+        }
+        if let error = model.error {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(model.errorTitle ?? error.title).font(.headline).accessibilityFocused($errorFocus)
+                if let detail = error.detail {
+                    DisclosureGroup("Tekniske detaljer", isExpanded: $errorDetails) {
+                        Text(detail).textSelection(.enabled)
+                    }
+                }
+                action("Prøv igen") { Task { await model.refresh() } }.disabled(switchDisabled)
+            }
+        }
+    }
+
+    @ViewBuilder private var connectionSettings: some View {
+        DisclosureGroup("Indstillinger · Forbindelse til PC", isExpanded: $setup) {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Profil", selection: $editedProfile) {
+                    ForEach(ConnectionProfile.allCases) { profile in
+                        Text(profile.title).tag(profile)
+                    }
+                }.disabled(switchDisabled)
+                .onChange(of: editedProfile) { _, profile in edit(profile) }
+                Text(editedProfile == .home ? "Indtast PC’ens lokale adresse." : "Indtast PC’ens IPv4-adresse fra Tailscale.")
+                TextField("Adresse fra PC’en", text: $address)
+                    .accessibilityLabel("PC-adresse")
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .keyboardType(.URL).textFieldStyle(.roundedBorder)
+                    .frame(minHeight: 48)
+                SecureField("Adgangskode fra PC’en", text: $token)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .textFieldStyle(.roundedBorder).frame(minHeight: 48)
+                action("Test og gem profil") {
+                    Task {
+                        await model.saveProfile(editedProfile, address: address, token: token)
+                        if model.error == nil && !model.isDemo { token = ""; setup = false }
+                    }
+                }.disabled(switchDisabled)
+                if model.isDemo {
+                    action("Prøv demo") { setup = false }
+                } else {
+                    Text(model.connected ? "Forbundet til PC" : "Ingen forbindelse").font(.headline)
+                    action("Skift til demo") {
+                        Task { await model.useDemo(); setup = false }
+                    }.disabled(switchDisabled)
+                }
+            }.padding(.top, 12)
+        }.font(.body)
+    }
+
+    @ViewBuilder private var loadingStatus: some View {
+        if model.busy || model.refreshing || model.mediaLoading {
+            ProgressView(model.mediaLoading ? "Henter video…" : "Vent et øjeblik…")
+        }
+    }
+
+    @ViewBuilder private var spaceContent: some View {
+        @Bindable var model = model
+        switch space {
+        case .brain:
+            ModelPickerBar()
+            if let latest = visibleJobs.max(by: { $0.created_at < $1.created_at }) {
+                VStack(alignment: .leading, spacing: 4) {
+                    heading("Fortsæt hvor du slap")
+                    Text(latest.mood.title + " · " + latest.status.title)
+                    action("Åbn Video Studio") { space = .gallery }
+                }
+            }
+            clipSection
+            moodSection
+            advanced($model.options)
+        case .notes:
+            heading("Noter")
+            TextEditor(text: $notes).frame(minHeight: 180)
+                .accessibilityLabel("Noter på denne enhed")
+        case .gallery:
+            jobSection
+        case .tasks:
+            heading("Aktive opgaver")
+            if pendingJobs == 0 { Text("Ingen aktive videojobs.") }
+            ForEach(model.jobs.filter { $0.status.active }) { job in
+                Text(job.mood.title + " · " + job.status.title)
+            }
+        case .library:
+            heading("Promptbibliotek")
+            ForEach(PromptExample.examples) { example in
+                VStack(alignment: .leading) {
+                    Text(example.category).font(.headline)
+                    action(example.text) {
+                        chatDraft = example.text
+                        showChat = true
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var appearanceSettings: some View {
+        DisclosureGroup("Visning og jobhistorik") {
+            Picker("Tema", selection: $theme) {
+                ForEach(["System", "Lys", "Mørk"], id: \.self) { Text($0) }
+            }
+            Picker("Skrift", selection: $font) {
+                ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
+            }
+            Toggle("Bevægelse i baggrunden", isOn: $motion)
+            Button("Ryd afsluttede jobs på denne telefon", role: .destructive) { confirmClear = true }
+                .frame(minHeight: 48)
         }
     }
 
@@ -696,27 +717,7 @@ private struct ChatView: View {
                 StatsBar(turns: turns.count, streaming: task != nil)
                 if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
                 Text("AI’en arbejder på din PC. Researcher bruger internettet til websøgning.")
-                ForEach(turns) { turn in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(turn.prompt).font(.headline)
-                        if !turn.reply.isEmpty { ChatTranscriptView(reply: turn.reply) }
-                        if let notice = turn.notice { Text(notice).font(.callout) }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12).background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
-                    .contextMenu {
-                        Button("Kopiér svar") { UIPasteboard.general.string = turn.reply }
-                        Button("Prøv igen") { draft = turn.prompt }.disabled(task != nil)
-                        Button("Start ny gren") { newConversation(); draft = turn.prompt }.disabled(task != nil)
-                    }
-                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                        Button("Kopiér") { UIPasteboard.general.string = turn.reply }
-                    }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        Button("Prøv igen") { draft = turn.prompt }.disabled(task != nil)
-                        Button("Ny gren") { newConversation(); draft = turn.prompt }.disabled(task != nil)
-                    }
-                }
+                transcriptRows
                 if !searchSteps.isEmpty {
                     DisclosureGroup("Deep Search · \(searchSteps.count) trin") {
                         ForEach(searchSteps.indices, id: \.self) { index in
@@ -756,6 +757,30 @@ private struct ChatView: View {
             loadHistory()
         }
         .onDisappear { stop() }
+    }
+
+    private var transcriptRows: some View {
+        ForEach(turns) { turn in
+            VStack(alignment: .leading, spacing: 8) {
+                Text(turn.prompt).font(.headline)
+                if !turn.reply.isEmpty { ChatTranscriptView(reply: turn.reply) }
+                if let notice = turn.notice { Text(notice).font(.callout) }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12).background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
+            .contextMenu {
+                Button("Kopiér svar") { UIPasteboard.general.string = turn.reply }
+                Button("Prøv igen") { draft = turn.prompt }.disabled(task != nil)
+                Button("Start ny gren") { newConversation(); draft = turn.prompt }.disabled(task != nil)
+            }
+            .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                Button("Kopiér") { UIPasteboard.general.string = turn.reply }
+            }
+            .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                Button("Prøv igen") { draft = turn.prompt }.disabled(task != nil)
+                Button("Ny gren") { newConversation(); draft = turn.prompt }.disabled(task != nil)
+            }
+        }
     }
 
     private func send() {
