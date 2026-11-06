@@ -437,7 +437,6 @@ private struct ChatView: View {
                     guard !Task.isCancelled else { return }
                     switch event.type {
                     case "tool_status": status = safeText(event.content)
-                    case "tool_error": status = "Et værktøj er ikke tilgængeligt."
                     case "text":
                         streamedText += event.content
                         turns[index].reply = safeText(streamedText)

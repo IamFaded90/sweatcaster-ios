@@ -45,7 +45,10 @@ final class ContractTests: XCTestCase {
 
     func testChatRejectsJSONAndMapsHTTPFailures() throws {
         XCTAssertNoThrow(try ChatFailure.validate(status: 200, mime: "text/event-stream"))
-        let cases: [(Int, ChatFailure)] = [(401, .unauthorized), (503, .unavailable), (200, .rejected)]
+        let cases: [(Int, ChatFailure)] = [
+            (401, .unauthorized), (403, .originRejected), (422, .invalidRequest),
+            (503, .rejected), (200, .rejected)
+        ]
         for (status, expected) in cases {
             XCTAssertThrowsError(try ChatFailure.validate(status: status, mime: "application/json")) {
                 XCTAssertEqual($0 as? ChatFailure, expected)

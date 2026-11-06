@@ -12,13 +12,15 @@ struct ChatEvent: Decodable, Sendable, Equatable {
 }
 
 enum ChatFailure: Error, Equatable {
-    case unreachable, unauthorized, unavailable, rejected, interrupted
+    case unreachable, unauthorized, originRejected, invalidRequest, unavailable, rejected, interrupted
 
     static func validate(status: Int, mime: String?) throws {
         switch status {
         case 200 where mime == "text/event-stream": return
-        case 401, 403: throw Self.unauthorized
-        case 404, 501, 502, 503, 504: throw Self.unavailable
+        case 401: throw Self.unauthorized
+        case 403: throw Self.originRejected
+        case 422: throw Self.invalidRequest
+        case 404, 501: throw Self.unavailable
         default: throw Self.rejected
         }
     }
@@ -27,6 +29,8 @@ enum ChatFailure: Error, Equatable {
         switch self {
         case .unreachable: "Kan ikke nå PC’en."
         case .unauthorized: "PC’en afviste adgangskoden."
+        case .originRejected: "PC’en afviste forbindelsens oprindelse."
+        case .invalidRequest: "PC’en afviste beskeden. Tjek teksten, og prøv igen."
         case .unavailable: "Agenttjenesten på PC’en er ikke klar."
         case .rejected: "Chatten kunne ikke læse svaret fra PC’en."
         case .interrupted: "Svaret blev afbrudt. Et job kan allerede være startet."
@@ -61,7 +65,7 @@ struct ChatSSEParser {
             guard let event = try? JSONDecoder().decode(ChatEvent.self, from: Data(payload.utf8))
             else { throw ChatFailure.interrupted }
             finished = event.type == "done"
-            return ["tool_status", "text", "done", "tool_error"].contains(event.type) ? event : nil
+            return ["tool_status", "text", "done"].contains(event.type) ? event : nil
         }
         if text == "data" || text.hasPrefix("data:") {
             let field = text.dropFirst(5)
