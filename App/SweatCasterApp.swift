@@ -70,6 +70,7 @@ struct Home: View {
     @State private var showJobs = 0
     @State private var space: Space = .brain
     @State private var showHelp = false
+    @State private var showAgentHub = false
     @State private var confirmClear = false
     @State private var hiddenJobs = Set<String>()
     @AppStorage("spaces.notes") private var notes = ""
@@ -137,6 +138,9 @@ struct Home: View {
             }
         } message: {
             Text("Videoerne og jobhistorikken bliver liggende på PC’en.")
+        }
+        .sheet(isPresented: $showAgentHub) {
+            AgentHub(model: model)
         }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
@@ -215,6 +219,7 @@ struct Home: View {
         }
         action(pendingJobs == 0 ? "Video Studio" : "Video Studio · \(pendingJobs) aktive") { space = .gallery }
         action("Hvad kan jeg?") { showHelp = true }
+        action("Agent-Hub") { showAgentHub = true }
         if !onboarded {
             VStack(alignment: .leading, spacing: 8) {
                 heading("Kom godt i gang")
@@ -527,6 +532,190 @@ struct Home: View {
         Button(action: work) {
             Text(title).frame(minHeight: 48).contentShape(Rectangle())
         }.buttonStyle(.bordered)
+    }
+}
+
+
+private enum OfficeRoom: String, CaseIterable, Identifiable {
+    case research = "Research Lab"
+    case video = "Video Studio"
+    case memory = "Memory Vault"
+
+    var id: Self { self }
+    var icon: String {
+        switch self {
+        case .research: "magnifyingglass"
+        case .video: "film"
+        case .memory: "archivebox"
+        }
+    }
+
+    var agent: String {
+        switch self {
+        case .research: "Researcher"
+        case .video: "Video Director"
+        case .memory: "File Explorer"
+        }
+    }
+}
+
+private struct AgentHub: View {
+    @Environment(\.dismiss) private var dismiss
+    let model: Model
+    @State private var room: OfficeRoom = .video
+    @State private var details: OfficeRoom?
+    @State private var achievements = false
+
+    private var jobs: [Job] { model.jobs.sorted { $0.created_at > $1.created_at } }
+    private var active: Int { jobs.filter { $0.status.active }.count }
+    private var completed: [Job] { jobs.filter { $0.status == .completed } }
+    private var xp: Int { completed.count * 25 }
+
+    private var streak: Int {
+        let calendar = Calendar.current
+        let days = Set(completed.map { calendar.startOfDay(for: $0.updated_at) })
+        var day = calendar.startOfDay(for: .now)
+        var count = 0
+        while days.contains(day), let previous = calendar.date(byAdding: .day, value: -1, to: day) {
+            count += 1
+            day = previous
+        }
+        return count
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text(model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")")
+                        .font(.subheadline)
+                    Text("Videostatus følger joblisten. Agenternes egne statusser afventer PC’en.")
+                        .foregroundStyle(.secondary)
+                    missionHUD
+                    Picker("Rum", selection: $room) {
+                        ForEach(OfficeRoom.allCases) { item in Text(item.rawValue).tag(item) }
+                    }.frame(minHeight: 48)
+                    officeFloor
+                    Button { achievements = true } label: {
+                        Label("Achievements", systemImage: "trophy").frame(minHeight: 48)
+                    }.buttonStyle(.bordered)
+                }.padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
+            }
+            .refreshable { await model.refresh() }
+            .navigationTitle("Agent-Hub")
+            .toolbar { Button("Luk") { dismiss() } }
+            .sheet(item: $details) { agent in agentDetails(agent) }
+            .sheet(isPresented: $achievements) { achievementPage }
+        }
+    }
+
+    private var missionHUD: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Mission HUD").font(.headline).accessibilityAddTraits(.isHeader)
+            Label("Aktive agenter · Afventer data", systemImage: "person.2")
+            Label("Aktive videojobs · \(active)", systemImage: "film")
+            Label("Video-XP · \(xp)", systemImage: "bolt")
+            Label("Streak · \(streak) dage", systemImage: "flame")
+            Text("Lokale point: 25 XP pr. færdig video i joblisten.")
+                .font(.caption).foregroundStyle(.secondary)
+        }.frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16).background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
+    }
+
+    private var officeFloor: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(room.rawValue).font(.title2.bold()).accessibilityAddTraits(.isHeader)
+            Button { details = room } label: {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: room.icon).font(.title2).frame(width: 48, height: 48)
+                        .background(.blue.opacity(0.15), in: Circle()).accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(room.agent).font(.headline)
+                        Text(status(for: room)).font(.subheadline)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(.blue.opacity(0.12), in: Capsule())
+                    }
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right").accessibilityHidden(true)
+                }.frame(minHeight: 48)
+            }.buttonStyle(.plain)
+                .accessibilityHint("Åbner agentens detaljer")
+            if room == .video {
+                ProgressView(value: Double(xp % 100), total: 100) {
+                    Text("Niveau \(xp / 100 + 1) · \(xp % 100) / 100 XP")
+                }
+            } else { Text("XP · Afventer data").foregroundStyle(.secondary) }
+            Text("Quest Log").font(.headline)
+            if room == .video, !jobs.isEmpty {
+                ForEach(jobs.prefix(3)) { job in Text(jobLabel(job)) }
+            } else { Text("Ingen opgaver at vise.").foregroundStyle(.secondary) }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16).background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 20))
+    }
+
+    private func status(for agent: OfficeRoom) -> String {
+        guard agent == .video else { return "Afventer data" }
+        guard model.isDemo || model.connected else { return "Forbindelse afbrudt" }
+        if jobs.contains(where: { $0.status.active && $0.status != .queued }) { return "Arbejder · Videokø" }
+        return active > 0 ? "Venter · Videokø" : "Klar · Videokø"
+    }
+
+    private func jobLabel(_ job: Job) -> String {
+        let clip = model.clips.first { $0.id == job.clip_id }?.name ?? "Klip"
+        return "\(clip) · \(job.status.title)"
+    }
+
+    private func agentDetails(_ agent: OfficeRoom) -> some View {
+        NavigationStack {
+            List {
+                Section("Status") { Text(status(for: agent)) }
+                Section("Historik") {
+                    if agent == .video, !jobs.isEmpty {
+                        ForEach(jobs) { job in
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(jobLabel(job))
+                                Text(job.updated_at.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    } else { Text("Ingen historik fra PC’en endnu.") }
+                }
+                Section("Værktøjskald") { Text("Afventer data fra PC’en.") }
+                Section("Hukommelse") { Text("Afventer data fra PC’en.") }
+            }
+            .navigationTitle(agent.agent)
+            .toolbar { Button("Luk") { details = nil } }
+        }
+    }
+
+    private var achievementPage: some View {
+        NavigationStack {
+            List {
+                badge("Første video", icon: "film", result: completed.isEmpty ? "Låst" : "Optjent")
+                badge("10 chats", icon: "bubble.left.and.bubble.right", result: "Afventer chatstatistik")
+                badge("Natjob", icon: "moon.stars", result: nightJob ? "Optjent" : "Låst")
+                Text(model.isDemo ? "Demo · Badges baseret på testjobs."
+                    : "Videobadges beregnes fra de jobs, der vises på denne PC-profil.")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
+            .navigationTitle("Achievements")
+            .toolbar { Button("Luk") { achievements = false } }
+        }
+    }
+
+    private var nightJob: Bool {
+        completed.contains { Calendar.current.component(.hour, from: $0.created_at) < 6 }
+    }
+
+    private func badge(_ title: String, icon: String, result: String) -> some View {
+        Label {
+            VStack(alignment: .leading) {
+                Text(title).font(.headline)
+                Text(result).font(.subheadline).foregroundStyle(.secondary)
+            }
+        } icon: {
+            Image(systemName: icon).foregroundStyle(result == "Optjent" ? Color.orange : Color.secondary)
+        }.frame(minHeight: 56)
     }
 }
 

@@ -24,3 +24,17 @@ For nye HTTP-fejl foreslås samme envelope som v1 med `{"error":{"code":"…","m
 Definér `step.state` som `queued`, `running`, `completed` eller `failed`. Gentag et step-id ved opdatering. Et svar uden `done` behandles som afbrudt. Sammenligning og branch må ikke genbruge den oprindelige samtales ID ved nye, uafhængige sessioner.
 
 iCloud-synkronisering kræver Apple-signering, en aftalt CloudKit-container og synkroniseringstest på to enheder. Det kræver ingen ændring i PC-API’et. Siri-genveje åbner chat eller klipvalg lokalt. Et senere bekræftet job kan bruge det eksisterende job-POST.
+
+## Agent-Hub
+
+Foreslået, endnu uden klientkald. Brug samme Bearer-token og fejlenvelope som v1.
+
+| Request | Svar |
+| --- | --- |
+| `GET /api/v2/agent-hub` | 200 `{"revision":12,"rooms":[{"id":"research","name":"Research Lab","icon":"search"}],"agents":[{"id":"researcher","room_id":"research","name":"Researcher","icon":"search","status":"thinking","xp":35,"level":1,"xp_in_level":35,"xp_for_next_level":100,"recent_quests":[{"id":"q1","title":"Søgning","state":"running","updated_at":"2026-11-06T12:00:00Z"}]}],"summary":{"active_agents":1,"active_jobs":2,"total_xp":35,"streak_days":3}}` |
+| `GET /api/v2/agents/{agent_id}/history?limit=50&cursor=…` | 200 `{"items":[{"id":"e1","kind":"tool_call","title":"Søgning","state":"completed","at":"2026-11-06T12:00:00Z","tool_name":"search","summary":"Fandt 2 resultater"}],"next_cursor":null}` |
+| `GET /api/v2/agents/{agent_id}/memory?limit=50&cursor=…` | 200 `{"items":[{"id":"m1","title":"Søgepræferencer","summary":"…","updated_at":"2026-11-06T12:00:00Z"}],"next_cursor":null}` |
+| `GET /api/v2/achievements` | 200 `{"items":[{"id":"first_video","title":"Første video","description":"Færdiggør en video","icon":"film","current":1,"target":1,"earned_at":"2026-11-06T12:00:00Z"}]}` |
+| `GET /api/v2/agent-hub/events?after_revision=12` med `Accept: text/event-stream` | 200 SSE med `data: {"type":"hub_updated","revision":13}`. Klienten henter et nyt snapshot. Send `{"type":"resync_required"}` hvis historikken er udløbet. |
+
+Agentstatus er `working`, `thinking`, `ready` eller `offline`. Sortér de seneste tre quests med den nyeste først. PC’en bør eje XP-regler, badgeoptjening og tidszonen for streaks. Filtrér tokens, rå værktøjsargumenter og interne filstier fra historik og hukommelse. Brug de eksisterende jobs som den autoritative videokø.
