@@ -4,6 +4,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct OfflineStudio: View {
+    let api: LiveAPI?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
     @AppStorage("offline.studio.enabled") private var enabled = false
@@ -36,7 +37,7 @@ struct OfflineStudio: View {
                     Button("Lås studiet op") { authenticate() }.frame(minHeight: 48).disabled(authenticating)
                 } else {
                     Toggle("Aktivér lokal tilstand", isOn: $enabled).disabled(task != nil)
-                    Text("Tekst og billeder behandles på telefonen. Download af modeller kræver internet.")
+                    Text("Tekst og billeder forsøges på telefonen. Hvis billedet fejler, kan PC’en overtage. Download af modeller kræver internet.")
                         .font(.caption)
                 }
                 if unlocked && enabled {
@@ -145,11 +146,11 @@ struct OfflineStudio: View {
                 Toggle("Brug importeret LoRA", isOn: $useLoRA).disabled(task != nil)
                 Text("Vælg en LoRA, der passer til billedmodellen.").font(.caption)
             }
-            Button("Generér billede på telefonen") { generateImage() }
-                .frame(minHeight: 48).disabled(!imageReady || !hasPrompt || task != nil)
+            Button("Generér billede") { generateImage() }
+                .frame(minHeight: 48).disabled((!imageReady && api == nil) || !hasPrompt || task != nil)
             if let imageURL, let preview = UIImage(contentsOfFile: imageURL.path) {
                 Image(uiImage: preview).resizable().scaledToFit()
-                    .accessibilityLabel("Lokalt genereret billede")
+                    .accessibilityLabel("Genereret billede")
                 ShareLink(item: imageURL) { Label("Del billede", systemImage: "square.and.arrow.up") }
             }
         }
@@ -166,15 +167,6 @@ struct OfflineStudio: View {
         let message = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let lora = useLoRA ? loraName : ""
         run("Genererer billede på telefonen…") {
-            var pipeline = try await MediaGenerationPipeline.fromPretrained(selected, backend: .local)
-            pipeline.configuration.width = 512
-            pipeline.configuration.height = 512
-            if !lora.isEmpty {
-                pipeline.configuration.loras = [.init(file: lora, weight: 1, mode: .base)]
-            }
-            let results = try await pipeline.generate(prompt: message)
-            try Task.checkCancellation()
-            guard let result = results.first else { throw PhoneModelError.emptyResponse }
             try FileManager.default.createDirectory(at: historyFolder, withIntermediateDirectories: true)
             var folder = historyFolder
             var values = URLResourceValues()
@@ -182,9 +174,28 @@ struct OfflineStudio: View {
             try folder.setResourceValues(values)
             let timestamp = Int(Date().timeIntervalSince1970 * 1_000)
             let destination = folder.appendingPathComponent("\(timestamp)-\(UUID()).png")
-            try result.write(to: destination, type: .png)
+            var source = "Telefon"
+            do {
+                guard imageReady else { throw PhoneModelError.unavailable }
+                var pipeline = try await MediaGenerationPipeline.fromPretrained(selected, backend: .local)
+                pipeline.configuration.width = 512
+                pipeline.configuration.height = 512
+                if !lora.isEmpty { pipeline.configuration.loras = [.init(file: lora, weight: 1, mode: .base)] }
+                let results = try await pipeline.generate(prompt: message)
+                try Task.checkCancellation()
+                guard let result = results.first else { throw PhoneModelError.emptyResponse }
+                try result.write(to: destination, type: .png)
+            } catch {
+                try Task.checkCancellation()
+                guard let api else { throw error }
+                status = "Telefonen kunne ikke lave billedet. PC’en prøver med sin egen model uden telefonens LoRA…"
+                let png = try await api.v2GenerateImage(prompt: message)
+                try Task.checkCancellation()
+                try png.write(to: destination, options: .atomic)
+                source = "PC (uden telefonens LoRA)"
+            }
             imageURL = destination
-            status = "Billede klar."
+            status = "Billede klar fra \(source)."
         }
     }
 
@@ -236,7 +247,7 @@ struct OfflineStudio: View {
             defer { task = nil }
             do { try await work() }
             catch is CancellationError { status = "Stoppet." }
-            catch { status = "Opgaven mislykkedes. Tjek model, ledig plads og hukommelse." }
+            catch { status = "Billedet kunne ikke laves. Tjek plads på telefonen og forbindelsen til PC’en." }
         }
     }
 }

@@ -485,6 +485,23 @@ struct V2CodeApplied: Decodable, Sendable {
 }
 
 extension LiveAPI {
+    func v2GenerateImage(prompt: String) async throws -> Data {
+        let message = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (1...1000).contains(message.count) else { throw V2Failure.invalidInput }
+        var req = try v2Request("images/generate", method: "POST")
+        req.timeoutInterval = 240
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("image/png", forHTTPHeaderField: "Accept")
+        req.httpBody = try JSONEncoder().encode(["prompt": message])
+        let (data, response) = try await session.data(for: req)
+        guard let http = response as? HTTPURLResponse else { throw V2Failure.invalidResponse }
+        guard http.statusCode == 200 else { throw v2HTTPError(http.statusCode, data: data) }
+        guard http.value(forHTTPHeaderField: "Content-Type")?.lowercased().hasPrefix("image/png") == true,
+              data.count <= 15_000_000, data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10])
+        else { throw V2Failure.invalidResponse }
+        return data
+    }
+
     func deletePCVideo(_ id: String) async throws {
         guard validWireID(id) else { throw V2Failure.invalidInput }
         var request = try v2Request("jobs/\(id)/video", method: "DELETE")

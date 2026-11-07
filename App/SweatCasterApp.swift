@@ -126,12 +126,58 @@ struct Home: View {
                 appearanceSettings
             }.padding(20).frame(maxWidth: 620).frame(maxWidth: .infinity)
         }.refreshable { await model.refresh() }
+        .safeAreaInset(edge: .bottom) { spacesBar }
         .onChange(of: showJobs) {
             space = .gallery
             proxy.scrollTo("jobs", anchor: .top)
             jobsFocus = true
         }
         .onChange(of: showClips) { proxy.scrollTo("clips", anchor: .top) }
+        }
+    }
+
+    private var spacesBar: some View {
+        HStack(spacing: 2) {
+            ForEach(Space.allCases) { item in
+                Button {
+                    space = item
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: spaceIcon(item)).font(.title3)
+                        Text(spaceTitle(item)).font(.caption2.bold()).lineLimit(1)
+                    }
+                    .foregroundStyle(space == item ? Color.cyan : Color.primary)
+                    .frame(maxWidth: .infinity, minHeight: 56)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Åbn " + spaceTitle(item))
+                .accessibilityAddTraits(space == item ? .isSelected : [])
+            }
+        }
+        .padding(6)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
+        .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(.white.opacity(0.20)))
+        .padding(.horizontal, 12).padding(.bottom, 4)
+    }
+
+    private func spaceTitle(_ item: Space) -> String {
+        switch item {
+        case .brain: "Hjem"
+        case .notes: "Noter"
+        case .gallery: "Video"
+        case .tasks: "Opgaver"
+        case .library: "Bibliotek"
+        }
+    }
+
+    private func spaceIcon(_ item: Space) -> String {
+        switch item {
+        case .brain: "house.fill"
+        case .notes: "note.text"
+        case .gallery: "play.rectangle.fill"
+        case .tasks: "checklist"
+        case .library: "books.vertical.fill"
         }
     }
 
@@ -218,7 +264,7 @@ struct Home: View {
             CodeWorkspaceView(api: model.api as? LiveAPI)
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
-        .sheet(isPresented: $showOfflineStudio) { OfflineStudio() }
+        .sheet(isPresented: $showOfflineStudio) { OfflineStudio(api: model.isDemo ? nil : model.api as? LiveAPI) }
         .sheet(isPresented: $showSavedVideos) { savedVideoLibrary }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
@@ -286,14 +332,6 @@ struct Home: View {
             .disabled(model.busy)
         if model.isDemo {
             Text("Demotilstand · Kun testdata").font(.headline)
-        }
-        Menu {
-            ForEach(Space.allCases) { item in
-                Button(item.rawValue) { space = item }
-            }
-        } label: {
-            Label("Spaces · \(space.rawValue)", systemImage: "square.grid.2x2")
-                .frame(minHeight: 48)
         }
         action(pendingJobs == 0 ? "Video Studio" : "Video Studio · \(pendingJobs) aktive") { space = .gallery }
         action("Hvad kan jeg?") { showHelp = true }
@@ -770,6 +808,7 @@ private struct VillageBot: Codable, Identifiable {
     var prompt = ""
     var voice = "da-DK"
     var sprite: Data? = nil
+    var personality: String? = nil
 }
 
 private struct VillageBotFile: FileDocument {
@@ -845,6 +884,12 @@ private struct VillageBotBuilder: View {
                 ForEach(["Blå", "Lilla", "Grøn"], id: \.self) { Text($0) }
             }
             TextField("Systemprompt", text: $draft.prompt, axis: .vertical).lineLimit(3...8)
+            Picker("Personlighed", selection: Binding(
+                get: { draft.personality ?? "Nysgerrig" },
+                set: { draft.personality = $0 }
+            )) {
+                ForEach(["Nysgerrig", "Rolig", "Sjov", "Omsorgsfuld"], id: \.self) { Text($0) }
+            }
             Picker("Stemme", selection: $draft.voice) {
                 Text("Dansk").tag("da-DK")
                 Text("Engelsk").tag("en-US")
@@ -1053,6 +1098,17 @@ private struct AgentHub: View {
                         .fill(night ? Color(red: 0.03, green: 0.06, blue: 0.14) :
                             Color(red: 0.10, green: 0.19, blue: 0.29))
                     Canvas { context, canvas in
+                        let meadow = Path(ellipseIn: CGRect(x: canvas.width * 0.04, y: canvas.height * 0.08,
+                                                           width: canvas.width * 0.92, height: canvas.height * 0.84))
+                        context.fill(meadow, with: .color(Color(red: 0.07, green: 0.27, blue: 0.24)))
+                        let road = Path { path in
+                            path.move(to: CGPoint(x: canvas.width * 0.26, y: canvas.height * 0.29))
+                            path.addLine(to: CGPoint(x: canvas.width * 0.73, y: canvas.height * 0.37))
+                            path.addLine(to: CGPoint(x: canvas.width * 0.27, y: canvas.height * 0.65))
+                            path.addLine(to: CGPoint(x: canvas.width * 0.73, y: canvas.height * 0.74))
+                        }
+                        context.stroke(road, with: .color(Color(red: 0.49, green: 0.57, blue: 0.55).opacity(0.55)),
+                                       style: StrokeStyle(lineWidth: 20, lineCap: .round, lineJoin: .round))
                         for zone in 0..<4 {
                             let center = villagePoint(zone, size: canvas)
                             let w = canvas.width * 0.23
@@ -1065,6 +1121,33 @@ private struct AgentHub: View {
                                 path.closeSubpath()
                             }
                             context.fill(tile, with: .color([Color.indigo, .blue, .teal, .purple][zone].opacity(0.62)))
+                            let wall = Path { path in
+                                path.move(to: CGPoint(x: center.x - w, y: center.y))
+                                path.addLine(to: CGPoint(x: center.x, y: center.y + h))
+                                path.addLine(to: CGPoint(x: center.x, y: center.y + h + 16))
+                                path.addLine(to: CGPoint(x: center.x - w, y: center.y + 16))
+                                path.closeSubpath()
+                            }
+                            context.fill(wall, with: .color([Color.indigo, .blue, .teal, .purple][zone].opacity(0.30)))
+                            let roof = Path { path in
+                                path.move(to: CGPoint(x: center.x - w * 0.62, y: center.y - h * 0.24))
+                                path.addLine(to: CGPoint(x: center.x, y: center.y - h * 0.85))
+                                path.addLine(to: CGPoint(x: center.x + w * 0.62, y: center.y - h * 0.24))
+                                path.addLine(to: CGPoint(x: center.x, y: center.y + h * 0.38))
+                                path.closeSubpath()
+                            }
+                            context.fill(roof, with: .color([Color.indigo, .blue, .teal, .purple][zone].opacity(0.90)))
+                            let window = Path(roundedRect: CGRect(x: center.x - 5, y: center.y - h * 0.42,
+                                                                  width: 10, height: 9), cornerRadius: 2)
+                            context.fill(window, with: .color(night ? .yellow.opacity(0.8) : .cyan.opacity(0.7)))
+                        }
+                        for tree in 0..<7 {
+                            let x = canvas.width * (0.08 + Double((tree * 31) % 83) / 100)
+                            let y = canvas.height * (0.11 + Double((tree * 47) % 75) / 100)
+                            context.fill(Path(ellipseIn: CGRect(x: x, y: y, width: 9, height: 6)),
+                                         with: .color(.black.opacity(0.18)))
+                            context.fill(Path(ellipseIn: CGRect(x: x - 2, y: y - 8, width: 13, height: 12)),
+                                         with: .color(Color(red: 0.08, green: 0.46, blue: 0.34)))
                         }
                         if offline {
                             let phase = reduceMotion ? 0 : Int(timeline.date.timeIntervalSince1970 * 24) % 100
@@ -1081,8 +1164,9 @@ private struct AgentHub: View {
                     }.accessibilityHidden(true)
                     ForEach(Array(["Research Lab", "Video Studio", "Kaffeområde", "Sovekrog"].enumerated()), id: \.offset) { item in
                         let point = villagePoint(item.offset, size: size)
-                        Text(item.element).font(.caption2.bold())
-                            .position(x: point.x, y: point.y + 23)
+                        Label(item.element, systemImage: ["books.vertical.fill", "film.fill", "cup.and.saucer.fill", "moon.stars.fill"][item.offset])
+                            .font(.caption2.bold()).labelStyle(.titleAndIcon)
+                            .position(x: point.x, y: point.y + 25)
                     }
                     ForEach(Array((snapshot?.agents ?? []).enumerated()), id: \.element.id) { item in
                         villageAvatar(item.element, index: item.offset, size: size)
@@ -1111,25 +1195,36 @@ private struct AgentHub: View {
     }
 
     private func localVillageAvatar(_ bot: VillageBot, index: Int, hour: Int, size: CGSize) -> some View {
-        let sleeping = villagePause || hour < 7 || hour >= 22
+        let sleeping = offline || villagePause || hour < 7 || hour >= 22
         let routine = (hour + index) % 3
         let zone = sleeping ? 3 : routine
         let center = villagePoint(zone, size: size)
-        let activity = sleeping ? "Sover" : ["Læser", "Øver sig", "Holder kaffepause"][routine]
+        let personality = bot.personality ?? "Nysgerrig"
+        let routines: [String] = switch personality {
+        case "Rolig": ["Læser i biblioteket", "Ordner studiet", "Drikker te"]
+        case "Sjov": ["Finder på historier", "Øver en scene", "Fortæller jokes"]
+        case "Omsorgsfuld": ["Hjælper i laboratoriet", "Hjælper med video", "Laver kaffe til holdet"]
+        default: ["Undersøger nye idéer", "Øver sig i studiet", "Holder kaffepause"]
+        }
+        let activity = sleeping ? "Sover" : routines[routine]
         let color: Color = bot.color == "Grøn" ? .green : bot.color == "Lilla" ? .purple : .cyan
         return Button {
             if !cinematic { localBot = bot }
         } label: {
-            Group {
-                if !sleeping, let data = bot.sprite, let image = UIImage(data: data) {
+            VStack(spacing: 0) {
+                Group {
+                if let data = bot.sprite, let image = UIImage(data: data) {
                     Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
                 } else {
                     Image(systemName: sleeping ? "moon.stars.fill" : "sparkle").foregroundStyle(color)
                 }
-            }.frame(width: 44, height: 44)
+                }.frame(width: 38, height: 38).opacity(sleeping ? 0.55 : 1)
+                Text(bot.name).font(.caption2.bold()).lineLimit(1)
+                if !sleeping { Text(activity).font(.system(size: 8)).lineLimit(1) }
+            }.frame(width: 92, height: 66)
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(bot.name + ", lokal bot, " + activity)
+        .accessibilityLabel(bot.name + ", " + (bot.personality ?? "Nysgerrig") + ", " + activity)
         .position(x: center.x + CGFloat(index % 5 - 2) * 23,
                   y: center.y + 42 + CGFloat(index / 5) * 20)
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.75), value: zone)
@@ -1147,12 +1242,23 @@ private struct AgentHub: View {
         let zone = sleeping ? 3 : resting ? 2 : agent.room_id.lowercased().contains("video") ? 1 : 0
         let point = villagePoint(zone, size: size)
         let offset = CGFloat(index % 4) * 29 - 43.5
+        let matchingSprite = localVillageBots.first {
+            $0.name.localizedCaseInsensitiveCompare(agent.name) == .orderedSame ||
+            $0.name.localizedCaseInsensitiveCompare(agent.id) == .orderedSame
+        }?.sprite
         return Button {
             if !cinematic { details = agent }
         } label: {
-            Image(systemName: sleeping ? "moon.zzz.fill" : "person.crop.circle.fill")
-                .font(.title2).frame(width: 44, height: 44)
-                .modifier(AgentPulse(active: !sleeping && !resting))
+            Group {
+                if let matchingSprite, let image = UIImage(data: matchingSprite) {
+                    Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
+                } else {
+                    Image(systemName: sleeping ? "moon.zzz.fill" : icon(agent.icon)).font(.title2)
+                }
+            }
+            .frame(width: 42, height: 42)
+            .opacity(sleeping ? 0.55 : 1)
+            .modifier(AgentPulse(active: !sleeping && !resting))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(agent.name + ", " + (sleeping ? "Hviler" : status(agent.status)))

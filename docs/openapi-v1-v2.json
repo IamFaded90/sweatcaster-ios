@@ -1,0 +1,3388 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SweatCaster",
+    "description": "SweatCaster API v1. Chat success is text/event-stream. JSON errors use the error envelope. Chat does not use HTTP 503. v2 model, chat, and agent hub routes are implemented on this process. v1 chat still does not use HTTP 503. Hub revisions are retained for 100 updates, then a client must resync.",
+    "version": "1",
+    "x-implementation-status": "v1-live-v2-implemented",
+    "x-v2-contract": "implemented",
+    "x-source": "https://github.com/IamFaded90/sweatcaster-ios/blob/0994515c2d76/BACKEND-TODO.md",
+    "x-agent-hub-source": "https://github.com/IamFaded90/sweatcaster-ios/blob/81e6b20/BACKEND-TODO.md#agent-hub"
+  },
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "summary": "Health",
+        "operationId": "health_api_v1_health_get",
+        "responses": {
+          "200": {
+            "description": "Liveness. No auth.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin. The body is the error envelope.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/capabilities": {
+      "get": {
+        "summary": "Capabilities",
+        "operationId": "capabilities_api_v1_capabilities_get",
+        "responses": {
+          "200": {
+            "description": "Live flags for this process.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Capabilities"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/clips": {
+      "get": {
+        "summary": "Clips",
+        "operationId": "clips_api_v1_clips_get",
+        "responses": {
+          "200": {
+            "description": "Inbox clips. Empty list when the inbox is empty.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClipList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/chat": {
+      "post": {
+        "summary": "Chat",
+        "operationId": "chat_api_v1_chat_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream. Each frame is data: {JSON}\\n\\n. The JSON type is only tool_status, text, or done. This status is also used when the assistant container is down, times out before the stream, returns a non-200 status, or names a different model. Those cases are one text frame and one done frame. They are not HTTP 503. A socket drop after the stream has started still begins as 200 and may end without done.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatSseFrame"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token. Sent before the stream starts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin. Sent before the stream starts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The chat JSON failed parse_chat, or it was not a JSON object. Sent before the stream starts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/jobs": {
+      "get": {
+        "summary": "List Jobs",
+        "operationId": "list_jobs_api_v1_jobs_get",
+        "responses": {
+          "200": {
+            "description": "Stored jobs, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "Create Jobs",
+        "operationId": "create_jobs_api_v1_jobs_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateJobsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "One job per clip. Processing has not finished.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "A clip id is not in the inbox.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The JSON body failed the job rules. The body is the error envelope, not a validation detail array.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ffmpeg, ffprobe, Ollama, or Piper is not ready. No job is stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/jobs/{job_id}": {
+      "get": {
+        "summary": "Get Job",
+        "operationId": "get_job_api_v1_jobs__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One job, including failed and cancelled jobs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/jobs/{job_id}/cancel": {
+      "post": {
+        "summary": "Cancel Job",
+        "operationId": "cancel_job_api_v1_jobs__job_id__cancel_post",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cancel requested, or the job was already terminal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/jobs/{job_id}/video": {
+      "get": {
+        "summary": "Video",
+        "operationId": "video_api_v1_jobs__job_id__video_get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Finished vertical MP4. Accept-Ranges is bytes.",
+            "content": {
+              "video/mp4": {
+                "schema": {
+                  "type": "string",
+                  "contentMediaType": "video/mp4"
+                }
+              }
+            },
+            "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string",
+                  "enum": [
+                    "bytes"
+                  ]
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "A Range request. Content-Range is set. This is still video/mp4.",
+            "content": {
+              "video/mp4": {
+                "schema": {
+                  "type": "string",
+                  "contentMediaType": "video/mp4"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job, or the finished file is missing.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The job has no finished video yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v2/jobs/{job_id}/phone-saved": {
+      "post": {
+        "summary": "Phone Saved",
+        "operationId": "phone_saved_api_v2_jobs__job_id__phone_saved_post",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneSavedRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Idempotent. Deletes only this job's generated files after the phone has saved its own copy. A second call removes nothing more.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PhoneSavedResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown job id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The job is not finished, or a file is busy or linked outside the job folder.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "saved is not true, or the body has another field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/jobs/{job_id}/video": {
+      "delete": {
+        "summary": "Remove Video",
+        "operationId": "remove_video_api_v2_jobs__job_id__video_delete",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Remove Video Api V2 Jobs  Job Id  Video Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v2/clip-roots": {
+      "get": {
+        "summary": "Clip Roots",
+        "operationId": "clip_roots_api_v2_clip_roots_get",
+        "responses": {
+          "200": {
+            "description": "Configured folders in config order. file_count is video files before the 180 second filter. No paths. ready means the file list can be paged. indexing means a background probe is still filling metadata. Folder names are not rewritten.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClipRootList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/clips": {
+      "get": {
+        "summary": "Clips Page",
+        "operationId": "clips_page_api_v2_clips_get",
+        "responses": {
+          "200": {
+            "description": "One folder. The v1 list still stops at 200 clips across folders. Clips longer than 180 seconds are omitted. A page does not hash the catalog and does not probe files outside that page. The same file id is reused when two roots open one volume file. POST /api/v1/jobs still takes clip_ids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClipPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown root id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Bad root id, limit, or cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented",
+        "parameters": [
+          {
+            "name": "root_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Id from GET /api/v2/clip-roots. It is the config index, not a path."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional. Omitted means 50. Integers 1 through 100."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "next_cursor from the previous page. A relative name inside that folder, not a path."
+          }
+        ]
+      }
+    },
+    "/api/v2/models": {
+      "get": {
+        "summary": "List Models",
+        "operationId": "list_models_api_v2_models_get",
+        "responses": {
+          "200": {
+            "description": "Local allowlist. Discovery does not download a model.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelCatalog"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/chat": {
+      "post": {
+        "summary": "Chat V2",
+        "operationId": "chat_v2_api_v2_chat_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatV2Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE. Each frame is data: {json} followed by a blank line. There is no event: line. Types are only tool_status, text, and done. done is once, last, and only after a finished reply. It carries an empty content, message_id, and the actual model_id. usage is omitted unless input_tokens, output_tokens, and elapsed_ms were all measured. A failure after the first byte closes without done.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "UTF-8 frames. JSON values match ChatV2Event."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token. Before admission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin. Before admission.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "model_id is a non-empty string outside qwen25-7b and llama31-8b. The id is not stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "This pairing identity already used request_id. No replay.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Malformed body, unknown field, bad message or session, bad request_id, empty model_id, context with data, or a non-null parent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The known tag is not installed, Ollama is offline, the assistant container did not answer, or the model queue is full. The id is not stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented",
+        "x-admission": {
+          "active_inference": 1,
+          "pending": 1,
+          "public_field": false
+        }
+      }
+    },
+    "/api/v2/agent-hub": {
+      "get": {
+        "summary": "Agent Hub",
+        "operationId": "agent_hub_api_v2_agent_hub_get",
+        "responses": {
+          "200": {
+            "description": "Read-only snapshot. Does not award XP or bump revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentHub"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/agents/{agent_id}/history": {
+      "get": {
+        "summary": "Agent History",
+        "operationId": "agent_history_api_v2_agents__agent_id__history_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional. Omitted means 50. Integers 1 through 100. Anything else is 422."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque seq:id from next_cursor. A value that is not that shape is 422."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentHistory"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown agent id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Bad limit or cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/agents/{agent_id}/memory": {
+      "get": {
+        "summary": "Agent Memory",
+        "operationId": "agent_memory_api_v2_agents__agent_id__memory_get",
+        "parameters": [
+          {
+            "name": "agent_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Agent Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional. Omitted means 50. Integers 1 through 100. Anything else is 422."
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Opaque seq:id from next_cursor. A value that is not that shape is 422."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Curated memories for this agent. Empty until a curated row exists. Chat sessions are not listed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentMemoryPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Unknown agent id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Bad limit or cursor.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/memory/{fact_id}": {
+      "delete": {
+        "summary": "Delete Memory",
+        "operationId": "delete_memory_api_v2_memory__fact_id__delete",
+        "parameters": [
+          {
+            "name": "fact_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Fact Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Delete Memory Api V2 Memory  Fact Id  Delete"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/memory": {
+      "post": {
+        "summary": "Add Memory",
+        "operationId": "add_memory_api_v2_memory_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CuratedFactRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A curated fact. It is not a chat turn. The same text and source return the existing id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CuratedFactSaved"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Missing text or source, or an extra field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/documents/ingest": {
+      "post": {
+        "summary": "Ingest Documents",
+        "operationId": "ingest_documents_api_v2_documents_ingest_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Only the named files under the documents folder. No home or Videos scan. Missing embedding is 503, not an empty success.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Missing paths, too many paths, or an extra field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The local embedding files are not on disk. This call does not download them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/schedules": {
+      "get": {
+        "summary": "List Schedules",
+        "operationId": "list_schedules_api_v2_schedules_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response List Schedules Api V2 Schedules Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      },
+      "post": {
+        "summary": "Create Schedule",
+        "operationId": "create_schedule_api_v2_schedules_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Create Schedule Api V2 Schedules Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/schedules/{schedule_id}": {
+      "get": {
+        "summary": "Get Schedule",
+        "operationId": "get_schedule_api_v2_schedules__schedule_id__get",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Schedule Api V2 Schedules  Schedule Id  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      },
+      "patch": {
+        "summary": "Update Schedule",
+        "operationId": "update_schedule_api_v2_schedules__schedule_id__patch",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Update Schedule Api V2 Schedules  Schedule Id  Patch"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/schedules/{schedule_id}/pause": {
+      "post": {
+        "summary": "Pause Schedule",
+        "operationId": "pause_schedule_api_v2_schedules__schedule_id__pause_post",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Pause Schedule Api V2 Schedules  Schedule Id  Pause Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/schedules/{schedule_id}/stop": {
+      "post": {
+        "summary": "Stop Schedule",
+        "operationId": "stop_schedule_api_v2_schedules__schedule_id__stop_post",
+        "parameters": [
+          {
+            "name": "schedule_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Schedule Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Stop Schedule Api V2 Schedules  Schedule Id  Stop Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/comfy/prompt": {
+      "post": {
+        "summary": "Comfy Prompt",
+        "operationId": "comfy_prompt_api_v2_comfy_prompt_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Comfy Prompt Api V2 Comfy Prompt Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/images/generate": {
+      "post": {
+        "summary": "Generate Image",
+        "operationId": "generate_image_api_v2_images_generate_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "prompt"
+                ],
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Generated image",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid image prompt.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "ComfyUI or its checkpoint is unavailable.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented",
+        "description": "Generate a PNG through PC-local ComfyUI when the phone cannot render locally. The phone's LoRA is not transferred."
+      }
+    },
+    "/api/v2/computer/act": {
+      "post": {
+        "summary": "Computer Act",
+        "operationId": "computer_act_api_v2_computer_act_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Computer Act Api V2 Computer Act Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/code/workspace": {
+      "get": {
+        "summary": "Code Workspace List",
+        "operationId": "code_workspace_list_api_v2_code_workspace_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Code Workspace List Api V2 Code Workspace Get"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/code/file": {
+      "get": {
+        "summary": "Code Workspace Read",
+        "operationId": "code_workspace_read_api_v2_code_file_get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Code Workspace Read Api V2 Code File Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/code/proposals": {
+      "post": {
+        "summary": "Code Workspace Propose",
+        "operationId": "code_workspace_propose_api_v2_code_proposals_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": true,
+                "type": "object",
+                "title": "Payload"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Code Workspace Propose Api V2 Code Proposals Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/code/proposals/{change_id}/apply": {
+      "post": {
+        "summary": "Code Workspace Apply",
+        "operationId": "code_workspace_apply_api_v2_code_proposals__change_id__apply_post",
+        "parameters": [
+          {
+            "name": "change_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Change Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "title": "Payload"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Code Workspace Apply Api V2 Code Proposals  Change Id  Apply Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/achievements": {
+      "get": {
+        "summary": "Achievements",
+        "operationId": "achievements_api_v2_achievements_get",
+        "responses": {
+          "200": {
+            "description": "first_video only. earned_at is stored, not the clock at read time.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AchievementList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented"
+      }
+    },
+    "/api/v2/agent-hub/events": {
+      "get": {
+        "summary": "Hub Events",
+        "operationId": "hub_events_api_v2_agent_hub_events_get",
+        "responses": {
+          "200": {
+            "description": "SSE comments are heartbeats. Data frames are hub_updated or resync_required. There is no chat done frame.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "data: {\"type\":\"hub_updated\",\"revision\":N} or data: {\"type\":\"resync_required\"}."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing or wrong bearer token. Before the stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Foreign Origin. Before the stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The revision cursor is not an integer, or it is in the future. Before the stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/V2ErrorEnvelope"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "x-implementation-status": "implemented",
+        "parameters": [
+          {
+            "name": "after_revision",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Omitted tails from the current revision and sends only later updates. A retained older revision yields one hub_updated for the latest revision, not a byte replay. A revision outside the retained window yields resync_required. A future revision is 422 before any SSE byte. The token is the Authorization header, never this query."
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorObject": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "UNAUTHORIZED",
+              "NOT_FOUND",
+              "NOT_READY",
+              "INVALID_INPUT",
+              "DEPENDENCY_MISSING"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorObject"
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "api_version",
+          "status"
+        ],
+        "properties": {
+          "api_version": {
+            "type": "string",
+            "const": "1"
+          },
+          "status": {
+            "type": "string",
+            "const": "ok"
+          }
+        }
+      },
+      "Capabilities": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "moods",
+          "max_batch_size",
+          "features",
+          "dependencies"
+        ],
+        "properties": {
+          "moods": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "roast",
+                "hype",
+                "sweaty",
+                "funny_npc"
+              ]
+            }
+          },
+          "max_batch_size": {
+            "type": "integer",
+            "const": 10
+          },
+          "features": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "upload",
+              "cancel",
+              "range_preview"
+            ],
+            "properties": {
+              "upload": {
+                "type": "boolean"
+              },
+              "cancel": {
+                "type": "boolean"
+              },
+              "range_preview": {
+                "type": "boolean"
+              }
+            }
+          },
+          "dependencies": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "name",
+                "ready",
+                "message"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "enum": [
+                    "ffmpeg",
+                    "ffprobe",
+                    "tesseract",
+                    "ollama",
+                    "piper",
+                    "whisper",
+                    "easyocr"
+                  ]
+                },
+                "ready": {
+                  "type": "boolean"
+                },
+                "message": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Clip": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "duration_seconds",
+          "width",
+          "height"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "duration_seconds": {
+            "type": "number"
+          },
+          "width": {
+            "type": "integer"
+          },
+          "height": {
+            "type": "integer"
+          }
+        }
+      },
+      "ClipList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clips"
+        ],
+        "properties": {
+          "clips": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Clip"
+            }
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "clip_id",
+          "mood",
+          "status",
+          "progress",
+          "message",
+          "warnings",
+          "created_at",
+          "updated_at",
+          "output_url",
+          "error"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "clip_id": {
+            "type": "string"
+          },
+          "mood": {
+            "type": "string",
+            "enum": [
+              "roast",
+              "hype",
+              "sweaty",
+              "funny_npc"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "analyzing",
+              "commentating",
+              "synthesizing",
+              "rendering",
+              "completed",
+              "failed",
+              "cancelled"
+            ]
+          },
+          "progress": {
+            "type": "number"
+          },
+          "message": {
+            "type": "string"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          },
+          "output_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string"
+                  },
+                  "message": {
+                    "type": "string"
+                  }
+                },
+                "description": "Present only when status is failed. Codes stored by the job worker include PROCESSING_FAILED, CLIP_CHANGED, ENGLISH_REJECTED, DEPENDENCY_MISSING, and NOT_FOUND."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "JobList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "jobs"
+        ],
+        "properties": {
+          "jobs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Job"
+            }
+          }
+        }
+      },
+      "Roi": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "x",
+          "y",
+          "width",
+          "height"
+        ],
+        "properties": {
+          "x": {
+            "type": "number"
+          },
+          "y": {
+            "type": "number"
+          },
+          "width": {
+            "type": "number"
+          },
+          "height": {
+            "type": "number"
+          }
+        }
+      },
+      "JobOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "roi": {
+            "$ref": "#/components/schemas/Roi"
+          },
+          "crop_mode": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "center"
+            ]
+          },
+          "denoise": {
+            "type": "boolean"
+          },
+          "commentary": {
+            "type": "boolean",
+            "default": true
+          }
+        }
+      },
+      "CreateJobsRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clip_ids",
+          "mood"
+        ],
+        "properties": {
+          "clip_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 10,
+            "items": {
+              "type": "string"
+            }
+          },
+          "mood": {
+            "type": "string",
+            "enum": [
+              "roast",
+              "hype",
+              "sweaty",
+              "funny_npc"
+            ]
+          },
+          "options": {
+            "$ref": "#/components/schemas/JobOptions"
+          }
+        }
+      },
+      "ChatRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "Required. Blank after trimming is rejected before the stream."
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional. Omitted or null becomes an empty string. A non-empty value is at most 64 characters; each character is a Unicode letter, digit, underscore, or hyphen. The host forwards that string. Empty is not stored. A non-empty value is only a key in the container process for up to six redacted user lines. It is not a login and it is not written to disk."
+          }
+        }
+      },
+      "ChatSseFrame": {
+        "type": "string",
+        "description": "One SSE frame: data: {\"type\":\"tool_status|text|done\",\"content\":\"...\"}\\n\\n. content is a string. It has no code field. done content is empty and is sent once only when the host finishes the generator. A tool exception or a mid-stream socket drop can end the body without done."
+      },
+      "V2ErrorObject": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "UNAUTHORIZED",
+              "NOT_FOUND",
+              "NOT_READY",
+              "INVALID_INPUT",
+              "DEPENDENCY_MISSING",
+              "REQUEST_REUSED"
+            ]
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "V2ErrorEnvelope": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/V2ErrorObject"
+          }
+        }
+      },
+      "ModelEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "label",
+          "available",
+          "loaded",
+          "capabilities"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Opaque id. Supported values are qwen25-7b and llama31-8b. Not an enum."
+          },
+          "label": {
+            "type": "string"
+          },
+          "available": {
+            "type": "boolean"
+          },
+          "loaded": {
+            "type": "boolean"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "chat",
+                "video",
+                "vision"
+              ]
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "available": {
+                  "const": false
+                }
+              },
+              "required": [
+                "available"
+              ]
+            },
+            "then": {
+              "properties": {
+                "loaded": {
+                  "const": false
+                }
+              }
+            }
+          }
+        ]
+      },
+      "ModelCatalog": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "default_model_id",
+          "models"
+        ],
+        "properties": {
+          "default_model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelEntry"
+            }
+          }
+        }
+      },
+      "ChatV2Request": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "message",
+          "request_id"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "model_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Omitted means the configured default. An unknown string is HTTP 404, not a schema failure."
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+          },
+          "context": {
+            "type": "array",
+            "maxItems": 0,
+            "items": {
+              "type": "object"
+            }
+          },
+          "parent_message_id": {
+            "type": "null"
+          },
+          "bot_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Omitted: the server picks the hub role from the message. Known ids are the hub agent ids. An unknown string is HTTP 404. The id selects the orchestrator node. A style line cannot replace that node's checks."
+          },
+          "system_prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "description": "Style only. The fixed security rules stay in front of it. When bot_id is also set, bot_id chooses the tool and this text only styles the reply."
+          },
+          "image": {
+            "$ref": "#/components/schemas/ChatImage"
+          }
+        }
+      },
+      "ChatImage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "media_type",
+          "data_base64"
+        ],
+        "properties": {
+          "media_type": {
+            "type": "string",
+            "enum": [
+              "image/jpeg",
+              "image/png",
+              "image/webp"
+            ]
+          },
+          "data_base64": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 5600000
+          }
+        },
+        "description": "One image. No URL. qwen25-7b and llama31-8b reject it. moondream-18 accepts it when that Ollama tag is already installed. Bytes are not stored."
+      },
+      "ChatV2Usage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "input_tokens",
+          "output_tokens",
+          "elapsed_ms"
+        ],
+        "properties": {
+          "input_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "output_tokens": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "elapsed_ms": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ChatV2ToolStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "content"
+        ],
+        "properties": {
+          "type": {
+            "const": "tool_status"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatV2Text": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "content"
+        ],
+        "properties": {
+          "type": {
+            "const": "text"
+          },
+          "content": {
+            "type": "string"
+          }
+        }
+      },
+      "ChatV2Done": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "type",
+          "content",
+          "message_id",
+          "model_id"
+        ],
+        "properties": {
+          "type": {
+            "const": "done"
+          },
+          "content": {
+            "type": "string",
+            "const": ""
+          },
+          "message_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "model_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "usage": {
+            "$ref": "#/components/schemas/ChatV2Usage"
+          }
+        }
+      },
+      "ChatV2Event": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/ChatV2ToolStatus"
+          },
+          {
+            "$ref": "#/components/schemas/ChatV2Text"
+          },
+          {
+            "$ref": "#/components/schemas/ChatV2Done"
+          }
+        ]
+      },
+      "HubRoom": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "icon"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon": {
+            "type": "string"
+          }
+        }
+      },
+      "HubQuest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "state",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "completed",
+              "failed"
+            ]
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        }
+      },
+      "HubAgent": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "room_id",
+          "name",
+          "icon",
+          "status",
+          "xp",
+          "level",
+          "xp_in_level",
+          "xp_for_next_level",
+          "recent_quests"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "room_id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "icon": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "working",
+              "thinking",
+              "ready",
+              "offline"
+            ]
+          },
+          "xp": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "level": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "xp_in_level": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "xp_for_next_level": {
+            "type": "integer",
+            "const": 100
+          },
+          "recent_quests": {
+            "type": "array",
+            "maxItems": 3,
+            "items": {
+              "$ref": "#/components/schemas/HubQuest"
+            }
+          }
+        }
+      },
+      "HubSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "active_agents",
+          "active_jobs",
+          "total_xp",
+          "streak_days"
+        ],
+        "properties": {
+          "active_agents": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "active_jobs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_xp": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "streak_days": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "AgentHub": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "revision",
+          "rooms",
+          "agents",
+          "summary"
+        ],
+        "properties": {
+          "revision": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "rooms": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HubRoom"
+            }
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HubAgent"
+            }
+          },
+          "summary": {
+            "$ref": "#/components/schemas/HubSummary"
+          }
+        }
+      },
+      "HistoryItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "state",
+          "at",
+          "tool_name",
+          "summary"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "tool_call",
+              "job",
+              "chat"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "queued",
+              "running",
+              "completed",
+              "failed"
+            ]
+          },
+          "at": {
+            "type": "string"
+          },
+          "tool_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      },
+      "AgentHistory": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryItem"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MemoryItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "summary",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string"
+          }
+        }
+      },
+      "AgentMemoryPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryItem"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Achievement": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "description",
+          "icon",
+          "current",
+          "target",
+          "earned_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "icon": {
+            "type": "string"
+          },
+          "current": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "target": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "earned_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PhoneSavedRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "saved"
+        ],
+        "properties": {
+          "saved": {
+            "type": "boolean",
+            "const": true
+          }
+        }
+      },
+      "PhoneSavedResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "job_id",
+          "removed",
+          "already_removed"
+        ],
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "removed": {
+            "type": "boolean"
+          },
+          "already_removed": {
+            "type": "boolean"
+          }
+        }
+      },
+      "IngestRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "paths"
+        ],
+        "properties": {
+          "paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "IngestItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "chunks": {
+            "type": "integer"
+          },
+          "unchanged": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "IngestResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "available",
+          "indexed",
+          "unavailable"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean"
+          },
+          "indexed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngestItem"
+            }
+          },
+          "unavailable": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IngestItem"
+            }
+          }
+        }
+      },
+      "CuratedFactRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "text",
+          "source"
+        ],
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          },
+          "source": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 300
+          }
+        }
+      },
+      "CuratedFactSaved": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "created"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "created": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ClipRoot": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "label",
+          "file_count",
+          "ready",
+          "indexing"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "file_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "indexing": {
+            "type": "boolean",
+            "description": "True while a background pass is probing files that this response did not need."
+          }
+        }
+      },
+      "ClipRootList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "roots"
+        ],
+        "properties": {
+          "roots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ClipRoot"
+            }
+          }
+        }
+      },
+      "ClipPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "root_id",
+          "label",
+          "clips",
+          "next_cursor",
+          "ready",
+          "indexing"
+        ],
+        "properties": {
+          "root_id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "clips": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Clip"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ready": {
+            "type": "boolean"
+          },
+          "indexing": {
+            "type": "boolean"
+          }
+        }
+      },
+      "AchievementList": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Achievement"
+            }
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Pairing token. Required on every /api/v1 route except GET /api/v1/health."
+      }
+    }
+  }
+}

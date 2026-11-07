@@ -2,6 +2,12 @@ import XCTest
 @testable import SweatCaster
 
 final class ContractTests: XCTestCase {
+    func testPCImageFallbackUsesAuthenticatedPNGRoute() async throws {
+        let api = try stubAPI()
+        let data = try await api.v2GenerateImage(prompt: "Blue star")
+        XCTAssertTrue(data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]))
+    }
+
     func testCodeWorkspaceContractModelsDecode() throws {
         let snapshot = try JSONDecoder().decode(V2CodeWorkspace.self, from: Data(#"""
         {"files":[{"path":"notes/plan.md","size":42,"updated_at":"2026-11-07T09:00:00Z"}],"max_files":100}
@@ -289,6 +295,15 @@ private final class Stub: URLProtocol {
     override func startLoading() {
         guard let url = request.url else { return }
         let auth = request.value(forHTTPHeaderField: "Authorization")
+        if url.path == "/api/v2/images/generate", request.httpMethod == "POST",
+           auth == "Bearer test-only-token", request.url?.host == "192.168.1.20" {
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
+                                           headerFields: ["Content-Type": "image/png"])!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data([137, 80, 78, 71, 13, 10, 26, 10, 0]))
+            client?.urlProtocolDidFinishLoading(self)
+            return
+        }
         let status: Int
         let body: String
         var mime = "application/json"
