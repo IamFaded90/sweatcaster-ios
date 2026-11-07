@@ -118,7 +118,7 @@ enum APIError: Error, Sendable {
         case .unhealthy: "PC’ens server er ikke klar."
         case .malformed: "PC’en gav et svar, appen ikke kunne læse."
         case .unsafeVideo: "PC’en gav ikke en gyldig videofil."
-        case .offline: "Kan ikke nå PC’en. Tjek Wi-Fi, adressen og om SweatCaster kører. Tjek også adgang til lokalt netværk."
+        case .offline: "Kan ikke nå PC’en. Tjek Wi-Fi, adressen og om serveren kører. Tjek også adgang til lokalt netværk."
         case .localNetwork: "Giv appen adgang til lokalt netværk i Indstillinger, og prøv igen."
         case .storage: "Appen kunne ikke gemme data på telefonen."
         case .http(404, _): "Klippet eller jobbet findes ikke længere."

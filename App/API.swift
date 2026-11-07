@@ -342,7 +342,7 @@ struct V2ChatEvent: Decodable, Sendable, Equatable {
     let usage: Usage?
 
     struct Usage: Decodable, Sendable, Equatable {
-        let input_tokens, output_tokens, elapsed_ms: Int?
+        let input_tokens, output_tokens, elapsed_ms: Int
     }
 }
 
@@ -508,6 +508,7 @@ extension LiveAPI {
 
     private func v2Stream(_ request: URLRequest) async throws -> URLSession.AsyncBytes {
         var req = request
+        req.timeoutInterval = 120
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         let (bytes, response) = try await session.bytes(for: req)
         guard let http = response as? HTTPURLResponse else {

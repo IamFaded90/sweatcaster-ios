@@ -4,6 +4,8 @@
 	classes = {};
 	objectVersion = 60;
 	objects = {
+		00000000000000000000002A = { isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		00000000000000000000002B = { isa = PBXBuildFile; fileRef = 00000000000000000000002A; };
 		000000000000000000000001 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Contract.swift; sourceTree = "<group>"; };
 		000000000000000000000002 = { isa = PBXBuildFile; fileRef = 000000000000000000000001; };
 		000000000000000000000003 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = API.swift; sourceTree = "<group>"; };
@@ -22,14 +24,14 @@
 		000000000000000000000010 = { isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = SweatCasterTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		000000000000000000000011 = { isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		000000000000000000000015 = { isa = PBXGroup; children = (000000000000000000000012, 000000000000000000000013, 000000000000000000000014);   sourceTree = "<group>"; };
-		000000000000000000000012 = { isa = PBXGroup; children = (000000000000000000000001, 000000000000000000000003, 000000000000000000000005, 000000000000000000000007, 000000000000000000000009, 00000000000000000000000B, 000000000000000000000011); path = App;  sourceTree = "<group>"; };
+		000000000000000000000012 = { isa = PBXGroup; children = (000000000000000000000001, 000000000000000000000003, 000000000000000000000005, 000000000000000000000007, 000000000000000000000009, 00000000000000000000000B, 000000000000000000000011, 00000000000000000000002A); path = App;  sourceTree = "<group>"; };
 		000000000000000000000013 = { isa = PBXGroup; children = (00000000000000000000000D); path = Tests;  sourceTree = "<group>"; };
 		000000000000000000000014 = { isa = PBXGroup; children = (00000000000000000000000F, 000000000000000000000010);  name = Products; sourceTree = "<group>"; };
 		000000000000000000000019 = { isa = PBXProject; attributes = { LastUpgradeCheck = 2600; TargetAttributes = { 000000000000000000000016 = { TestTargetID = 000000000000000000000017; }; }; }; buildConfigurationList = 000000000000000000000018; compatibilityVersion = "Xcode 15.0"; developmentRegion = da; knownRegions = (da, en, Base); mainGroup = 000000000000000000000015; productRefGroup = 000000000000000000000014; projectDirPath = ""; projectRoot = ""; targets = (000000000000000000000017, 000000000000000000000016); };
 		000000000000000000000017 = { isa = PBXNativeTarget; name = SweatCaster; productName = SweatCaster; productType = "com.apple.product-type.application"; productReference = 00000000000000000000000F; buildConfigurationList = 00000000000000000000001A; buildPhases = (00000000000000000000001B, 00000000000000000000001C, 00000000000000000000001D); buildRules = (); dependencies = (); };
 		00000000000000000000001B = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (000000000000000000000002, 000000000000000000000004, 000000000000000000000006, 000000000000000000000008, 00000000000000000000000A, 00000000000000000000000C); runOnlyForDeploymentPostprocessing = 0; };
 		00000000000000000000001C = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-		00000000000000000000001D = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		00000000000000000000001D = { isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (00000000000000000000002B); runOnlyForDeploymentPostprocessing = 0; };
 		000000000000000000000016 = { isa = PBXNativeTarget; name = SweatCasterTests; productName = SweatCasterTests; productType = "com.apple.product-type.bundle.unit-test"; productReference = 000000000000000000000010; buildConfigurationList = 00000000000000000000001E; buildPhases = (00000000000000000000001F, 000000000000000000000020, 000000000000000000000021); buildRules = (); dependencies = (000000000000000000000022); };
 		00000000000000000000001F = { isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (00000000000000000000000E); runOnlyForDeploymentPostprocessing = 0; };
 		000000000000000000000020 = { isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
@@ -39,8 +41,8 @@
 		000000000000000000000024 = { isa = XCBuildConfiguration; name = Debug; buildSettings = { IPHONEOS_DEPLOYMENT_TARGET = 18.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; CLANG_ENABLE_MODULES = YES; ENABLE_TESTABILITY = YES; SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = dwarf; }; };
 		000000000000000000000025 = { isa = XCBuildConfiguration; name = Release; buildSettings = { IPHONEOS_DEPLOYMENT_TARGET = 18.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; CLANG_ENABLE_MODULES = YES;  }; };
 		000000000000000000000018 = { isa = XCConfigurationList; buildConfigurations = (000000000000000000000024, 000000000000000000000025); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
-		000000000000000000000026 = { isa = XCBuildConfiguration; name = Debug; buildSettings = { PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = dk.sweatcaster.ios; INFOPLIST_FILE = App/Info.plist; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic;  }; };
-		000000000000000000000027 = { isa = XCBuildConfiguration; name = Release; buildSettings = { PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = dk.sweatcaster.ios; INFOPLIST_FILE = App/Info.plist; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic;  }; };
+		000000000000000000000026 = { isa = XCBuildConfiguration; name = Debug; buildSettings = { PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = dk.sweatcaster.ios; INFOPLIST_FILE = App/Info.plist; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic;  }; };
+		000000000000000000000027 = { isa = XCBuildConfiguration; name = Release; buildSettings = { PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = dk.sweatcaster.ios; INFOPLIST_FILE = App/Info.plist; ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic;  }; };
 		00000000000000000000001A = { isa = XCConfigurationList; buildConfigurations = (000000000000000000000026, 000000000000000000000027); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		000000000000000000000028 = { isa = XCBuildConfiguration; name = Debug; buildSettings = { PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = dk.sweatcaster.ios.tests; GENERATE_INFOPLIST_FILE = YES; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SweatCaster.app/SweatCaster"; BUNDLE_LOADER = "$(TEST_HOST)"; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic;  }; };
 		000000000000000000000029 = { isa = XCBuildConfiguration; name = Release; buildSettings = { PRODUCT_NAME = "$(TARGET_NAME)"; PRODUCT_BUNDLE_IDENTIFIER = dk.sweatcaster.ios.tests; GENERATE_INFOPLIST_FILE = YES; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/SweatCaster.app/SweatCaster"; BUNDLE_LOADER = "$(TEST_HOST)"; TARGETED_DEVICE_FAMILY = 1; CODE_SIGN_STYLE = Automatic;  }; };

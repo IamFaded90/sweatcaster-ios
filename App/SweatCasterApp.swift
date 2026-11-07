@@ -3,7 +3,7 @@ import AppIntents
 import SwiftUI
 
 struct OpenSweatCasterChat: AppIntent {
-    static let title: LocalizedStringResource = "Åbn SweatCaster-chat"
+    static let title: LocalizedStringResource = "Åbn FadedAI-chat"
     static let openAppWhenRun = true
     @MainActor func perform() async throws -> some IntentResult {
         UserDefaults.standard.set("chat", forKey: "spaces.shortcut")
@@ -12,7 +12,7 @@ struct OpenSweatCasterChat: AppIntent {
 }
 
 struct OpenSweatCasterVideo: AppIntent {
-    static let title: LocalizedStringResource = "Vælg klip i SweatCaster"
+    static let title: LocalizedStringResource = "Vælg klip i FadedAI"
     static let openAppWhenRun = true
     @MainActor func perform() async throws -> some IntentResult {
         UserDefaults.standard.set("video", forKey: "spaces.shortcut")
@@ -109,6 +109,10 @@ struct Home: View {
             openShortcut()
         }
         .onChange(of: shortcut) { openShortcut() }
+        .sensoryFeedback(.selection, trigger: space)
+        .sensoryFeedback(.success, trigger: model.jobs.filter { $0.status == .completed }.map(\.id)) { old, new in
+            new.count > old.count
+        }
         .onChange(of: model.error?.title) { _, title in
             errorDetails = false
             if title != nil { errorFocus = true }
@@ -140,7 +144,7 @@ struct Home: View {
             Text("Videoerne og jobhistorikken bliver liggende på PC’en.")
         }
         .sheet(isPresented: $showAgentHub) {
-            AgentHub()
+            AgentHub(api: model.api as? LiveAPI)
         }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
@@ -178,7 +182,7 @@ struct Home: View {
 
 
     @ViewBuilder private var header: some View {
-        Text("AI Sweat-Caster").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+        Text("FadedAI").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
         if !model.isDemo {
             Label("\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
                   systemImage: model.connected ? "checkmark.circle" : "exclamationmark.circle")
@@ -223,7 +227,9 @@ struct Home: View {
         if !onboarded {
             VStack(alignment: .leading, spacing: 8) {
                 heading("Kom godt i gang")
-                Text("Åbn Brain for at vælge et klip eller chatte. Åbn indstillingerne for at forbinde din PC.")
+                Label("1. Forbind til PC", systemImage: "desktopcomputer")
+                Label("2. Vælg klip", systemImage: "film")
+                Label("3. Chat med din AI", systemImage: "bubble.left")
                 action("Forstået") { onboarded = true }
             }
         }
@@ -235,7 +241,10 @@ struct Home: View {
                         Text(detail).textSelection(.enabled)
                     }
                 }
-                action("Prøv igen") { Task { await model.refresh() } }.disabled(switchDisabled)
+                action("Prøv igen") {
+                    if model.connected || !model.address.isEmpty { Task { await model.refresh() } }
+                    else { setup = true }
+                }.disabled(switchDisabled)
             }
         }
     }
@@ -264,12 +273,14 @@ struct Home: View {
                         if model.error == nil && !model.isDemo { token = ""; setup = false }
                     }
                 }.disabled(switchDisabled)
-                if model.isDemo {
-                    action("Prøv demo") { setup = false }
-                } else {
-                    Text(model.connected ? "Forbundet til PC" : "Ingen forbindelse").font(.headline)
-                    action("Skift til demo") {
-                        Task { await model.useDemo(); setup = false }
+                Text("\(model.activeProfile.route) · \(model.connected ? "Forbundet til PC" : "Ingen forbindelse")")
+                    .font(.headline)
+                ForEach(ConnectionProfile.allCases) { profile in
+                    action("Skift til \(profile.title)") {
+                        edit(profile)
+                        if model.savedAddresses[profile] != nil {
+                            Task { await model.selectProfile(profile) }
+                        }
                     }.disabled(switchDisabled)
                 }
             }.padding(.top, 12)
@@ -278,7 +289,7 @@ struct Home: View {
 
     @ViewBuilder private var loadingStatus: some View {
         if model.busy || model.refreshing || model.mediaLoading {
-            ProgressView(model.mediaLoading ? "Henter video…" : "Vent et øjeblik…")
+            LoadingSkeleton(label: model.mediaLoading ? "Henter video…" : "Henter klip og job…")
         }
     }
 
@@ -286,7 +297,6 @@ struct Home: View {
         @Bindable var model = model
         switch space {
         case .brain:
-            ModelPickerBar()
             if let latest = visibleJobs.max(by: { $0.created_at < $1.created_at }) {
                 VStack(alignment: .leading, spacing: 4) {
                     heading("Fortsæt hvor du slap")
@@ -529,7 +539,10 @@ struct Home: View {
         Text(title).font(.title2.bold()).accessibilityAddTraits(.isHeader)
     }
     private func action(_ title: String, _ work: @escaping () -> Void) -> some View {
-        Button(action: work) {
+        Button {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            work()
+        } label: {
             Text(title).frame(minHeight: 48).contentShape(Rectangle())
         }.buttonStyle(.bordered)
     }
@@ -538,20 +551,31 @@ struct Home: View {
 
 private struct AgentHub: View {
     @Environment(\.dismiss) private var dismiss
+    let api: LiveAPI?
     @State private var selectedRoom = "research"
     @State private var details: V2Hub.Agent?
     @State private var achievements = false
 
-    private let snapshot = AgentHubPreview.snapshot
+    @State private var snapshot: V2Hub?
+    @State private var failure: String?
+    @State private var attempt = 0
+    @State private var history: [V2History] = []
+    @State private var memory: [V2Memory] = []
+    @State private var badges: [V2Achievements.Item] = []
+    @State private var detailError: String?
+    @State private var badgeError: String?
+    @State private var detailsLoading = false
+    @State private var badgesLoading = false
 
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    Label("Eksempeldata · Agent-Hub", systemImage: "info.circle").font(.headline)
-                    Text("Tallene viser et eksempel. Dine videojobs ligger i Video Studio.")
-                        .foregroundStyle(.secondary)
-                    missionHUD
+                    if let failure {
+                        RetryNotice(message: failure) { attempt += 1 }
+                    }
+                    if let snapshot {
+                    missionHUD(snapshot.summary)
                     Picker("Rum", selection: $selectedRoom) {
                         ForEach(snapshot.rooms) { room in Text(room.name).tag(room.id) }
                     }.frame(minHeight: 48)
@@ -560,18 +584,22 @@ private struct AgentHub: View {
                     }
                     Button("Achievements", systemImage: "trophy") { achievements = true }
                         .frame(minHeight: 48)
+                    } else if failure == nil {
+                        LoadingSkeleton(label: "Henter agenter…")
+                    }
                 }.padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
             }
             .navigationTitle("Agent-Hub")
+            .task(id: attempt) { await followHub() }
+            .refreshable { attempt += 1 }
             .toolbar { Button("Luk") { dismiss() } }
             .sheet(item: $details) { agent in agentDetails(agent) }
             .sheet(isPresented: $achievements) { achievementPage }
         }
     }
 
-    private var missionHUD: some View {
-        let summary = snapshot.summary
-        return VStack(alignment: .leading, spacing: 8) {
+    private func missionHUD(_ summary: V2Hub.Summary) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             Text("Mission HUD").font(.headline).accessibilityAddTraits(.isHeader)
             Label("Aktive agenter · \(summary.active_agents)", systemImage: "person.2")
             Label("Aktive jobs · \(summary.active_jobs)", systemImage: "film")
@@ -593,24 +621,24 @@ private struct AgentHub: View {
             }
             Text("Quest Log").font(.headline)
             let quests = agent.recent_quests.sorted { $0.updated_at > $1.updated_at }
-            if quests.isEmpty { Text("Ingen opgaver i eksemplet.") }
+            if quests.isEmpty { Text("Ingen opgaver endnu.") }
             ForEach(quests.prefix(3)) { quest in
                 Text(quest.title + " · " + questStatus(quest.state))
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
             .padding(16).background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 20))
+            .modifier(AgentPulse(active: agent.status == .working || agent.status == .thinking))
     }
 
     private func agentDetails(_ agent: V2Hub.Agent) -> some View {
-        let history = AgentHubPreview.history(for: agent.id)
-        let memory = AgentHubPreview.memory(for: agent.id)
-        return NavigationStack {
+        NavigationStack {
             List {
-                Text("Eksempeldata")
+                if detailsLoading { LoadingSkeleton(label: "Henter agentdetaljer…") }
+                if let detailError { RetryNotice(message: detailError) { Task { await loadDetails(agent.id) } } }
                 Section("Status") { Text("\(status(agent.status)) · \(agent.xp) XP") }
                 Section("Historik") {
-                    if history.items.isEmpty { Text("Ingen historik i eksemplet.") }
-                    ForEach(history.items) { item in
+                    if history.isEmpty && !detailsLoading { Text("Ingen historik at vise.") }
+                    ForEach(history) { item in
                         VStack(alignment: .leading) {
                             Text(item.title)
                             Text(item.at.formatted(date: .abbreviated, time: .shortened)).font(.caption)
@@ -619,13 +647,13 @@ private struct AgentHub: View {
                     }
                 }
                 Section("Værktøjskald") {
-                    let tools = history.items.filter { $0.kind == "tool_call" }
-                    if tools.isEmpty { Text("Ingen værktøjskald i eksemplet.") }
+                    let tools = history.filter { $0.kind == "tool_call" }
+                    if tools.isEmpty && !detailsLoading { Text("Ingen værktøjskald at vise.") }
                     ForEach(tools) { item in Text(item.tool_name ?? item.title) }
                 }
                 Section("Hukommelse") {
-                    if memory.items.isEmpty { Text("Ingen hukommelse i eksemplet.") }
-                    ForEach(memory.items) { item in
+                    if memory.isEmpty && !detailsLoading { Text("Ingen hukommelse at vise.") }
+                    ForEach(memory) { item in
                         VStack(alignment: .leading) {
                             Text(item.title).font(.headline)
                             Text(item.summary)
@@ -634,19 +662,22 @@ private struct AgentHub: View {
                 }
             }.navigationTitle(agent.name)
                 .toolbar { Button("Luk") { details = nil } }
+                .task(id: agent.id) { await loadDetails(agent.id) }
         }
     }
 
     private var achievementPage: some View {
         NavigationStack {
             List {
-                Text("Eksempeldata")
-                ForEach(AgentHubPreview.achievements.items) { item in
+                if badgesLoading { LoadingSkeleton(label: "Henter achievements…") }
+                if let badgeError { RetryNotice(message: badgeError) { Task { await loadBadges() } } }
+                if badges.isEmpty && !badgesLoading && badgeError == nil { Text("Ingen achievements endnu.") }
+                ForEach(badges) { item in
                     Label {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.title).font(.headline)
                             Text(item.description)
-                            Text(item.earned_at == nil ? "\(item.current) / \(item.target) · Låst" : "Optjent i eksemplet")
+                            Text(item.earned_at == nil ? "\(item.current) / \(item.target) · Låst" : "Optjent")
                                 .foregroundStyle(.secondary)
                         }
                     } icon: {
@@ -656,7 +687,60 @@ private struct AgentHub: View {
                 }
             }.navigationTitle("Achievements")
                 .toolbar { Button("Luk") { achievements = false } }
+                .task { await loadBadges() }
         }
+    }
+
+    private func followHub() async {
+        failure = nil
+        guard let api else { failure = "Forbind til din PC i Indstillinger."; return }
+        do {
+            while !Task.isCancelled {
+                let initial = try await api.v2Hub()
+                apply(initial)
+                try await api.v2HubEvents(after: initial.revision) { event in
+                    guard let updated = try? await api.v2Hub() else { return }
+                    await MainActor.run {
+                        if !Task.isCancelled, event.type == .resync_required || updated.revision >= (snapshot?.revision ?? 0) {
+                            apply(updated)
+                        }
+                    }
+                }
+                try await Task.sleep(for: .seconds(2))
+            }
+        } catch {
+            if !Task.isCancelled { failure = "Kunne ikke hente Agent-Hub. Tjek forbindelsen til PC’en." }
+        }
+    }
+
+    private func apply(_ value: V2Hub) {
+        snapshot = value
+        if !value.rooms.contains(where: { $0.id == selectedRoom }) {
+            selectedRoom = value.rooms.first?.id ?? ""
+        }
+    }
+
+    private func loadDetails(_ id: String) async {
+        guard let api else { return }
+        history = []; memory = []; detailError = nil; detailsLoading = true
+        defer { detailsLoading = false }
+        do {
+            async let historyPage = api.v2History(agentID: id)
+            async let memoryPage = api.v2Memory(agentID: id)
+            let (h, m) = try await (historyPage, memoryPage)
+            try Task.checkCancellation()
+            history = h.items; memory = m.items
+        } catch {
+            if !Task.isCancelled { detailError = "Kunne ikke hente agentens detaljer." }
+        }
+    }
+
+    private func loadBadges() async {
+        guard let api else { return }
+        badgeError = nil; badgesLoading = true
+        defer { badgesLoading = false }
+        do { badges = try await api.v2Achievements().items }
+        catch { if !Task.isCancelled { badgeError = "Kunne ikke hente achievements." } }
     }
 
     private func icon(_ value: String) -> String {
@@ -680,48 +764,6 @@ private struct AgentHub: View {
         case .failed: "Fejlede"
         }
     }
-}
-
-private enum AgentHubPreview {
-    private static let date = Date(timeIntervalSince1970: 1_793_966_400)
-    static let snapshot = V2Hub(revision: 12, rooms: [
-        .init(id: "research", name: "Research Lab", icon: "search"),
-        .init(id: "video", name: "Video Studio", icon: "film"),
-        .init(id: "memory", name: "Memory Vault", icon: "archivebox")
-    ], agents: [
-        .init(id: "researcher", room_id: "research", name: "Researcher", icon: "search", status: .thinking,
-              xp: 35, level: 1, xp_in_level: 35, xp_for_next_level: 100, recent_quests: [
-                .init(id: "q1", title: "Søgning", state: .running, updated_at: date)
-              ]),
-        .init(id: "director", room_id: "video", name: "Video Director", icon: "film", status: .working,
-              xp: 120, level: 2, xp_in_level: 20, xp_for_next_level: 100, recent_quests: [
-                .init(id: "q2", title: "Klip et højdepunkt", state: .running, updated_at: date)
-              ]),
-        .init(id: "explorer", room_id: "memory", name: "File Explorer", icon: "archivebox", status: .ready,
-              xp: 10, level: 1, xp_in_level: 10, xp_for_next_level: 100, recent_quests: [])
-    ], summary: .init(active_agents: 2, active_jobs: 2, total_xp: 165, streak_days: 3))
-
-    static func history(for agentID: String) -> V2Page<V2History> {
-        .init(items: agentID == "researcher" ? [
-            .init(id: "e1", kind: "tool_call", title: "Søgning", state: "completed",
-                  at: date, tool_name: "search", summary: "Fandt 2 resultater")
-        ] : [], next_cursor: nil)
-    }
-
-    static func memory(for agentID: String) -> V2Page<V2Memory> {
-        .init(items: agentID == "researcher" ? [
-            .init(id: "m1", title: "Søgepræferencer", summary: "Foretrækker korte svar på dansk.", updated_at: date)
-        ] : [], next_cursor: nil)
-    }
-
-    static let achievements = V2Achievements(items: [
-        .init(id: "first_video", title: "Første video", description: "Færdiggør en video",
-              icon: "film", current: 1, target: 1, earned_at: date),
-        .init(id: "ten_chats", title: "10 chats", description: "Afslut 10 chats",
-              icon: "bubble.left.and.bubble.right", current: 4, target: 10, earned_at: nil),
-        .init(id: "night_job", title: "Natjob", description: "Fuldfør et job om natten",
-              icon: "moon.stars", current: 0, target: 1, earned_at: nil)
-    ])
 }
 
 private struct Preview: View {
@@ -796,46 +838,55 @@ private struct ChatTurn: Identifiable, Codable {
     var notice: String?
 }
 
-private struct ModelPickerBar: View {
-    @State private var comparison = false
+private struct LoadingSkeleton: View {
+    let label: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        DisclosureGroup("Modeller") {
-            Picker("Model · Eksempel", selection: .constant(V2Models.preview.default_model_id)) {
-                ForEach(V2Models.preview.models) { model in
-                    Text(model.label).tag(model.id)
-                }
-            }.disabled(true)
-            ForEach(V2Models.preview.models) { model in
-                Text("\(model.label) · \(model.loaded ? "Indlæst i eksemplet" : "Ikke indlæst i eksemplet")")
-                    .font(.caption)
+        VStack(alignment: .leading, spacing: 8) {
+            Text(label).font(.subheadline)
+            TimelineView(.animation(minimumInterval: 1.0 / 15, paused: reduceMotion)) { context in
+                let opacity = reduceMotion ? 0.22 : 0.22 + 0.07 * sin(context.date.timeIntervalSinceReferenceDate * 4)
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach([1.0, 0.72, 0.48], id: \.self) { width in
+                        RoundedRectangle(cornerRadius: 6)
+                            .fill(.secondary.opacity(opacity))
+                            .frame(height: 12)
+                            .scaleEffect(x: width, y: 1, anchor: .leading)
+                    }
+                }.accessibilityHidden(true)
             }
-            Text("PC’en vælger modellen. Modelvalg i appen kommer senere.")
-                .font(.caption)
-            Button("Se eksempel på sammenligning") { comparison = true }.frame(minHeight: 48)
-        }
-        .sheet(isPresented: $comparison) {
-            NavigationStack {
-                ScrollView {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(alignment: .top, spacing: 24) { comparisonCards }
-                        VStack(alignment: .leading, spacing: 16) { comparisonCards }
-                    }.padding()
-                }.navigationTitle("Modelsammenligning")
-                    .toolbar { Button("Luk") { comparison = false } }
-            }
+        }.accessibilityElement(children: .combine)
+    }
+}
+
+private struct RetryNotice: View {
+    let message: String
+    let retry: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(message)
+            Button(action: retry) { Text("Prøv igen").frame(minHeight: 48) }
+                .buttonStyle(.bordered)
         }
     }
+}
 
-    @ViewBuilder private var comparisonCards: some View {
-        VStack(alignment: .leading) {
-            Text("PC’ens standardmodel").font(.headline)
-            Text("Bruges af den eksisterende chat.")
-        }.fixedSize(horizontal: true, vertical: false)
-        VStack(alignment: .leading) {
-            Text("Model B · Eksempel").font(.headline)
-            Text("Afventer modelvalg på PC’en.")
-        }.fixedSize(horizontal: true, vertical: false)
+private struct AgentPulse: ViewModifier {
+    let active: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    func body(content: Content) -> some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 15, paused: !active || reduceMotion)) { context in
+            let intensity = active && !reduceMotion
+                ? 0.18 + 0.12 * sin(context.date.timeIntervalSinceReferenceDate * 2)
+                : 0.0
+            content.overlay {
+                RoundedRectangle(cornerRadius: 20).strokeBorder(.blue.opacity(intensity), lineWidth: 2)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+            }
+        }
     }
 }
 
@@ -905,6 +956,12 @@ private struct ChatView: View {
     @State private var loaded = false
     @AppStorage("spaces.notes") private var notes = ""
     @State private var sourceExcerpt: String?
+    @State private var models: [V2Models.Entry] = []
+    @State private var selectedModel = ""
+    @State private var modelsLoading = true
+    @State private var modelsError: String?
+    @State private var legacyChat = false
+    @State private var completedReplies = 0
 
     var body: some View {
         List {
@@ -913,6 +970,7 @@ private struct ChatView: View {
                 Text(connection).font(.subheadline)
                 Button("Ny samtale") { newConversation() }.frame(minHeight: 48).disabled(task != nil)
                 StatsBar(turns: turns.count, streaming: task != nil)
+                modelControls
                 if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
                 Text("AI’en arbejder på din PC. Researcher bruger internettet til websøgning.")
                 transcriptRows
@@ -924,6 +982,7 @@ private struct ChatView: View {
                     }
                 }
                 if let status { Text(status).font(.callout) }
+                if task != nil && streamedText.isEmpty { LoadingSkeleton(label: "Venter på AI…") }
                 if let sourceExcerpt {
                     DisclosureGroup("Lokal reference · Notes") {
                         Text(sourceExcerpt)
@@ -944,7 +1003,8 @@ private struct ChatView: View {
                 } else {
                     Button { send() } label: { Text("Send besked").frame(minHeight: 48) }
                         .buttonStyle(.borderedProminent)
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+                                  modelsLoading || (!legacyChat && !demo && selectedModel.isEmpty))
                 }
             }.padding(12).background(.regularMaterial)
         }
@@ -955,6 +1015,49 @@ private struct ChatView: View {
             loadHistory()
         }
         .onDisappear { stop() }
+        .task { await loadModels() }
+        .sensoryFeedback(.success, trigger: completedReplies)
+    }
+
+    @ViewBuilder private var modelControls: some View {
+        if modelsLoading { LoadingSkeleton(label: "Henter modeller…") }
+        if let modelsError { RetryNotice(message: modelsError) { Task { await loadModels() } } }
+        if legacyChat { Text("Chat bruger PC’ens standardmodel via v1.").font(.caption) }
+        if !models.isEmpty {
+            Picker("AI-model", selection: $selectedModel) {
+                ForEach(models) { model in
+                    Text(model.label).tag(model.id)
+                }
+            }.disabled(task != nil || modelsLoading).frame(minHeight: 48)
+        }
+    }
+
+    private func loadModels() async {
+        modelsLoading = true
+        defer { modelsLoading = false }
+        modelsError = nil
+        legacyChat = false
+        guard let live = api as? LiveAPI else {
+            if !demo { modelsError = "Forbind til din PC i Indstillinger." }
+            return
+        }
+        do {
+            let catalog = try await live.v2Models()
+            let available = catalog.models.filter { $0.available && $0.capabilities.contains("chat") }
+            models = available
+            if !available.contains(where: { $0.id == selectedModel }) {
+                selectedModel = available.first(where: { $0.id == catalog.default_model_id })?.id
+                    ?? available.first?.id ?? ""
+            }
+            if available.isEmpty { modelsError = "PC’en har ingen tilgængelige chatmodeller." }
+        } catch V2Failure.http(status: 404, code: _, message: _) {
+            models = []; selectedModel = ""; legacyChat = true
+        } catch {
+            if !Task.isCancelled {
+                models = []; selectedModel = ""
+                modelsError = error is V2Failure ? v2Message(error) : "Kunne ikke hente modeller. Tjek forbindelsen til PC’en."
+            }
+        }
     }
 
     private var transcriptRows: some View {
@@ -962,7 +1065,9 @@ private struct ChatView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(turn.prompt).font(.headline)
                 if !turn.reply.isEmpty { ChatTranscriptView(reply: turn.reply) }
-                if let notice = turn.notice { Text(notice).font(.callout) }
+                    if let notice = turn.notice {
+                        RetryNotice(message: notice) { draft = turn.prompt }.disabled(task != nil)
+                    }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(12).background(.secondary.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
@@ -1000,14 +1105,26 @@ private struct ChatView: View {
                     turns[index].reply = "Jeg fandt et testklip. "
                     try await Task.sleep(for: .milliseconds(600))
                     turns[index].reply += "Demoen starter ikke et video-job."
+                } else if let live = api as? LiveAPI, !legacyChat {
+                    let request = try V2ChatRequest(message: message, sessionID: sessionID.uuidString,
+                                                    modelID: selectedModel)
+                    try await live.v2Chat(request) { event in
+                        await MainActor.run {
+                            guard !Task.isCancelled else { return }
+                            receive(type: event.type.rawValue, content: event.content, index: index)
+                        }
+                    }
+                    try Task.checkCancellation()
                 } else {
                     guard let api else { throw ChatFailure.unauthorized }
                     await run(api, input: input, index: index)
                 }
+                if turns[index].notice == nil { completedReplies += 1 }
             } catch is CancellationError {
                 turns[index].notice = "Modtagelsen er stoppet."
             } catch {
-                turns[index].notice = (error as? ChatFailure ?? .interrupted).message
+                turns[index].notice = error is V2Failure ? v2Message(error)
+                    : (error as? ChatFailure ?? .interrupted).message
             }
             status = nil
             task = nil
@@ -1020,24 +1137,39 @@ private struct ChatView: View {
             try await api.chat(input) { event in
                 await MainActor.run {
                     guard !Task.isCancelled else { return }
-                    switch event.type {
-                    case "tool_status":
-                        let step = safeText(event.content)
-                        status = step
-                        if searchSteps.last != step { searchSteps.append(step) }
-                    case "text":
-                        streamedText += event.content
-                        turns[index].reply = safeText(streamedText)
-                    case "done":
-                        turns[index].reply = safeText(streamedText, complete: true)
-                    default: break
-                    }
+                    receive(type: event.type, content: event.content, index: index)
                 }
             }
             try Task.checkCancellation()
         } catch {
             turns[index].notice = Task.isCancelled ? "Modtagelsen er stoppet. Et job kan stadig køre."
                 : (error as? ChatFailure ?? .interrupted).message
+        }
+    }
+
+    private func receive(type: String, content: String, index: Int) {
+        switch type {
+        case "tool_status":
+            let step = safeText(content)
+            status = step
+            if searchSteps.last != step { searchSteps.append(step) }
+        case "text":
+            streamedText += content
+            turns[index].reply = safeText(streamedText)
+        case "done":
+            turns[index].reply = safeText(streamedText, complete: true)
+        default: break
+        }
+    }
+
+    private func v2Message(_ error: Error) -> String {
+        switch error as? V2Failure {
+        case .http(status: 401, code: _, message: _): "PC’en afviste tokenet. Tjek det under Indstillinger."
+        case .http(status: 404, code: _, message: _): "PC’en kunne ikke finde modellen eller funktionen."
+        case .http(status: 409, code: _, message: _): "Beskeden er allerede sendt."
+        case .http(status: 503, code: _, message: _): "PC’en har travlt, eller modellen er utilgængelig. Prøv igen om lidt."
+        case .invalidInput, .http(status: 422, code: _, message: _): "Skriv en besked på mellem 1 og 2.000 tegn."
+        default: "Svaret blev afbrudt. Tjek forbindelsen til PC’en."
         }
     }
 

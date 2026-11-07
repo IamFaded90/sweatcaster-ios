@@ -43,6 +43,7 @@ import Observation
     init(api: (any SweatAPI)? = nil, defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.api = api ?? demo
+        if api == nil { isDemo = false }
         for profile in ConnectionProfile.allCases {
             savedAddresses[profile] = defaults.string(forKey: profile.storageKey)
         }
