@@ -127,6 +127,21 @@ struct Home: View {
         }
     }
 
+    @ViewBuilder private var homeBackground: some View {
+        if theme == "OLED Sort" {
+            Color.black.ignoresSafeArea()
+        } else if motion && !reduceMotion {
+            LinearGradient(colors: [.blue.opacity(0.12), .clear],
+                           startPoint: backgroundPhase ? .topLeading : .bottomTrailing, endPoint: .center)
+                .ignoresSafeArea()
+                .onAppear {
+                    withAnimation(.easeInOut(duration: 5).repeatForever(autoreverses: true)) {
+                        backgroundPhase.toggle()
+                    }
+                }
+        }
+    }
+
     private var homePresentation: some View {
         homeContent
         .onAppear {
@@ -151,20 +166,7 @@ struct Home: View {
         }
         .preferredColorScheme(theme == "Lys" ? .light : ["Mørk", "OLED Sort"].contains(theme) ? .dark : nil)
         .fontDesign(font == "Afrundet" ? .rounded : font == "Monospace" ? .monospaced : .default)
-        .background {
-            if theme == "OLED Sort" {
-                Color.black.ignoresSafeArea()
-            } else if motion && !reduceMotion {
-                LinearGradient(colors: [.blue.opacity(0.12), .clear],
-                               startPoint: backgroundPhase ? .topLeading : .bottomTrailing, endPoint: .center)
-                    .ignoresSafeArea()
-                    .onAppear {
-                        withAnimation(.easeInOut(duration: 5).repeatForever(autoreverses: true)) {
-                            backgroundPhase.toggle()
-                        }
-                    }
-            }
-        }
+        .background { homeBackground }
     }
 
     var body: some View {
