@@ -2,6 +2,11 @@ import XCTest
 @testable import SweatCaster
 
 final class ContractTests: XCTestCase {
+    func testPhoneRoutingKeepsPCWorkAndLongContextOnServer() {
+        XCTAssertFalse(PhoneModels.prefersPC("Hvad er fotosyntese?", previousCharacters: 0))
+        XCTAssertTrue(PhoneModels.prefersPC("Lav et roast-klip af den nyeste optagelse", previousCharacters: 0))
+        XCTAssertTrue(PhoneModels.prefersPC("Fortsæt", previousCharacters: 3_000))
+    }
     func testV2ChatKeepsQueueStatusAndCompletionMetadata() throws {
         let stream = """
         data: {"type":"tool_status","content":"Venter på modelplads."}

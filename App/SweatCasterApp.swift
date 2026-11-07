@@ -71,6 +71,7 @@ struct Home: View {
     @State private var space: Space = .brain
     @State private var showHelp = false
     @State private var showAgentHub = false
+    @State private var showPhoneModels = false
     @State private var confirmClear = false
     @State private var hiddenJobs = Set<String>()
     @AppStorage("spaces.notes") private var notes = ""
@@ -146,6 +147,7 @@ struct Home: View {
         .sheet(isPresented: $showAgentHub) {
             AgentHub(api: model.api as? LiveAPI)
         }
+        .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
                 List {
@@ -334,6 +336,7 @@ struct Home: View {
     }
 
     @ViewBuilder private var appearanceSettings: some View {
+        action("Lokale modeller") { showPhoneModels = true }
         DisclosureGroup("Visning og jobhistorik") {
             Picker("Tema", selection: $theme) {
                 ForEach(["System", "Lys", "Mørk"], id: \.self) { Text($0) }
@@ -836,6 +839,7 @@ private struct ChatTurn: Identifiable, Codable {
     let prompt: String
     var reply = ""
     var notice: String?
+    var source: String?
 }
 
 private struct LoadingSkeleton: View {
@@ -962,6 +966,8 @@ private struct ChatView: View {
     @State private var modelsError: String?
     @State private var legacyChat = false
     @State private var completedReplies = 0
+    @AppStorage("phone.model") private var phoneModel = "apple"
+    @State private var usePC = false
 
     var body: some View {
         List {
@@ -970,6 +976,9 @@ private struct ChatView: View {
                 Text(connection).font(.subheadline)
                 Button("Ny samtale") { newConversation() }.frame(minHeight: 48).disabled(task != nil)
                 StatsBar(turns: turns.count, streaming: task != nil)
+                Toggle("Brug PC til næste svar", isOn: $usePC).disabled(task != nil)
+                Text("Korte svar forsøges på telefonen. Længere spørgsmål og PC-opgaver sendes til din PC.")
+                    .font(.caption)
                 modelControls
                 if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
                 Text("AI’en arbejder på din PC. Researcher bruger internettet til websøgning.")
@@ -1003,8 +1012,7 @@ private struct ChatView: View {
                 } else {
                     Button { send() } label: { Text("Send besked").frame(minHeight: 48) }
                         .buttonStyle(.borderedProminent)
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-                                  modelsLoading || (!legacyChat && !demo && selectedModel.isEmpty))
+                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }.padding(12).background(.regularMaterial)
         }
@@ -1064,6 +1072,7 @@ private struct ChatView: View {
         ForEach(turns) { turn in
             VStack(alignment: .leading, spacing: 8) {
                 Text(turn.prompt).font(.headline)
+                if let source = turn.source { Text(source).font(.caption).foregroundStyle(.secondary) }
                 if !turn.reply.isEmpty { ChatTranscriptView(reply: turn.reply) }
                     if let notice = turn.notice {
                         RetryNotice(message: notice) { draft = turn.prompt }.disabled(task != nil)
@@ -1095,6 +1104,9 @@ private struct ChatView: View {
         streamedText = ""
         turns.append(ChatTurn(prompt: message))
         let index = turns.count - 1
+        let context = turns.dropLast().suffix(6).filter { !$0.reply.isEmpty }
+            .map { "Bruger: \($0.prompt)\nSvar: \($0.reply)" }.joined(separator: "\n")
+        let requiresPC = usePC || PhoneModels.prefersPC(message, previousCharacters: context.count)
         status = "Venter på svar…"
         let input = ChatRequest(message: message, session_id: sessionID)
         task = Task {
@@ -1105,19 +1117,12 @@ private struct ChatView: View {
                     turns[index].reply = "Jeg fandt et testklip. "
                     try await Task.sleep(for: .milliseconds(600))
                     turns[index].reply += "Demoen starter ikke et video-job."
-                } else if let live = api as? LiveAPI, !legacyChat {
-                    let request = try V2ChatRequest(message: message, sessionID: sessionID.uuidString,
-                                                    modelID: selectedModel)
-                    try await live.v2Chat(request) { event in
-                        await MainActor.run {
-                            guard !Task.isCancelled else { return }
-                            receive(type: event.type.rawValue, content: event.content, index: index)
-                        }
-                    }
-                    try Task.checkCancellation()
                 } else {
-                    guard let api else { throw ChatFailure.unauthorized }
-                    await run(api, input: input, index: index)
+                    var answered = false
+                    if !requiresPC {
+                        answered = try await answerOnPhone(message, context: context, index: index)
+                    }
+                    if !answered { try await answerOnPC(input, index: index) }
                 }
                 if turns[index].notice == nil { completedReplies += 1 }
             } catch is CancellationError {
@@ -1129,6 +1134,49 @@ private struct ChatView: View {
             status = nil
             task = nil
             save()
+        }
+    }
+
+    private func answerOnPhone(_ message: String, context: String, index: Int) async throws -> Bool {
+        status = "Telefon · Forbereder svar…"
+        let prompt = context.isEmpty ? message : "\(context)\nBruger: \(message)"
+        do {
+            try await PhoneModels.reply(modelID: phoneModel, prompt: prompt) { answer in
+                turns[index].source = "Telefon"
+                turns[index].reply = safeText(answer)
+                streamedText = answer
+            }
+            turns[index].reply = safeText(streamedText, complete: true)
+            return true
+        } catch {
+            try Task.checkCancellation()
+            if !turns[index].reply.isEmpty {
+                turns[index].notice = "Telefonsvaret blev afbrudt."
+                return true
+            }
+            return false
+        }
+    }
+
+    private func answerOnPC(_ input: ChatRequest, index: Int) async throws {
+        guard let api else {
+            turns[index].notice = "Denne besked kræver en model, der er klar. Forbind til PC’en, eller vælg en lokal model i Indstillinger."
+            return
+        }
+        turns[index].source = "PC"
+        status = "PC · Venter på svar…"
+        if let live = api as? LiveAPI, !legacyChat {
+            let request = try V2ChatRequest(message: input.message, sessionID: sessionID.uuidString,
+                                            modelID: selectedModel.isEmpty ? nil : selectedModel)
+            try await live.v2Chat(request) { event in
+                await MainActor.run {
+                    guard !Task.isCancelled else { return }
+                    receive(type: event.type.rawValue, content: event.content, index: index)
+                }
+            }
+            try Task.checkCancellation()
+        } else {
+            await run(api, input: input, index: index)
         }
     }
 
