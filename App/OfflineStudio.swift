@@ -1,9 +1,11 @@
 import MediaGenerationKit
+import LocalAuthentication
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct OfflineStudio: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var phase
     @AppStorage("offline.studio.enabled") private var enabled = false
     @AppStorage("phone.model") private var textModel = "apple"
     @AppStorage("offline.studio.lora") private var loraName = ""
@@ -16,29 +18,75 @@ struct OfflineStudio: View {
     @State private var task: Task<Void, Never>?
     @State private var imageModel = "sd_v1.5_f16.ckpt"
     @State private var useLoRA = false
+    @State private var unlocked = false
+    @State private var authenticating = false
+    @State private var showHistory = false
+    @State private var downloadProgress: Double?
+
+    private var historyFolder: URL { URL.applicationSupportDirectory.appending(path: "StudioImages", directoryHint: .isDirectory) }
+    private var history: [URL] {
+        let items = (try? FileManager.default.contentsOfDirectory(at: historyFolder, includingPropertiesForKeys: nil)) ?? []
+        return items.filter { $0.pathExtension == "png" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                Toggle("Aktivér lokal tilstand", isOn: $enabled).disabled(task != nil)
-                Text("Tekst og billeder behandles på telefonen. Download af modeller kræver internet.")
-                    .font(.caption)
-                if enabled {
+                if !unlocked {
+                    Button("Lås studiet op") { authenticate() }.frame(minHeight: 48).disabled(authenticating)
+                } else {
+                    Toggle("Aktivér lokal tilstand", isOn: $enabled).disabled(task != nil)
+                    Text("Tekst og billeder behandles på telefonen. Download af modeller kræver internet.")
+                        .font(.caption)
+                }
+                if unlocked && enabled {
+                    Text(textReady && imageReady ? "Klar til flytilstand · Tekst og billeder"
+                         : textReady ? "Klar til flytilstand · Kun tekst"
+                         : imageReady ? "Klar til flytilstand · Kun billeder" : "Hent modeller før flytilstand.")
                     textSection
                     imageSection
+                    Button("Billedhistorik") { showHistory = true }.frame(minHeight: 48)
                 }
-                if !status.isEmpty { Text(status).accessibilityAddTraits(.updatesFrequently) }
-                if task != nil {
+                if !status.isEmpty { Text(status) }
+                if unlocked, let downloadProgress {
+                    ProgressView(value: downloadProgress) { Text(downloadProgress.formatted(.percent)) }
+                }
+                if unlocked && task != nil {
                     Button("Stop") { task?.cancel() }.frame(minHeight: 48)
                 }
             }
             .navigationTitle("NSFW / Uncensored")
             .toolbar { Button("Luk") { dismiss() } }
             .sheet(isPresented: $showModels) { PhoneModelsView() }
+            .sheet(isPresented: $showHistory) {
+                NavigationStack {
+                    List(history, id: \.self) { file in
+                        Button {
+                            imageURL = file
+                            showHistory = false
+                        } label: {
+                            if let stamp = file.lastPathComponent.split(separator: "-").first,
+                               let millis = Double(stamp) {
+                                Text(Date(timeIntervalSince1970: millis / 1000), format: .dateTime.day().month().hour().minute())
+                            } else { Text("Gemt billede") }
+                        }.accessibilityHint("Åbner billedet")
+                    }.navigationTitle("Billedhistorik")
+                        .toolbar { Button("Luk") { showHistory = false } }
+                }
+            }
             .fileImporter(isPresented: $importLoRA, allowedContentTypes: [.data]) { result in
                 if case .success(let url) = result { loadLoRA(url) }
             }
             .onDisappear { task?.cancel() }
+            .onChange(of: phase) { _, newPhase in
+                if newPhase == .background {
+                    unlocked = false
+                    showHistory = false
+                    showModels = false
+                    task?.cancel()
+                    prompt = ""; answer = ""; imageURL = nil
+                }
+            }
         }
     }
 
@@ -71,8 +119,23 @@ struct OfflineStudio: View {
             Text(imageReady ? "Billedmodellen er fundet på telefonen." : "Billedmodellen skal hentes først.")
             Button("Download billedmodel") {
                 let selected = imageModel
+                let reserve: Int64 = selected.hasPrefix("flux") ? 8_000_000_000 : 4_000_000_000
+                guard PhoneModels.hasDownloadSpace(bytes: reserve) else {
+                    status = "Frigør mere plads før download."
+                    return
+                }
                 run("Henter billedmodel…") {
-                    _ = try await MediaGenerationEnvironment.default.ensure(selected)
+                    defer { downloadProgress = nil }
+                    _ = try await MediaGenerationEnvironment.default.ensure(selected) { state in
+                        if case .downloading(_, let index, let count, let written, let total) = state,
+                           count > 0, total > 0 {
+                            let part = min(1, Double(written) / Double(total))
+                            let progress = min(1, (Double(max(0, index - 1)) + part) / Double(count))
+                            Task { @MainActor in
+                                if unlocked && task != nil { downloadProgress = progress }
+                            }
+                        }
+                    }
                     status = "Billedmodel hentet."
                 }
             }.frame(minHeight: 48).disabled(task != nil)
@@ -112,11 +175,34 @@ struct OfflineStudio: View {
             let results = try await pipeline.generate(prompt: message)
             try Task.checkCancellation()
             guard let result = results.first else { throw PhoneModelError.emptyResponse }
-            let destination = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".png")
+            try FileManager.default.createDirectory(at: historyFolder, withIntermediateDirectories: true)
+            var folder = historyFolder
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try folder.setResourceValues(values)
+            let timestamp = Int(Date().timeIntervalSince1970 * 1_000)
+            let destination = folder.appendingPathComponent("\(timestamp)-\(UUID()).png")
             try result.write(to: destination, type: .png)
-            if let imageURL { try? FileManager.default.removeItem(at: imageURL) }
             imageURL = destination
             status = "Billede klar."
+        }
+    }
+
+    private func authenticate() {
+        let context = LAContext()
+        guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) else {
+            status = "Slå Face ID eller Touch ID til på telefonen for at åbne studiet."
+            return
+        }
+        authenticating = true
+        Task {
+            defer { authenticating = false }
+            do {
+                let accepted = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
+                                                                localizedReason: "Lås FadedAI-studiet op")
+                unlocked = accepted && phase != .background
+                status = unlocked ? "" : "Studiet er låst."
+            } catch { status = "Studiet er låst. Prøv igen." }
         }
     }
 

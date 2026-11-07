@@ -16,6 +16,9 @@
     <array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Appen bruger dit lokale netværk til at hente klip og videoer fra din PC.</string>
+    <key>NSFaceIDUsageDescription</key><string>Face ID beskytter dit lokale studie.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Mikrofonen bruges, når du dikterer en chatbesked.</string>
+    <key>NSSpeechRecognitionUsageDescription</key><string>FadedAI bruger lokal talegenkendelse til at skrive din chatkladde.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key><true/>

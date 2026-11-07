@@ -16,6 +16,11 @@ enum PhoneModels {
         var id: String { model.id }
     }
 
+    static func hasDownloadSpace(bytes: Int64) -> Bool {
+        let values = try? URL.documentsDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+        return (values?.volumeAvailableCapacityForImportantUsage ?? 0) >= bytes
+    }
+
     static var catalog: [Entry] {
         [
             .init(model: .lfm2_5_350m, memory: "Lavere hukommelsesforbrug"),
@@ -129,7 +134,10 @@ struct PhoneModelsView: View {
                             if PhoneModels.installedDirectory(entry.id) != nil {
                                 Button { selected = entry.id } label: { modelLabel("Brug modellen", id: entry.id) }
                             } else if downloadID == entry.id {
-                                ProgressView("Henter modellen…")
+                                let progress = min(1, max(0, ModelDownloader.shared.progress))
+                                ProgressView(value: progress) {
+                                    Text("Henter modellen · \(progress.formatted(.percent.precision(.fractionLength(0))))")
+                                }
                             } else {
                                 Button("Download") { download(entry) }
                                     .disabled(downloadID != nil || working)
@@ -163,6 +171,11 @@ struct PhoneModelsView: View {
     }
 
     private func download(_ entry: PhoneModels.Entry) {
+        let reserves: [String: Int64] = ["lfm2.5-350m": 1_200_000_000, "qwen3.5-0.8b": 1_800_000_000, "gemma4-e2b": 7_000_000_000]
+        guard PhoneModels.hasDownloadSpace(bytes: reserves[entry.id] ?? 2_000_000_000) else {
+            notice = "Der er ikke plads nok til modellen. Frigør plads, og prøv igen."
+            return
+        }
         downloadID = entry.id
         notice = nil
         Task {

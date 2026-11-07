@@ -168,21 +168,37 @@ import Observation
 
     func submit(_ mood: Mood) async {
         guard canSubmit, let capabilities, capabilities.moods.contains(mood), cancelling.isEmpty else { return }
+        let batch = Batch(clip_ids: clips.filter { selected.contains($0.id) }.map(\.id), mood: mood, options: options)
+        await submit(batch, clearSelection: true, limit: capabilities.limit)
+    }
+
+    func canRetry(_ job: Job) -> Bool {
+        job.status == .failed && connected && !busy && !refreshing && !uncertain && !blocked &&
+            cancelling.isEmpty && options.roi.valid && clips.contains(where: { $0.id == job.clip_id }) &&
+            capabilities?.moods.contains(job.mood) == true
+    }
+
+    func retry(_ job: Job) async {
+        guard canRetry(job), let capabilities else { return }
+        await submit(Batch(clip_ids: [job.clip_id], mood: job.mood, options: options),
+                     clearSelection: false, limit: capabilities.limit)
+    }
+
+    private func submit(_ batch: Batch, clearSelection: Bool, limit: Int) async {
         busy = true
         revision += 1
         error = nil
         defer { busy = false }
-        let batch = Batch(clip_ids: clips.filter { selected.contains($0.id) }.map(\.id), mood: mood, options: options)
         do {
-            try batch.validate(limit: capabilities.limit)
+            try batch.validate(limit: limit)
             if let pendingKey { defaults.set(true, forKey: pendingKey) }
             let received = try await api.submit(batch).jobs
             guard received.count == batch.clip_ids.count,
                   Set(received.map(\.id)).count == received.count,
                   received.map(\.clip_id) == batch.clip_ids,
-                  received.allSatisfy({ $0.mood == mood }) else { throw APIError.malformed }
+                  received.allSatisfy({ $0.mood == batch.mood }) else { throw APIError.malformed }
             merge(received)
-            selected = []
+            if clearSelection { selected = [] }
             clearPending()
         } catch {
             if (error as? APIError)?.ambiguous ?? true {

@@ -1,4 +1,6 @@
 import AVKit
+import Speech
+import Observation
 import AppIntents
 import SwiftUI
 
@@ -34,6 +36,8 @@ private struct PromptExample: Identifiable {
     let text: String
     var id: String { text }
     static let examples = [
+        Self(category: "Video", text: "Lav et hype-klip af den nyeste fil."),
+        Self(category: "Analyse", text: "Analyser denne tekst:"),
         Self(category: "Video", text: "Foreslå en kort titel til mit næste klip."),
         Self(category: "Planlægning", text: "Lav en tjekliste til min næste optagelse."),
         Self(category: "Idéer", text: "Giv mig tre idéer til et sjovt gamingklip.")
@@ -41,7 +45,15 @@ private struct PromptExample: Identifiable {
 }
 
 @main struct SweatCasterApp: App {
-    var body: some Scene { WindowGroup { Home() } }
+    @AppStorage("app.text.scale") private var textScale = 0.0
+    @Environment(\.dynamicTypeSize) private var systemTextSize
+    var body: some Scene {
+        WindowGroup {
+            Home().dynamicTypeSize(textScale == 0 ? systemTextSize :
+                [DynamicTypeSize.large, .xLarge, .xxLarge, .xxxLarge,
+                 .accessibility1, .accessibility2][min(5, max(0, Int(textScale)))])
+        }
+    }
 }
 
 private struct Media: Identifiable {
@@ -73,6 +85,14 @@ struct Home: View {
     @State private var showAgentHub = false
     @State private var showPhoneModels = false
     @State private var showOfflineStudio = false
+    @State private var showSavedVideos = false
+    @State private var savedVideos: [URL] = []
+    @AppStorage("app.text.scale") private var textScale = 0.0
+    @State private var clipGame = ""
+    @State private var shortClips = false
+    @State private var recentJobsFirst = false
+    @State private var clipDateRange = 0
+    @State private var saveVideoNotice: String?
     @State private var confirmClear = false
     @State private var hiddenJobs = Set<String>()
     @AppStorage("spaces.notes") private var notes = ""
@@ -103,6 +123,7 @@ struct Home: View {
             proxy.scrollTo("jobs", anchor: .top)
             jobsFocus = true
         }
+        .onChange(of: showClips) { proxy.scrollTo("clips", anchor: .top) }
         }
         .onAppear {
             edit(model.activeProfile)
@@ -124,10 +145,12 @@ struct Home: View {
         .sensoryFeedback(.selection, trigger: model.jobs.map { $0.id + $0.status.rawValue }) { old, new in
             old.count == new.count && !old.isEmpty
         }
-        .preferredColorScheme(theme == "Lys" ? .light : theme == "Mørk" ? .dark : nil)
+        .preferredColorScheme(theme == "Lys" ? .light : ["Mørk", "OLED Sort"].contains(theme) ? .dark : nil)
         .fontDesign(font == "Afrundet" ? .rounded : font == "Monospace" ? .monospaced : .default)
         .background {
-            if motion && !reduceMotion {
+            if theme == "OLED Sort" {
+                Color.black.ignoresSafeArea()
+            } else if motion && !reduceMotion {
                 LinearGradient(colors: [.blue.opacity(0.12), .clear],
                                startPoint: backgroundPhase ? .topLeading : .bottomTrailing, endPoint: .center)
                     .ignoresSafeArea()
@@ -150,6 +173,7 @@ struct Home: View {
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
         .sheet(isPresented: $showOfflineStudio) { OfflineStudio() }
+        .sheet(isPresented: $showSavedVideos) { savedVideoLibrary }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
                 List {
@@ -228,6 +252,8 @@ struct Home: View {
         action(pendingJobs == 0 ? "Video Studio" : "Video Studio · \(pendingJobs) aktive") { space = .gallery }
         action("Hvad kan jeg?") { showHelp = true }
         action("Agent-Hub") { showAgentHub = true }
+        action("Start video · Vælg klip") { space = .brain; showClips += 1 }
+        action("Gemte videoer") { reloadSavedVideos(); showSavedVideos = true }
         if !onboarded {
             VStack(alignment: .leading, spacing: 8) {
                 heading("Kom godt i gang")
@@ -342,8 +368,10 @@ struct Home: View {
         action("NSFW / Uncensored") { showOfflineStudio = true }
         DisclosureGroup("Visning og jobhistorik") {
             Picker("Tema", selection: $theme) {
-                ForEach(["System", "Lys", "Mørk"], id: \.self) { Text($0) }
+                ForEach(["System", "Lys", "Mørk", "OLED Sort"], id: \.self) { Text($0) }
             }
+            Slider(value: $textScale, in: 0...5, step: 1) { Text("Tekststørrelse") }
+                .accessibilityLabel("Tekststørrelse i appen")
             Picker("Skrift", selection: $font) {
                 ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
             }
@@ -389,11 +417,24 @@ struct Home: View {
     private var clipSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             heading("1. Vælg klip")
+            DisclosureGroup("Filtrér klip") {
+                TextField("Spil i filnavnet", text: $clipGame).textFieldStyle(.roundedBorder)
+                Toggle("Under ét minut", isOn: $shortClips)
+                Toggle("Seneste jobdato først", isOn: $recentJobsFirst)
+                Picker("Jobdato", selection: $clipDateRange) {
+                    Text("Alle datoer").tag(0)
+                    Text("Seneste 7 dage").tag(7)
+                    Text("Seneste 30 dage").tag(30)
+                }
+                Text("Datoen kommer fra tidligere job med klippet.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if let caps = model.capabilities {
                 Text("Valgt: \(model.selected.count) af \(caps.limit)")
             }
             if model.clips.isEmpty { Text("Ingen klip at vise.") }
-            ForEach(model.clips) { clip in
+            if !model.clips.isEmpty && filteredClips.isEmpty { Text("Ingen klip matcher filteret.") }
+            ForEach(filteredClips) { clip in
                 let selected = model.selected.contains(clip.id)
                 Button { model.toggle(clip) } label: {
                     HStack(alignment: .top, spacing: 12) {
@@ -411,6 +452,25 @@ struct Home: View {
                     .disabled(model.busy || (!selected && model.selected.count >= (model.capabilities?.limit ?? 0)))
             }
             action("Opdater klip") { Task { await model.refresh() } }.disabled(switchDisabled)
+        }.id("clips")
+    }
+
+    @State private var showClips = 0
+
+    private var filteredClips: [Clip] {
+        let query = clipGame.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dates = Dictionary(model.jobs.map { ($0.clip_id, $0.created_at) }, uniquingKeysWith: max)
+        let cutoff = Calendar.current.date(byAdding: .day, value: -clipDateRange, to: .now) ?? .distantPast
+        let clips = model.clips.filter {
+            (!shortClips || $0.duration_seconds < 60) &&
+                (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) &&
+                (clipDateRange == 0 || (dates[$0.id] ?? .distantPast) >= cutoff)
+        }
+        guard recentJobsFirst else { return clips }
+        return clips.sorted {
+            let lhs = dates[$0.id] ?? .distantPast
+            let rhs = dates[$1.id] ?? .distantPast
+            return lhs == rhs ? $0.name < $1.name : lhs > rhs
         }
     }
 
@@ -459,12 +519,17 @@ struct Home: View {
                 }.disabled(switchDisabled)
             }
             if visibleJobs.isEmpty { Text("Ingen videoer endnu.") }
+            if let saveVideoNotice { Text(saveVideoNotice) }
             ForEach(visibleJobs.sorted { $0.created_at > $1.created_at }) { job in
                 VStack(alignment: .leading, spacing: 8) {
                     Text(model.clips.first { $0.id == job.clip_id }?.name ?? "Klip")
                         .font(.headline).accessibilityAddTraits(.isHeader)
                     Text(job.mood.title + " · " + job.status.title)
                     Text(job.message)
+                    if job.status == .failed {
+                        action("Prøv igen") { Task { await model.retry(job) } }
+                            .disabled(!model.canRetry(job))
+                    }
                     if job.status.active {
                         let progress = min(1, max(0, job.progress))
                         ProgressView(value: progress)
@@ -485,6 +550,9 @@ struct Home: View {
                                 if let url = await model.video(job) { media = Media(url: url, demo: demo) }
                             }
                         }.disabled(model.mediaLoading)
+                        if !model.isDemo {
+                            action("Gem på telefonen") { Task { await saveVideo(job) } }.disabled(model.mediaLoading)
+                        }
                         action("Del job-resultat") {
                             Task {
                                 if let url = await model.video(job) { shareResult = Media(url: url, demo: model.isDemo) }
@@ -511,6 +579,42 @@ struct Home: View {
     }
 
     @State private var shareResult: Media?
+
+    private var videoFolder: URL { URL.applicationSupportDirectory.appending(path: "SavedVideos", directoryHint: .isDirectory) }
+
+    private func reloadSavedVideos() {
+        let files = (try? FileManager.default.contentsOfDirectory(at: videoFolder, includingPropertiesForKeys: nil)) ?? []
+        savedVideos = files.filter { $0.pathExtension == "mp4" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+    }
+
+    private func saveVideo(_ job: Job) async {
+        saveVideoNotice = nil
+        guard let downloaded = await model.video(job) else { return }
+        defer { try? FileManager.default.removeItem(at: downloaded) }
+        do {
+            try FileManager.default.createDirectory(at: videoFolder, withIntermediateDirectories: true)
+            let filename = Date.now.formatted(.iso8601).replacingOccurrences(of: ":", with: "-")
+            let target = videoFolder.appendingPathComponent("\(filename)-\(UUID().uuidString.prefix(6)).mp4")
+            try FileManager.default.copyItem(at: downloaded, to: target)
+            saveVideoNotice = "Videoen er gemt på telefonen."
+        } catch { saveVideoNotice = "Videoen kunne ikke gemmes. Tjek ledig plads." }
+    }
+
+    private var savedVideoLibrary: some View {
+        NavigationStack {
+            List {
+                if savedVideos.isEmpty { Text("Gem en færdig video fra Video Studio.") }
+                ForEach(savedVideos, id: \.self) { file in
+                    NavigationLink {
+                        Preview(media: Media(url: file, demo: false))
+                    } label: {
+                        Label(file.deletingPathExtension().lastPathComponent, systemImage: "film")
+                    }
+                }
+            }.navigationTitle("Gemte videoer")
+                .toolbar { Button("Luk") { showSavedVideos = false } }
+        }
+    }
 
     private func advanced(_ options: Binding<Options>) -> some View {
         DisclosureGroup("Avancerede indstillinger") {
@@ -946,6 +1050,97 @@ private struct ChatTranscriptView: View {
     }
 }
 
+
+@MainActor @Observable private final class ChatDictation {
+    private let engine = AVAudioEngine()
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var recognition: SFSpeechRecognitionTask?
+    private var recognizer: SFSpeechRecognizer?
+    private var tapInstalled = false
+    private var sessionActive = false
+    private var runID = UUID()
+    private(set) var active = false
+    private(set) var problem: String?
+
+    func start(update: @escaping (String) -> Void) async {
+        guard !active else { return }
+        let id = UUID()
+        runID = id
+        active = true
+        problem = nil
+        let speechAllowed = await withCheckedContinuation { continuation in
+            SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
+        }
+        guard runID == id else { return }
+        guard speechAllowed, let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "da-DK")),
+              recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
+            fail("Dansk diktering på telefonen er ikke tilgængelig. Tjek talegenkendelse i Indstillinger.")
+            return
+        }
+        let micAllowed = await AVAudioApplication.requestRecordPermission()
+        guard runID == id else { return }
+        guard micAllowed else {
+            fail("Giv FadedAI adgang til mikrofonen i Indstillinger.")
+            return
+        }
+        do {
+            let audio = AVAudioSession.sharedInstance()
+            try audio.setCategory(.record, mode: .measurement)
+            try audio.setActive(true)
+            sessionActive = true
+            let request = SFSpeechAudioBufferRecognitionRequest()
+            request.requiresOnDeviceRecognition = true
+            request.shouldReportPartialResults = true
+            self.request = request
+            self.recognizer = recognizer
+            let node = engine.inputNode
+            let format = node.outputFormat(forBus: 0)
+            guard format.channelCount > 0, format.sampleRate > 0 else {
+                fail("Mikrofonen er ikke klar.")
+                return
+            }
+            node.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in request.append(buffer) }
+            tapInstalled = true
+            recognition = recognizer.recognitionTask(with: request) { result, error in
+                let text = result?.bestTranscription.formattedString
+                let done = result?.isFinal == true
+                let failed = error != nil
+                Task { @MainActor [weak self] in
+                    guard let self, self.runID == id else { return }
+                    if let text { update(text) }
+                    if done { self.stop() }
+                    else if failed { self.fail("Dikteringen stoppede. Du kan prøve igen.") }
+                }
+            }
+            try engine.start()
+        } catch { fail("Mikrofonen kunne ikke startes.") }
+    }
+
+    func stop() {
+        runID = UUID()
+        active = false
+        engine.stop()
+        if tapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            tapInstalled = false
+        }
+        request?.endAudio()
+        recognition?.cancel()
+        recognition = nil
+        request = nil
+        recognizer = nil
+        if sessionActive {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            sessionActive = false
+        }
+    }
+
+    private func fail(_ message: String) {
+        stop()
+        problem = message
+    }
+}
+
 private struct ChatView: View {
     @Environment(\.dismiss) private var dismiss
     let api: (any ChatAPI)?
@@ -971,6 +1166,7 @@ private struct ChatView: View {
     @State private var completedReplies = 0
     @AppStorage("phone.model") private var phoneModel = "apple"
     @State private var usePC = false
+    @State private var dictation = ChatDictation()
 
     var body: some View {
         List {
@@ -1007,6 +1203,27 @@ private struct ChatView: View {
         .refreshable { if task == nil { loadHistory() } }
         .safeAreaInset(edge: .bottom) {
             VStack(alignment: .leading, spacing: 8) {
+                if task == nil {
+                    HStack {
+                        Menu("Skabeloner") {
+                            ForEach(PromptExample.examples) { example in
+                                Button(example.text) { draft = example.text }
+                            }
+                        }.frame(minHeight: 44)
+                        Spacer()
+                        Button {
+                            if dictation.active { dictation.stop() }
+                            else {
+                                let prefix = draft.isEmpty ? "" : draft + " "
+                                Task { await dictation.start { draft = prefix + $0 } }
+                            }
+                        } label: {
+                            Image(systemName: dictation.active ? "stop.circle" : "mic")
+                                .frame(minWidth: 48, minHeight: 48)
+                        }.accessibilityLabel(dictation.active ? "Stop diktering" : "Dikter chatbesked")
+                    }
+                    if let problem = dictation.problem { Text(problem).font(.caption) }
+                }
                 TextField("Din besked", text: $draft, axis: .vertical)
                     .textFieldStyle(.roundedBorder).lineLimit(2...5).frame(minHeight: 48)
                 if task != nil {
@@ -1025,7 +1242,7 @@ private struct ChatView: View {
             draft = initialDraft
             loadHistory()
         }
-        .onDisappear { stop() }
+        .onDisappear { stop(); dictation.stop() }
         .task { await loadModels() }
         .sensoryFeedback(.success, trigger: completedReplies)
     }
@@ -1099,6 +1316,7 @@ private struct ChatView: View {
     }
 
     private func send() {
+        dictation.stop()
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard task == nil, !message.isEmpty else { return }
         draft = ""
