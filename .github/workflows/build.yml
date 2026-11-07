@@ -9,7 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: macos-latest
-    timeout-minutes: 25
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - name: Run XCTest on an iPhone simulator
