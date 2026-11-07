@@ -114,6 +114,18 @@ struct Home: View {
     @State private var backgroundPhase = false
     @AppStorage("video.lastMood") private var selectedVideoMood: Mood = .hype
     @State private var jobFilter = 0
+    @AppStorage("qol.confirmVideo") private var confirmVideoStart = true
+    @AppStorage("qol.compactClips") private var compactClipCards = false
+    @AppStorage("qol.showDurations") private var showClipDurations = true
+    @AppStorage("qol.jobDetails") private var showJobDetails = false
+    @AppStorage("qol.keepAwake") private var keepScreenAwake = false
+    @AppStorage("qol.haptics") private var appHaptics = true
+    @AppStorage("qol.reduceMotion") private var calmMotion = false
+    @AppStorage("qol.rememberSpace") private var rememberLastSpace = true
+    @AppStorage("qol.autoRefreshTabs") private var autoRefreshTabs = true
+    @AppStorage("qol.connectionBanner") private var showConnectionBanner = true
+    @AppStorage("qol.lastSpace") private var lastSpace = Space.brain.rawValue
+    @State private var pendingVideoMood: Mood?
 
     private var visibleJobs: [Job] {
         model.jobs.filter { job in
@@ -142,6 +154,16 @@ struct Home: View {
             jobsFocus = true
         }
         .onChange(of: showClips) { proxy.scrollTo("clips", anchor: .top) }
+        .onChange(of: space) { _, value in
+            if rememberLastSpace { lastSpace = value.rawValue }
+            if autoRefreshTabs && !model.isDemo { Task { await model.refresh() } }
+        }
+        .onChange(of: keepScreenAwake) { UIApplication.shared.isIdleTimerDisabled = keepScreenAwake }
+        .onAppear {
+            if rememberLastSpace, let saved = Space(rawValue: lastSpace) { space = saved }
+            UIApplication.shared.isIdleTimerDisabled = keepScreenAwake
+        }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
         }
     }
 
@@ -193,7 +215,7 @@ struct Home: View {
     @ViewBuilder private var homeBackground: some View {
         if theme == "OLED Sort" {
             Color.black.ignoresSafeArea()
-        } else if motion && !reduceMotion {
+        } else if motion && !reduceMotion && !calmMotion {
             LinearGradient(colors: [.blue.opacity(0.12), .clear],
                            startPoint: backgroundPhase ? .topLeading : .bottomTrailing, endPoint: .center)
                 .ignoresSafeArea()
@@ -226,7 +248,7 @@ struct Home: View {
         let completed: [String] = model.jobs.filter { $0.status == .completed }.map(\.id)
         let statuses: [String] = model.jobs.map { $0.id + $0.status.rawValue }
         return homeLifecycle
-            .sensoryFeedback(.selection, trigger: space)
+            .sensoryFeedback(.selection, trigger: appHaptics ? space.rawValue : "")
             .sensoryFeedback(.success, trigger: completed) { old, new in
                 new.count > old.count
             }
@@ -265,6 +287,14 @@ struct Home: View {
             }
         } message: {
             Text("Videoerne og jobhistorikken bliver liggende på PC’en.")
+        }
+        .confirmationDialog("Start videomagi?", isPresented: Binding(
+            get: { pendingVideoMood != nil }, set: { if !$0 { pendingVideoMood = nil } }
+        ), presenting: pendingVideoMood) { mood in
+            Button("Start \(mood.title)") { startVideo(mood); pendingVideoMood = nil }
+            Button("Annuller", role: .cancel) { pendingVideoMood = nil }
+        } message: { mood in
+            Text("Starter \(model.selected.count) valgte klip med \(mood.title).")
         }
         .sheet(isPresented: $showAgentHub) {
             AgentHub(api: model.api as? LiveAPI)
@@ -315,7 +345,7 @@ struct Home: View {
 
     @ViewBuilder private var header: some View {
         Text("FadedAI").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-        if !model.isDemo {
+        if !model.isDemo && showConnectionBanner {
             Label("\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
                   systemImage: model.connected ? "checkmark.circle" : "exclamationmark.circle")
                 .font(.subheadline)
@@ -477,6 +507,19 @@ struct Home: View {
                 ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
             }
             Toggle("Bevægelse i baggrunden", isOn: $motion)
+            Toggle("Bekræft før video startes", isOn: $confirmVideoStart)
+            Toggle("Kompakte klipkort", isOn: $compactClipCards)
+            Toggle("Vis kliplængde", isOn: $showClipDurations)
+            Toggle("Vis jobdetaljer", isOn: $showJobDetails)
+            Toggle("Hold skærmen vågen", isOn: $keepScreenAwake)
+            Toggle("Haptisk feedback", isOn: $appHaptics)
+            Toggle("Ekstra rolig bevægelse", isOn: $calmMotion)
+            Toggle("Husk seneste fane", isOn: $rememberLastSpace)
+            Toggle("Opdatér ved faneskift", isOn: $autoRefreshTabs)
+            Toggle("Vis forbindelsesbanner", isOn: $showConnectionBanner)
+            Button("Ryd midlertidige previews") {
+                prunePreviews(); saveVideoNotice = "Midlertidige previews er ryddet."
+            }.frame(minHeight: 48)
             Button("Ryd afsluttede jobs på denne telefon", role: .destructive) { confirmClear = true }
                 .frame(minHeight: 48)
         }
@@ -586,12 +629,14 @@ struct Home: View {
                                                startPoint: .topLeading, endPoint: .bottomTrailing)
                                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
                                     .font(.title2).foregroundStyle(selected ? .cyan : .white.opacity(0.75)).padding(8)
-                                Text(durationLabel(clip.duration_seconds))
-                                    .font(.caption.monospacedDigit()).padding(5)
-                                    .background(.black.opacity(0.72), in: Capsule()).padding(8)
-                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                                if showClipDurations {
+                                    Text(durationLabel(clip.duration_seconds))
+                                        .font(.caption.monospacedDigit()).padding(5)
+                                        .background(.black.opacity(0.72), in: Capsule()).padding(8)
+                                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                                }
                             }
-                            .frame(height: 105)
+                            .frame(height: compactClipCards ? 76 : 105)
                             .clipShape(RoundedRectangle(cornerRadius: 14))
                             .overlay(RoundedRectangle(cornerRadius: 14)
                                 .stroke(selected ? Color.cyan : Color.white.opacity(0.12), lineWidth: selected ? 3 : 1))
@@ -615,6 +660,13 @@ struct Home: View {
     private func durationLabel(_ seconds: Double) -> String {
         let value = max(0, Int(seconds.rounded()))
         return String(format: "%d:%02d", value / 60, value % 60)
+    }
+
+    private func startVideo(_ mood: Mood) {
+        Task {
+            await model.submit(mood)
+            if model.error == nil || model.uncertain { showJobs += 1 }
+        }
     }
 
     private func clipColor(_ clip: Clip) -> Color {
@@ -691,10 +743,8 @@ struct Home: View {
                 }
                 .frame(height: 170).clipShape(RoundedRectangle(cornerRadius: 18))
                 Button {
-                    Task {
-                        await model.submit(selectedVideoMood)
-                        if model.error == nil || model.uncertain { showJobs += 1 }
-                    }
+                    if confirmVideoStart { pendingVideoMood = selectedVideoMood }
+                    else { startVideo(selectedVideoMood) }
                 } label: {
                     Label("Start videomagi", systemImage: "sparkles")
                         .font(.headline).frame(maxWidth: .infinity, minHeight: 62)
@@ -732,6 +782,10 @@ struct Home: View {
                         .font(.headline).accessibilityAddTraits(.isHeader)
                     Text(job.mood.title + " · " + job.status.title)
                     Text(job.message)
+                    if showJobDetails {
+                        Text("\(job.id) · \(job.progress.formatted(.percent.precision(.fractionLength(0))))")
+                            .font(.caption.monospaced()).foregroundStyle(.secondary)
+                    }
                     if job.status == .failed {
                         action("Prøv igen") { Task { await model.retry(job) } }
                             .disabled(!model.canRetry(job))
@@ -892,7 +946,7 @@ struct Home: View {
     }
     private func action(_ title: String, _ work: @escaping () -> Void) -> some View {
         Button {
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            if appHaptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
             work()
         } label: {
             Text(title)
@@ -1654,6 +1708,8 @@ private struct ChatTurn: Identifiable, Codable {
     var notice: String?
     var source: String?
     var favorite: Bool?
+    var createdAt: Date?
+    var feedback: Int?
 }
 
 private struct LoadingSkeleton: View {
@@ -1881,6 +1937,8 @@ private struct CodeWorkspaceView: View {
     @State private var loading = false
     @State private var message: String?
     @State private var approval = false
+    @State private var featureRequest = ""
+    @State private var codeStatus = ""
 
     var body: some View {
         NavigationStack {
@@ -1926,6 +1984,18 @@ private struct CodeWorkspaceView: View {
                             .accessibilityLabel("\(file.path), \(selected.contains(file.path) ? "valgt som kontekst" : "ikke valgt")")
                         }
                     }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Byg en lille funktion med PC-modellen").font(.title2.bold())
+                        Text("Vælg eller skriv en filsti, beskriv én afgrænset ændring, og gennemgå altid diffen før godkendelse.")
+                            .font(.callout).foregroundStyle(.secondary)
+                        TextField("Beskriv funktionen", text: $featureRequest, axis: .vertical)
+                            .lineLimit(2...6).textFieldStyle(.roundedBorder)
+                        Button("Lad Code Bot forberede ændringen") { Task { await generateFeature() } }
+                            .buttonStyle(.borderedProminent).controlSize(.large)
+                            .disabled(api == nil || loading || path.isEmpty || featureRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        if !codeStatus.isEmpty { Text(codeStatus).font(.caption).foregroundStyle(.cyan) }
+                    }.padding().background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
 
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Forbered filændring").font(.title2.bold())
@@ -1996,6 +2066,41 @@ private struct CodeWorkspaceView: View {
         catch { message = "Ændringen kunne ikke forberedes. Tjek filstien og prøv igen." }
     }
 
+    private func generateFeature() async {
+        guard let api else { return }
+        let brief = featureRequest.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !brief.isEmpty else { return }
+        guard content.count <= 1_200 else {
+            codeStatus = "Filen er for stor til sikker automatisk omskrivning. Vælg en mindre fil eller opret en ny komponentfil."
+            return
+        }
+        loading = true; codeStatus = "PC-modellen forbereder filen…"
+        defer { loading = false }
+        do {
+            let existing = content
+            let prompt = "Du er Code Bot i en sikker workspace. Returnér kun det komplette nye filindhold uden markdown-hegn. Fil: \(path). Opgave: \(brief). Eksisterende begyndelse: \(existing)"
+            let request = try V2ChatRequest(message: String(prompt.prefix(2_000)), sessionID: "codebot-ios")
+            var generated = ""
+            try await api.v2Chat(request) { event in
+                await MainActor.run {
+                    if event.type == .text { generated += event.content }
+                    if event.type == .tool_status { codeStatus = event.content }
+                }
+            }
+            let cleaned = generated
+                .replacingOccurrences(of: "```swift", with: "")
+                .replacingOccurrences(of: "```python", with: "")
+                .replacingOccurrences(of: "```", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !cleaned.isEmpty else { throw V2Failure.invalidResponse }
+            content = cleaned
+            proposal = try await api.v2CodeProposal(path: path, content: cleaned)
+            codeStatus = "Forslaget er klar. Gennemgå diffen nedenfor."
+        } catch {
+            codeStatus = "Code Bot kunne ikke forberede ændringen. Ingen fil blev skrevet."
+        }
+    }
+
     private func reject(_ item: V2CodeProposal) async {
         guard let api else { return }
         do { _ = try await api.v2ApplyCodeProposal(item.change_id, approved: false) }
@@ -2058,6 +2163,36 @@ private struct ChatView: View {
     @State private var chatSearch = ""
     @State private var favoritesOnly = false
     @State private var scrollRequest = 0
+    @AppStorage("ai.tone") private var aiTone = "Naturlig"
+    @AppStorage("ai.length") private var aiLength = "Kort"
+    @AppStorage("ai.language") private var aiLanguage = "Dansk"
+    @AppStorage("ai.creativity") private var aiCreativity = "Balanceret"
+    @AppStorage("ai.bullets") private var aiBullets = false
+    @AppStorage("ai.examples") private var aiExamples = false
+    @AppStorage("ai.summary") private var aiSummary = false
+    @AppStorage("ai.actions") private var aiActions = false
+    @AppStorage("ai.clarify") private var aiClarify = true
+    @AppStorage("ai.simple") private var aiSimple = true
+    @AppStorage("ai.noJargon") private var aiNoJargon = true
+    @AppStorage("ai.steps") private var aiSteps = false
+    @AppStorage("ai.tables") private var aiTables = false
+    @AppStorage("ai.uncertainty") private var aiUncertainty = true
+    @AppStorage("ai.counterpoint") private var aiCounterpoint = false
+    @AppStorage("ai.assumptions") private var aiAssumptions = false
+    @AppStorage("ai.sources") private var aiSources = false
+    @AppStorage("ai.codeComments") private var aiCodeComments = true
+    @AppStorage("ai.preserveNames") private var aiPreserveNames = true
+    @AppStorage("ai.emojis") private var aiEmojis = false
+    @AppStorage("ai.headings") private var aiHeadings = true
+    @AppStorage("ai.recapQuestion") private var aiRecapQuestion = false
+    @AppStorage("ai.suggestions") private var aiSuggestions = true
+    @AppStorage("ai.risks") private var aiRisks = false
+    @AppStorage("ai.prosCons") private var aiProsCons = false
+    @AppStorage("ai.checklist") private var aiChecklist = false
+    @AppStorage("ai.private") private var aiPrivateSession = false
+    @AppStorage("ai.timestamps") private var aiTimestamps = false
+    @AppStorage("ai.wordCount") private var aiWordCount = false
+    @AppStorage("ai.showTools") private var aiShowTools = true
 
     private var voiceBots: [VillageBot] {
         (try? JSONDecoder().decode([VillageBot].self, from: voiceBotData)) ?? []
@@ -2110,6 +2245,7 @@ private struct ChatView: View {
                                     .font(.caption).foregroundStyle(.secondary)
                                 modelControls
                                 voiceControls
+                                aiBoostControls
                                 if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
                                 Text("Researcher bruger internettet, når en websøgning er nødvendig.")
                                     .font(.caption).foregroundStyle(.secondary)
@@ -2122,7 +2258,7 @@ private struct ChatView: View {
                             }.padding(.top, 8)
                         }
                         transcriptRows
-                        if !searchSteps.isEmpty {
+                        if aiShowTools && !searchSteps.isEmpty {
                             DisclosureGroup("Agentaktivitet · \(searchSteps.count) trin") {
                                 ForEach(searchSteps.indices, id: \.self) { index in
                                     Label(searchSteps[index], systemImage: index + 1 == searchSteps.count ? "circle.fill" : "arrow.down.circle")
@@ -2239,6 +2375,51 @@ private struct ChatView: View {
         }
     }
 
+    private var aiBoostControls: some View {
+        DisclosureGroup("AI Boost · 30 forbedringer") {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Tone", selection: $aiTone) {
+                    ForEach(["Naturlig", "Varm", "Professionel", "Direkte", "Legende"], id: \.self) { Text($0) }
+                }
+                Picker("Svarlængde", selection: $aiLength) {
+                    ForEach(["Meget kort", "Kort", "Mellem", "Grundig"], id: \.self) { Text($0) }
+                }
+                Picker("Sprog", selection: $aiLanguage) {
+                    ForEach(["Dansk", "Engelsk", "Følg beskeden"], id: \.self) { Text($0) }
+                }
+                Picker("Kreativitet", selection: $aiCreativity) {
+                    ForEach(["Præcis", "Balanceret", "Kreativ"], id: \.self) { Text($0) }
+                }
+                Toggle("Brug punktform", isOn: $aiBullets)
+                Toggle("Giv eksempler", isOn: $aiExamples)
+                Toggle("Start med et resumé", isOn: $aiSummary)
+                Toggle("Slut med næste handling", isOn: $aiActions)
+                Toggle("Spørg ved uklarhed", isOn: $aiClarify)
+                Toggle("Brug enkelt sprog", isOn: $aiSimple)
+                Toggle("Undgå fagsprog", isOn: $aiNoJargon)
+                Toggle("Vis trin for trin", isOn: $aiSteps)
+                Toggle("Brug tabel ved sammenligning", isOn: $aiTables)
+                Toggle("Fortæl når noget er usikkert", isOn: $aiUncertainty)
+                Toggle("Nævn et modargument", isOn: $aiCounterpoint)
+                Toggle("Vis antagelser", isOn: $aiAssumptions)
+                Toggle("Bed om kilder ved research", isOn: $aiSources)
+                Toggle("Korte kodekommentarer", isOn: $aiCodeComments)
+                Toggle("Bevar præcise navne", isOn: $aiPreserveNames)
+                Toggle("Tillad få emojis", isOn: $aiEmojis)
+                Toggle("Brug korte overskrifter", isOn: $aiHeadings)
+                Toggle("Slut med kontrolspørgsmål", isOn: $aiRecapQuestion)
+                Toggle("Foreslå relevante genveje", isOn: $aiSuggestions)
+                Toggle("Fremhæv risici", isOn: $aiRisks)
+                Toggle("Vis fordele og ulemper", isOn: $aiProsCons)
+                Toggle("Lav tjekliste ved opgaver", isOn: $aiChecklist)
+                Toggle("Privat session uden historik", isOn: $aiPrivateSession)
+                Toggle("Vis klokkeslæt", isOn: $aiTimestamps)
+                Toggle("Vis antal ord", isOn: $aiWordCount)
+                Toggle("Vis værktøjsaktivitet", isOn: $aiShowTools)
+            }.padding(.top, 8)
+        }
+    }
+
     private func loadModels() async {
         modelsLoading = true
         defer { modelsLoading = false }
@@ -2280,13 +2461,26 @@ private struct ChatView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Label(turn.source ?? "AI", systemImage: turn.source == "Telefon" ? "iphone" : "desktopcomputer")
                             .font(.caption.bold()).foregroundStyle(.cyan)
+                        if aiTimestamps, let date = turn.createdAt {
+                            Text(date, format: .dateTime.hour().minute()).font(.caption2).foregroundStyle(.secondary)
+                        }
                         ChatTranscriptView(reply: turn.reply)
+                        if aiWordCount {
+                            Text("\(turn.reply.split(whereSeparator: \.isWhitespace).count) ord")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                         Button("Læs svaret op", systemImage: "speaker.wave.2") { speak(turn.reply) }
                             .frame(minHeight: 44)
                         HStack {
                             Button(turn.favorite == true ? "Fjern favorit" : "Favorit",
                                    systemImage: turn.favorite == true ? "star.fill" : "star") { toggleFavorite(turn.id) }
                             Button("Slet", systemImage: "trash", role: .destructive) { deleteTurn(turn.id) }
+                            Button("Godt svar", systemImage: turn.feedback == 1 ? "hand.thumbsup.fill" : "hand.thumbsup") {
+                                setFeedback(turn.id, value: 1)
+                            }.labelStyle(.iconOnly).accessibilityLabel("Markér som godt svar")
+                            Button("Dårligt svar", systemImage: turn.feedback == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown") {
+                                setFeedback(turn.id, value: -1)
+                            }.labelStyle(.iconOnly).accessibilityLabel("Markér som dårligt svar")
                         }.frame(minHeight: 44)
                     }
                     .padding(14)
@@ -2336,6 +2530,34 @@ private struct ChatView: View {
         save()
     }
 
+    private func setFeedback(_ id: UUID, value: Int) {
+        guard let index = turns.firstIndex(where: { $0.id == id }) else { return }
+        turns[index].feedback = turns[index].feedback == value ? nil : value
+        save()
+    }
+
+    private func enhancedPrompt(_ message: String) -> String {
+        var rules = ["tone=\(aiTone)", "længde=\(aiLength)", "sprog=\(aiLanguage)", "kreativitet=\(aiCreativity)"]
+        let flags: [(Bool, String)] = [
+            (aiBullets, "punktform"), (aiExamples, "eksempler"), (aiSummary, "kort resumé først"),
+            (aiActions, "næste handling til sidst"), (aiClarify, "spørg ved uklarhed"),
+            (aiSimple, "enkelt sprog"), (aiNoJargon, "intet unødigt fagsprog"), (aiSteps, "trin for trin"),
+            (aiTables, "tabel ved sammenligning"), (aiUncertainty, "markér usikkerhed"),
+            (aiCounterpoint, "ét modargument"), (aiAssumptions, "vis antagelser"),
+            (aiSources, "kilder ved research"), (aiCodeComments, "korte kodekommentarer"),
+            (aiPreserveNames, "bevar præcise navne"), (aiEmojis, "få emojis"),
+            (aiHeadings, "korte overskrifter"), (aiRecapQuestion, "kontrolspørgsmål til sidst"),
+            (aiSuggestions, "relevante genveje"), (aiRisks, "fremhæv risici"),
+            (aiProsCons, "fordele og ulemper"), (aiChecklist, "tjekliste ved opgaver")
+        ]
+        rules.append(contentsOf: flags.filter { $0.0 }.map { $0.1 })
+        let prefix = "\n\n[Svarpræferencer: "
+        let suffix = "]"
+        let available = max(0, 2000 - message.count - prefix.count - suffix.count)
+        guard available > 0 else { return String(message.prefix(2000)) }
+        return message + prefix + String(rules.joined(separator: "; ").prefix(available)) + suffix
+    }
+
     private func send() {
         dictation.stop()
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2344,13 +2566,14 @@ private struct ChatView: View {
         searchSteps = []
         sourceExcerpt = localReference(for: message)
         streamedText = ""
-        turns.append(ChatTurn(prompt: message))
+        turns.append(ChatTurn(prompt: message, createdAt: .now))
         let index = turns.count - 1
         let context = turns.dropLast().suffix(6).filter { !$0.reply.isEmpty }
             .map { "Bruger: \($0.prompt)\nSvar: \($0.reply)" }.joined(separator: "\n")
-        let requiresPC = usePC || PhoneModels.prefersPC(message, previousCharacters: context.count)
+        let modelMessage = enhancedPrompt(message)
+        let requiresPC = usePC || PhoneModels.prefersPC(modelMessage, previousCharacters: context.count)
         status = "Venter på svar…"
-        let input = ChatRequest(message: message, session_id: sessionID)
+        let input = ChatRequest(message: modelMessage, session_id: sessionID)
         save(pending: true)
         task = Task {
             do {
@@ -2363,7 +2586,7 @@ private struct ChatView: View {
                 } else {
                     var answered = false
                     if !requiresPC {
-                        answered = try await answerOnPhone(message, context: context, index: index)
+                        answered = try await answerOnPhone(modelMessage, context: context, index: index)
                     }
                     if !answered { try await answerOnPC(input, index: index) }
                 }
@@ -2506,6 +2729,7 @@ private struct ChatView: View {
     }
 
     private func save(pending: Bool = false) {
+        guard !aiPrivateSession else { return }
         let session = SavedAgentSession(id: sessionID, turns: turns, toolSteps: searchSteps, pending: pending)
         if let data = try? JSONEncoder().encode(session) {
             UserDefaults.standard.set(data, forKey: storageKey)
@@ -2513,6 +2737,7 @@ private struct ChatView: View {
     }
 
     private func loadHistory() {
+        guard !aiPrivateSession else { turns = []; return }
         guard let data = UserDefaults.standard.data(forKey: storageKey) else { return }
         let decoder = JSONDecoder()
         if let session = try? decoder.decode(SavedAgentSession.self, from: data) {
