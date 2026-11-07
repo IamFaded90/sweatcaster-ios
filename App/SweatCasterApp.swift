@@ -86,6 +86,7 @@ struct Home: View {
     @State private var space: Space = .brain
     @State private var showHelp = false
     @State private var showAgentHub = false
+    @State private var showCodeWorkspace = false
     @State private var showPhoneModels = false
     @State private var showOfflineStudio = false
     @State private var showSavedVideos = false
@@ -212,6 +213,9 @@ struct Home: View {
         }
         .sheet(isPresented: $showAgentHub) {
             AgentHub(api: model.api as? LiveAPI)
+        }
+        .sheet(isPresented: $showCodeWorkspace) {
+            CodeWorkspaceView(api: model.api as? LiveAPI)
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
         .sheet(isPresented: $showOfflineStudio) { OfflineStudio() }
@@ -408,6 +412,7 @@ struct Home: View {
     @ViewBuilder private var appearanceSettings: some View {
         action("Lokale modeller") { showPhoneModels = true }
         action("NSFW / Uncensored") { showOfflineStudio = true }
+        action("Code Bot og Agent Workspace") { showCodeWorkspace = true }
         DisclosureGroup("Visning og jobhistorik") {
             Picker("Tema", selection: $theme) {
                 ForEach(["System", "Lys", "Mørk", "OLED Sort"], id: \.self) { Text($0) }
@@ -1610,6 +1615,175 @@ private struct SavedAgentSession: Codable {
     let turns: [ChatTurn]
     let toolSteps: [String]
     let pending: Bool
+}
+
+private struct CodeWorkspaceView: View {
+    private enum Autonomy: String, CaseIterable {
+        case strict = "Strict"
+        case guided = "Guided"
+        case autonomous = "Autonomous"
+
+        var explanation: String {
+            switch self {
+            case .strict: "Code Bot må kun forberede ændringer. Du godkender hver fil."
+            case .guided: "Code Bot må planlægge flere trin. Hver filskrivning kræver stadig godkendelse."
+            case .autonomous: "Code Bot må arbejde videre selv. Sikkerhedsgodkendelse før filskrivning er stadig aktiv."
+            }
+        }
+    }
+
+    let api: LiveAPI?
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("code.autonomy") private var autonomy = Autonomy.strict.rawValue
+    @State private var files: [V2CodeWorkspace.File] = []
+    @State private var selected = Set<String>()
+    @State private var path = "notes/plan.md"
+    @State private var content = ""
+    @State private var proposal: V2CodeProposal?
+    @State private var loading = false
+    @State private var message: String?
+    @State private var approval = false
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text("Code Bot").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
+                    Text("Filer bliver kun læst og skrevet i den sikre Agent Workspace-mappe på PC’en.")
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Autonomi").font(.title2.bold())
+                        Picker("Code Bot-autonomi", selection: $autonomy) {
+                            ForEach(Autonomy.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) }
+                        }.pickerStyle(.segmented)
+                        Text(Autonomy(rawValue: autonomy)?.explanation ?? Autonomy.strict.explanation)
+                            .font(.callout).foregroundStyle(.secondary)
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text("Aktive filer og kontekst").font(.title2.bold())
+                            Spacer()
+                            if loading { ProgressView().accessibilityLabel("Henter Agent Workspace") }
+                        }
+                        if files.isEmpty && !loading { Text("Ingen tekstfiler i Agent Workspace endnu.") }
+                        ForEach(files) { file in
+                            Button {
+                                if selected.contains(file.path) { selected.remove(file.path) }
+                                else { selected.insert(file.path) }
+                                persistContext()
+                                Task { await open(file.path) }
+                            } label: {
+                                HStack {
+                                    Image(systemName: selected.contains(file.path) ? "checkmark.circle.fill" : "circle")
+                                    VStack(alignment: .leading) {
+                                        Text(file.path).lineLimit(2)
+                                        Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                }.frame(minHeight: 52)
+                            }
+                            .buttonStyle(.bordered)
+                            .accessibilityLabel("\(file.path), \(selected.contains(file.path) ? "valgt som kontekst" : "ikke valgt")")
+                        }
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Forbered filændring").font(.title2.bold())
+                        TextField("Relativ filsti", text: $path).textInputAutocapitalization(.never)
+                            .autocorrectionDisabled().textFieldStyle(.roundedBorder)
+                            .accessibilityLabel("Filsti i Agent Workspace")
+                        TextEditor(text: $content).frame(minHeight: 180)
+                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.secondary.opacity(0.35)))
+                            .accessibilityLabel("Nyt filindhold")
+                        Button("Forbered ændring") { Task { await prepare() } }
+                            .buttonStyle(.borderedProminent).controlSize(.large)
+                            .disabled(api == nil || loading || path.isEmpty)
+                    }
+
+                    if let proposal {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Label("Kræver din godkendelse", systemImage: "lock.shield")
+                                .font(.headline).foregroundStyle(.orange)
+                            ScrollView(.horizontal) {
+                                Text(proposal.diff).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            }.frame(maxHeight: 260)
+                            HStack {
+                                Button("Afvis", role: .destructive) { Task { await reject(proposal) } }
+                                    .buttonStyle(.bordered).controlSize(.large)
+                                Button("Godkend ændring") { approval = true }
+                                    .buttonStyle(.borderedProminent).controlSize(.large)
+                            }
+                        }.padding().background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
+                    }
+
+                    if let message {
+                        Text(message).padding().frame(maxWidth: .infinity, alignment: .leading)
+                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
+                            .accessibilityLabel(message)
+                    }
+                }.padding(20).frame(maxWidth: 680).frame(maxWidth: .infinity)
+            }
+            .background(Color.black.ignoresSafeArea())
+            .navigationTitle("Agent Workspace")
+            .toolbar { Button("Luk") { dismiss() }.accessibilityLabel("Luk Agent Workspace") }
+            .refreshable { await load() }
+            .task { restoreContext(); await load() }
+            .confirmationDialog("Godkend filændringen?", isPresented: $approval, presenting: proposal) { item in
+                Button("Skriv filen", role: .destructive) { Task { await apply(item) } }
+            } message: { item in
+                Text("Kun \(item.path) i Agent Workspace bliver ændret.")
+            }
+        }.preferredColorScheme(.dark)
+    }
+
+    private func load() async {
+        guard let api else { message = "Forbind til PC’en for at åbne Agent Workspace."; return }
+        loading = true; defer { loading = false }
+        do { files = try await api.v2CodeWorkspace().files; message = nil }
+        catch { message = "Agent Workspace kunne ikke hentes. Tryk og prøv igen." }
+    }
+
+    private func open(_ file: String) async {
+        guard let api else { return }
+        do { let found = try await api.v2CodeFile(path: file); path = found.path; content = found.content }
+        catch { message = "Filen kunne ikke åbnes sikkert." }
+    }
+
+    private func prepare() async {
+        guard let api else { return }
+        loading = true; defer { loading = false }
+        do { proposal = try await api.v2CodeProposal(path: path, content: content); message = nil }
+        catch { message = "Ændringen kunne ikke forberedes. Tjek filstien og prøv igen." }
+    }
+
+    private func reject(_ item: V2CodeProposal) async {
+        guard let api else { return }
+        do { _ = try await api.v2ApplyCodeProposal(item.change_id, approved: false) }
+        catch { /* A rejection is confirmed by the server's NOT_READY response. */ }
+        proposal = nil
+        message = "Ændringen blev afvist. Intet blev skrevet."
+    }
+
+    private func apply(_ item: V2CodeProposal) async {
+        guard let api else { return }
+        loading = true; defer { loading = false }
+        do {
+            let result = try await api.v2ApplyCodeProposal(item.change_id, approved: true)
+            proposal = nil
+            message = result.applied ? "Ændringen er skrevet til \(result.path)." : "Intet blev ændret."
+            await load()
+        } catch { message = "PC’en bekræftede ikke ændringen. Intet nyt forsøg blev sendt." }
+    }
+
+    private func persistContext() {
+        UserDefaults.standard.set(Array(selected).sorted(), forKey: "code.active.context")
+    }
+
+    private func restoreContext() {
+        selected = Set(UserDefaults.standard.stringArray(forKey: "code.active.context") ?? [])
+    }
 }
 
 private struct ChatView: View {

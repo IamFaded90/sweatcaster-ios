@@ -459,6 +459,31 @@ struct V2HubEvent: Decodable, Sendable {
     let revision: Int?
 }
 
+struct V2CodeWorkspace: Decodable, Sendable {
+    let files: [File]
+    let max_files: Int
+    struct File: Decodable, Identifiable, Sendable {
+        let path: String
+        let size: Int
+        let updated_at: String
+        var id: String { path }
+    }
+}
+
+struct V2CodeFile: Decodable, Sendable {
+    let path, content: String
+}
+
+struct V2CodeProposal: Decodable, Sendable {
+    let change_id, path, diff: String
+    let requires_approval: Bool
+}
+
+struct V2CodeApplied: Decodable, Sendable {
+    let change_id, path: String
+    let applied: Bool
+}
+
 extension LiveAPI {
     func deletePCVideo(_ id: String) async throws {
         guard validWireID(id) else { throw V2Failure.invalidInput }
@@ -473,6 +498,32 @@ extension LiveAPI {
     func v2Models() async throws -> V2Models { try await v2JSON("models") }
     func v2Hub() async throws -> V2Hub { try await v2JSON("agent-hub") }
     func v2Achievements() async throws -> V2Achievements { try await v2JSON("achievements") }
+    func v2CodeWorkspace() async throws -> V2CodeWorkspace { try await v2JSON("code/workspace") }
+
+    func v2CodeFile(path: String) async throws -> V2CodeFile {
+        try await v2JSON("code/file", query: [URLQueryItem(name: "path", value: path)])
+    }
+
+    func v2CodeProposal(path: String, content: String) async throws -> V2CodeProposal {
+        var request = try v2Request("code/proposals", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["path": path, "content": content])
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw V2Failure.invalidResponse }
+        guard http.statusCode == 200 else { throw v2HTTPError(http.statusCode, data: data) }
+        return try contractDecoder().decode(V2CodeProposal.self, from: data)
+    }
+
+    func v2ApplyCodeProposal(_ id: String, approved: Bool) async throws -> V2CodeApplied {
+        guard UUID(uuidString: id) != nil else { throw V2Failure.invalidInput }
+        var request = try v2Request("code/proposals/\(id)/apply", method: "POST")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["approved": approved])
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw V2Failure.invalidResponse }
+        guard http.statusCode == 200 else { throw v2HTTPError(http.statusCode, data: data) }
+        return try contractDecoder().decode(V2CodeApplied.self, from: data)
+    }
 
     func v2History(agentID: String, cursor: String? = nil) async throws -> V2Page<V2History> {
         try await v2JSON("agents/\(v2AgentSegment(agentID))/history", query: v2PageQuery(cursor))

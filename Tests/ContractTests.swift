@@ -2,6 +2,20 @@ import XCTest
 @testable import SweatCaster
 
 final class ContractTests: XCTestCase {
+    func testCodeWorkspaceContractModelsDecode() throws {
+        let snapshot = try JSONDecoder().decode(V2CodeWorkspace.self, from: Data(#"""
+        {"files":[{"path":"notes/plan.md","size":42,"updated_at":"2026-11-07T09:00:00Z"}],"max_files":100}
+        """#.utf8))
+        XCTAssertEqual(snapshot.files.first?.path, "notes/plan.md")
+        XCTAssertEqual(snapshot.max_files, 100)
+
+        let proposal = try JSONDecoder().decode(V2CodeProposal.self, from: Data(#"""
+        {"change_id":"7c9e6679-7425-40de-944b-e07fc1f90ae7","path":"notes/plan.md","diff":"--- før","requires_approval":true}
+        """#.utf8))
+        XCTAssertTrue(proposal.requires_approval)
+        XCTAssertEqual(proposal.path, "notes/plan.md")
+    }
+
     func testPhoneRoutingKeepsPCWorkAndLongContextOnServer() {
         XCTAssertFalse(PhoneModels.prefersPC("Hvad er fotosyntese?", previousCharacters: 0))
         XCTAssertTrue(PhoneModels.prefersPC("Lav et roast-klip af den nyeste optagelse", previousCharacters: 0))
