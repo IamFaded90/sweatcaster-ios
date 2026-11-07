@@ -680,8 +680,22 @@ struct Home: View {
             UIImpactFeedbackGenerator(style: .light).impactOccurred()
             work()
         } label: {
-            Text(title).frame(minHeight: 48).contentShape(Rectangle())
-        }.buttonStyle(.bordered)
+            Text(title)
+                .frame(minHeight: 48)
+                .padding(.horizontal, 16)
+                .background {
+                    if theme == "OLED Sort" {
+                        RoundedRectangle(cornerRadius: 14)
+                            .fill(.thinMaterial)
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.15))
+                            }
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(theme == "OLED Sort" ? Color.white : Color.accentColor)
     }
 }
 
