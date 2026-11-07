@@ -107,7 +107,7 @@ struct Home: View {
     private var visibleJobs: [Job] { model.jobs.filter { !hiddenJobs.contains($0.id) } }
     private var pendingJobs: Int { model.jobs.filter { $0.status.active }.count }
 
-    var body: some View {
+    private var homeContent: some View {
         ScrollViewReader { proxy in
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
@@ -125,6 +125,10 @@ struct Home: View {
         }
         .onChange(of: showClips) { proxy.scrollTo("clips", anchor: .top) }
         }
+    }
+
+    private var homePresentation: some View {
+        homeContent
         .onAppear {
             edit(model.activeProfile)
             setup = model.address.isEmpty || model.isDemo
@@ -161,6 +165,10 @@ struct Home: View {
                     }
             }
         }
+    }
+
+    var body: some View {
+        homePresentation
         .confirmationDialog("Skjul afsluttede jobs på denne telefon?", isPresented: $confirmClear) {
             Button("Skjul afsluttede jobs", role: .destructive) {
                 hiddenJobs.formUnion(model.jobs.filter { !$0.status.active }.map(\.id))
@@ -1201,41 +1209,7 @@ private struct ChatView: View {
         }
         .listStyle(.plain)
         .refreshable { if task == nil { loadHistory() } }
-        .safeAreaInset(edge: .bottom) {
-            VStack(alignment: .leading, spacing: 8) {
-                if task == nil {
-                    HStack {
-                        Menu("Skabeloner") {
-                            ForEach(PromptExample.examples) { example in
-                                Button(example.text) { draft = example.text }
-                            }
-                        }.frame(minHeight: 44)
-                        Spacer()
-                        Button {
-                            if dictation.active { dictation.stop() }
-                            else {
-                                let prefix = draft.isEmpty ? "" : draft + " "
-                                Task { await dictation.start { draft = prefix + $0 } }
-                            }
-                        } label: {
-                            Image(systemName: dictation.active ? "stop.circle" : "mic")
-                                .frame(minWidth: 48, minHeight: 48)
-                        }.accessibilityLabel(dictation.active ? "Stop diktering" : "Dikter chatbesked")
-                    }
-                    if let problem = dictation.problem { Text(problem).font(.caption) }
-                }
-                TextField("Din besked", text: $draft, axis: .vertical)
-                    .textFieldStyle(.roundedBorder).lineLimit(2...5).frame(minHeight: 48)
-                if task != nil {
-                    Button { stop() } label: { Text("Stop modtagelse").frame(minHeight: 48) }
-                        .buttonStyle(.bordered)
-                } else {
-                    Button { send() } label: { Text("Send besked").frame(minHeight: 48) }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                }
-            }.padding(12).background(.regularMaterial)
-        }
+        .safeAreaInset(edge: .bottom) { composer }
         .onAppear {
             guard !loaded else { return }
             loaded = true
@@ -1245,6 +1219,42 @@ private struct ChatView: View {
         .onDisappear { stop(); dictation.stop() }
         .task { await loadModels() }
         .sensoryFeedback(.success, trigger: completedReplies)
+    }
+
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if task == nil {
+                HStack {
+                    Menu("Skabeloner") {
+                        ForEach(PromptExample.examples) { example in
+                            Button(example.text) { draft = example.text }
+                        }
+                    }.frame(minHeight: 44)
+                    Spacer()
+                    Button {
+                        if dictation.active { dictation.stop() }
+                        else {
+                            let prefix = draft.isEmpty ? "" : draft + " "
+                            Task { await dictation.start { draft = prefix + $0 } }
+                        }
+                    } label: {
+                        Image(systemName: dictation.active ? "stop.circle" : "mic")
+                            .frame(minWidth: 48, minHeight: 48)
+                    }.accessibilityLabel(dictation.active ? "Stop diktering" : "Dikter chatbesked")
+                }
+                if let problem = dictation.problem { Text(problem).font(.caption) }
+            }
+            TextField("Din besked", text: $draft, axis: .vertical)
+                .textFieldStyle(.roundedBorder).lineLimit(2...5).frame(minHeight: 48)
+            if task != nil {
+                Button { stop() } label: { Text("Stop modtagelse").frame(minHeight: 48) }
+                    .buttonStyle(.bordered)
+            } else {
+                Button { send() } label: { Text("Send besked").frame(minHeight: 48) }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }.padding(12).background(.regularMaterial)
     }
 
     @ViewBuilder private var modelControls: some View {
