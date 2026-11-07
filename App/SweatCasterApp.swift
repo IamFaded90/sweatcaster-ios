@@ -112,9 +112,16 @@ struct Home: View {
     @AppStorage("spaces.shortcut") private var shortcut = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var backgroundPhase = false
-    @State private var selectedVideoMood: Mood = .hype
+    @AppStorage("video.lastMood") private var selectedVideoMood: Mood = .hype
+    @State private var jobFilter = 0
 
-    private var visibleJobs: [Job] { model.jobs.filter { !hiddenJobs.contains($0.id) } }
+    private var visibleJobs: [Job] {
+        model.jobs.filter { job in
+            !hiddenJobs.contains(job.id) &&
+            (jobFilter == 0 || (jobFilter == 1 && job.status.active) ||
+             (jobFilter == 2 && job.status == .completed) || (jobFilter == 3 && job.status == .failed))
+        }
+    }
     private var pendingJobs: Int { model.jobs.filter { $0.status.active }.count }
 
     private var homeContent: some View {
@@ -544,7 +551,7 @@ struct Home: View {
                 }
             }
             DisclosureGroup("Filtrér klip") {
-                TextField("Spil i filnavnet", text: $clipGame).textFieldStyle(.roundedBorder)
+                TextField("Søg i filnavn", text: $clipGame).textFieldStyle(.roundedBorder)
                 Toggle("Under ét minut", isOn: $shortClips)
                 Toggle("Seneste jobdato først", isOn: $recentJobsFirst)
                 Picker("Jobdato", selection: $clipDateRange) {
@@ -554,6 +561,18 @@ struct Home: View {
                 }
                 Text("Datoen kommer fra tidligere job med klippet.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("Vælg synlige") { model.select(filteredClips) }
+                    .disabled(model.busy || filteredClips.isEmpty)
+                Spacer()
+                Button("Ryd valg") { model.clearSelection() }
+                    .disabled(model.busy || model.selected.isEmpty)
+            }.frame(minHeight: 44)
+            if !model.selected.isEmpty {
+                let seconds = model.clips.filter { model.selected.contains($0.id) }.reduce(0) { $0 + $1.duration_seconds }
+                Text("Valgt spilletid · \(durationLabel(seconds))")
+                    .font(.caption.bold()).foregroundStyle(.cyan)
             }
             if model.clips.isEmpty { Text("Ingen klip at vise.") }
             if !model.clips.isEmpty && filteredClips.isEmpty { Text("Ingen klip matcher filteret.") }
@@ -693,6 +712,12 @@ struct Home: View {
     private var jobSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             heading("3. Følg dine videoer").accessibilityFocused($jobsFocus)
+            Picker("Vis jobs", selection: $jobFilter) {
+                Text("Alle").tag(0)
+                Text("Aktive").tag(1)
+                Text("Klar").tag(2)
+                Text("Fejl").tag(3)
+            }.pickerStyle(.segmented)
             if model.uncertain {
                 Text("Starten blev ikke bekræftet. Tjek joblisten for at se, om dine klip allerede er i gang.")
                 action("Jeg har tjekket listen") {
@@ -1628,6 +1653,7 @@ private struct ChatTurn: Identifiable, Codable {
     var reply = ""
     var notice: String?
     var source: String?
+    var favorite: Bool?
 }
 
 private struct LoadingSkeleton: View {
@@ -2029,6 +2055,9 @@ private struct ChatView: View {
     @AppStorage("chat.voiceBot") private var voiceBotID = ""
     @AppStorage("village.bots") private var voiceBotData = Data()
     @FocusState private var composerFocused: Bool
+    @State private var chatSearch = ""
+    @State private var favoritesOnly = false
+    @State private var scrollRequest = 0
 
     private var voiceBots: [VillageBot] {
         (try? JSONDecoder().decode([VillageBot].self, from: voiceBotData)) ?? []
@@ -2084,6 +2113,12 @@ private struct ChatView: View {
                                 if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
                                 Text("Researcher bruger internettet, når en websøgning er nødvendig.")
                                     .font(.caption).foregroundStyle(.secondary)
+                                TextField("Søg i samtalen", text: $chatSearch).textFieldStyle(.roundedBorder)
+                                Toggle("Vis kun favoritter", isOn: $favoritesOnly)
+                                ShareLink(item: conversationText) {
+                                    Label("Eksportér samtale", systemImage: "square.and.arrow.up")
+                                        .frame(minHeight: 44)
+                                }.disabled(turns.isEmpty)
                             }.padding(.top, 8)
                         }
                         transcriptRows
@@ -2111,6 +2146,8 @@ private struct ChatView: View {
                 .defaultScrollAnchor(.bottom)
                 .onChange(of: turns.count) { scrollChat(proxy) }
                 .onChange(of: streamedText) { scrollChat(proxy) }
+                .onChange(of: scrollRequest) { scrollChat(proxy) }
+                .onChange(of: draft) { UserDefaults.standard.set(draft, forKey: storageKey + ".draft") }
                 .safeAreaInset(edge: .bottom) { composer }
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
@@ -2127,6 +2164,7 @@ private struct ChatView: View {
                     loaded = true
                     draft = initialDraft
                     loadHistory()
+                    if draft.isEmpty { draft = UserDefaults.standard.string(forKey: storageKey + ".draft") ?? initialDraft }
                     scrollChat(proxy)
                 }
                 .onDisappear { stop(); dictation.stop(); speech.stopSpeaking(at: .immediate) }
@@ -2169,13 +2207,21 @@ private struct ChatView: View {
             TextField("Din besked", text: $draft, axis: .vertical)
                 .textFieldStyle(.roundedBorder).lineLimit(2...5).frame(minHeight: 48)
                 .focused($composerFocused)
+            HStack {
+                Text("\(draft.count) / 2.000").font(.caption.monospacedDigit())
+                    .foregroundStyle(draft.count > 2000 ? Color.red : Color.secondary)
+                Spacer()
+                Button("Ryd") { draft = "" }.disabled(draft.isEmpty || task != nil)
+                Button("Nyeste", systemImage: "arrow.down") { composerFocused = false; scrollRequest += 1 }
+                    .accessibilityHint("Flytter fokus væk fra tastaturet og viser den nyeste besked")
+            }.frame(minHeight: 36)
             if task != nil {
                 Button { stop() } label: { Text("Stop modtagelse").frame(minHeight: 48) }
                     .buttonStyle(.bordered)
             } else {
                 Button { send() } label: { Text("Send besked").frame(minHeight: 48) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 2000)
             }
         }.padding(12).background(.regularMaterial)
     }
@@ -2222,7 +2268,7 @@ private struct ChatView: View {
     }
 
     private var transcriptRows: some View {
-        ForEach(turns) { turn in
+        ForEach(filteredTurns) { turn in
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
                     Spacer(minLength: 44)
@@ -2237,6 +2283,11 @@ private struct ChatView: View {
                         ChatTranscriptView(reply: turn.reply)
                         Button("Læs svaret op", systemImage: "speaker.wave.2") { speak(turn.reply) }
                             .frame(minHeight: 44)
+                        HStack {
+                            Button(turn.favorite == true ? "Fjern favorit" : "Favorit",
+                                   systemImage: turn.favorite == true ? "star.fill" : "star") { toggleFavorite(turn.id) }
+                            Button("Slet", systemImage: "trash", role: .destructive) { deleteTurn(turn.id) }
+                        }.frame(minHeight: 44)
                     }
                     .padding(14)
                     .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
@@ -2260,6 +2311,29 @@ private struct ChatView: View {
             }
             .id(turn.id)
         }
+    }
+
+    private var filteredTurns: [ChatTurn] {
+        let query = chatSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        return turns.filter { turn in
+            (!favoritesOnly || turn.favorite == true) &&
+            (query.isEmpty || turn.prompt.localizedCaseInsensitiveContains(query) || turn.reply.localizedCaseInsensitiveContains(query))
+        }
+    }
+
+    private var conversationText: String {
+        turns.map { "Dig: \($0.prompt)\n\($0.source ?? "AI"): \($0.reply)" }.joined(separator: "\n\n")
+    }
+
+    private func toggleFavorite(_ id: UUID) {
+        guard let index = turns.firstIndex(where: { $0.id == id }) else { return }
+        turns[index].favorite = turns[index].favorite != true
+        save()
+    }
+
+    private func deleteTurn(_ id: UUID) {
+        turns.removeAll { $0.id == id }
+        save()
     }
 
     private func send() {
@@ -2414,6 +2488,7 @@ private struct ChatView: View {
         }
         turns = []
         draft = ""
+        UserDefaults.standard.removeObject(forKey: storageKey + ".draft")
         searchSteps = []
         sourceExcerpt = nil
         sessionID = UUID()

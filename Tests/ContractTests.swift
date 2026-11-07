@@ -273,6 +273,15 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(model.selected.isEmpty)
     }
 
+    @MainActor func testBulkClipSelectionCanBeCleared() async {
+        let model = Model(api: MockAPI())
+        await model.refresh()
+        model.select(model.clips)
+        XCTAssertEqual(model.selected.count, min(model.clips.count, model.capabilities?.limit ?? 0))
+        model.clearSelection()
+        XCTAssertTrue(model.selected.isEmpty)
+    }
+
     @MainActor func testIncompatibleVersionPreventsSubmission() async {
         let model = Model(api: UncertainAPI(version: "2"))
         await model.refresh()

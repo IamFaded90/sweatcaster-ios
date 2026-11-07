@@ -143,8 +143,10 @@ struct OfflineStudio: View {
                 loaded = true
                 enabled = true
                 loadPrivateConversation()
+                prompt = UserDefaults.standard.string(forKey: "private.chat.draft") ?? ""
                 if privateBotID.isEmpty { privateBotID = privateBots.first?.id.uuidString ?? "" }
             }
+            .onChange(of: prompt) { UserDefaults.standard.set(prompt, forKey: "private.chat.draft") }
         }
     }
 
@@ -192,6 +194,10 @@ struct OfflineStudio: View {
                 Toggle("Brug importeret LoRA", isOn: $useLoRA).disabled(task != nil)
             }
             Button("Billedhistorik") { showHistory = true }.frame(minHeight: 44)
+            ShareLink(item: privateConversationText) {
+                Label("Eksportér privat samtale", systemImage: "square.and.arrow.up")
+                    .frame(minHeight: 44)
+            }.disabled(turns.isEmpty)
             Text(textReady && imageReady ? "Klar til flytilstand · Chat og billeder"
                  : textReady ? "Klar til flytilstand · Chat"
                  : imageReady ? "Klar til flytilstand · Billeder" : "Lokale modeller mangler")
@@ -224,6 +230,9 @@ struct OfflineStudio: View {
                         Text("Billedet er slettet.").foregroundStyle(.secondary)
                     }
                 }
+                Button("Slet samtaleled", systemImage: "trash", role: .destructive) {
+                    deleteTurn(turn.id)
+                }.frame(minHeight: 44)
             }
             .padding(14).background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
         }.id(turn.id)
@@ -243,13 +252,19 @@ struct OfflineStudio: View {
                     Button("Åbn billedhistorik", systemImage: "photo.on.rectangle") { showHistory = true }
                 } label: {
                     Image(systemName: "plus").frame(width: 48, height: 48)
-                }.accessibilityLabel("Billeder").disabled(task != nil || !hasPrompt)
+                }.accessibilityLabel("Billeder").disabled(task != nil || !hasPrompt || prompt.count > 2000)
                 Button { sendPrivateMessage() } label: {
                     Image(systemName: "arrow.up").frame(width: 48, height: 48)
                 }
                 .buttonStyle(.borderedProminent).tint(.pink)
                 .accessibilityLabel("Send besked")
-                .disabled(!textReady || !hasPrompt || task != nil)
+                .disabled(!textReady || !hasPrompt || prompt.count > 2000 || task != nil)
+            }
+            HStack {
+                Text("\(prompt.count) / 2.000").font(.caption.monospacedDigit())
+                    .foregroundStyle(prompt.count > 2000 ? Color.red : Color.secondary)
+                Spacer()
+                Button("Ryd") { prompt = "" }.disabled(prompt.isEmpty || task != nil)
             }
         }.padding(12).background(.ultraThinMaterial)
     }
@@ -321,6 +336,17 @@ struct OfflineStudio: View {
     private func newPrivateConversation() {
         turns = []; prompt = ""; answer = ""; status = ""
         UserDefaults.standard.removeObject(forKey: "private.chat.turns")
+        UserDefaults.standard.removeObject(forKey: "private.chat.draft")
+    }
+
+    private var privateConversationText: String {
+        turns.map { "Dig: \($0.prompt)\n\(selectedPrivateBot?.name ?? "Privat bot"): \($0.reply)" }
+            .joined(separator: "\n\n")
+    }
+
+    private func deleteTurn(_ id: UUID) {
+        turns.removeAll { $0.id == id }
+        savePrivateConversation()
     }
 
     private func deleteImage(_ file: URL) {

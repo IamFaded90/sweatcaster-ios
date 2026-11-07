@@ -169,6 +169,17 @@ import Observation
         selected.insert(clip.id)
     }
 
+    func select(_ clips: [Clip]) {
+        guard !busy else { return }
+        let limit = capabilities?.limit ?? 0
+        for clip in clips where selected.count < limit { selected.insert(clip.id) }
+    }
+
+    func clearSelection() {
+        guard !busy else { return }
+        selected.removeAll()
+    }
+
     func submit(_ mood: Mood) async {
         guard canSubmit, let capabilities, capabilities.moods.contains(mood), cancelling.isEmpty else { return }
         let batch = Batch(clip_ids: clips.filter { selected.contains($0.id) }.map(\.id), mood: mood, options: options)
