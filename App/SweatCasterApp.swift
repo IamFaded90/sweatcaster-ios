@@ -72,6 +72,7 @@ struct Home: View {
     @State private var showHelp = false
     @State private var showAgentHub = false
     @State private var showPhoneModels = false
+    @State private var showOfflineStudio = false
     @State private var confirmClear = false
     @State private var hiddenJobs = Set<String>()
     @AppStorage("spaces.notes") private var notes = ""
@@ -148,6 +149,7 @@ struct Home: View {
             AgentHub(api: model.api as? LiveAPI)
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
+        .sheet(isPresented: $showOfflineStudio) { OfflineStudio() }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
                 List {
@@ -337,6 +339,7 @@ struct Home: View {
 
     @ViewBuilder private var appearanceSettings: some View {
         action("Lokale modeller") { showPhoneModels = true }
+        action("NSFW / Uncensored") { showOfflineStudio = true }
         DisclosureGroup("Visning og jobhistorik") {
             Picker("Tema", selection: $theme) {
                 ForEach(["System", "Lys", "Mørk"], id: \.self) { Text($0) }
