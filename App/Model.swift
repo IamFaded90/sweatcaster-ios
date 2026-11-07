@@ -35,7 +35,10 @@ import Observation
         return error?.title
     }
     var hasActive: Bool { jobs.contains { $0.status.active } }
-    var blocked: Bool { !(capabilities?.missingRequired.isEmpty ?? true) }
+    var blocked: Bool {
+        let missing = capabilities?.missingRequired ?? []
+        return missing.contains { options.commentary != false || $0.name == "ffmpeg" || $0.name == "ffprobe" }
+    }
     var canSubmit: Bool {
         connected && !busy && !refreshing && !uncertain && !blocked && !selected.isEmpty && options.roi.valid
     }

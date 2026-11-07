@@ -86,6 +86,7 @@ struct Options: Codable, Sendable {
     var roi = ROI()
     var crop_mode = Crop.auto
     var denoise = false
+    var commentary: Bool? = nil
 }
 struct Batch: Codable, Sendable {
     let clip_ids: [String]

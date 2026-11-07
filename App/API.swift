@@ -460,6 +460,16 @@ struct V2HubEvent: Decodable, Sendable {
 }
 
 extension LiveAPI {
+    func deletePCVideo(_ id: String) async throws {
+        guard validWireID(id) else { throw V2Failure.invalidInput }
+        var request = try v2Request("jobs/\(id)/video", method: "DELETE")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONEncoder().encode(["confirm_job_id": id])
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw V2Failure.invalidResponse }
+        guard http.statusCode == 200 else { throw v2HTTPError(http.statusCode, data: data) }
+    }
+
     func v2Models() async throws -> V2Models { try await v2JSON("models") }
     func v2Hub() async throws -> V2Hub { try await v2JSON("agent-hub") }
     func v2Achievements() async throws -> V2Achievements { try await v2JSON("achievements") }

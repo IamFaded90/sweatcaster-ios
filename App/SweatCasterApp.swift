@@ -1,5 +1,7 @@
 import AVKit
 import UniformTypeIdentifiers
+import PhotosUI
+import ImageIO
 import Speech
 import Observation
 import AppIntents
@@ -88,6 +90,10 @@ struct Home: View {
     @State private var showOfflineStudio = false
     @State private var showSavedVideos = false
     @State private var savedVideos: [URL] = []
+    @State private var pendingLocalDeletion: URL?
+    @State private var localDeletionError = false
+    @State private var pcDeletion: (id: String, api: LiveAPI)?
+    @State private var deletingPCVideo = false
     @AppStorage("app.text.scale") private var textScale = 0.0
     @State private var clipGame = ""
     @State private var shortClips = false
@@ -188,6 +194,15 @@ struct Home: View {
 
     var body: some View {
         homePresentation
+        .confirmationDialog("Slet den redigerede video fra PC’en?", isPresented: Binding(
+            get: { pcDeletion != nil }, set: { if !$0 { pcDeletion = nil } }
+        ), presenting: pcDeletion) { target in
+            Button("Slet video fra PC’en", role: .destructive) {
+                Task { await deletePCVideo(target.id, using: target.api) }
+            }
+        } message: { _ in
+            Text("Originalklippet og eventuelle kopier på telefonen bevares.")
+        }
         .confirmationDialog("Skjul afsluttede jobs på denne telefon?", isPresented: $confirmClear) {
             Button("Skjul afsluttede jobs", role: .destructive) {
                 hiddenJobs.formUnion(model.jobs.filter { !$0.status.active }.map(\.id))
@@ -504,6 +519,13 @@ struct Home: View {
     private var moodSection: some View {
         VStack(alignment: .leading, spacing: 10) {
             heading("2. Vælg stil")
+            if !model.isDemo {
+                Toggle("Kommentator", isOn: Binding(
+                    get: { model.options.commentary != false },
+                    set: { model.options.commentary = $0 ? nil : false }
+                ))
+                .disabled(model.busy)
+            }
             if let caps = model.capabilities {
                 if model.blocked { Text("PC’en er ikke klar til at lave videoer.").font(.headline) }
                 if !caps.dependencies.isEmpty {
@@ -580,6 +602,13 @@ struct Home: View {
                         if !model.isDemo {
                             action("Gem på telefonen") { Task { await saveVideo(job) } }.disabled(model.mediaLoading)
                         }
+                        if !model.isDemo, let api = model.api as? LiveAPI {
+                            Button("Slet redigeret video fra PC’en", role: .destructive) {
+                                pcDeletion = (job.id, api)
+                            }
+                            .frame(minHeight: 44)
+                            .disabled(deletingPCVideo || model.mediaLoading)
+                        }
                         action("Del job-resultat") {
                             Task {
                                 if let url = await model.video(job) { shareResult = Media(url: url, demo: model.isDemo) }
@@ -627,6 +656,19 @@ struct Home: View {
         } catch { saveVideoNotice = "Videoen kunne ikke gemmes. Tjek ledig plads." }
     }
 
+    private func deletePCVideo(_ id: String, using api: LiveAPI) async {
+        guard !deletingPCVideo else { return }
+        deletingPCVideo = true
+        defer { deletingPCVideo = false }
+        do {
+            try await api.deletePCVideo(id)
+            await model.refresh()
+            saveVideoNotice = "Den redigerede video er slettet fra PC’en."
+        } catch {
+            saveVideoNotice = "PC’en kunne ikke bekræfte sletningen. Opdater joblisten."
+        }
+    }
+
     private var savedVideoLibrary: some View {
         NavigationStack {
             List {
@@ -637,9 +679,25 @@ struct Home: View {
                     } label: {
                         Label(file.deletingPathExtension().lastPathComponent, systemImage: "film")
                     }
+                    .swipeActions(allowsFullSwipe: false) {
+                        Button("Slet fra telefonen", role: .destructive) { pendingLocalDeletion = file }
+                    }
                 }
             }.navigationTitle("Gemte videoer")
                 .toolbar { Button("Luk") { showSavedVideos = false } }
+                .confirmationDialog("Slet den gemte video fra telefonen?", isPresented: Binding(
+                    get: { pendingLocalDeletion != nil },
+                    set: { if !$0 { pendingLocalDeletion = nil } }
+                ), presenting: pendingLocalDeletion) { file in
+                    Button("Slet fra telefonen", role: .destructive) {
+                        do { try FileManager.default.removeItem(at: file); reloadSavedVideos() }
+                        catch { localDeletionError = true }
+                        pendingLocalDeletion = nil
+                    }
+                }
+                .alert("Videoen kunne ikke slettes.", isPresented: $localDeletionError) {
+                    Button("OK", role: .cancel) {}
+                }
         }
     }
 
@@ -706,6 +764,7 @@ private struct VillageBot: Codable, Identifiable {
     var color = "Blå"
     var prompt = ""
     var voice = "da-DK"
+    var sprite: Data? = nil
 }
 
 private struct VillageBotFile: FileDocument {
@@ -729,6 +788,7 @@ private struct VillageBotBuilder: View {
     @AppStorage("village.bots") private var savedBots = Data()
     @State private var draft = VillageBot()
     @State private var importing = false
+    @State private var selectedSprite: PhotosPickerItem?
     @State private var exporting = false
     @State private var exportFile: VillageBotFile?
     @State private var notice: String?
@@ -764,6 +824,18 @@ private struct VillageBotBuilder: View {
     private var editor: some View {
         Section("Botprofil på telefonen") {
             TextField("Navn", text: $draft.name)
+            PhotosPicker("Vælg figur fra Fotos", selection: $selectedSprite, matching: .images)
+                .onChange(of: selectedSprite) { _, item in
+                    guard let item else { return }
+                    let id = draft.id
+                    Task { await loadSprite(item, botID: id) }
+                }
+            if let data = draft.sprite, let image = UIImage(data: data) {
+                Image(uiImage: image).resizable().interpolation(.none)
+                    .scaledToFit().frame(width: 44, height: 44)
+                    .accessibilityLabel("Bottens figur")
+                Button("Fjern figur") { draft.sprite = nil }
+            }
             Picker("Farve", selection: $draft.color) {
                 ForEach(["Blå", "Lilla", "Grøn"], id: \.self) { Text($0) }
             }
@@ -788,6 +860,20 @@ private struct VillageBotBuilder: View {
                 }
             }
         }
+    }
+
+    private func loadSprite(_ item: PhotosPickerItem, botID: UUID) async {
+        guard let data = try? await item.loadTransferable(type: Data.self),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: 64
+              ] as CFDictionary),
+              let sprite = UIImage(cgImage: thumbnail).pngData(),
+              draft.id == botID, selectedSprite == item else { return }
+        draft.sprite = sprite
+        selectedSprite = nil
     }
 
     private var localTest: some View {
@@ -1029,9 +1115,13 @@ private struct AgentHub: View {
         return Button {
             if !cinematic { localBot = bot }
         } label: {
-            Image(systemName: sleeping ? "moon.stars.fill" : "sparkle")
-                .foregroundStyle(color)
-                .frame(width: 44, height: 44)
+            Group {
+                if !sleeping, let data = bot.sprite, let image = UIImage(data: data) {
+                    Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
+                } else {
+                    Image(systemName: sleeping ? "moon.stars.fill" : "sparkle").foregroundStyle(color)
+                }
+            }.frame(width: 44, height: 44)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(bot.name + ", lokal bot, " + activity)
@@ -1515,6 +1605,13 @@ private struct ChatTranscriptView: View {
     }
 }
 
+private struct SavedAgentSession: Codable {
+    let id: UUID
+    let turns: [ChatTurn]
+    let toolSteps: [String]
+    let pending: Bool
+}
+
 private struct ChatView: View {
     @Environment(\.dismiss) private var dismiss
     let api: (any ChatAPI)?
@@ -1589,7 +1686,7 @@ private struct ChatView: View {
                 Text("AI’en arbejder på din PC. Researcher bruger internettet til websøgning.")
                 transcriptRows
                 if !searchSteps.isEmpty {
-                    DisclosureGroup("Deep Search · \(searchSteps.count) trin") {
+                    DisclosureGroup("Agentaktivitet · \(searchSteps.count) trin") {
                         ForEach(searchSteps.indices, id: \.self) { index in
                             Label(searchSteps[index], systemImage: index + 1 == searchSteps.count ? "circle.fill" : "arrow.down.circle")
                         }
@@ -1742,6 +1839,7 @@ private struct ChatView: View {
         let requiresPC = usePC || PhoneModels.prefersPC(message, previousCharacters: context.count)
         status = "Venter på svar…"
         let input = ChatRequest(message: message, session_id: sessionID)
+        save(pending: true)
         task = Task {
             do {
                 if demo {
@@ -1838,7 +1936,11 @@ private struct ChatView: View {
         case "tool_status":
             let step = safeText(content)
             status = step
-            if searchSteps.last != step { searchSteps.append(step) }
+            if !step.isEmpty && searchSteps.last != step {
+                searchSteps.append(step)
+                if searchSteps.count > 30 { searchSteps.removeFirst() }
+                save(pending: true)
+            }
         case "text":
             streamedText += content
             turns[index].reply = safeText(streamedText)
@@ -1890,15 +1992,25 @@ private struct ChatView: View {
         }.map { String($0.prefix(240)) }
     }
 
-    private func save() {
-        if let data = try? JSONEncoder().encode(turns) {
+    private func save(pending: Bool = false) {
+        let session = SavedAgentSession(id: sessionID, turns: turns, toolSteps: searchSteps, pending: pending)
+        if let data = try? JSONEncoder().encode(session) {
             UserDefaults.standard.set(data, forKey: storageKey)
         }
     }
 
     private func loadHistory() {
-        if let data = UserDefaults.standard.data(forKey: storageKey),
-           let saved = try? JSONDecoder().decode([ChatTurn].self, from: data) {
+        guard let data = UserDefaults.standard.data(forKey: storageKey) else { return }
+        let decoder = JSONDecoder()
+        if let session = try? decoder.decode(SavedAgentSession.self, from: data) {
+            sessionID = session.id
+            turns = session.turns
+            searchSteps = session.toolSteps
+            if session.pending && !turns.isEmpty {
+                turns[turns.count - 1].notice = "Forbindelsen blev afbrudt, før svaret var færdigt."
+                save()
+            }
+        } else if let saved = try? decoder.decode([ChatTurn].self, from: data) {
             turns = saved
         }
     }
