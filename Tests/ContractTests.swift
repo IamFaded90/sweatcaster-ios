@@ -2,6 +2,14 @@ import XCTest
 @testable import SweatCaster
 
 final class ContractTests: XCTestCase {
+    func testOldBotProfilesRemainReadableAfterProfileUpgrade() throws {
+        let data = Data(#"{"id":"7C9E6679-7425-40DE-944B-E07FC1F90AE7","name":"Nova","color":"Blå","prompt":"Vær varm","voice":"da-DK","sprite":null,"personality":"Omsorgsfuld"}"#.utf8)
+        let bot = try JSONDecoder().decode(VillageBot.self, from: data)
+        XCTAssertEqual(bot.name, "Nova")
+        XCTAssertEqual(bot.notifications ?? true, true)
+        XCTAssertEqual(bot.voiceRate ?? 1.0, 1.0)
+    }
+
     func testPCImageFallbackUsesAuthenticatedPNGRoute() async throws {
         let api = try stubAPI()
         let data = try await api.v2GenerateImage(prompt: "Blue star")

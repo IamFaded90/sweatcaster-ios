@@ -34,10 +34,10 @@ jobs:
           mkdir "$staging/Payload"
           ditto "$app" "$staging/Payload/SweatCaster.app"
           cd "$staging"
-          zip -qr "$RUNNER_TEMP/SweatCaster-unsigned.ipa" Payload
-          unzip -tq "$RUNNER_TEMP/SweatCaster-unsigned.ipa"
+          zip -qr "$RUNNER_TEMP/FadedAI-unsigned.ipa" Payload
+          unzip -tq "$RUNNER_TEMP/FadedAI-unsigned.ipa"
       - uses: actions/upload-artifact@v4
         with:
-          name: SweatCaster-unsigned
-          path: ${{ runner.temp }}/SweatCaster-unsigned.ipa
+          name: FadedAI-unsigned
+          path: ${{ runner.temp }}/FadedAI-unsigned.ipa
           if-no-files-found: error
