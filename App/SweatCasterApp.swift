@@ -1,4 +1,5 @@
 import AVKit
+import UniformTypeIdentifiers
 import Speech
 import Observation
 import AppIntents
@@ -97,7 +98,7 @@ struct Home: View {
     @State private var hiddenJobs = Set<String>()
     @AppStorage("spaces.notes") private var notes = ""
     @AppStorage("spaces.onboarded") private var onboarded = false
-    @AppStorage("spaces.theme") private var theme = "System"
+    @AppStorage("spaces.theme") private var theme = "OLED Sort"
     @AppStorage("spaces.font") private var font = "Standard"
     @AppStorage("spaces.motion") private var motion = false
     @AppStorage("spaces.shortcut") private var shortcut = ""
@@ -277,7 +278,7 @@ struct Home: View {
         }
         action(pendingJobs == 0 ? "Video Studio" : "Video Studio · \(pendingJobs) aktive") { space = .gallery }
         action("Hvad kan jeg?") { showHelp = true }
-        action("Agent-Hub") { showAgentHub = true }
+        action("Landsbyen og Agent-Hub") { showAgentHub = true }
         action("Start video · Vælg klip") { space = .brain; showClips += 1 }
         action("Gemte videoer") { reloadSavedVideos(); showSavedVideos = true }
         if !onboarded {
@@ -685,10 +686,184 @@ struct Home: View {
 }
 
 
+private struct VillageBot: Codable, Identifiable {
+    var id = UUID()
+    var name = ""
+    var color = "Blå"
+    var prompt = ""
+    var voice = "da-DK"
+}
+
+private struct VillageBotFile: FileDocument {
+    static var readableContentTypes: [UTType] { [.json] }
+    let bot: VillageBot
+
+    init(bot: VillageBot) { self.bot = bot }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let data = configuration.file.regularFileContents else { throw CocoaError(.fileReadCorruptFile) }
+        bot = try JSONDecoder().decode(VillageBot.self, from: data)
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: try JSONEncoder().encode(bot))
+    }
+}
+
+private struct VillageBotBuilder: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("village.bots") private var savedBots = Data()
+    @State private var draft = VillageBot()
+    @State private var importing = false
+    @State private var exporting = false
+    @State private var exportFile: VillageBotFile?
+    @State private var notice: String?
+    @State private var improving = false
+    @State private var testing = false
+    @State private var testQuestion = ""
+    @State private var testReply = ""
+
+    private var bots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: savedBots)) ?? [] }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Mine bots · \(bots.count) af 10") {
+                    ForEach(bots) { bot in Button(bot.name) { draft = bot } }
+                    Button("Ny bot") { draft = VillageBot() }.disabled(bots.count >= 10)
+                    Button("Importér JSON") { importing = true }.disabled(bots.count >= 10)
+                }
+                editor
+                localTest
+                if let notice { Text(notice) }
+            }
+            .navigationTitle("Botbygger")
+            .toolbar { Button("Luk") { dismiss() } }
+            .fileImporter(isPresented: $importing, allowedContentTypes: [.json], onCompletion: importBot)
+            .fileExporter(isPresented: $exporting, document: exportFile, contentType: .json,
+                          defaultFilename: "FadedAI-bot") { result in
+                if case .failure = result { notice = "Botten kunne ikke eksporteres." }
+            }
+        }
+    }
+
+    private var editor: some View {
+        Section("Botprofil på telefonen") {
+            TextField("Navn", text: $draft.name)
+            Picker("Farve", selection: $draft.color) {
+                ForEach(["Blå", "Lilla", "Grøn"], id: \.self) { Text($0) }
+            }
+            TextField("Systemprompt", text: $draft.prompt, axis: .vertical).lineLimit(3...8)
+            Picker("Stemme", selection: $draft.voice) {
+                Text("Dansk").tag("da-DK")
+                Text("Engelsk").tag("en-US")
+                ForEach(AVSpeechSynthesisVoice.speechVoices().filter {
+                    $0.language == "da-DK" || $0.language == "en-US" || $0.language == "en-GB"
+                }, id: \.identifier) { voice in
+                    Text(voice.name + " · " + voice.language).tag(voice.identifier)
+                }
+            }
+            Button("Forbedr prompt på telefonen") { Task { await improvePrompt() } }
+                .disabled(improving || draft.prompt.isEmpty || !PhoneModels.appleAvailable)
+            Button("Gem bot") { save(draft) }.disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if bots.contains(where: { $0.id == draft.id }) {
+                Button("Eksportér bot") { exportFile = VillageBotFile(bot: draft); exporting = true }
+                Button("Slet lokal bot", role: .destructive) {
+                    persist(bots.filter { $0.id != draft.id })
+                    draft = VillageBot()
+                }
+            }
+        }
+    }
+
+    private var localTest: some View {
+        Section("Prøv AI på denne iPhone") {
+            Text(PhoneModels.appleAvailable ? "Apple Intelligence er klar." : "Apple Intelligence er ikke tilgængelig lige nu.")
+            TextField("Besked til botten", text: $testQuestion, axis: .vertical)
+            Button(testing ? "Svarer på telefonen…" : "Prøv på telefonen") {
+                Task { await testBot() }
+            }
+            .frame(minHeight: 44)
+            .disabled(testing || !PhoneModels.appleAvailable || testQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            if !testReply.isEmpty {
+                Label("Telefon", systemImage: "iphone")
+                Text(testReply).textSelection(.enabled)
+            }
+        }
+    }
+
+    private func testBot() async {
+        guard !testing else { return }
+        testing = true
+        testReply = ""
+        notice = nil
+        defer { testing = false }
+        do {
+            try await PhoneModels.reply(modelID: "apple", prompt: testQuestion,
+                                        instructions: draft.prompt) { testReply = $0 }
+        } catch {
+            notice = "Telefonen kunne ikke svare. Tjek Apple Intelligence, og prøv igen."
+        }
+    }
+
+    private func save(_ bot: VillageBot) {
+        var updated = bots
+        if let index = updated.firstIndex(where: { $0.id == bot.id }) { updated[index] = bot }
+        else {
+            guard updated.count < 10 else { notice = "Du kan gemme op til 10 bots."; return }
+            updated.append(bot)
+        }
+        persist(updated)
+    }
+
+    private func persist(_ value: [VillageBot]) {
+        do { savedBots = try JSONEncoder().encode(value); notice = nil }
+        catch { notice = "Botten kunne ikke gemmes." }
+    }
+
+    private func importBot(_ result: Result<URL, Error>) {
+        do {
+            let url = try result.get()
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            let data = try Data(contentsOf: url)
+            guard data.count <= 256_000 else { throw CocoaError(.fileReadCorruptFile) }
+            var bot = try JSONDecoder().decode(VillageBot.self, from: data)
+            guard !bot.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            bot.id = UUID()
+            save(bot)
+            draft = bot
+        } catch { notice = "Filen kunne ikke læses som en FadedAI-bot." }
+    }
+
+    private func improvePrompt() async {
+        improving = true
+        defer { improving = false }
+        let original = draft
+        var suggestion = ""
+        do {
+            try await PhoneModels.reply(modelID: "apple", prompt:
+                "Omskriv denne idé til en kort systemprompt på dansk. Returnér kun prompten. Idé: " +
+                original.prompt) { suggestion = $0 }
+            if draft.id == original.id && draft.prompt == original.prompt { draft.prompt = suggestion }
+        } catch { notice = "Telefonen kunne ikke forbedre prompten." }
+    }
+}
+
 private struct AgentHub: View {
     @Environment(\.dismiss) private var dismiss
     let api: LiveAPI?
     @State private var selectedRoom = "research"
+    @AppStorage("village.bots") private var localBotsData = Data()
+    @State private var localBot: VillageBot?
+    @State private var villagePause = false
+    @State private var cinematic = false
+    @State private var showBuilder = false
+    @State private var offline = false
+    @State private var completions = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var details: V2Hub.Agent?
     @State private var achievements = false
 
@@ -707,6 +882,16 @@ private struct AgentHub: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    village
+                    if !cinematic {
+                        Toggle("Lad lokale bots hvile", isOn: $villagePause)
+                        Text("Lokale bots følger telefonens ur. PC-agenter følger deres live-status.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if offline { Text("PC’en er offline. Botsene hviler.") }
+                    if !cinematic {
+                    Button("Botbygger", systemImage: "person.crop.circle.badge.plus") { showBuilder = true }
+                        .frame(minHeight: 48)
                     if let failure {
                         RetryNotice(message: failure) { attempt += 1 }
                     }
@@ -723,15 +908,152 @@ private struct AgentHub: View {
                     } else if failure == nil {
                         LoadingSkeleton(label: "Henter agenter…")
                     }
+                    }
                 }.padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
             }
-            .navigationTitle("Agent-Hub")
+            .navigationTitle("Landsbyen")
+            .toolbarVisibility(cinematic ? .hidden : .visible, for: .navigationBar)
+            .sensoryFeedback(.success, trigger: completions)
+            .sheet(isPresented: $showBuilder) { VillageBotBuilder() }
+            .sheet(item: $localBot) { bot in
+                NavigationStack {
+                    List {
+                        Text("Lokal bot")
+                        if !bot.prompt.isEmpty { Text(bot.prompt) }
+                        Button("Åbn Botbygger") {
+                            localBot = nil
+                            showBuilder = true
+                        }
+                    }
+                    .navigationTitle(bot.name)
+                    .toolbar { Button("Luk") { localBot = nil } }
+                }
+            }
             .task(id: attempt) { await followHub() }
             .refreshable { attempt += 1 }
             .toolbar { Button("Luk") { dismiss() } }
             .sheet(item: $details) { agent in agentDetails(agent) }
             .sheet(isPresented: $achievements) { achievementPage }
         }
+    }
+
+    private var village: some View {
+        TimelineView(.periodic(from: .now, by: reduceMotion ? 60 : 0.25)) { timeline in
+            let hour = Calendar.current.component(.hour, from: timeline.date)
+            let night = hour < 7 || hour >= 20
+            GeometryReader { geometry in
+                let size = geometry.size
+                ZStack {
+                    RoundedRectangle(cornerRadius: 20)
+                        .fill(night ? Color(red: 0.03, green: 0.06, blue: 0.14) :
+                            Color(red: 0.10, green: 0.19, blue: 0.29))
+                    Canvas { context, canvas in
+                        for zone in 0..<4 {
+                            let center = villagePoint(zone, size: canvas)
+                            let w = canvas.width * 0.23
+                            let h = canvas.height * 0.15
+                            let tile = Path { path in
+                                path.move(to: CGPoint(x: center.x, y: center.y - h))
+                                path.addLine(to: CGPoint(x: center.x + w, y: center.y))
+                                path.addLine(to: CGPoint(x: center.x, y: center.y + h))
+                                path.addLine(to: CGPoint(x: center.x - w, y: center.y))
+                                path.closeSubpath()
+                            }
+                            context.fill(tile, with: .color([Color.indigo, .blue, .teal, .purple][zone].opacity(0.62)))
+                        }
+                        if offline {
+                            let phase = reduceMotion ? 0 : Int(timeline.date.timeIntervalSince1970 * 24) % 100
+                            for drop in 0..<30 {
+                                let x = canvas.width * Double((drop * 37) % 100) / 100
+                                let y = canvas.height * Double((drop * 61 + phase) % 100) / 100
+                                let line = Path { path in
+                                    path.move(to: CGPoint(x: x, y: y))
+                                    path.addLine(to: CGPoint(x: x - 4, y: y + 10))
+                                }
+                                context.stroke(line, with: .color(.cyan.opacity(0.45)), lineWidth: 1)
+                            }
+                        }
+                    }.accessibilityHidden(true)
+                    ForEach(Array(["Research Lab", "Video Studio", "Kaffeområde", "Sovekrog"].enumerated()), id: \.offset) { item in
+                        let point = villagePoint(item.offset, size: size)
+                        Text(item.element).font(.caption2.bold())
+                            .position(x: point.x, y: point.y + 23)
+                    }
+                    ForEach(Array((snapshot?.agents ?? []).enumerated()), id: \.element.id) { item in
+                        villageAvatar(item.element, index: item.offset, size: size)
+                    }
+                    ForEach(Array(localVillageBots.enumerated()), id: \.element.id) { item in
+                        localVillageAvatar(item.element, index: item.offset, hour: hour, size: size)
+                    }
+                }
+                .foregroundStyle(.white)
+                .clipShape(RoundedRectangle(cornerRadius: 20))
+            }.frame(height: 290)
+        }
+        .overlay(alignment: .topTrailing) {
+            Button(cinematic ? "Vis menu" : "Filmtilstand", systemImage: cinematic ? "eye" : "video") {
+                cinematic.toggle()
+            }
+            .labelStyle(.iconOnly)
+            .accessibilityLabel(cinematic ? "Afslut filmtilstand" : "Start filmtilstand")
+            .frame(minWidth: 48, minHeight: 48)
+            .foregroundStyle(.white)
+        }
+    }
+
+    private var localVillageBots: [VillageBot] {
+        (try? JSONDecoder().decode([VillageBot].self, from: localBotsData)) ?? []
+    }
+
+    private func localVillageAvatar(_ bot: VillageBot, index: Int, hour: Int, size: CGSize) -> some View {
+        let sleeping = villagePause || hour < 7 || hour >= 22
+        let routine = (hour + index) % 3
+        let zone = sleeping ? 3 : routine
+        let center = villagePoint(zone, size: size)
+        let activity = sleeping ? "Sover" : ["Læser", "Øver sig", "Holder kaffepause"][routine]
+        let color: Color = bot.color == "Grøn" ? .green : bot.color == "Lilla" ? .purple : .cyan
+        return Button {
+            if !cinematic { localBot = bot }
+        } label: {
+            Image(systemName: sleeping ? "moon.stars.fill" : "sparkle")
+                .foregroundStyle(color)
+                .frame(width: 44, height: 44)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(bot.name + ", lokal bot, " + activity)
+        .position(x: center.x + CGFloat(index % 5 - 2) * 23,
+                  y: center.y + 42 + CGFloat(index / 5) * 20)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.75), value: zone)
+    }
+
+    private func villagePoint(_ zone: Int, size: CGSize) -> CGPoint {
+        let columns = [0.27, 0.73, 0.27, 0.73]
+        let rows = [0.28, 0.37, 0.65, 0.74]
+        return CGPoint(x: size.width * columns[zone], y: size.height * rows[zone])
+    }
+
+    private func villageAvatar(_ agent: V2Hub.Agent, index: Int, size: CGSize) -> some View {
+        let sleeping = offline || agent.status == .offline
+        let resting = agent.status == .ready
+        let zone = sleeping ? 3 : resting ? 2 : agent.room_id.lowercased().contains("video") ? 1 : 0
+        let point = villagePoint(zone, size: size)
+        let offset = CGFloat(index % 4) * 29 - 43.5
+        return Button {
+            if !cinematic { details = agent }
+        } label: {
+            Image(systemName: sleeping ? "moon.zzz.fill" : "person.crop.circle.fill")
+                .font(.title2).frame(width: 44, height: 44)
+                .modifier(AgentPulse(active: !sleeping && !resting))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(agent.name + ", " + (sleeping ? "Hviler" : status(agent.status)))
+        .contextMenu {
+            if !cinematic {
+                Button("Vis historik og hukommelse") { details = agent }
+            }
+        }
+        .position(x: point.x + offset, y: point.y - 5 - CGFloat(index / 4) * 28)
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.75), value: zone)
     }
 
     private func missionHUD(_ summary: V2Hub.Summary) -> some View {
@@ -845,11 +1167,23 @@ private struct AgentHub: View {
                 try await Task.sleep(for: .seconds(2))
             }
         } catch {
-            if !Task.isCancelled { failure = "Kunne ikke hente Agent-Hub. Tjek forbindelsen til PC’en." }
+            if !Task.isCancelled {
+                if let networkError = error as? URLError {
+                    offline = [.notConnectedToInternet, .cannotConnectToHost, .networkConnectionLost,
+                               .timedOut, .cannotFindHost].contains(networkError.code)
+                }
+                failure = "Kunne ikke hente Agent-Hub. Tjek forbindelsen til PC’en."
+            }
         }
     }
 
     private func apply(_ value: V2Hub) {
+        if let snapshot {
+            let previous = Set(snapshot.agents.flatMap(\.recent_quests).filter { $0.state == .completed }.map(\.id))
+            let next = Set(value.agents.flatMap(\.recent_quests).filter { $0.state == .completed }.map(\.id))
+            if !next.subtracting(previous).isEmpty { completions += 1 }
+        }
+        offline = false
         snapshot = value
         if !value.rooms.contains(where: { $0.id == selectedRoom }) {
             selectedRoom = value.rooms.first?.id ?? ""
@@ -1193,6 +1527,37 @@ private struct ChatView: View {
     @AppStorage("phone.model") private var phoneModel = "apple"
     @State private var usePC = false
     @State private var dictation = ChatDictation()
+    @State private var speech = AVSpeechSynthesizer()
+    @AppStorage("chat.voiceMode") private var voiceMode = false
+    @AppStorage("chat.voiceBot") private var voiceBotID = ""
+    @AppStorage("village.bots") private var voiceBotData = Data()
+
+    private var voiceBots: [VillageBot] {
+        (try? JSONDecoder().decode([VillageBot].self, from: voiceBotData)) ?? []
+    }
+
+    private var voiceControls: some View {
+        DisclosureGroup("Oplæsning på telefonen") {
+            Toggle("Læs færdige svar op", isOn: $voiceMode)
+            if !voiceBots.isEmpty {
+                Picker("Botstemme", selection: $voiceBotID) {
+                    Text("Dansk standard").tag("")
+                    ForEach(voiceBots) { bot in Text(bot.name).tag(bot.id.uuidString) }
+                }
+            }
+            Button("Stop oplæsning") { speech.stopSpeaking(at: .immediate) }
+                .frame(minHeight: 44)
+        }
+    }
+
+    private func speak(_ text: String) {
+        speech.stopSpeaking(at: .immediate)
+        let utterance = AVSpeechUtterance(string: text)
+        let choice = voiceBots.first { $0.id.uuidString == voiceBotID }?.voice ?? "da-DK"
+        utterance.voice = AVSpeechSynthesisVoice(identifier: choice) ??
+            AVSpeechSynthesisVoice(language: choice) ?? AVSpeechSynthesisVoice(language: "da-DK")
+        speech.speak(utterance)
+    }
 
     var body: some View {
         List {
@@ -1201,6 +1566,7 @@ private struct ChatView: View {
                 Text(connection).font(.subheadline)
                 Button("Ny samtale") { newConversation() }.frame(minHeight: 48).disabled(task != nil)
                 StatsBar(turns: turns.count, streaming: task != nil)
+                voiceControls
                 Toggle("Brug PC til næste svar", isOn: $usePC).disabled(task != nil)
                 Text("Korte svar forsøges på telefonen. Længere spørgsmål og PC-opgaver sendes til din PC.")
                     .font(.caption)
@@ -1234,7 +1600,7 @@ private struct ChatView: View {
             draft = initialDraft
             loadHistory()
         }
-        .onDisappear { stop(); dictation.stop() }
+        .onDisappear { stop(); dictation.stop(); speech.stopSpeaking(at: .immediate) }
         .task { await loadModels() }
         .sensoryFeedback(.success, trigger: completedReplies)
     }
@@ -1321,7 +1687,11 @@ private struct ChatView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(turn.prompt).font(.headline)
                 if let source = turn.source { Text(source).font(.caption).foregroundStyle(.secondary) }
-                if !turn.reply.isEmpty { ChatTranscriptView(reply: turn.reply) }
+                if !turn.reply.isEmpty {
+                    ChatTranscriptView(reply: turn.reply)
+                    Button("Læs svaret op", systemImage: "speaker.wave.2") { speak(turn.reply) }
+                        .frame(minHeight: 44)
+                }
                     if let notice = turn.notice {
                         RetryNotice(message: notice) { draft = turn.prompt }.disabled(task != nil)
                     }
@@ -1373,7 +1743,12 @@ private struct ChatView: View {
                     }
                     if !answered { try await answerOnPC(input, index: index) }
                 }
-                if turns[index].notice == nil { completedReplies += 1 }
+                if turns[index].notice == nil {
+                    completedReplies += 1
+                    if voiceMode && !turns[index].reply.isEmpty && !dictation.active {
+                        speak(turns[index].reply)
+                    }
+                }
             } catch is CancellationError {
                 turns[index].notice = "Modtagelsen er stoppet."
             } catch {

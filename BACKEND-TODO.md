@@ -1,8 +1,21 @@
 # Backend To-Do til Grok
 
-Den godkendte første v2-kontrakt erstatter de tidligere forslag til modeller og chat nedenfor. Første version accepterer kun tom eller udeladt `context` og null eller udeladt `parent_message_id`. Chat-SSE bruger kun `tool_status`, `text` og `done`. Agent-Hub er foreløbig en lokal forhåndsvisning af kontraktforslaget. Appen bruger v1, indtil serverens v2-endpoints er klar og testet.
+## Aktuel integration
 
-Forslag til en ny kontrakt. iOS-klienten kalder kun den nuværende v1-kontrakt, indtil vi har aftalt og testet udvidelserne. Bevar token i Bearer-headeren og adgangen via den valgte PC-profil. Nye ID’er skal være stabile, uigennemsigtige strenge. Eksponér hverken filstier, tokens eller interne serverfejl.
+FadedAI bruger v1 til video og v2 til modelvalg, chat og Agent-Hub. Landsbyen læser agentstatus fra det eksisterende hub-snapshot og følger dets SSE-revisioner. V2-chat sender den aftalte request og fortolker kun `tool_status`, `text` og `done`. Tabellen med ældre idéer nedenfor er forslag og beskriver ingen aktive kald.
+
+| Ønske | Afklaring fra PC-backenden |
+| --- | --- |
+| Botvalg i v2-chat | Lever OpenAPI for `bot_id` og `system_prompt`, deres valgfrie/null-værdier, længdegrænser, prioritet og relationen mellem en lokal bot og et PC-agent-ID. Den hidtidige kontrakt afviser ukendte felter med 422. |
+| Særskilt agentstatus | Bekræft om `GET /api/v2/agents/status` findes, og hvad den tilføjer til hub-snapshot og SSE. Lever DTO og revisionsregler, hvis den har egne data som mood eller kaffemaskinelog. |
+| Vision | Aftal requestform, MIME-typer, størrelse og antal billeder, modelkrav, sletning af billeddata og fejlstatus før SSE. |
+| Slet hukommelse | Aftal route, hukommelses-ID og scope, svar ved gentagelse, ejerskab og om hub-revisionen ændres. |
+| Planlagte jobs | Aftal hvordan klienten opretter, redigerer og stopper planer på PC’en, inklusive tidszone, næste kørsel, dubletbeskyttelse og status. |
+| Agentprofilbillede | Aftal profilbilledets felt og autenticitet, hvis billedet skal leveres fra PC’en. Lokale sprites kræver separat test af billedinput i den anvendte iOS-generator. |
+
+Brug Bearer-headeren og den konfigurerede PC-profil for aftalte kald. Eksponér hverken tokens, rå filstier eller interne serverfejl.
+
+## Tidligere kontraktforslag
 
 | Funktion | Foreslået request | Foreslået response |
 | --- | --- | --- |
@@ -29,7 +42,7 @@ iCloud-synkronisering kræver Apple-signering, en aftalt CloudKit-container og s
 
 ## Agent-Hub
 
-Foreslået, endnu uden klientkald. Brug samme Bearer-token og fejlenvelope som v1.
+Implementeret i klienten med samme Bearer-token og fejlenvelope som v1.
 
 | Request | Svar |
 | --- | --- |

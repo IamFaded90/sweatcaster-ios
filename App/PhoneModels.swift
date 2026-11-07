@@ -54,11 +54,12 @@ enum PhoneModels {
                 "seneste nyt", "min pc", "på pc", "file explorer", "agent-hub"].contains { text.contains($0) }
     }
 
-    @MainActor static func reply(modelID: String, prompt: String, update: (String) -> Void) async throws {
+    @MainActor static func reply(modelID: String, prompt: String, instructions: String = "", update: (String) -> Void) async throws {
         var answer = ""
         if modelID == "apple" {
             guard #available(iOS 26.0, *), appleAvailable else { throw PhoneModelError.unavailable }
-            let session = LanguageModelSession(instructions: "Svar kort på brugerens sprog. Du har kun adgang til teksten i chatten.")
+            let defaults = "Svar kort på brugerens sprog. Du har kun adgang til teksten i chatten."
+            let session = LanguageModelSession(instructions: instructions.isEmpty ? defaults : instructions)
             for try await snapshot in session.streamResponse(to: prompt) {
                 try Task.checkCancellation()
                 answer = snapshot.content
