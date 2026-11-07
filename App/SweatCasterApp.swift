@@ -142,7 +142,7 @@ struct Home: View {
         }
     }
 
-    private var homePresentation: some View {
+    private var homeLifecycle: some View {
         homeContent
         .onAppear {
             edit(model.activeProfile)
@@ -151,22 +151,38 @@ struct Home: View {
             openShortcut()
         }
         .onChange(of: shortcut) { openShortcut() }
-        .sensoryFeedback(.selection, trigger: space)
-        .sensoryFeedback(.success, trigger: model.jobs.filter { $0.status == .completed }.map(\.id)) { old, new in
-            new.count > old.count
-        }
         .onChange(of: model.error?.title) { _, title in
             errorDetails = false
             if title != nil { errorFocus = true }
         }
         .onChange(of: model.isDemo) { hiddenJobs.removeAll() }
         .onChange(of: model.address) { hiddenJobs.removeAll() }
-        .sensoryFeedback(.selection, trigger: model.jobs.map { $0.id + $0.status.rawValue }) { old, new in
-            old.count == new.count && !old.isEmpty
+    }
+
+    private var homeFeedback: some View {
+        let completed: [String] = model.jobs.filter { $0.status == .completed }.map(\.id)
+        let statuses: [String] = model.jobs.map { $0.id + $0.status.rawValue }
+        return homeLifecycle
+            .sensoryFeedback(.selection, trigger: space)
+            .sensoryFeedback(.success, trigger: completed) { old, new in
+                new.count > old.count
+            }
+            .sensoryFeedback(.selection, trigger: statuses) { old, new in
+                old.count == new.count && !old.isEmpty
+            }
+    }
+
+    private var homePresentation: some View {
+        let scheme: ColorScheme? = theme == "Lys" ? .light :
+            (theme == "Mørk" || theme == "OLED Sort" ? .dark : nil)
+        let design: Font.Design = font == "Afrundet" ? .rounded :
+            (font == "Monospace" ? .monospaced : .default)
+        return ZStack {
+            homeBackground
+            homeFeedback
         }
-        .preferredColorScheme(theme == "Lys" ? .light : ["Mørk", "OLED Sort"].contains(theme) ? .dark : nil)
-        .fontDesign(font == "Afrundet" ? .rounded : font == "Monospace" ? .monospaced : .default)
-        .background { homeBackground }
+        .preferredColorScheme(scheme)
+        .fontDesign(design)
     }
 
     var body: some View {
