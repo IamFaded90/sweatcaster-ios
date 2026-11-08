@@ -43,6 +43,18 @@ enum FadedColors {
     static let sunset = Color(red: 26 / 255, green: 20 / 255, blue: 16 / 255)
     static let terminal = Color(red: 10 / 255, green: 10 / 255, blue: 14 / 255)
     static let daylightWindow = Color(red: 242 / 255, green: 195 / 255, blue: 95 / 255)
+    static let officeInk = Color(red: 26 / 255, green: 26 / 255, blue: 46 / 255)
+    static let officePaper = Color(red: 255 / 255, green: 248 / 255, blue: 231 / 255)
+    static let officeWorkers = [
+        Color(red: 124 / 255, green: 108 / 255, blue: 242 / 255),
+        Color(red: 233 / 255, green: 169 / 255, blue: 46 / 255),
+        Color(red: 47 / 255, green: 185 / 255, blue: 138 / 255),
+        Color(red: 224 / 255, green: 96 / 255, blue: 126 / 255),
+        Color(red: 138 / 255, green: 143 / 255, blue: 152 / 255),
+        Color(red: 61 / 255, green: 143 / 255, blue: 232 / 255),
+        Color(red: 232 / 255, green: 132 / 255, blue: 58 / 255),
+        Color(red: 47 / 255, green: 175 / 255, blue: 194 / 255)
+    ]
 }
 
 struct FadedPalette {

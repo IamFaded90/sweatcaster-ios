@@ -299,12 +299,14 @@ struct OfflineStudio: View {
     }
     private var privateBots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: botData)) ?? [] }
     private var selectedPrivateBot: VillageBot? {
-        privateBots.first { $0.id.uuidString == privateBotID } ?? privateBots.first
+        if ephemeralOnly { return nil }
+        return privateBots.first { $0.id.uuidString == privateBotID } ?? privateBots.first
     }
 
     private var currentBotTurns: [PrivateChatTurn] { turns.filter(belongsToCurrentBot) }
 
     private func belongsToCurrentBot(_ turn: PrivateChatTurn) -> Bool {
+        if ephemeralOnly { return turn.botID == nil }
         let botID = selectedPrivateBot?.id
         if let owner = turn.botID { return owner == botID }
         return botID == privateBots.first?.id
@@ -1078,7 +1080,7 @@ struct OfflineStudio: View {
     }
 
     private var companionInstructions: String {
-        Self.companionInstructions(for: selectedPrivateBot, preset: personalityPreset)
+        Self.companionInstructions(for: selectedPrivateBot, preset: ephemeralOnly ? "bot" : personalityPreset)
     }
 
     static func companionInstructions(for profile: VillageBot?, preset choice: String = "bot") -> String {
@@ -1090,7 +1092,10 @@ struct OfflineStudio: View {
         case "direct": "Svar direkte, konkret og uden fyld."
         default: ""
         }
-        return [base, custom.isEmpty ? "" : "Din personlighed: " + String(custom.prefix(600)), preset]
+        let role = profile.map { "Dit speciale er \($0.specialtyTitle)." } ?? ""
+        let responsibility = profile?.responsibility?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return [base, role, responsibility.isEmpty ? "" : "Ansvar og grænser: " + String(responsibility.prefix(400)),
+                custom.isEmpty ? "" : "Din personlighed: " + String(custom.prefix(600)), preset]
             .filter { !$0.isEmpty }.joined(separator: " ")
     }
 
@@ -1152,10 +1157,10 @@ struct OfflineStudio: View {
         enabled = true
         UIDevice.current.isBatteryMonitoringEnabled = true
         privateBatteryLevel = UIDevice.current.batteryLevel
-        if let id = pendingBotID, privateBots.contains(where: { $0.id == id }) { privateBotID = id.uuidString }
+        if !ephemeralOnly, let id = pendingBotID, privateBots.contains(where: { $0.id == id }) { privateBotID = id.uuidString }
         pendingBotID = nil
         loadPrivateConversation()
-        if privateBotID.isEmpty { privateBotID = privateBots.first?.id.uuidString ?? "" }
+        if !ephemeralOnly, privateBotID.isEmpty { privateBotID = privateBots.first?.id.uuidString ?? "" }
     }
 
     private func loadPrivateConversation() {

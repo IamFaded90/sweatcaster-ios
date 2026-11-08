@@ -1,6 +1,20 @@
 import XCTest
 @testable import SweatCaster
 
+extension ContractTests {
+    func testSearchFindsChatBotVideoAndFile() {
+        let input: [FadedSearchRecord] = [
+            .init(id: "chat", category: .chat, title: "Træning i morgen", destination: .chat(query: "Træning")),
+            .init(id: "bot", category: .bot, title: "Scout", keywords: "træning", destination: .bot(id: UUID())),
+            .init(id: "video", category: .video, title: "Træningsklip", destination: .video(jobID: "test-video")),
+            .init(id: "file", category: .file, title: "Plan.md", detail: "træning", destination: .file(path: "Plan.md")),
+        ]
+        let matches = FadedSearchIndex(records: input).matches("TRÆNING")
+        XCTAssertEqual(Set(matches.map(\.category)), Set([.chat, .bot, .video, .file]))
+        XCTAssertTrue(FadedSearchIndex(records: input).matches(" ").isEmpty)
+    }
+}
+
 final class ContractTests: XCTestCase {
     func testPairingQRRecognizesLocalAndTailscaleProfiles() throws {
         let home = try PairingQRCode.parse(#"{"version":1,"address":"192.168.1.42","token":"fixture-token"}"#)
@@ -372,6 +386,57 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(model.selected.isEmpty)
     }
 
+    @MainActor func testOfflineVideoDraftAndClaimSurviveRelaunch() async throws {
+        for host in ["192.168.1.20", "192.168.1.24"] {
+            let api = try stubAPI(address: host)
+            let suite = "Tests.\(UUID())"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+            defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: directory) }
+            defaults.set(host, forKey: Pairing.addressKey)
+
+            let first = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+            await first.refresh()
+            let folder = try await api.v2ClipPage(rootID: "2")
+            first.includeFolderClips(folder.clips, folderID: folder.root_id)
+            first.select(folder.clips)
+            first.rememberVideoFolder(folder.root_id)
+            first.rememberVideoMood(.roast)
+
+            let offline = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+            XCTAssertEqual(offline.selected, Set(["clip-one", "clip-two"]))
+            XCTAssertEqual(offline.lastVideoFolder, "2")
+            XCTAssertEqual(offline.lastVideoMood, .roast)
+            XCTAssertTrue(offline.queueVideoOffline(.hype))
+            XCTAssertTrue(offline.selected.isEmpty)
+
+            let reconnecting = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+            XCTAssertEqual(reconnecting.videoOutbox.first?.state, .waiting)
+            await reconnecting.refresh()
+            let before = Stub.timedOutVideoPosts.count
+            await reconnecting.deliverQueuedVideos()
+            if host == "192.168.1.24" {
+                XCTAssertTrue(reconnecting.uncertain)
+                XCTAssertEqual(reconnecting.videoOutbox.first?.state, .attempted)
+                let reopened = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+                await reopened.refresh()
+                await reopened.deliverQueuedVideos()
+                XCTAssertTrue(reopened.uncertain)
+                XCTAssertEqual(Stub.timedOutVideoPosts.count, before + 1)
+                await reopened.acknowledgeAfterReview()
+                XCTAssertTrue(reopened.videoOutbox.isEmpty)
+            } else {
+                XCTAssertEqual(reconnecting.jobs.map(\.clip_id), ["clip-one", "clip-two"])
+                XCTAssertTrue(reconnecting.videoOutbox.isEmpty)
+            }
+            defaults.set("192.168.1.25", forKey: Pairing.addressKey)
+            let other = Model(api: try stubAPI(address: "192.168.1.25"), defaults: defaults, videoStateDirectory: directory)
+            XCTAssertTrue(other.selected.isEmpty)
+            XCTAssertTrue(other.videoOutbox.isEmpty)
+            XCTAssertNil(other.lastVideoFolder)
+        }
+    }
+
     @MainActor func testIncompatibleVersionPreventsSubmission() async {
         let model = Model(api: UncertainAPI(version: "2"))
         await model.refresh()
@@ -397,11 +462,23 @@ private final class TestClock: @unchecked Sendable {
 }
 
 private final class Stub: URLProtocol {
+    static let timedOutVideoPosts = RequestCounter()
+    static let timedOutChatPosts = RequestCounter()
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         guard let url = request.url else { return }
         let auth = request.value(forHTTPHeaderField: "Authorization")
+        if url.host == "192.168.1.24", url.path == "/api/v1/jobs", request.httpMethod == "POST" {
+            Self.timedOutVideoPosts.increment()
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+            return
+        }
+        if url.host == "192.168.1.27", url.path == "/api/v2/chat", request.httpMethod == "POST", auth == "Bearer test-only-token" {
+            Self.timedOutChatPosts.increment()
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+            return
+        }
         if url.path == "/api/v2/images/generate", request.httpMethod == "POST",
            auth == "Bearer test-only-token", request.url?.host == "192.168.1.20" {
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
@@ -428,6 +505,9 @@ private final class Stub: URLProtocol {
         } else if url.path == "/api/v2/clips", url.query == "root_id=2&limit=100" {
             status = 200
             body = #"{"root_id":"2","label":"Fortnite","clips":[{"id":"clip-one","name":"one.mp4","duration_seconds":10,"width":1920,"height":1080},{"id":"clip-two","name":"two.mp4","duration_seconds":20,"width":1920,"height":1080}],"next_cursor":null,"ready":true,"indexing":false}"#
+        } else if url.path == "/api/v2/models", url.host == "192.168.1.27" {
+            status = 200
+            body = #"{"default_model_id":"qwen","models":[{"id":"qwen","label":"Qwen","available":true,"loaded":true,"capabilities":["chat"]}]}"#
         } else if url.path == "/api/v1/clips" {
             status = 200; body = "bad JSON"
         } else if url.path == "/api/v1/jobs", request.httpMethod == "GET" {
@@ -460,6 +540,13 @@ private final class Stub: URLProtocol {
         client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
+}
+
+private final class RequestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    var count: Int { lock.withLock { value } }
+    func increment() { lock.withLock { value += 1 } }
 }
 
 private actor UncertainAPI: SweatAPI {
@@ -581,5 +668,61 @@ extension ContractTests {
         }
         XCTAssertEqual(GrokAPI.redacted("Hej, fixture-", key: "fixture-secret", streaming: true), "Hej, ")
         XCTAssertEqual(GrokAPI.redacted("Hej, fixture-secret", key: "fixture-secret", streaming: false), "Hej, [skjult]")
+    }
+}
+
+extension ContractTests {
+    @MainActor func testPCChatOutboxClaimSurvivesRelaunchAndCannotReplay() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "queue.json")
+        let first = PCChatOutbox(file: file)
+        let home = "192.168.1.42"
+        let external = "100.64.1.42"
+        let session = UUID()
+        let record = try first.enqueue(address: home, prompt: "Søg", message: "Søg i noter", sessionID: session, modelID: "qwen")
+        XCTAssertEqual(first.pendingCount(for: home), 1)
+        XCTAssertEqual(first.pendingCount(for: external), 0)
+        XCTAssertNil(try first.claim(record.id, for: external))
+        let attempt = try XCTUnwrap(first.claim(record.id, for: home))
+        let request = try attempt.request()
+        XCTAssertEqual(request.request_id, record.id)
+        XCTAssertEqual(request.session_id, session.uuidString)
+        XCTAssertEqual(request.message, "Søg i noter")
+        XCTAssertEqual(request.model_id, "qwen")
+
+        let reopened = PCChatOutbox(file: file)
+        XCTAssertNil(try reopened.claim(record.id, for: home))
+        XCTAssertEqual(reopened.reviewCount(for: home), 1)
+        XCTAssertEqual(try reopened.entries(for: home).first?.state, .attempted)
+        try reopened.complete(record.id, for: home, reply: "Noterne er fundet.")
+        XCTAssertNil(try reopened.claim(record.id, for: home))
+        XCTAssertEqual(try reopened.entries(for: home).first?.reply, "Noterne er fundet.")
+        XCTAssertEqual(try reopened.entries(for: home).first?.state, .completed)
+    }
+
+    @MainActor func testPCChatOutboxOnlyTreatsNetworkFailureAsOffline() {
+        XCTAssertTrue(PCChatOutbox.confirmedOffline(.offline))
+        XCTAssertTrue(PCChatOutbox.confirmedOffline(.transport(URLError.timedOut.rawValue)))
+        XCTAssertFalse(PCChatOutbox.confirmedOffline(nil))
+        XCTAssertFalse(PCChatOutbox.confirmedOffline(.token))
+        XCTAssertFalse(PCChatOutbox.confirmedOffline(.http(503, nil)))
+    }
+
+    @MainActor func testPCChatOutboxDrainNeverRepeatsTimedOutPOST() async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "queue.json")
+        let address = "192.168.1.27"
+        let api = try stubAPI(address: address)
+        let outbox = PCChatOutbox(file: file)
+        try outbox.enqueue(address: address, prompt: "Se jobbet", message: "Se jobbet", sessionID: UUID(), modelID: nil)
+        let before = Stub.timedOutChatPosts.count
+        await outbox.deliverReady(using: api)
+        XCTAssertEqual(Stub.timedOutChatPosts.count - before, 1)
+        let reopened = PCChatOutbox(file: file)
+        XCTAssertEqual(reopened.reviewCount(for: address), 1)
+        await reopened.deliverReady(using: api)
+        XCTAssertEqual(Stub.timedOutChatPosts.count - before, 1)
     }
 }

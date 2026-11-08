@@ -1,10 +1,37 @@
 import Foundation
 import Observation
 
+struct SavedVideoClip: Codable, Sendable {
+    let clip: Clip
+    let folderID: String?
+}
+
+struct VideoOutboxItem: Codable, Identifiable, Sendable {
+    enum State: String, Codable, Sendable { case waiting, attempted, rejected }
+
+    let id: UUID
+    let createdAt: Date
+    let batch: Batch
+    let clips: [SavedVideoClip]
+    var state: State
+    var message: String?
+}
+
+private struct VideoStudioState: Codable {
+    var folderID: String?
+    var mood: Mood?
+    var clips: [SavedVideoClip] = []
+    var outbox: [VideoOutboxItem] = []
+}
+
 @MainActor @Observable final class Model {
     private(set) var api: any SweatAPI
     private let demo = MockAPI()
     private let defaults: UserDefaults
+    private let videoStateDirectory: URL
+    private var videoStudio = VideoStudioState()
+    private var clipFolderIDs: [String: String] = [:]
+    private var videoStateReadable = true
     private var pendingKey: String?
     private var revision = 0
     private(set) var isDemo = true
@@ -21,6 +48,9 @@ import Observation
     private(set) var connected = false
     private(set) var latencyMs: Int?
     private(set) var jobsObservationWindow: Int = 0
+    private(set) var videoStorageNotice: String?
+    private(set) var videoOutboxNotice: String?
+    private(set) var checkingVideoOutbox = false
     var error: APIError?
     var options = Options()
     var address: String { defaults.string(forKey: Pairing.addressKey) ?? "" }
@@ -42,13 +72,24 @@ import Observation
         return missing.contains { options.commentary != false || $0.name == "ffmpeg" || $0.name == "ffprobe" }
     }
     var canSubmit: Bool {
-        connected && !busy && !refreshing && !uncertain && !blocked && !selected.isEmpty && options.roi.valid
+        connected && !busy && !refreshing && !checkingVideoOutbox && !uncertain && !blocked && !selected.isEmpty && options.roi.valid &&
+            selected.count <= (capabilities?.limit ?? 0)
     }
 
-    init(api: (any SweatAPI)? = nil, defaults: UserDefaults = .standard) {
+    var lastVideoFolder: String? { videoStudio.folderID }
+    var lastVideoMood: Mood? { videoStudio.mood }
+    var videoOutbox: [VideoOutboxItem] { videoStudio.outbox }
+    var canQueueVideoOffline: Bool {
+        !connected && !isDemo && api is LiveAPI && !busy && !refreshing && !uncertain && !selected.isEmpty &&
+            videoStateReadable && options.roi.valid && videoOutbox.count < 5 && savedVideoClips.allSatisfy { $0.folderID != nil }
+    }
+
+    init(api: (any SweatAPI)? = nil, defaults: UserDefaults = .standard,
+         videoStateDirectory: URL = URL.applicationSupportDirectory.appending(path: "VideoStudio", directoryHint: .isDirectory)) {
         self.defaults = defaults
+        self.videoStateDirectory = videoStateDirectory
         self.api = api ?? demo
-        if api == nil { isDemo = false }
+        isDemo = api.map { !($0 is LiveAPI) } ?? false
         for profile in ConnectionProfile.allCases {
             savedAddresses[profile] = defaults.string(forKey: profile.storageKey)
         }
@@ -68,6 +109,7 @@ import Observation
                 uncertain = defaults.object(forKey: "pending." + address) != nil
             } catch { self.error = error as? APIError ?? .storage }
         }
+        if !isDemo, !address.isEmpty { restoreVideoStudio() }
     }
 
     private func report(_ failure: Error) {
@@ -83,10 +125,11 @@ import Observation
         waitingForStop = []
         pendingKey = demo ? nil : "pending." + address
         uncertain = pendingKey.map { defaults.object(forKey: $0) != nil } ?? false
+        restoreVideoStudio()
     }
 
     func useDemo() async {
-        guard !busy, !refreshing, cancelling.isEmpty, !mediaLoading else { return }
+        guard !busy, !refreshing, !checkingVideoOutbox, cancelling.isEmpty, !mediaLoading else { return }
         install(demo, demo: true)
         await refresh()
     }
@@ -103,7 +146,7 @@ import Observation
     }
 
     private func connect(address: String, token input: String, profile: ConnectionProfile, activateBeforeTest: Bool) async {
-        guard !busy, !refreshing, cancelling.isEmpty, !mediaLoading else { return }
+        guard !busy, !refreshing, !checkingVideoOutbox, cancelling.isEmpty, !mediaLoading else { return }
         busy = true
         defer { busy = false }
         error = nil
@@ -181,11 +224,87 @@ import Observation
     }
     private func apply(_ data: (Capabilities, [Clip]?, [Job], Int?)) {
         capabilities = data.0
-        if let refreshedClips = data.1 { clips = refreshedClips }
-        selected = Set(clips.filter { selected.contains($0.id) }.prefix(data.0.limit).map(\.id))
+        if let refreshedClips = data.1 {
+            clips = refreshedClips
+            selected.formIntersection(clips.map(\.id))
+        }
         replaceJobs(data.2)
         connected = true
         latencyMs = data.3
+    }
+
+    private var videoStateFile: URL? {
+        guard !isDemo, let server = try? Server(address) else { return nil }
+        return videoStateDirectory.appending(path: server.address + ".json", directoryHint: .notDirectory)
+    }
+
+    private var savedVideoClips: [SavedVideoClip] {
+        clips.filter { selected.contains($0.id) }.map { SavedVideoClip(clip: $0, folderID: clipFolderIDs[$0.id]) }
+    }
+
+    private func restoreVideoStudio() {
+        videoStudio = VideoStudioState()
+        clipFolderIDs = [:]
+        videoStateReadable = true
+        videoStorageNotice = nil
+        videoOutboxNotice = nil
+        guard let file = videoStateFile else { return }
+        do {
+            let bytes = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            guard bytes <= 512_000 else { throw APIError.storage }
+            videoStudio = try JSONDecoder().decode(VideoStudioState.self, from: Data(contentsOf: file))
+            var seen = Set<String>()
+            let draft = videoStudio.clips.filter { validWireID($0.clip.id) && seen.insert($0.clip.id).inserted }.prefix(10)
+            clips = draft.map(\.clip)
+            selected = Set(clips.map(\.id))
+            for clip in draft { clipFolderIDs[clip.clip.id] = clip.folderID }
+            uncertain = uncertain || videoStudio.outbox.contains { $0.state == .attempted }
+        } catch let error as CocoaError where [.fileNoSuchFile, .fileReadNoSuchFile].contains(error.code) {
+            return
+        } catch {
+            videoStateReadable = false
+            videoStorageNotice = "Den lokale videokladde kunne ikke læses. Gemte køjobs sendes ikke."
+        }
+    }
+
+    @discardableResult private func saveVideoStudio(_ updated: VideoStudioState) -> Bool {
+        guard let file = videoStateFile, videoStateReadable else { return false }
+        do {
+            let data = try JSONEncoder().encode(updated)
+            guard data.count <= 512_000 else { throw APIError.storage }
+            var folder = videoStateDirectory
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            var values = URLResourceValues()
+            values.isExcludedFromBackup = true
+            try? folder.setResourceValues(values)
+            try data.write(to: file, options: [.atomic, .completeFileProtection])
+            videoStudio = updated
+            videoStorageNotice = nil
+            return true
+        } catch {
+            videoStorageNotice = "Videokladden kunne ikke gemmes på telefonen."
+            return false
+        }
+    }
+
+    private func saveVideoSelection() {
+        var updated = videoStudio
+        updated.clips = savedVideoClips
+        saveVideoStudio(updated)
+    }
+
+    func rememberVideoFolder(_ folderID: String) {
+        guard folderID != videoStudio.folderID else { return }
+        var updated = videoStudio
+        updated.folderID = folderID
+        saveVideoStudio(updated)
+    }
+
+    func rememberVideoMood(_ mood: Mood) {
+        guard mood != videoStudio.mood else { return }
+        var updated = videoStudio
+        updated.mood = mood
+        saveVideoStudio(updated)
     }
 
     func refresh() async {
@@ -214,10 +333,11 @@ import Observation
 
     func toggle(_ clip: Clip) {
         guard !busy else { return }
-        if selected.remove(clip.id) != nil { return }
+        if selected.remove(clip.id) != nil { saveVideoSelection(); return }
         guard selected.count < (capabilities?.limit ?? 0) else { return }
         includeFolderClips([clip])
         selected.insert(clip.id)
+        saveVideoSelection()
     }
 
     func select(_ clips: [Clip]) {
@@ -228,16 +348,127 @@ import Observation
             if selected.insert(clip.id).inserted { added.append(clip) }
         }
         includeFolderClips(added)
+        if !added.isEmpty { saveVideoSelection() }
     }
 
     func clearSelection() {
         guard !busy else { return }
         selected.removeAll()
+        saveVideoSelection()
     }
 
-    func includeFolderClips(_ additional: [Clip]) {
+    func includeFolderClips(_ additional: [Clip], folderID: String? = nil) {
         var known = Set(clips.map(\.id))
         clips.append(contentsOf: additional.filter { known.insert($0.id).inserted })
+        if let folderID {
+            for clip in additional where !selected.contains(clip.id) || clipFolderIDs[clip.id] == nil {
+                clipFolderIDs[clip.id] = folderID
+            }
+        }
+    }
+
+    func queueVideoOffline(_ mood: Mood) -> Bool {
+        guard canQueueVideoOffline else { return false }
+        let sources = savedVideoClips
+        let batch = Batch(clip_ids: sources.map { $0.clip.id }, mood: mood, options: options)
+        guard (try? batch.validate(limit: 10)) != nil else { return false }
+        var updated = videoStudio
+        updated.outbox.append(VideoOutboxItem(id: UUID(), createdAt: .now, batch: batch, clips: sources,
+                                            state: .waiting, message: nil))
+        updated.mood = mood
+        updated.clips = []
+        guard saveVideoStudio(updated) else { return false }
+        selected = []
+        return true
+    }
+
+    func removeQueuedVideo(_ id: UUID) {
+        guard !checkingVideoOutbox, let item = videoOutbox.first(where: { $0.id == id }), item.state != .attempted else { return }
+        if updateQueuedVideo(id, state: nil) { videoOutboxNotice = nil }
+    }
+
+    func deliverQueuedVideos() async {
+        guard !checkingVideoOutbox, connected, !isDemo, !uncertain, videoStateReadable,
+              videoOutbox.contains(where: { $0.state == .waiting }),
+              let live = api as? LiveAPI, live.server.address == address else { return }
+        let source = live.server.address
+        checkingVideoOutbox = true
+        defer { checkingVideoOutbox = false }
+        videoOutboxNotice = nil
+        while !Task.isCancelled && connected && !uncertain && !isDemo && address == source {
+            guard let item = videoOutbox.first(where: { $0.state == .waiting }) else { return }
+            if busy || refreshing || !cancelling.isEmpty {
+                do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
+                continue
+            }
+            guard let caps = capabilities, caps.moods.contains(item.batch.mood),
+                  (try? item.batch.validate(limit: caps.limit)) != nil else {
+                videoOutboxNotice = "Et køjob passer ikke til PC’ens nuværende stilarter eller klipgrænse."
+                return
+            }
+            if caps.missingRequired.contains(where: {
+                item.batch.options.commentary != false || $0.name == "ffmpeg" || $0.name == "ffprobe"
+            }) {
+                videoOutboxNotice = "PC’en mangler en tjeneste til det næste køjob."
+                return
+            }
+            let checkedRevision = revision
+            do {
+                guard try await verifyQueuedClips(item, using: live) else {
+                    if !Task.isCancelled, address == source {
+                        videoOutboxNotice = "Et klip kan ikke bekræftes i sin mappe. Åbn mappen for at kontrollere klippet."
+                    }
+                    return
+                }
+            } catch {
+                if !Task.isCancelled, address == source {
+                    videoOutboxNotice = "PC’en kunne ikke kontrollere køens klip lige nu."
+                }
+                return
+            }
+            guard !Task.isCancelled, connected, address == source, !isDemo, !uncertain else { return }
+            guard checkedRevision == revision, !busy, !refreshing, cancelling.isEmpty else { continue }
+            // Record the claim on disk before the first POST. Relaunch can only reconcile it.
+            guard updateQueuedVideo(item.id, state: .attempted) else { return }
+            for clip in item.clips { includeFolderClips([clip.clip], folderID: clip.folderID) }
+            let accepted = await submit(item.batch, clearSelection: false, limit: caps.limit, queuedID: item.id)
+            if !accepted { return }
+        }
+    }
+
+    private func verifyQueuedClips(_ item: VideoOutboxItem, using live: LiveAPI) async throws -> Bool {
+        guard item.batch.clip_ids == item.clips.map({ $0.clip.id }) else { return false }
+        for (folder, clips) in Dictionary(grouping: item.clips, by: \.folderID) {
+            try Task.checkCancellation()
+            guard let folder else { return false }
+            let current: [Clip]
+            if folder == "legacy" {
+                current = try await live.clips().clips
+            } else {
+                let page = try await live.v2ClipPage(rootID: folder, limit: 100)
+                guard page.root_id == folder, page.ready else { return false }
+                current = page.clips
+            }
+            guard clips.allSatisfy({ saved in
+                current.contains {
+                    $0.id == saved.clip.id && $0.name == saved.clip.name && $0.width == saved.clip.width &&
+                        $0.height == saved.clip.height && abs($0.duration_seconds - saved.clip.duration_seconds) < 0.001
+                }
+            }) else { return false }
+        }
+        return true
+    }
+
+    private func updateQueuedVideo(_ id: UUID, state: VideoOutboxItem.State?, message: String? = nil) -> Bool {
+        var updated = videoStudio
+        guard let index = updated.outbox.firstIndex(where: { $0.id == id }) else { return false }
+        if let state {
+            updated.outbox[index].state = state
+            updated.outbox[index].message = message
+        } else {
+            updated.outbox.remove(at: index)
+        }
+        return saveVideoStudio(updated)
     }
 
     @discardableResult func submit(_ mood: Mood) async -> Bool {
@@ -247,7 +478,7 @@ import Observation
     }
 
     func canRetry(_ job: Job) -> Bool {
-        job.status == .failed && connected && !busy && !refreshing && !uncertain && !blocked &&
+        job.status == .failed && connected && !busy && !refreshing && !checkingVideoOutbox && !uncertain && !blocked &&
             cancelling.isEmpty && options.roi.valid && validWireID(job.clip_id) &&
             capabilities?.moods.contains(job.mood) == true
     }
@@ -258,7 +489,7 @@ import Observation
                          clearSelection: false, limit: capabilities.limit)
     }
 
-    private func submit(_ batch: Batch, clearSelection: Bool, limit: Int) async -> Bool {
+    private func submit(_ batch: Batch, clearSelection: Bool, limit: Int, queuedID: UUID? = nil) async -> Bool {
         busy = true
         revision += 1
         error = nil
@@ -272,14 +503,17 @@ import Observation
                   received.map(\.clip_id) == batch.clip_ids,
                   received.allSatisfy({ $0.mood == batch.mood }) else { throw APIError.malformed }
             merge(received)
-            if clearSelection { selected = [] }
-            clearPending()
+            if clearSelection { selected = []; saveVideoSelection() }
+            if let queuedID, !updateQueuedVideo(queuedID, state: nil) { uncertain = true }
+            else { clearPending() }
             return true
         } catch {
             if (error as? APIError)?.ambiguous ?? true {
                 uncertain = true
                 // Never repeat POST. Load the authoritative list; user reviews before another submission.
                 do { replaceJobs(try await api.jobs().jobs) } catch { report(error) }
+            } else if let queuedID, !updateQueuedVideo(queuedID, state: .rejected, message: (error as? APIError)?.title) {
+                uncertain = true
             } else { clearPending() }
             report(error)
             return false
@@ -293,7 +527,9 @@ import Observation
         defer { busy = false }
         do {
             replaceJobs(try await api.jobs().jobs)
-            selected = []
+            let attempted = videoOutbox.filter { $0.state == .attempted }
+            if attempted.isEmpty { selected = []; saveVideoSelection() }
+            for item in attempted where !updateQueuedVideo(item.id, state: nil) { return }
             clearPending()
             error = nil
         } catch { report(error) }

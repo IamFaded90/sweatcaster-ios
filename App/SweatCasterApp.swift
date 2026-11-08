@@ -122,6 +122,24 @@ private struct DashboardVideoCard: View {
     }
 }
 
+private struct FadedNotesSheet: View {
+    let onClose: () -> Void
+    @AppStorage("spaces.notes") private var notes = ""
+
+    var body: some View {
+        NavigationStack {
+            TextEditor(text: $notes)
+                .font(FadedTypography.body)
+                .scrollContentBackground(.hidden)
+                .padding(FadedSpacing.edge)
+                .background(FadedBackground())
+                .accessibilityLabel("Dine noter")
+                .navigationTitle("Noter")
+                .toolbar { Button("Luk", action: onClose) }
+        }
+    }
+}
+
 struct Home: View {
     private enum SettingsCategory: String, CaseIterable {
         case connection = "Forbindelse", models = "Modeller", appearance = "Udseende"
@@ -153,6 +171,20 @@ struct Home: View {
         let id = UUID()
         let text: String
     }
+    private struct DashboardJob: Codable {
+        let id: String
+        let mood: Mood
+        let status: Stage
+        let progress: Double
+
+        init(_ job: Job) {
+            id = job.id
+            mood = job.mood
+            status = job.status
+            progress = job.progress
+        }
+    }
+    private struct SearchBot: Identifiable { let id: UUID }
     private enum SettingsFollowup { case login, models, privateChat, bots, code, export }
     private enum Space: String, CaseIterable, Identifiable {
         case brain = "Brain", notes = "Notes", gallery = "Gallery", tasks = "Tasks", library = "Library"
@@ -165,6 +197,20 @@ struct Home: View {
     @State private var showSettings = false
     @State private var settingsFollowup: SettingsFollowup?
     @State private var recentChats: [ChatTurn] = []
+    @AppStorage("dashboard.chat.previews") private var dashboardChatPreviews = Data()
+    @State private var dashboardRefresh: Task<Void, Never>?
+    @State private var cachedJobs: [DashboardJob] = []
+    @State private var cachedJobAddress = ""
+    @State private var showSearch = false
+    @State private var searchRecords: [FadedSearchRecord] = []
+    @State private var searchDestination: FadedSearchDestination?
+    @State private var searchBot: SearchBot?
+    @State private var searchChatQuery = ""
+    @State private var searchVideoJobID: String?
+    @State private var searchCodePath: String?
+    @State private var showNotes = false
+    @State private var queuedChatCount = 0
+    @State private var chatReviewCount = 0
     @State private var pingResult: String?
     @State private var pinging = false
     @AppStorage("studio.images.autoSavePhotos") private var saveImagesToPhotos = false
@@ -216,6 +262,7 @@ struct Home: View {
     @State private var catalogLoading: UUID?
     @State private var pageLoading: UUID?
     @State private var videoStartNotice: String?
+    @State private var handledVideoJobRequest: Int?
     @State private var saveVideoNotice: String?
     @State private var confirmClear = false
     @State private var hiddenJobs = Set<String>()
@@ -267,7 +314,7 @@ struct Home: View {
             videoStudio
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Video", systemImage: "film.fill") }.tag(Space.gallery.rawValue)
-            AgentHub(api: model.api as? LiveAPI, isVisible: space == .tasks && selectedModuleTab == nil,
+            AgentHub(api: studioAPI, isVisible: space == .tasks && selectedModuleTab == nil,
                      studioUnlocked: $nsfwSessionUnlocked,
                      onPrivateSessionEnded: showPrivateSessionNotice, onBack: { selectSpace(.brain) })
                 .toolbarVisibility(.hidden, for: .tabBar)
@@ -353,6 +400,7 @@ struct Home: View {
                 ToolbarItem(placement: .principal) { dashboardConnection }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
+                        Button("Søg", systemImage: "magnifyingglass", action: openSearch)
                         Button("Indstillinger", systemImage: "gearshape") { showSettings = true }
                         Button("Skift forbindelse", systemImage: "network") { showLogin = true }.disabled(switchDisabled)
                         Button("Hvad kan jeg?", systemImage: "questionmark.circle") { showHelp = true }
@@ -509,7 +557,9 @@ struct Home: View {
             if title != nil { errorFocus = true }
         }
         .onChange(of: model.isDemo) { hiddenJobs.removeAll() }
-        .onChange(of: model.address) { hiddenJobs.removeAll() }
+        .onChange(of: model.address) { hiddenJobs.removeAll(); readJobCache(); refreshQueueBadge() }
+        .onChange(of: model.connected) { _, online in if online { cacheJobs() } }
+        .onChange(of: model.jobs.map { "\($0.id):\($0.status.rawValue):\($0.progress)" }) { cacheJobs() }
     }
 
     private var homeFeedback: some View {
@@ -534,7 +584,7 @@ struct Home: View {
             (font == "Monospace" ? .monospaced : .default)
         return ZStack {
             homeBackground
-            if model.connected || model.isDemo {
+            if model.connected || model.isDemo || !model.address.isEmpty {
                 homeFeedback
             } else {
                 LoginView(model: model, openLocalChat: { showChat = true },
@@ -551,6 +601,8 @@ struct Home: View {
             FadedTheme.migrateIfNeeded()
             UIDevice.current.isBatteryMonitoringEnabled = true
             StudioScratch.purgeOnceAtLaunch()
+            readJobCache()
+            refreshQueueBadge()
             openShortcut()
         }
         .onOpenURL { url in
@@ -561,6 +613,7 @@ struct Home: View {
             }
         }
         .onChange(of: shortcut) { openShortcut() }
+        .onReceive(NotificationCenter.default.publisher(for: PCChatOutbox.didChange)) { _ in refreshQueueBadge() }
         .onChange(of: phase, initial: true) { _, value in
             if value == .background { LocalCompute.suspend() }
             if value == .active { LocalCompute.resume() }
@@ -636,7 +689,7 @@ struct Home: View {
     private var homeSheets: some View {
         homeVideoDialogs
         .sheet(isPresented: $showCodeWorkspace) {
-            CodeWorkspaceView(api: model.api as? LiveAPI, onBack: { showCodeWorkspace = false })
+            CodeWorkspaceView(api: studioAPI, onBack: { showCodeWorkspace = false }, initialPath: searchCodePath)
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
         .sheet(isPresented: $showOfflineStudio) {
@@ -683,10 +736,52 @@ struct Home: View {
                 if !Task.isCancelled { await model.poll() }
             }
         }
+        .task(id: offlineRecoveryAddress) { await recoverPCConnection() }
+        .task(id: "\(phase == .active && model.connected && !model.isDemo):\(model.address)") {
+            guard phase == .active, model.connected, !model.isDemo, let api = model.api as? LiveAPI else { return }
+            await model.deliverQueuedVideos()
+            guard !Task.isCancelled, model.connected, !model.uncertain, model.address == api.server.address else { return }
+            await PCChatOutbox().deliverReady(using: api)
+        }
+    }
+
+    private var offlineRecoveryAddress: String? {
+        guard phase == .active, !model.isDemo, !model.connected, !model.address.isEmpty else { return nil }
+        return model.address
+    }
+
+    private func recoverPCConnection() async {
+        guard let address = offlineRecoveryAddress else { return }
+        while offlineRecoveryAddress == address && !Task.isCancelled {
+            do { try await Task.sleep(for: .seconds(8)) } catch { return }
+            guard offlineRecoveryAddress == address, !Task.isCancelled else { return }
+            switch model.error {
+            case .offline?, .transport(_)?, nil: await model.refresh()
+            default: return
+            }
+        }
+    }
+
+    private var homeSearchPresentation: some View {
+        homePolling
+            .sheet(isPresented: $showSearch, onDismiss: followSearchResult) {
+                FadedSearchSheet(index: FadedSearchIndex(records: searchRecords)) { destination in
+                    searchDestination = destination
+                    showSearch = false
+                }
+            }
+            .sheet(item: $searchBot) { selection in
+                NavigationStack {
+                    VillageBotProfile(botID: selection.id, api: studioAPI, studioUnlocked: $nsfwSessionUnlocked,
+                                      onPrivateSessionEnded: showPrivateSessionNotice)
+                        .toolbar { Button("Luk") { searchBot = nil } }
+                }
+            }
+            .sheet(isPresented: $showNotes) { FadedNotesSheet(onClose: { showNotes = false }) }
     }
 
     var body: some View {
-        homePolling
+        homeSearchPresentation
             .sheet(item: $media) { Preview(media: $0) }
             .sheet(isPresented: $showChat, onDismiss: refreshAfterChat) { chatSheet }
             .environment(\.fadedPalette, palette)
@@ -696,6 +791,7 @@ struct Home: View {
     }
 
     private func refreshAfterChat() {
+        searchChatQuery = ""
         refreshDashboard()
         if let prompt = imagePromptAfterChat {
             imagePromptAfterChat = nil
@@ -707,13 +803,15 @@ struct Home: View {
     }
 
     private var chatSheet: some View {
-        let session = model.isDemo ? "demo" : (model.connected ? model.address : "offline")
+        let session = model.isDemo ? "demo" : (model.address.isEmpty ? "offline" : model.address)
         let api: (any ChatAPI)? = model.connected || model.isDemo ? model.api as? any ChatAPI : nil
         let status = model.connected ? "Forbundet" : "Ikke forbundet"
         let connection = model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(status)"
         return ChatView(api: api, demo: model.isDemo, initialDraft: "", connection: connection,
                         storageKey: "spaces.chat." + session, onBack: { showChat = false },
-                        openImageStudio: openImagesFromChat)
+                        openImageStudio: openImagesFromChat, pcTargetAddress: (model.api as? LiveAPI)?.server.address,
+                        pcConnectionError: model.error, reconnectPC: { Task { await model.refresh() } },
+                        initialSearch: searchChatQuery)
             .id(session)
     }
 
@@ -741,6 +839,10 @@ struct Home: View {
             FadedCard(accent: palette.purple) { Text("Demo · Kun testdata").font(FadedTypography.action) }
         }
         dashboardActiveJob
+        dashboardConnectionNotice
+        dashboardQueueNotice
+        FadedSecondaryButton("Søg i FadedAI", icon: "magnifyingglass", action: openSearch)
+            .keyboardShortcut("k", modifiers: .command)
         FadedSectionLabel("Hurtige handlinger")
         quickActions
         dashboardRecentChats
@@ -756,7 +858,7 @@ struct Home: View {
                 }
             }
         }
-        if let error = model.error {
+        if model.connected, let error = model.error {
             VStack(alignment: .leading, spacing: 6) {
                 Text(model.errorTitle ?? error.title).font(.headline).accessibilityFocused($errorFocus)
                 if let detail = error.detail {
@@ -768,8 +870,57 @@ struct Home: View {
                     if model.connected || !model.address.isEmpty { Task { await model.refresh() } }
                     else { showLogin = true }
                 }.disabled(switchDisabled)
+                FadedSecondaryButton("Kopiér fejl", icon: "doc.on.doc") { UIPasteboard.general.string = model.errorTitle ?? error.title }
             }
         }
+    }
+
+    @ViewBuilder private var dashboardConnectionNotice: some View {
+        if !model.isDemo, !model.connected {
+            FadedCard(accent: model.refreshing ? palette.cyan : palette.coral) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(model.refreshing ? "Opdaterer forbindelsen…" : (model.errorTitle ?? "Tjekker PC’en…"))
+                        .font(FadedTypography.action)
+                    if !model.refreshing, model.error != nil {
+                        FadedSecondaryButton("Brug Telefon", icon: "iphone") { showChat = true }
+                        FadedSecondaryButton("Prøv igen", icon: "arrow.clockwise") { Task { await model.refresh() } }
+                        if let title = model.errorTitle {
+                            FadedSecondaryButton("Kopiér fejl", icon: "doc.on.doc") { UIPasteboard.general.string = title }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var dashboardQueueNotice: some View {
+        let videos = model.videoOutbox.count
+        if !model.isDemo && queuedChatCount + chatReviewCount + videos > 0 {
+            FadedCard(accent: chatReviewCount > 0 ? palette.coral : palette.cyan) {
+                VStack(alignment: .leading, spacing: 8) {
+                    FadedSectionLabel("I kø")
+                    if queuedChatCount > 0 {
+                        FadedSecondaryButton("Chat i kø · \(queuedChatCount)", icon: "bubble.left") {
+                            selectSpace(.notes); showChat = true
+                        }
+                    }
+                    if chatReviewCount > 0 {
+                        FadedSecondaryButton("Tjek afsendelse · \(chatReviewCount)", icon: "exclamationmark.circle") {
+                            selectSpace(.notes); showChat = true
+                        }
+                    }
+                    if videos > 0 {
+                        FadedSecondaryButton("Videokø · \(videos)", icon: "film") { selectSpace(.gallery); showJobs += 1 }
+                    }
+                }
+            }
+        }
+    }
+
+    private func refreshQueueBadge() {
+        let queue = PCChatOutbox()
+        queuedChatCount = queue.pendingCount(for: model.address)
+        chatReviewCount = queue.reviewCount(for: model.address)
     }
 
     @ViewBuilder private var dashboardConnection: some View {
@@ -786,14 +937,19 @@ struct Home: View {
     }
 
     @ViewBuilder private var dashboardActiveJob: some View {
-        if let job = model.jobs.first(where: { $0.status.active }) {
+        let job = (model.connected || model.isDemo)
+            ? model.jobs.first(where: { $0.status.active }).map(DashboardJob.init)
+            : (cachedJobAddress == model.address ? cachedJobs.first : nil)
+        if let job {
             FadedSectionLabel("I gang")
             FadedCard(accent: palette.cyan) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("\(job.mood.title) · \(job.status.title)").font(FadedTypography.title)
+                    if !model.connected && !model.isDemo { Text("Sidst set på PC’en").font(.caption).foregroundStyle(palette.secondary) }
                     FadedProgress(value: job.progress)
                     FadedSecondaryButton("Følg video", icon: "film") {
                         selectSpace(.gallery)
+                        searchVideoJobID = job.id
                         showJobs += 1
                     }
                 }
@@ -813,7 +969,7 @@ struct Home: View {
     }
 
     @ViewBuilder private var quickActionCards: some View {
-        quickAction("Ny chat", detail: "Dit AI-hold", icon: "message", accent: palette.green) { selectSpace(.notes) }
+        quickAction("Ny chat", detail: "Dit AI-hold", icon: "message", accent: palette.green) { selectSpace(.notes); showChat = true }
         quickAction("Ny video", detail: "Video Studio", icon: "video", accent: palette.cyan) { selectSpace(.gallery) }
         quickAction("Ny bot", detail: "Byg din makker", icon: "person.crop.circle.badge.plus", accent: palette.purple) { showBots = true }
     }
@@ -865,7 +1021,114 @@ struct Home: View {
 
     private func refreshDashboard() {
         reloadSavedVideos()
-        recentChats = Array(ChatArchive.turns().prefix(3))
+        if recentChats.isEmpty { recentChats = (try? JSONDecoder().decode([ChatTurn].self, from: dashboardChatPreviews)) ?? [] }
+        dashboardRefresh?.cancel()
+        dashboardRefresh = Task {
+            let previews = await Task.detached(priority: .utility) {
+                ChatArchive.turns().prefix(3).map { turn in
+                    ChatTurn(id: turn.id, prompt: String(turn.prompt.prefix(240)), source: turn.source, createdAt: turn.createdAt)
+                }
+            }.value
+            guard !Task.isCancelled else { return }
+            recentChats = previews
+            if let data = try? JSONEncoder().encode(previews), dashboardChatPreviews != data { dashboardChatPreviews = data }
+        }
+    }
+
+    private func readJobCache() {
+        let address = model.address
+        cachedJobAddress = address
+        let data = UserDefaults.standard.data(forKey: "dashboard.jobs.\(address)") ?? Data()
+        cachedJobs = (try? JSONDecoder().decode([DashboardJob].self, from: data)) ?? []
+    }
+
+    private func cacheJobs() {
+        guard model.connected, !model.isDemo, !model.address.isEmpty else { return }
+        let jobs = Array(model.jobs.lazy.filter { $0.status.active }.prefix(8).map(DashboardJob.init))
+        cachedJobs = jobs
+        cachedJobAddress = model.address
+        if let data = try? JSONEncoder().encode(jobs) { UserDefaults.standard.set(data, forKey: "dashboard.jobs.\(model.address)") }
+    }
+
+    private func openSearch() {
+        reloadSavedVideos()
+        searchRecords = dashboardSearchRecords
+        showSearch = true
+        Task {
+            let chats = await Task.detached(priority: .userInitiated) {
+                ChatArchive.turns().prefix(1_500).map { turn in
+                    let source: FadedSearchSource = turn.source == GrokAPI.sourceLabel ? .cloud : turn.source == "PC" ? .pc : .phone
+                    return FadedSearchRecord(id: "chat:\(turn.id)", category: .chat, title: turn.prompt,
+                                             detail: String(turn.reply.prefix(160)), source: source,
+                                             destination: .chat(query: String(turn.prompt.prefix(120))))
+                }
+            }.value
+            if showSearch { searchRecords += chats }
+        }
+    }
+
+    private var dashboardSearchRecords: [FadedSearchRecord] {
+        let defaults = UserDefaults.standard
+        let bots = defaults.data(forKey: "village.bots").flatMap { try? JSONDecoder().decode([VillageBot].self, from: $0) } ?? []
+        var records = bots.map { bot in
+            FadedSearchRecord(id: "bot:\(bot.id)", category: .bot, title: bot.name, detail: bot.specialtyTitle,
+                              keywords: bot.responsibility ?? "",
+                              source: .phone, destination: .bot(id: bot.id))
+        }
+        records += savedVideos.prefix(80).map { file in
+            FadedSearchRecord(id: "saved:\(file.lastPathComponent)", category: .video,
+                              title: file.deletingPathExtension().lastPathComponent,
+                              detail: "Gemt video", source: .phone, destination: .savedVideo(file))
+        }
+        records += model.jobs.prefix(80).map { job in
+            let clipName = model.clips.first(where: { $0.id == job.clip_id })?.name ?? job.mood.title
+            return FadedSearchRecord(id: "job:\(job.id)", category: .video, title: clipName,
+                                     detail: job.status.title, source: .pc, destination: .video(jobID: job.id))
+        }
+        records += (defaults.stringArray(forKey: "code.active.context") ?? []).prefix(100).map { path in
+            FadedSearchRecord(id: "file:\(path)", category: .file, title: path, detail: "Valgt i Agent Workspace",
+                              source: .pc, destination: .file(path: path))
+        }
+        records += ConnectionProfile.allCases.map { profile in
+            FadedSearchRecord(id: "connection:\(profile.rawValue)", category: .connection, title: profile.route,
+                              detail: model.savedAddresses[profile] ?? "PC-forbindelse", source: .pc, destination: .connection)
+        }
+        if let notes = defaults.string(forKey: "spaces.notes") {
+            records += notes.split(whereSeparator: \.isNewline).prefix(80).enumerated().map { line in
+                FadedSearchRecord(id: "note:\(line.offset)", category: .note, title: String(line.element),
+                                  source: .phone, destination: .note)
+            }
+        }
+        records.append(FadedSearchRecord(id: "note:editor", category: .note, title: "Noter", source: .phone, destination: .note))
+        records += SettingsCategory.allCases.map { category in
+            FadedSearchRecord(id: "settings:\(category.rawValue)", category: .settings, title: category.rawValue,
+                              detail: category.detail, destination: .settings)
+        }
+        return records
+    }
+
+    private func followSearchResult() {
+        guard let destination = searchDestination else { return }
+        searchDestination = nil
+        switch destination {
+        case .chat(let query):
+            searchChatQuery = query
+            selectSpace(.notes)
+            showChat = true
+        case .bot(let id): searchBot = SearchBot(id: id)
+        case .video(let jobID):
+            searchVideoJobID = jobID
+            selectSpace(.gallery)
+            showJobs += 1
+        case .savedVideo(let file):
+            if savedVideos.contains(file) { media = Media(url: file, demo: false) }
+        case .file(let path):
+            searchCodePath = path
+            showCodeWorkspace = true
+        case .connection: showLogin = true
+        case .note: showNotes = true
+        case .settings: showSettings = true
+        }
     }
 
     @ViewBuilder private var loadingStatus: some View {
@@ -989,7 +1252,7 @@ struct Home: View {
         case .models: showPhoneModels = true
         case .privateChat: openStudio(.chat)
         case .bots: showBots = true
-        case .code: showCodeWorkspace = true
+        case .code: searchCodePath = nil; showCodeWorkspace = true
         case .export: exportDiagnostics()
         }
     }
@@ -1046,7 +1309,7 @@ struct Home: View {
     }
 
     private var switchDisabled: Bool {
-        model.busy || model.refreshing || model.mediaLoading || !model.cancelling.isEmpty
+        model.busy || model.refreshing || model.checkingVideoOutbox || model.mediaLoading || !model.cancelling.isEmpty
     }
 
     private func prunePreviews() {
@@ -1083,6 +1346,7 @@ struct Home: View {
                 videoFeedback
                 clipSection { closeVideoFolder(andShow: "recipe", scroll: scroll) }
                 moodSection.id("recipe")
+                videoOutboxSection
                 jobSection.id("jobs")
             }
             .padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
@@ -1092,8 +1356,10 @@ struct Home: View {
         .toolbar { videoToolbar(scroll) }
         .safeAreaInset(edge: .bottom) { videoBottomBar(scroll) }
         .refreshable { await refreshVideoStudio() }
-        .onChange(of: showJobs) { scroll.scrollTo("jobs", anchor: .top) }
+        .onChange(of: showJobs) { revealVideoJob(scroll) }
         .onChange(of: showClips) { scroll.scrollTo("clips", anchor: .top) }
+        .onChange(of: model.selected) { if !model.selected.isEmpty { videoStartNotice = nil } }
+        .onAppear { if searchVideoJobID != nil { revealVideoJob(scroll) } }
     }
 
     @ToolbarContentBuilder private func videoToolbar(_ scroll: ScrollViewProxy) -> some ToolbarContent {
@@ -1133,6 +1399,19 @@ struct Home: View {
         scroll.scrollTo(target, anchor: .top)
     }
 
+    private func revealVideoJob(_ scroll: ScrollViewProxy) {
+        guard handledVideoJobRequest != showJobs else { return }
+        handledVideoJobRequest = showJobs
+        guard let jobID = searchVideoJobID else { scroll.scrollTo("jobs", anchor: .top); return }
+        searchVideoJobID = nil
+        jobFilter = 0
+        hiddenJobs.remove(jobID)
+        Task { @MainActor in
+            await Task.yield()
+            scroll.scrollTo(model.jobs.contains { $0.id == jobID } ? "video-job:\(jobID)" : "jobs", anchor: .top)
+        }
+    }
+
     private var videoStudioHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
             FadedSignature()
@@ -1148,6 +1427,9 @@ struct Home: View {
     }
 
     @ViewBuilder private var videoFeedback: some View {
+        if let notice = model.videoStorageNotice {
+            FadedCard(accent: palette.coral) { Label(notice, systemImage: "externaldrive.badge.exclamationmark") }
+        }
         if model.selected.isEmpty, let message = videoStartNotice ?? model.errorTitle {
             FadedCard(accent: palette.coral) {
                 Label(message, systemImage: "exclamationmark.circle").font(.headline)
@@ -1168,7 +1450,16 @@ struct Home: View {
                         .foregroundStyle(palette.isDark ? palette.lime : palette.text)
                     FadedSecondaryButton("Ryd klipvalg", icon: "xmark") { model.clearSelection() }.disabled(model.busy)
                 }
-                videoFolders(onDone: onDone)
+                if model.connected || model.isDemo {
+                    videoFolders(onDone: onDone)
+                } else {
+                    Text(model.selected.isEmpty ? "PC’en er offline. Forbind igen for at hente klip." :
+                            "PC’en er offline. Du kan gemme de valgte klip til senere.")
+                        .font(.subheadline).foregroundStyle(palette.secondary)
+                    ForEach(model.clips.filter { model.selected.contains($0.id) }) { clip in
+                        Label(clip.name, systemImage: "film").font(.subheadline)
+                    }
+                }
                 if let folderNotice { Text(folderNotice).font(.caption).foregroundStyle(palette.secondary) }
             }
         }
@@ -1197,11 +1488,15 @@ struct Home: View {
         return VStack(alignment: .leading, spacing: 8) {
             Button {
                 selectedGameFolder = expanded ? nil : id
+                if !expanded { model.rememberVideoFolder(id) }
             } label: {
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
                         Label(title, systemImage: expanded ? "folder.fill" : "folder")
                             .font(.headline)
+                        if model.lastVideoFolder == id {
+                            Text("Senest åbnet").font(.caption).foregroundStyle(palette.secondary)
+                        }
                         if let subtitle { Text(subtitle).font(.caption).foregroundStyle(palette.secondary) }
                     }
                     Spacer()
@@ -1431,7 +1726,7 @@ struct Home: View {
             let pageClips = Array(clips.lazy.filter { validWireID($0.id) && seen.insert($0.id).inserted }.prefix(limit))
             folderPages[id] = pageClips
             folderPageNotices[id] = notice
-            model.includeFolderClips(pageClips)
+            model.includeFolderClips(pageClips, folderID: id)
         } catch {
             guard !Task.isCancelled, videoFolderScope == server, selectedGameFolder == id, pageLoading == ticket else { return }
             folderPageNotices[id] = "Klip i denne mappe kunne ikke hentes."
@@ -1439,15 +1734,23 @@ struct Home: View {
     }
 
     private var availableVideoMood: Mood? {
-        guard let moods = model.capabilities?.moods else { return nil }
-        return moods.contains(selectedVideoMood) ? selectedVideoMood : moods.first
+        let moods = videoMoods
+        let preference = model.isDemo ? selectedVideoMood : model.lastVideoMood ?? .hype
+        return moods.contains(preference) ? preference : moods.first
+    }
+
+    private var videoMoods: [Mood] {
+        if let moods = model.capabilities?.moods { return moods }
+        return model.connected ? [] : Mood.allCases
     }
 
     private var videoStartBlocker: String? {
         if model.uncertain { return "Tjek joblisten, før du starter et nyt job." }
+        if model.checkingVideoOutbox { return "Kontrollerer den lokale videokø…" }
         if model.blocked { return "PC’en mangler en tjeneste. Se Status på PC’en under videoindstillinger." }
         if !model.options.roi.valid { return "Ret området til tekstlæsning i videoindstillinger." }
         if availableVideoMood == nil { return "PC’en har ingen tilgængelige stilarter." }
+        if model.selected.count > (model.capabilities?.limit ?? 0) { return "PC’en tillader færre klip. Ryd klipvalget, og vælg igen." }
         if !model.cancelling.isEmpty { return "Venter på, at PC’en stopper videojobbet." }
         if !model.connected { return "Forbind til PC’en for at starte." }
         return nil
@@ -1455,16 +1758,26 @@ struct Home: View {
 
     private var videoStartControls: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let message = videoStartNotice ?? model.errorTitle ?? videoStartBlocker {
-                Label(message, systemImage: "info.circle").font(.caption).foregroundStyle(palette.secondary)
+            if !model.connected && !model.isDemo {
+                if let notice = videoStartNotice { Text(notice).font(.caption).foregroundStyle(palette.secondary) }
+                Text("Køjob sendes første gang, når appen igen får kontakt til denne PC.")
+                    .font(.caption).foregroundStyle(palette.secondary)
+                FadedPrimaryButton("Gem i lokal kø · \(model.selected.count) klip", icon: "tray.and.arrow.down") {
+                    guard let mood = availableVideoMood else { return }
+                    if model.queueVideoOffline(mood) { selectedGameFolder = nil; videoStartNotice = "Videojob gemt på telefonen." }
+                    else { videoStartNotice = "Køjobbet kunne ikke gemmes. Kontrollér klipvalget." }
+                }.disabled(!model.canQueueVideoOffline || availableVideoMood == nil)
+            } else {
+                if let message = videoStartNotice ?? model.errorTitle ?? videoStartBlocker {
+                    Label(message, systemImage: "info.circle").font(.caption).foregroundStyle(palette.secondary)
+                }
+                FadedPrimaryButton(model.busy ? "Sender videojob…" : "Start videomagi · \(model.selected.count) klip",
+                                   icon: "play.fill") {
+                    guard let mood = availableVideoMood else { return }
+                    if confirmVideoStart { pendingVideoMood = mood }
+                    else { startVideo(mood) }
+                }.disabled(!model.canSubmit || videoStartBlocker != nil)
             }
-            FadedPrimaryButton(model.busy ? "Sender videojob…" : "Start videomagi · \(model.selected.count) klip",
-                               icon: "play.fill") {
-                guard let mood = availableVideoMood else { return }
-                if confirmVideoStart { pendingVideoMood = mood }
-                else { startVideo(mood) }
-            }
-            .disabled(!model.canSubmit || videoStartBlocker != nil)
         }
         .frame(maxWidth: 640)
     }
@@ -1478,13 +1791,14 @@ struct Home: View {
     @ViewBuilder private var videoRecipeContents: some View {
             FadedSectionLabel("Opskrift")
             Text("Vælg din energi").font(FadedTypography.title).foregroundStyle(palette.text)
-            if let caps = model.capabilities {
+            if !videoMoods.isEmpty {
                 let columns = videoTypeSize.isAccessibilitySize ? [GridItem(.flexible(), alignment: .leading)] :
                     [GridItem(.adaptive(minimum: 118), alignment: .leading)]
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
-                    ForEach(Mood.allCases.filter(caps.moods.contains)) { mood in
+                    ForEach(Mood.allCases.filter(videoMoods.contains)) { mood in
                         FadedChip(mood.title, accent: palette.lime, selected: availableVideoMood == mood) {
-                            selectedVideoMood = mood
+                            if model.isDemo { selectedVideoMood = mood }
+                            else { model.rememberVideoMood(mood) }
                         }.disabled(model.busy)
                     }
                 }
@@ -1498,9 +1812,9 @@ struct Home: View {
                 Text(model.options.commentary == false ? "Video uden tale og undertekster" : "Engelsk reaktion med stemme og undertekster")
                     .font(.caption).foregroundStyle(palette.secondary)
             }
+            Toggle("Fjern støj", isOn: Binding(get: { model.options.denoise }, set: { model.options.denoise = $0 }))
+                .tint(palette.lime).disabled(model.busy)
             if let caps = model.capabilities {
-                Toggle("Fjern støj", isOn: Binding(get: { model.options.denoise }, set: { model.options.denoise = $0 }))
-                    .tint(palette.lime).disabled(model.busy)
                 if model.blocked { Label("PC’en er ikke klar til at lave videoer.", systemImage: "exclamationmark.circle").font(.headline) }
                 if !caps.dependencies.isEmpty {
                     DisclosureGroup("Status på PC’en") {
@@ -1510,12 +1824,53 @@ struct Home: View {
                     }
                 }
                 if caps.moods.isEmpty { Text("PC’en tilbyder ingen stilarter lige nu.") }
-                advanced(Binding(get: { model.options }, set: { model.options = $0 }))
-                    .disabled(model.busy)
-                Label(model.options.crop_mode == .auto ? "9:16 · Automatisk beskæring" : "9:16 · Beskær til midten",
-                      systemImage: "aspectratio")
-                    .font(.caption.monospaced()).foregroundStyle(palette.secondary)
             }
+            advanced(Binding(get: { model.options }, set: { model.options = $0 }))
+                .disabled(model.busy)
+            Label(model.options.crop_mode == .auto ? "9:16 · Automatisk beskæring" : "9:16 · Beskær til midten",
+                  systemImage: "aspectratio")
+                .font(.caption.monospaced()).foregroundStyle(palette.secondary)
+    }
+
+    @ViewBuilder private var videoOutboxSection: some View {
+        if !model.videoOutbox.isEmpty {
+            FadedCard(accent: palette.cyan) {
+                VStack(alignment: .leading, spacing: 12) {
+                    FadedSectionLabel("Lokal videokø · \(model.videoOutbox.count) / 5")
+                    Text("Kun til den valgte PC-forbindelse.").font(.caption).foregroundStyle(palette.secondary)
+                    if model.checkingVideoOutbox { ProgressView("Kontrollerer køens klip…") }
+                    if let notice = model.videoOutboxNotice { Text(notice).font(.subheadline).foregroundStyle(palette.secondary) }
+                    ForEach(model.videoOutbox) { item in videoOutboxRow(item) }
+                    if model.connected && model.videoOutbox.contains(where: { $0.state == .waiting }) {
+                        FadedSecondaryButton("Kontrollér lokal kø", icon: "arrow.clockwise") {
+                            Task { await model.deliverQueuedVideos() }
+                        }.disabled(model.checkingVideoOutbox || model.uncertain || switchDisabled)
+                    }
+                }
+            }
+        }
+    }
+
+    private func videoOutboxRow(_ item: VideoOutboxItem) -> some View {
+        let status: String = switch item.state {
+        case .waiting: "Afventer kontrol på PC’en"
+        case .attempted: model.checkingVideoOutbox && model.busy ? "Sender til PC’en…" : "Afsendelse uafklaret. Tjek videojoblisten."
+        case .rejected: item.message ?? "PC’en afviste jobbet."
+        }
+        return VStack(alignment: .leading, spacing: 5) {
+            Divider()
+            Label("\(item.batch.mood.title) · \(item.batch.clip_ids.count) klip", systemImage: "film").font(.headline)
+            Text(item.clips.map { $0.clip.name }.joined(separator: ", ")).font(.caption).foregroundStyle(palette.secondary)
+                .lineLimit(2)
+            Text(item.createdAt, format: .dateTime.day().month().hour().minute())
+                .font(.caption).foregroundStyle(palette.secondary)
+            Text(status).font(.subheadline).foregroundStyle(palette.secondary)
+            if item.state != .attempted {
+                FadedSecondaryButton("Fjern fra lokal kø", icon: "trash", role: .destructive) {
+                    model.removeQueuedVideo(item.id)
+                }.disabled(model.checkingVideoOutbox)
+            }
+        }
     }
 
     private var jobSection: some View {
@@ -1532,7 +1887,10 @@ struct Home: View {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Starten blev ikke bekræftet. Tjek joblisten for at se, om dine klip allerede er i gang.")
                         FadedSecondaryButton("Jeg har tjekket listen", icon: "checkmark") {
-                            Task { await model.acknowledgeAfterReview() }
+                            Task {
+                                await model.acknowledgeAfterReview()
+                                if phase == .active { await model.deliverQueuedVideos() }
+                            }
                         }.disabled(switchDisabled)
                     }
                 }
@@ -1542,7 +1900,7 @@ struct Home: View {
             }
             if let saveVideoNotice { Text(saveVideoNotice).foregroundStyle(palette.secondary) }
             ForEach(visibleJobs.sorted { $0.created_at > $1.created_at }) { job in
-                videoJobCard(job)
+                videoJobCard(job).id("video-job:\(job.id)")
             }
         }
         .sheet(item: $shareResult) { result in
@@ -1746,7 +2104,7 @@ struct Home: View {
 }
 
 
-struct VillageBot: Codable, Identifiable {
+struct VillageBot: Codable, Identifiable, Equatable {
     var id = UUID()
     var name = ""
     var color = "Blå"
@@ -1757,6 +2115,13 @@ struct VillageBot: Codable, Identifiable {
     var notifications: Bool? = true
     var voiceRate: Double? = 1.0
     var language: String? = "da-DK"
+    var specialty: String? = nil
+    var responsibility: String? = nil
+
+    var specialtyTitle: String {
+        let named = specialty?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return named.isEmpty ? "Personlig sparring" : named
+    }
 
     private var playbackVoice: AVSpeechSynthesisVoice? {
         let locale = ["da-DK", "en-US", "en-GB"].contains(voice) ? voice : language ?? "da-DK"
@@ -1820,7 +2185,9 @@ struct VillageBotBuilder: View {
     @Environment(\.dynamicTypeSize) private var typeSize
     @AppStorage("village.bots") private var savedBots = Data()
     @AppStorage(PhoneModels.selectionKey) private var phoneModel = "apple"
+    @AppStorage private var savedEditorDraft: Data
     @State private var draft: VillageBot
+    @State private var draftLoaded = false
     @State private var voicePreview = AVSpeechSynthesizer()
     @State private var importing = false
     @State private var selectedSprite: PhotosPickerItem?
@@ -1845,6 +2212,7 @@ struct VillageBotBuilder: View {
         self.onBack = onBack
         fixedProfile = bot != nil
         _draft = State(initialValue: bot ?? VillageBot())
+        _savedEditorDraft = AppStorage(wrappedValue: Data(), "village.botDraft.\(bot?.id.uuidString ?? "new")")
     }
 
     var body: some View {
@@ -1898,6 +2266,14 @@ struct VillageBotBuilder: View {
             } message: {
                 Text("Botprofilen fjernes fra telefonen og Landsbyen.")
             }
+            .onAppear {
+                guard !draftLoaded else { return }
+                if let restored = try? JSONDecoder().decode(VillageBot.self, from: savedEditorDraft), !fixedProfile || restored.id == draft.id {
+                    draft = restored
+                }
+                draftLoaded = true
+            }
+            .onChange(of: draft) { _, value in updateDraftCache(value) }
             .onDisappear { stopPreview() }
         }
     }
@@ -1911,6 +2287,18 @@ struct VillageBotBuilder: View {
     private var editor: some View {
         Section("Botprofil på telefonen") {
             TextField("Navn", text: $draft.name)
+            if !savedEditorDraft.isEmpty { Text("Gemt som kladde").font(.caption).foregroundStyle(.secondary) }
+            TextField("Speciale, fx Researcher", text: Binding(
+                get: { draft.specialty ?? "" }, set: { draft.specialty = String($0.prefix(64)) }
+            ))
+            Menu("Vælg et speciale", systemImage: "person.crop.circle.badge.checkmark") {
+                ForEach(["Stabschef", "Skribent", "Researcher", "Kode og logik", "Kreativ leder", "SEO", "Økonomi", "Coach"], id: \.self) { role in
+                    Button(role) { draft.specialty = role }
+                }
+            }
+            TextField("Ansvar og grænser", text: Binding(
+                get: { draft.responsibility ?? "" }, set: { draft.responsibility = String($0.prefix(400)) }
+            ), axis: .vertical).lineLimit(2...4)
             PhotosPicker("Vælg figur fra Fotos", selection: $selectedSprite, matching: .images)
                 .onChange(of: selectedSprite) { _, item in
                     guard let item else { return }
@@ -2080,6 +2468,21 @@ struct VillageBotBuilder: View {
             updated.append(bot)
         }
         persist(updated)
+        if bots.contains(where: { $0 == bot }) { savedEditorDraft = Data() }
+    }
+
+    private func updateDraftCache(_ bot: VillageBot) {
+        guard draftLoaded else { return }
+        if fixedProfile, let existing = bots.first(where: { $0.id == bot.id }), existing == bot {
+            savedEditorDraft = Data()
+            return
+        }
+        if !fixedProfile && bots.contains(where: { $0.id == bot.id }) { return }
+        if bot.name.isEmpty && bot.prompt.isEmpty && bot.sprite == nil && !fixedProfile {
+            savedEditorDraft = Data()
+        } else if let data = try? JSONEncoder().encode(bot) {
+            savedEditorDraft = data
+        }
     }
 
     private func persist(_ value: [VillageBot]) {
@@ -2239,7 +2642,6 @@ private struct VillageBotProfile: View {
     let api: LiveAPI?
     @Binding var studioUnlocked: Bool
     let onPrivateSessionEnded: () -> Void
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
     @AppStorage("village.bots") private var savedBots = Data()
     @AppStorage(PhoneModels.selectionKey) private var phoneModel = "apple"
@@ -2247,7 +2649,8 @@ private struct VillageBotProfile: View {
     @State private var showPrivateChat = false
     @State private var showModels = false
     @State private var fullPrompt = false
-    @State private var confirmDelete = false
+    @State private var deletedBot: VillageBot?
+    @State private var deletedIndex = 0
     @State private var testQuestion = ""
     @State private var testReply = ""
     @State private var testTask: Task<Void, Never>?
@@ -2272,6 +2675,13 @@ private struct VillageBotProfile: View {
                     personalityCard(bot)
                     testCard(bot)
                     profileActions
+                } else if let deletedBot {
+                    FadedCard(accent: palette.coral) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("\(deletedBot.name) er slettet.").font(FadedTypography.action)
+                            FadedSecondaryButton("Fortryd", icon: "arrow.uturn.backward", action: restoreBot)
+                        }
+                    }
                 } else {
                     FadedEmptyState(icon: "person.crop.circle.badge.questionmark", title: "Botprofilen findes ikke længere",
                                     detail: "Du kan vælge en anden bot under Mine bots.")
@@ -2296,10 +2706,10 @@ private struct VillageBotProfile: View {
             OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
                           initialPage: .chat, initialBotID: botID)
         }
-        .confirmationDialog("Slet botprofil?", isPresented: $confirmDelete, titleVisibility: .visible) {
-            Button("Slet bot", role: .destructive, action: deleteBot)
-        } message: {
-            Text("Botprofilen fjernes fra telefonen og Landsbyen.")
+        .task(id: deletedBot?.id) {
+            guard let id = deletedBot?.id else { return }
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            if deletedBot?.id == id { deletedBot = nil }
         }
     }
 
@@ -2307,6 +2717,7 @@ private struct VillageBotProfile: View {
         VStack(spacing: 10) {
             VillageBotAvatar(bot: bot, size: 120, radius: 28)
             Text(bot.name).font(.largeTitle.bold()).multilineTextAlignment(.center).accessibilityAddTraits(.isHeader)
+            Text(bot.specialtyTitle).font(FadedTypography.action).foregroundStyle(palette.secondary)
             Text(bot.personality ?? "Nysgerrig")
                 .font(.subheadline.weight(.semibold)).foregroundStyle(palette.isDark ? palette.purple : palette.text)
                 .padding(.horizontal, 12).padding(.vertical, 6).background(palette.raised, in: .capsule)
@@ -2332,6 +2743,9 @@ private struct VillageBotProfile: View {
         FadedCard(accent: palette.purple) {
             VStack(alignment: .leading, spacing: 10) {
                 FadedSectionLabel("Personlighed")
+                if let responsibility = bot.responsibility, !responsibility.isEmpty {
+                    Text(responsibility).font(.subheadline).foregroundStyle(palette.secondary)
+                }
                 if bot.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     Text("Du kan tilføje en systemprompt under Redigér.").font(.subheadline).foregroundStyle(palette.secondary)
                 } else {
@@ -2394,7 +2808,7 @@ private struct VillageBotProfile: View {
                 speech.stopSpeaking(at: .immediate)
                 showBuilder = true
             }
-            FadedSecondaryButton("Slet bot", icon: "trash", role: .destructive) { confirmDelete = true }
+            FadedSecondaryButton("Slet bot", icon: "trash", role: .destructive, action: deleteBot)
         }.frame(maxWidth: .infinity, alignment: .leading).disabled(testTask != nil)
     }
 
@@ -2421,12 +2835,26 @@ private struct VillageBotProfile: View {
 
     private func deleteBot() {
         guard let bots = try? JSONDecoder().decode([VillageBot].self, from: savedBots),
+              let index = bots.firstIndex(where: { $0.id == botID }),
               let remaining = try? JSONEncoder().encode(bots.filter { $0.id != botID }) else {
             notice = "Botprofilen kunne ikke slettes."
             return
         }
+        speech.stopSpeaking(at: .immediate)
+        deletedBot = bots[index]
+        deletedIndex = index
         savedBots = remaining
-        dismiss()
+        notice = nil
+    }
+
+    private func restoreBot() {
+        guard let deletedBot, var bots = try? JSONDecoder().decode([VillageBot].self, from: savedBots),
+              !bots.contains(where: { $0.id == deletedBot.id }), bots.count < 10 else {
+            notice = "Botten kunne ikke gendannes. Tjek, om der er plads på holdet."
+            return
+        }
+        bots.insert(deletedBot, at: min(deletedIndex, bots.count))
+        if let data = try? JSONEncoder().encode(bots) { savedBots = data; self.deletedBot = nil; notice = nil }
     }
 }
 
@@ -2439,6 +2867,7 @@ private struct AgentHub: View {
     let onPrivateSessionEnded: () -> Void
     let onBack: () -> Void
     @State private var selectedRoom = "research"
+    @AppStorage("village.showOffice") private var showOffice = true
     @AppStorage("village.bots") private var localBotsData = Data()
     @State private var localBot: VillageBot?
     @State private var villageChatBot: VillageBot?
@@ -2514,8 +2943,16 @@ private struct AgentHub: View {
             if !cinematic {
                 FadedSignature()
                 Text("Agent-Hub").font(FadedTypography.title).accessibilityAddTraits(.isHeader)
+                Picker("Visning", selection: $showOffice) {
+                    Text("Kontoret").tag(true)
+                    Text("Landsbyen").tag(false)
+                }.pickerStyle(.segmented)
             }
-            village
+            if showOffice && !cinematic {
+                PixelOfficeView(workers: officeWorkers, isVisible: villageVisible, onSelect: openOfficeWorker)
+            } else {
+                village
+            }
             if !cinematic {
                 if offline {
                     Label("PC’en er offline. Botsene hviler.", systemImage: "cloud.rain")
@@ -2526,6 +2963,38 @@ private struct AgentHub: View {
             }
         }
         .padding(FadedSpacing.edge).frame(maxWidth: 640).frame(maxWidth: .infinity)
+    }
+
+    private var officeWorkers: [PixelOfficeWorker] {
+        let sleeping = villageBotsSleep(hour: Calendar.current.component(.hour, from: .now))
+        let local = localVillageBots.map { bot in
+            let id = "bot:\(bot.id.uuidString)"
+            return PixelOfficeWorker(id: id, name: bot.name, specialty: bot.specialtyTitle,
+                                     colorIndex: officeColorIndex(id), status: sleeping ? .offline : .ready)
+        }
+        let remote = (snapshot?.agents ?? []).map { agent in
+            let id = "agent:\(agent.id)"
+            let role = snapshot?.rooms.first(where: { $0.id == agent.room_id })?.name ?? "PC-agent"
+            let status: PixelOfficeWorker.Status = if offline || api == nil { .offline } else {
+                switch agent.status {
+                case .working: .working
+                case .thinking: .thinking
+                case .ready: .ready
+                case .offline: .offline
+                }
+            }
+            return PixelOfficeWorker(id: id, name: agent.name, specialty: role, colorIndex: officeColorIndex(id), status: status)
+        }
+        return local + remote
+    }
+
+    private func officeColorIndex(_ id: String) -> Int {
+        id.utf8.reduce(0) { ($0 + Int($1)) % FadedColors.officeWorkers.count }
+    }
+
+    private func openOfficeWorker(_ worker: PixelOfficeWorker) {
+        if let bot = localVillageBots.first(where: { "bot:\($0.id.uuidString)" == worker.id }) { localBot = bot }
+        else if let agent = snapshot?.agents.first(where: { "agent:\($0.id)" == worker.id }) { details = agent }
     }
 
     private var villageActivity: some View {
@@ -3188,7 +3657,7 @@ private struct Preview: View {
     }
 }
 
-private struct ChatTurn: Identifiable, Codable {
+private struct ChatTurn: Identifiable, Codable, Sendable {
     var id = UUID()
     let prompt: String
     var reply = ""
@@ -3406,12 +3875,23 @@ private struct SavedAgentSession: Codable {
 private enum ChatArchive {
     static let key = "spaces.chat.archive.v1"
 
-    static func append(_ session: SavedAgentSession) {
-        guard !session.turns.isEmpty else { return }
+    @discardableResult static func append(_ session: SavedAgentSession) -> Bool {
+        guard !session.turns.isEmpty else { return false }
         let defaults = UserDefaults.standard
         let saved = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode([SavedAgentSession].self, from: $0) } ?? []
         let updated = [session] + saved.filter { $0.id != session.id }
-        if let data = try? JSONEncoder().encode(Array(updated.prefix(100))) { defaults.set(data, forKey: key) }
+        guard let data = try? JSONEncoder().encode(Array(updated.prefix(100))) else { return false }
+        defaults.set(data, forKey: key)
+        return true
+    }
+
+    static func appendOutboxTurn(_ turn: ChatTurn, to sessionID: UUID) -> Bool {
+        let saved = UserDefaults.standard.data(forKey: key)
+            .flatMap { try? JSONDecoder().decode([SavedAgentSession].self, from: $0) }
+        let session = saved?.first { $0.id == sessionID }
+        let turns = session?.turns ?? []
+        guard !turns.contains(where: { $0.id == turn.id }) else { return true }
+        return append(SavedAgentSession(id: sessionID, turns: turns + [turn], toolSteps: session?.toolSteps ?? [], pending: false))
     }
 
     static func turns() -> [ChatTurn] {
@@ -3718,6 +4198,7 @@ private struct CodeWorkspaceView: View {
 
     let api: LiveAPI?
     let onBack: () -> Void
+    var initialPath: String? = nil
     @AppStorage("code.autonomy") private var autonomy = Autonomy.strict.rawValue
     @State private var files: [V2CodeWorkspace.File] = []
     @State private var selected = Set<String>()
@@ -3744,7 +4225,14 @@ private struct CodeWorkspaceView: View {
                     }
                 }
                 .refreshable { await load() }
-                .task { restoreContext(); await load() }
+                .task {
+                    restoreContext()
+                    await load()
+                    if let initialPath {
+                        path = initialPath
+                        await open(initialPath)
+                    }
+                }
                 .confirmationDialog("Godkend filændringen?", isPresented: $approval, presenting: proposal) { item in
                     Button("Skriv filen", role: .destructive) { Task { await apply(item) } }
                 } message: { item in
@@ -4085,6 +4573,12 @@ private struct CloudModelSettings: View {
 }
 
 private struct ChatView: View {
+    private struct RemovedTurn {
+        let turn: ChatTurn
+        let index: Int
+        let expiresAt: ContinuousClock.Instant
+    }
+
     private enum ReplySource: String, CaseIterable {
         case phone = "Telefon"
         case pc = "PC"
@@ -4109,6 +4603,10 @@ private struct ChatView: View {
     let storageKey: String
     let onBack: (() -> Void)?
     let openImageStudio: ((String) -> Void)?
+    let pcTargetAddress: String?
+    let pcConnectionError: APIError?
+    let reconnectPC: (() -> Void)?
+    let initialSearch: String
     @State private var sessionID = UUID()
     @State private var draft = ""
     @AppStorage private var savedDraft: String
@@ -4146,7 +4644,12 @@ private struct ChatView: View {
     @State private var choosingNote = false
     @State private var newNote = ""
     @State private var attachedNote: String?
+    @State private var attachedQuote: String?
     @State private var imageHandoff: String?
+    @State private var removedTurns: [RemovedTurn] = []
+    @State private var outboxEntries: [PCChatOutbox.Entry] = []
+    @State private var activeOutboxIDs = Set<UUID>()
+    @State private var chatNotice: String?
     @AppStorage("ai.tone") private var aiTone = "Naturlig"
     @AppStorage("ai.length") private var aiLength = "Kort"
     @AppStorage("ai.language") private var aiLanguage = "Dansk"
@@ -4180,7 +4683,9 @@ private struct ChatView: View {
     @AppStorage("qol.reduceMotion") private var calmMotion = false
 
     init(api: (any ChatAPI)?, demo: Bool, initialDraft: String, connection: String, storageKey: String,
-         onBack: (() -> Void)? = nil, openImageStudio: ((String) -> Void)? = nil) {
+         onBack: (() -> Void)? = nil, openImageStudio: ((String) -> Void)? = nil,
+         pcTargetAddress: String? = nil, pcConnectionError: APIError? = nil, reconnectPC: (() -> Void)? = nil,
+         initialSearch: String = "") {
         self.api = api
         self.demo = demo
         self.initialDraft = initialDraft
@@ -4188,6 +4693,10 @@ private struct ChatView: View {
         self.storageKey = storageKey
         self.onBack = onBack
         self.openImageStudio = openImageStudio
+        self.pcTargetAddress = pcTargetAddress
+        self.pcConnectionError = pcConnectionError
+        self.reconnectPC = reconnectPC
+        self.initialSearch = initialSearch
         _savedDraft = AppStorage(wrappedValue: "", storageKey + ".draft")
     }
 
@@ -4250,6 +4759,7 @@ private struct ChatView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
+                        if !aiPrivateSession && !outboxEntries.isEmpty { outboxPanel }
                         TextField(aiPrivateSession ? "Søg i privat samtale" : "Søg i alle samtaler", text: $chatSearch)
                             .textFieldStyle(.roundedBorder)
                             .onChange(of: chatSearch) { old, new in
@@ -4304,7 +4814,10 @@ private struct ChatView: View {
                 .onChange(of: turns.count) { scrollChat(proxy) }
                 .onChange(of: streamedText) { scrollChat(proxy) }
                 .onChange(of: scrollRequest) { scrollChat(proxy) }
-                .onChange(of: replySource) { attachedNote = nil }
+                .onChange(of: replySource) {
+                    attachedNote = nil
+                    attachedQuote = nil
+                }
                 .onChange(of: draft) { _, value in
                     if loaded && !aiPrivateSession { savedDraft = value }
                 }
@@ -4315,11 +4828,15 @@ private struct ChatView: View {
                     searchSteps = []
                     sourceExcerpt = nil
                     attachedNote = nil
+                    attachedQuote = nil
+                    removedTurns = []
+                    chatNotice = nil
                     sessionID = UUID()
                     archivedTurns = []
                     chatSearch = ""
                     draft = isPrivate ? "" : savedDraft
                     if !isPrivate { loadHistory() }
+                    reloadOutbox()
                 }
                 .safeAreaInset(edge: .bottom) { composer }
                 .onAppear {
@@ -4332,7 +4849,9 @@ private struct ChatView: View {
                     if api != nil && !localReady && !demo { replySource = .pc }
                     loadHistory()
                     draft = initialDraft.isEmpty && !aiPrivateSession ? savedDraft : initialDraft
-                    scrollChat(proxy)
+                    if !aiPrivateSession { chatSearch = initialSearch }
+                    reloadOutbox()
+                    if initialSearch.isEmpty { scrollChat(proxy) }
                 }
                 .onDisappear { stop(); dictation.stop(); speech.stopSpeaking(at: .immediate) }
                 .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in
@@ -4341,6 +4860,8 @@ private struct ChatView: View {
                 .onReceive(NotificationCenter.default.publisher(for: CloudModelKey.didChange)) { _ in
                     cloudKeyAvailable = CloudModelKey.exists()
                 }
+                .onReceive(NotificationCenter.default.publisher(for: PCChatOutbox.didChange)) { _ in reloadOutbox() }
+                .onChange(of: task != nil) { _, active in if !active { reloadOutbox() } }
                 .task { await loadModels() }
                 .sensoryFeedback(.success, trigger: completedReplies)
             }
@@ -4355,6 +4876,7 @@ private struct ChatView: View {
             }
         }
         .sheet(isPresented: $showComposerTools, onDismiss: finishComposerTools) { composerToolsSheet }
+        .task(id: removedTurns.last?.turn.id) { await expireUndo() }
     }
 
     private var chatHeading: some View {
@@ -4428,7 +4950,7 @@ private struct ChatView: View {
         guard !demo else { return nil }
         return switch replySource {
         case .phone: nil
-        case .pc: api == nil ? "Forbind til PC’en for at sende." : nil
+        case .pc: api != nil ? nil : canQueuePC ? "PC’en kan ikke nås. Du kan sætte beskeden i udbakken." : "Forbind til PC’en for at sende."
         case .grok: cloudKeyAvailable
             ? "Beskeden og de seneste Grok-udvekslinger sendes til xAI. Forbrug kan koste penge."
             : "Gem en xAI-nøgle under Chatindstillinger for at sende til Grok."
@@ -4439,9 +4961,84 @@ private struct ChatView: View {
         if demo { return true }
         return switch replySource {
         case .phone: true
-        case .pc: api != nil && !modelsLoading
+        case .pc: (api != nil && !modelsLoading) || canQueuePC
         case .grok: cloudKeyAvailable && !aiPrivateSession
         }
+    }
+
+    private var canQueuePC: Bool {
+        api == nil && !demo && !aiPrivateSession && pcTargetAddress != nil && PCChatOutbox.confirmedOffline(pcConnectionError)
+    }
+
+    private var outboxPanel: some View {
+        FadedCard(accent: palette.cyan) {
+            VStack(alignment: .leading, spacing: 8) {
+                FadedSectionLabel("Udbakke til PC")
+                ForEach(outboxEntries) { entry in
+                    let inFlight = activeOutboxIDs.contains(entry.id)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(entry.prompt).lineLimit(2)
+                        Text(entry.state == .waiting ? "Sendes, når denne PC er tilbage."
+                             : inFlight ? "PC-beskeden behandles…" : "Kontrollér på PC’en. Denne besked gensendes aldrig automatisk.")
+                            .font(.caption).foregroundStyle(palette.secondary)
+                        if !inFlight {
+                            Menu("Udbakkehandlinger", systemImage: "ellipsis.circle") {
+                                Button("Kopiér besked", systemImage: "doc.on.doc") { copyText(entry.prompt) }
+                                Button("Fjern fra udbakken", systemImage: "trash", role: .destructive) {
+                                    removeFromOutbox(entry)
+                                }
+                            }.frame(minHeight: 44)
+                        }
+                    }.padding(.vertical, 3)
+                }
+                if api == nil, let reconnectPC {
+                    FadedSecondaryButton("Tjek forbindelse", icon: "arrow.clockwise", action: reconnectPC)
+                } else if let live = api as? LiveAPI, outboxEntries.contains(where: { $0.state == .waiting }) {
+                    FadedSecondaryButton("Send ventende", icon: "paperplane") {
+                        Task { await PCChatOutbox().deliverReady(using: live) }
+                    }.disabled(!activeOutboxIDs.isEmpty || task != nil)
+                }
+            }
+        }
+    }
+
+    private func reloadOutbox() {
+        guard !demo, !aiPrivateSession, let address = pcTargetAddress else {
+            outboxEntries = []
+            activeOutboxIDs = []
+            return
+        }
+        let outbox = PCChatOutbox()
+        do {
+            let stored = try outbox.entries(for: address)
+            outboxEntries = stored.filter { $0.state != .completed }
+            activeOutboxIDs = Set(stored.map(\.id).filter { PCChatOutbox.isDelivering($0) })
+            guard loaded, task == nil else { return }
+            let completed = stored.filter { $0.state == .completed && !PCChatOutbox.isDelivering($0.id) }
+            guard !completed.isEmpty else { return }
+            var imported = Set<UUID>()
+            let existing = Set(turns.map(\.id))
+            for entry in completed {
+                let reply = safeText(entry.reply ?? "", complete: true)
+                let turn = ChatTurn(id: entry.id, prompt: entry.prompt, reply: reply,
+                                    notice: reply.isEmpty ? "PC’en afsluttede beskeden uden svartekst." : nil,
+                                    source: "PC", createdAt: entry.createdAt)
+                if entry.sessionID == sessionID {
+                    if !existing.contains(entry.id) { turns.append(turn) }
+                    imported.insert(entry.id)
+                } else if ChatArchive.appendOutboxTurn(turn, to: entry.sessionID) {
+                    imported.insert(entry.id)
+                }
+            }
+            guard save() else { return }
+            try outbox.remove(imported, for: address)
+            if !chatSearch.isEmpty { archivedTurns = ChatArchive.turns() }
+        } catch { chatNotice = "Udbakken kunne ikke læses eller opdateres." }
+    }
+
+    private func removeFromOutbox(_ entry: PCChatOutbox.Entry) {
+        do { try PCChatOutbox().remove([entry.id], for: entry.address) }
+        catch { chatNotice = "Beskeden kunne ikke fjernes fra udbakken." }
     }
 
     private func scrollChat(_ proxy: ScrollViewProxy) {
@@ -4455,6 +5052,8 @@ private struct ChatView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 6) {
+            if let deleted = removedTurns.last, deleted.expiresAt > ContinuousClock.now { undoBar }
+            if let chatNotice { Text(chatNotice).font(.caption).foregroundStyle(palette.secondary) }
             VStack(alignment: .leading, spacing: 6) {
                 if let attachedNote {
                     HStack {
@@ -4463,6 +5062,15 @@ private struct ChatView: View {
                             .font(.caption.weight(.semibold)).foregroundStyle(palette.secondary)
                         Spacer()
                         Button("Fjern note", systemImage: "xmark") { self.attachedNote = nil }
+                            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                    }
+                }
+                if let attachedQuote {
+                    HStack {
+                        Label("Citat: \(String(attachedQuote.prefix(80)))", systemImage: "quote.opening")
+                            .lineLimit(1).font(.caption.weight(.semibold)).foregroundStyle(palette.secondary)
+                        Spacer()
+                        Button("Fjern citat", systemImage: "xmark") { self.attachedQuote = nil }
                             .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                     }
                 }
@@ -4507,13 +5115,14 @@ private struct ChatView: View {
             if sending { stop() }
             else { send() }
         } label: {
-            Image(systemName: sending ? "stop.fill" : "arrow.up")
+            Image(systemName: sending ? "stop.fill" : (replySource == .pc && canQueuePC ? "tray.and.arrow.down" : "arrow.up"))
                 .font(.body.weight(.bold)).foregroundStyle(Color.black)
                 .frame(width: 40, height: 40).background(palette.lime.opacity(allowed ? 1 : 0.45), in: Circle())
                 .frame(width: 44, height: 44).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(sending ? "Stop modtagelse" : (demo ? "Send testbesked" : "Send til \(replySource.rawValue)"))
+        .accessibilityLabel(sending ? "Stop modtagelse" : (demo ? "Send testbesked" :
+            (replySource == .pc && canQueuePC ? "Sæt besked i udbakke til PC" : "Send til \(replySource.rawValue)")))
         .disabled(!allowed)
     }
 
@@ -4545,8 +5154,9 @@ private struct ChatView: View {
                             Button("Ryd kladde", role: .destructive) {
                                 draft = ""
                                 attachedNote = nil
+                                attachedQuote = nil
                                 showComposerTools = false
-                            }.frame(minHeight: 44).disabled(draft.isEmpty && attachedNote == nil)
+                            }.frame(minHeight: 44).disabled(draft.isEmpty && attachedNote == nil && attachedQuote == nil)
                         }
                     }
                 }.padding(20)
@@ -4754,22 +5364,33 @@ private struct ChatView: View {
                     }
                 }
                 if let notice = turn.notice {
-                    RetryNotice(message: notice) { draft = turn.prompt }.disabled(task != nil)
+                    FadedCard(accent: palette.coral) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(notice)
+                            if canRetryOnPhone(turn) {
+                                FadedSecondaryButton("Prøv igen på telefonen", icon: "arrow.clockwise") { retryOnPhone(turn) }
+                                    .disabled(task != nil)
+                            } else {
+                                FadedSecondaryButton("Brug som kladde", icon: "square.and.pencil") { restoreDraft(turn) }
+                                    .disabled(task != nil)
+                            }
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contextMenu {
-                Button("Kopiér prompt") { UIPasteboard.general.string = turn.prompt }
-                Button("Kopiér svar") { UIPasteboard.general.string = turn.reply }
-                Button("Prøv igen") { draft = turn.prompt }.disabled(task != nil)
-                Button("Start ny gren") { newConversation(); draft = turn.prompt }.disabled(task != nil)
+                quickTurnActions(turn)
+                Button("Start ny gren") { newConversation(); restoreDraft(turn) }.disabled(task != nil)
+                Button("Slet besked", systemImage: "trash", role: .destructive) { deleteTurn(turn.id) }
+                    .disabled(task != nil)
             }
             .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                Button("Kopiér") { UIPasteboard.general.string = turn.reply }
+                Button("Kopiér") { copyText(turn.reply.isEmpty ? turn.prompt : turn.reply) }
             }
             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                Button("Prøv igen") { draft = turn.prompt }.disabled(task != nil)
-                Button("Ny gren") { newConversation(); draft = turn.prompt }.disabled(task != nil)
+                Button("Brug som kladde") { restoreDraft(turn) }.disabled(task != nil)
+                Button("Ny gren") { newConversation(); restoreDraft(turn) }.disabled(task != nil)
             }
             .id(turn.id)
         }
@@ -4789,6 +5410,7 @@ private struct ChatView: View {
             Button("Læs svaret op", systemImage: "speaker.wave.2") { speak(turn.reply) }
                 .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
             Menu {
+                quickTurnActions(turn)
                 Button(turn.favorite == true ? "Fjern favorit" : "Favorit",
                        systemImage: turn.favorite == true ? "star.fill" : "star") { toggleFavorite(turn.id) }
                 Button("Godt svar", systemImage: turn.feedback == 1 ? "hand.thumbsup.fill" : "hand.thumbsup") {
@@ -4797,11 +5419,73 @@ private struct ChatView: View {
                 Button("Dårligt svar", systemImage: turn.feedback == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown") {
                     setFeedback(turn.id, value: -1)
                 }
-                Button("Slet", systemImage: "trash", role: .destructive) { deleteTurn(turn.id) }
+                Button("Slet besked", systemImage: "trash", role: .destructive) { deleteTurn(turn.id) }
+                    .disabled(task != nil)
             } label: {
                 Image(systemName: "ellipsis.circle").frame(minWidth: 44, minHeight: 44)
             }.accessibilityLabel("Flere handlinger for svar")
         }
+    }
+
+    @ViewBuilder private func quickTurnActions(_ turn: ChatTurn) -> some View {
+        if turn.notice != nil && canRetryOnPhone(turn) {
+            Button("Prøv igen på telefonen", systemImage: "arrow.clockwise") { retryOnPhone(turn) }
+                .disabled(task != nil)
+        }
+        Button("Brug som kladde", systemImage: "square.and.pencil") { restoreDraft(turn) }.disabled(task != nil)
+        Button("Kopiér besked", systemImage: "doc.on.doc") { copyText(turn.prompt) }
+        if !turn.reply.isEmpty {
+            Button("Svar med citat", systemImage: "quote.opening") { quoteReply(turn) }.disabled(task != nil)
+            Button("Kopiér svar", systemImage: "doc.on.doc") { copyText(turn.reply) }
+            if !aiPrivateSession {
+                ShareLink(item: turn.reply) { Label("Del svar", systemImage: "square.and.arrow.up") }
+                Button("Gem uddrag som note", systemImage: "note.text") { saveReplyNote(turn.reply) }
+            }
+        }
+    }
+
+    private func canRetryOnPhone(_ turn: ChatTurn) -> Bool {
+        !demo && turn.source == "Telefon" && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func retryOnPhone(_ turn: ChatTurn) {
+        guard task == nil, canRetryOnPhone(turn) else { return }
+        restoreDraft(turn)
+        replySource = .phone
+        send()
+    }
+
+    private func restoreDraft(_ turn: ChatTurn) {
+        guard task == nil else { return }
+        attachedNote = nil
+        attachedQuote = nil
+        draft = turn.prompt
+        chatSearch = ""
+        composerFocused = true
+    }
+
+    private func quoteReply(_ turn: ChatTurn) {
+        guard task == nil, !turn.reply.isEmpty else { return }
+        attachedQuote = String(turn.reply.unicodeScalars.prefix(650))
+        chatSearch = ""
+        composerFocused = true
+    }
+
+    private func copyText(_ text: String) {
+        guard !text.isEmpty else { return }
+        var options: [UIPasteboard.OptionsKey: Any] = [.localOnly: true]
+        if aiPrivateSession { options[.expirationDate] = Date().addingTimeInterval(60) }
+        UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: text]], options: options)
+        chatNotice = "Kopieret."
+    }
+
+    private func saveReplyNote(_ reply: String) {
+        guard !aiPrivateSession else { return }
+        let oneLine = reply.split(whereSeparator: \.isNewline).joined(separator: " ")
+        let excerpt = String(oneLine.prefix(600)).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !excerpt.isEmpty else { return }
+        notes = notes.isEmpty ? excerpt : excerpt + "\n" + notes
+        chatNotice = "Uddraget er gemt som note på telefonen."
     }
 
     private var filteredTurns: [ChatTurn] {
@@ -4828,8 +5512,7 @@ private struct ChatView: View {
                 if !turn.reply.isEmpty { Text(turn.reply).lineLimit(5).textSelection(.enabled) }
             }
             .contextMenu {
-                Button("Kopiér prompt") { UIPasteboard.general.string = turn.prompt }
-                Button("Brug prompt") { draft = turn.prompt; chatSearch = "" }.disabled(task != nil)
+                quickTurnActions(turn)
             }
         }
     }
@@ -4845,8 +5528,35 @@ private struct ChatView: View {
     }
 
     private func deleteTurn(_ id: UUID) {
-        turns.removeAll { $0.id == id }
+        guard task == nil, let index = turns.firstIndex(where: { $0.id == id }) else { return }
+        removedTurns.removeAll { $0.expiresAt <= ContinuousClock.now }
+        removedTurns.append(RemovedTurn(turn: turns.remove(at: index), index: index,
+                                        expiresAt: ContinuousClock.now.advanced(by: .seconds(5))))
         save()
+    }
+
+    private var undoBar: some View {
+        HStack {
+            Text("Besked slettet").font(.subheadline)
+            Spacer()
+            Button("Fortryd", action: undoDelete).font(.subheadline.weight(.semibold)).frame(minHeight: 44)
+        }
+        .padding(.horizontal, 12).background(palette.raised, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func undoDelete() {
+        guard let deletion = removedTurns.popLast(), deletion.expiresAt > ContinuousClock.now,
+              !turns.contains(where: { $0.id == deletion.turn.id }) else { return }
+        turns.insert(deletion.turn, at: min(deletion.index, turns.count))
+        save()
+    }
+
+    private func expireUndo() async {
+        while let expiry = removedTurns.map(\.expiresAt).min() {
+            do { try await Task.sleep(until: expiry, clock: .continuous) }
+            catch { return }
+            removedTurns.removeAll { $0.expiresAt <= ContinuousClock.now }
+        }
     }
 
     private func setFeedback(_ id: UUID, value: Int) {
@@ -4879,9 +5589,10 @@ private struct ChatView: View {
     }
 
     private var transportMessage: String {
-        let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let attachedNote else { return message }
-        return message + "\n\nVedhæftet note til kontekst:\n" + attachedNote
+        var message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let attachedNote { message += "\n\nVedhæftet note til kontekst:\n" + attachedNote }
+        if let attachedQuote { message += "\n\nCitat fra et tidligere svar til kontekst:\n" + attachedQuote }
+        return message
     }
 
     private func send() {
@@ -4891,20 +5602,26 @@ private struct ChatView: View {
         guard task == nil, !message.isEmpty, outgoing.unicodeScalars.count <= 2000, canSendToSource else { return }
         let source = replySource
         let routeGrok = source == .grok && !demo
+        let collectionQuestion = message.lowercased().hasPrefix("kortsamling:")
+        let modelMessage = routeGrok || collectionQuestion ? outgoing : enhancedPrompt(outgoing)
+        if source == .pc && canQueuePC, let address = pcTargetAddress {
+            queuePCMessage(message, outgoing: modelMessage, address: address)
+            return
+        }
         let cloudMessages = routeGrok ? grokMessages(endingWith: outgoing) : []
         sourceExcerpt = routeGrok || attachedNote != nil ? nil : localReference(for: message)
         attachedNote = nil
+        attachedQuote = nil
+        chatNotice = nil
         draft = ""
         if !aiPrivateSession { savedDraft = "" }
         searchSteps = []
         streamedText = ""
-        turns.append(ChatTurn(prompt: message, createdAt: .now))
-        let index = turns.count - 1
-        let turnID = turns[index].id
-        let history = turns.dropLast().suffix(6).filter { !$0.reply.isEmpty }
+        let turn = ChatTurn(prompt: message, createdAt: .now)
+        let history = turns.suffix(6).filter { !$0.reply.isEmpty }
             .map { "Bruger: \($0.prompt)\nSvar: \($0.reply)" }.joined(separator: "\n")
-        let collectionQuestion = message.lowercased().hasPrefix("kortsamling:")
-        let modelMessage = routeGrok || collectionQuestion ? outgoing : enhancedPrompt(outgoing)
+        turns.append(turn)
+        let turnID = turn.id
         let context = String(history.suffix(max(0, 3000 - modelMessage.count)))
         status = "Venter på svar…"
         let input = ChatRequest(message: modelMessage, session_id: aiPrivateSession ? nil : sessionID)
@@ -4915,28 +5632,29 @@ private struct ChatView: View {
                 if demo {
                     status = "Demo · Finder et testklip…"
                     try await Task.sleep(for: .milliseconds(600))
+                    guard let index = turnIndex(turnID) else { return }
                     turns[index].reply = "Jeg fandt et testklip. "
                     try await Task.sleep(for: .milliseconds(600))
-                    turns[index].reply += "Demoen starter ikke et video-job."
+                    if let current = turnIndex(turnID) { turns[current].reply += "Demoen starter ikke et video-job." }
                 } else {
                     switch source {
-                    case .phone: try await answerOnPhone(modelMessage, context: context, index: index, turnID: turnID)
-                    case .pc: try await answerOnPC(input, index: index, turnID: turnID)
-                    case .grok: try await answerOnGrok(cloudMessages, index: index, turnID: turnID)
+                    case .phone: try await answerOnPhone(modelMessage, context: context, turnID: turnID)
+                    case .pc: try await answerOnPC(input, turnID: turnID)
+                    case .grok: try await answerOnGrok(cloudMessages, turnID: turnID)
                     }
                 }
-                if turns.indices.contains(index), turns[index].id == turnID, turns[index].notice == nil {
+                if let index = turnIndex(turnID), turns[index].notice == nil {
                     completedReplies += 1
                     if voiceMode && !turns[index].reply.isEmpty && !dictation.active {
                         speak(turns[index].reply)
                     }
                 }
             } catch is CancellationError {
-                if turns.indices.contains(index), turns[index].id == turnID {
+                if let index = turnIndex(turnID) {
                     turns[index].notice = "Modtagelsen er stoppet."
                 }
             } catch {
-                if turns.indices.contains(index), turns[index].id == turnID {
+                if let index = turnIndex(turnID) {
                     if source == .phone && !demo {
                         turns[index].notice = phoneError(error, hasPartial: !turns[index].reply.isEmpty)
                     } else {
@@ -4946,6 +5664,28 @@ private struct ChatView: View {
                     }
                 }
             }
+        }
+    }
+
+    private func turnIndex(_ id: UUID) -> Int? { turns.firstIndex { $0.id == id } }
+
+    private func queuePCMessage(_ prompt: String, outgoing: String, address: String) {
+        guard canQueuePC, pcTargetAddress == address else { return }
+        do {
+            try PCChatOutbox().enqueue(address: address, prompt: prompt, message: outgoing, sessionID: sessionID,
+                                       modelID: selectedModel.isEmpty ? nil : selectedModel)
+            attachedNote = nil
+            attachedQuote = nil
+            draft = ""
+            savedDraft = ""
+            composerFocused = false
+            save()
+            chatNotice = "Beskeden venter i udbakken til denne PC."
+            reloadOutbox()
+        } catch PCChatOutbox.Failure.full {
+            chatNotice = "Udbakken er fuld. Fjern en besked, og prøv igen."
+        } catch {
+            chatNotice = "Beskeden kunne ikke gemmes i udbakken. Din kladde er bevaret."
         }
     }
 
@@ -4968,30 +5708,32 @@ private struct ChatView: View {
         }
     }
 
-    private func answerOnGrok(_ messages: [GrokAPI.Message], index: Int, turnID: UUID) async throws {
+    private func answerOnGrok(_ messages: [GrokAPI.Message], turnID: UUID) async throws {
+        guard let index = turnIndex(turnID) else { return }
         turns[index].source = GrokAPI.sourceLabel
         status = "Grok · Venter på svar…"
         try await GrokAPI.reply(input: messages) { output in
             await MainActor.run {
-                guard !Task.isCancelled, turns.indices.contains(index), turns[index].id == turnID else { return }
+                guard !Task.isCancelled, let index = turnIndex(turnID) else { return }
                 streamedText = output
                 turns[index].reply = safeText(output, complete: true)
             }
         }
     }
 
-    private func answerOnPhone(_ message: String, context: String, index: Int, turnID: UUID) async throws {
+    private func answerOnPhone(_ message: String, context: String, turnID: UUID) async throws {
+        guard let index = turnIndex(turnID) else { return }
         turns[index].source = "Telefon"
         status = "Telefon · Forbereder svar…"
         let prompt = context.isEmpty ? message : "\(context)\nBruger: \(message)"
         try await PhoneModels.reply(modelID: PhoneModels.effectiveModelID(phoneModel), prompt: prompt,
                                     instructions: "Svar på brugerens sprog. Du kan bruge teksten i chatten og udfører ingen opgaver på PC’en.") { answer in
-            guard !Task.isCancelled, turns.indices.contains(index), turns[index].id == turnID else { return }
+            guard !Task.isCancelled, let index = turnIndex(turnID) else { return }
             turns[index].reply = safeText(answer)
             streamedText = answer
         }
         try Task.checkCancellation()
-        if turns.indices.contains(index), turns[index].id == turnID {
+        if let index = turnIndex(turnID) {
             turns[index].reply = safeText(streamedText, complete: true)
         }
     }
@@ -5004,7 +5746,8 @@ private struct ChatView: View {
         return "Telefonmodellen kunne ikke svare. Prøv igen, eller vælg en anden kilde."
     }
 
-    private func answerOnPC(_ input: ChatRequest, index: Int, turnID: UUID) async throws {
+    private func answerOnPC(_ input: ChatRequest, turnID: UUID) async throws {
+        guard let index = turnIndex(turnID) else { return }
         guard let api else {
             turns[index].notice = "Denne besked kræver en model, der er klar. Forbind til PC’en, eller vælg en lokal model i Indstillinger."
             return
@@ -5016,27 +5759,27 @@ private struct ChatView: View {
                                             modelID: selectedModel.isEmpty ? nil : selectedModel)
             try await live.v2Chat(request) { event in
                 await MainActor.run {
-                    guard !Task.isCancelled, turns.indices.contains(index), turns[index].id == turnID else { return }
+                    guard !Task.isCancelled, let index = turnIndex(turnID) else { return }
                     receive(type: event.type.rawValue, content: event.content, index: index)
                 }
             }
             try Task.checkCancellation()
         } else {
-            await run(api, input: input, index: index, turnID: turnID)
+            await run(api, input: input, turnID: turnID)
         }
     }
 
-    private func run(_ api: any ChatAPI, input: ChatRequest, index: Int, turnID: UUID) async {
+    private func run(_ api: any ChatAPI, input: ChatRequest, turnID: UUID) async {
         do {
             try await api.chat(input) { event in
                 await MainActor.run {
-                    guard !Task.isCancelled, turns.indices.contains(index), turns[index].id == turnID else { return }
+                    guard !Task.isCancelled, let index = turnIndex(turnID) else { return }
                     receive(type: event.type, content: event.content, index: index)
                 }
             }
             try Task.checkCancellation()
         } catch {
-            guard turns.indices.contains(index), turns[index].id == turnID else { return }
+            guard let index = turnIndex(turnID) else { return }
             turns[index].notice = Task.isCancelled ? "Modtagelsen er stoppet. Et job kan stadig køre."
                 : pcBusyMessage(error) ?? (error as? APIError)?.title ?? (error as? ChatFailure ?? .interrupted).message
         }
@@ -5091,6 +5834,9 @@ private struct ChatView: View {
         searchSteps = []
         sourceExcerpt = nil
         attachedNote = nil
+        attachedQuote = nil
+        removedTurns = []
+        chatNotice = nil
         sessionID = UUID()
         save()
     }
@@ -5105,12 +5851,12 @@ private struct ChatView: View {
         }.map { String($0.prefix(240)) }
     }
 
-    private func save(pending: Bool = false) {
-        guard !aiPrivateSession else { return }
-        let session = SavedAgentSession(id: sessionID, turns: turns, toolSteps: searchSteps, pending: pending)
-        if let data = try? JSONEncoder().encode(session) {
-            UserDefaults.standard.set(data, forKey: storageKey)
-        }
+    @discardableResult private func save(pending: Bool? = nil) -> Bool {
+        guard !aiPrivateSession else { return false }
+        let session = SavedAgentSession(id: sessionID, turns: turns, toolSteps: searchSteps, pending: pending ?? (task != nil))
+        guard let data = try? JSONEncoder().encode(session) else { return false }
+        UserDefaults.standard.set(data, forKey: storageKey)
+        return true
     }
 
     private func loadHistory() {
