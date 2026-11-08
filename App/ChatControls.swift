@@ -589,7 +589,7 @@ extension ChatView {
                 models = []
                 selectedModel = ""
                 pcDefaultModelID = ""
-                modelsError = error is V2Failure ? v2Message(error) : "Kunne ikke hente modeller. Tjek forbindelsen til PC’en."
+                modelsError = error is V2Failure ? AppErrorPresentation(error).title : "Kunne ikke hente modeller. Tjek forbindelsen til PC’en."
             }
         }
     }
