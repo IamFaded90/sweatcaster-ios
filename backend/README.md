@@ -19,3 +19,15 @@ Run `python backend/install_module_tabs.py <checkpoint-directory>` and restart t
 Export JSON from Kortscanner, open Kortsamling on the phone and choose the file. Import replaces the previous collection on this PC. In v2 chat, type `Kortsamling: Hvilke kort har jeg dubletter af?` or `Kortsamling: Hvilke kort mangler en pris?`. These answers use a local lookup.
 
 Add more native information tabs by placing `module-tabs.json` in the configured output directory, for example `[{"id":"status","title":"Status","text":"Alle rutiner er klar."}]`. The phone refreshes the manifest on foreground and pull-to-refresh. Other renderers and actions require a new app build.
+
+## Local Code Bot batch queue
+
+Copy `sweatcaster/code_batch.py` into the same installed Python package as `repository_library.py`. Run from the checkpoint directory:
+
+```powershell
+.\.venv\Scripts\python.exe -m sweatcaster.code_batch enqueue owner/project 'Describe a usable change' path/first.py path/second.py
+.\.venv\Scripts\python.exe -m sweatcaster.code_batch worker
+.\.venv\Scripts\python.exe -m sweatcaster.code_batch show <job-id>
+```
+
+The queue persists under the PC output directory. The worker serializes jobs and acquires the existing Ollama model lease shared with chat and rendering. It uses the configured local model. A job produces a review-only unified diff for up to five selected tracked files, plus a test plan. The worker does not apply proposals. Start the worker separately from the HTTP server. `worker --once` handles at most one queued job.
