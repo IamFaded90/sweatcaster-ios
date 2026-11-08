@@ -84,6 +84,9 @@ struct Home: View {
     @AccessibilityFocusState private var jobsFocus: Bool
     @State private var showJobs = 0
     @State private var space: Space = .brain
+    @State private var moduleTabs: [ModuleTab] = []
+    @State private var moduleAddress: String?
+    @State private var selectedModuleTab: String?
     @State private var showHelp = false
     @State private var showAgentHub = false
     @State private var showCodeWorkspace = false
@@ -145,26 +148,45 @@ struct Home: View {
     private var pendingJobs: Int { model.jobs.filter { $0.status.active }.count }
 
     private var homeContent: some View {
-        TabView(selection: $space) {
+        TabView(selection: Binding(get: { selectedModuleTab ?? space.rawValue }, set: { value in
+            if let fixed = Space(rawValue: value) {
+                selectedModuleTab = nil
+                space = fixed
+            } else {
+                selectedModuleTab = value
+            }
+        })) {
             NavigationStack { tabPage("Hjem") { header; connectionSettings; loadingStatus; appearanceSettings } }
-                .tabItem { Label("Hjem", systemImage: "house.fill") }.tag(Space.brain)
+                .tabItem { Label("Hjem", systemImage: "house.fill") }.tag(Space.brain.rawValue)
             ChatView(api: model.api as? any ChatAPI, demo: model.isDemo, initialDraft: "",
                      connection: model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
                      storageKey: "spaces.chat." + (model.isDemo ? "demo" : model.address))
-                .tabItem { Label("Chat", systemImage: "bubble.left.fill") }.tag(Space.notes)
+                .tabItem { Label("Chat", systemImage: "bubble.left.fill") }.tag(Space.notes.rawValue)
             NavigationStack { tabPage("Video Studio") { videoStudioHeader; clipSection; moodSection; advanced(Binding(get: { model.options }, set: { model.options = $0 })); jobSection } }
-                .tabItem { Label("Video", systemImage: "film.fill") }.tag(Space.gallery)
+                .tabItem { Label("Video", systemImage: "film.fill") }.tag(Space.gallery.rawValue)
             AgentHub(api: model.api as? LiveAPI)
-                .tabItem { Label("Landsby", systemImage: "house.lodge.fill") }.tag(Space.tasks)
+                .tabItem { Label("Landsby", systemImage: "house.lodge.fill") }.tag(Space.tasks.rawValue)
             CodeWorkspaceView(api: model.api as? LiveAPI)
-                .tabItem { Label("Code Bot", systemImage: "chevron.left.forwardslash.chevron.right") }.tag(Space.library)
+                .tabItem { Label("Code Bot", systemImage: "chevron.left.forwardslash.chevron.right") }.tag(Space.library.rawValue)
+            if moduleAddress == model.address, let api = model.api as? LiveAPI {
+                ForEach(moduleTabs) { tab in
+                    ModuleTabView(tab: tab, api: api)
+                        .id(model.address + ":" + tab.id)
+                        .tabItem { Label(tab.title, systemImage: tab.kind == "cards" ? "rectangle.on.rectangle" : "info.circle") }
+                        .tag("module:" + tab.id)
+                }
+            }
         }
-        .onChange(of: showJobs) { space = .gallery; jobsFocus = true }
-        .onChange(of: showClips) { space = .gallery }
+        .onChange(of: showJobs) { selectedModuleTab = nil; space = .gallery; jobsFocus = true }
+        .onChange(of: showClips) { selectedModuleTab = nil; space = .gallery }
+        .task(id: "\(model.isDemo):\(model.address):\(phase == .active)") {
+            if phase == .active { await loadModuleTabs() }
+        }
         .task(id: space) {
             if space == .gallery && !model.isDemo { await loadGameFolders() }
         }
         .onChange(of: space) { _, value in
+            selectedModuleTab = nil
             if rememberLastSpace { lastSpace = value.rawValue }
             if autoRefreshTabs && !model.isDemo { Task { await model.refresh() } }
         }
@@ -176,13 +198,34 @@ struct Home: View {
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
     }
 
+    private func loadModuleTabs() async {
+        let address = model.address
+        if moduleAddress != address {
+            moduleTabs = []
+            selectedModuleTab = nil
+        }
+        guard !model.isDemo, let api = model.api as? LiveAPI else {
+            moduleTabs = []
+            selectedModuleTab = nil
+            return
+        }
+        guard let manifest = try? await api.moduleManifest(), manifest.version == 1,
+              !Task.isCancelled, !model.isDemo, model.address == address else { return }
+        var seen = Set<String>()
+        moduleAddress = address
+        moduleTabs = Array(manifest.tabs.filter { $0.supported && seen.insert($0.id).inserted }.prefix(8))
+        if let selectedModuleTab, !moduleTabs.contains(where: { "module:" + $0.id == selectedModuleTab }) {
+            self.selectedModuleTab = nil
+        }
+    }
+
     private func tabPage<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20, content: content)
                 .padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
         .navigationTitle(title)
-        .refreshable { await model.refresh() }
+        .refreshable { await model.refresh(); await loadModuleTabs() }
     }
 
     private var chatTab: some View {
@@ -2055,7 +2098,86 @@ private struct SavedAgentSession: Codable {
     let pending: Bool
 }
 
+private struct ModuleTabView: View {
+    let tab: ModuleTab
+    let api: LiveAPI
+    @State private var cards: [ModuleCards.Card] = []
+    @State private var information: String?
+    @State private var importing = false
+    @State private var confirmImport = false
+    @State private var busy = false
+    @State private var notice: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if let notice { Text(notice) }
+                if busy { ProgressView("Opdaterer") }
+                if tab.kind == "cards" {
+                    Button("Importér Kortscanner-fil", systemImage: "square.and.arrow.down") {
+                        confirmImport = true
+                    }.frame(minHeight: 44).disabled(busy)
+                    if cards.isEmpty && !busy { Text("Ingen kort endnu.") }
+                    ForEach(cards) { card in
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(card.name).font(.headline)
+                            Text([card.set, card.number, card.language].filter { !$0.isEmpty }.joined(separator: " · "))
+                                .foregroundStyle(.secondary)
+                            if let price = card.price { Text(price, format: .currency(code: "DKK")) }
+                        }
+                    }
+                } else if let information {
+                    Text(verbatim: information)
+                }
+                if notice != nil {
+                    Button("Prøv igen") { Task { await load() } }.frame(minHeight: 44).disabled(busy)
+                }
+            }
+            .navigationTitle(tab.title)
+            .task { await load() }
+            .refreshable { await load() }
+            .confirmationDialog("Erstat samlingen på PC’en?", isPresented: $confirmImport) {
+                Button("Vælg JSON-fil") { importing = true }
+            } message: { Text("Den valgte fil sendes til din FadedAI-PC og erstatter den tidligere import.") }
+            .fileImporter(isPresented: $importing, allowedContentTypes: [.json]) { result in
+                guard case let .success(url) = result else { return }
+                Task { await load(file: url) }
+            }
+        }
+    }
+
+    private func load(file: URL? = nil) async {
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            if let file {
+                let granted = file.startAccessingSecurityScopedResource()
+                defer { if granted { file.stopAccessingSecurityScopedResource() } }
+                let handle = try FileHandle(forReadingFrom: file)
+                defer { try? handle.close() }
+                let data = try handle.read(upToCount: 1_000_001) ?? Data()
+                guard !data.isEmpty && data.count <= 1_000_000 else { throw APIError.input }
+                cards = try await api.moduleCards(tab.id, upload: data).cards
+            } else if tab.kind == "cards" {
+                cards = try await api.moduleCards(tab.id).cards
+            } else {
+                information = try await api.moduleInformation(tab.id).text
+            }
+            notice = nil
+        } catch {
+            notice = file == nil ? "Fanen kunne ikke hentes fra PC’en." : "Importen mislykkedes. Vælg en gyldig Kortscanner-fil på højst 1 MB."
+        }
+    }
+}
+
 private struct CodeWorkspaceView: View {
+    private struct FeatureDraft: Decodable {
+        let feasible: Bool
+        let reason: String
+        let content: String?
+        let tests: [String]
+    }
     private enum Autonomy: String, CaseIterable {
         case strict = "Strict"
         case guided = "Guided"
@@ -2083,6 +2205,7 @@ private struct CodeWorkspaceView: View {
     @State private var approval = false
     @State private var featureRequest = ""
     @State private var codeStatus = ""
+    @State private var testPlan: [String] = []
 
     var body: some View {
         NavigationStack {
@@ -2161,6 +2284,12 @@ private struct CodeWorkspaceView: View {
                             ScrollView(.horizontal) {
                                 Text(proposal.diff).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
                             }.frame(maxHeight: 260)
+                            if !testPlan.isEmpty {
+                                Text("Testplan").font(.headline)
+                                ForEach(Array(testPlan.enumerated()), id: \.offset) { item in
+                                    Text("\(item.offset + 1). \(item.element)")
+                                }
+                            }
                             HStack {
                                 Button("Afvis", role: .destructive) { Task { await reject(proposal) } }
                                     .buttonStyle(.bordered).controlSize(.large)
@@ -2205,6 +2334,8 @@ private struct CodeWorkspaceView: View {
 
     private func prepare() async {
         guard let api else { return }
+        proposal = nil
+        testPlan = []
         loading = true; defer { loading = false }
         do { proposal = try await api.v2CodeProposal(path: path, content: content); message = nil }
         catch { message = "Ændringen kunne ikke forberedes. Tjek filstien og prøv igen." }
@@ -2218,12 +2349,14 @@ private struct CodeWorkspaceView: View {
             codeStatus = "Filen er for stor til sikker automatisk omskrivning. Vælg en mindre fil eller opret en ny komponentfil."
             return
         }
+        proposal = nil
+        testPlan = []
         loading = true; codeStatus = "PC-modellen forbereder filen…"
         defer { loading = false }
         do {
-            let existing = content
-            let prompt = "Du er Code Bot i en sikker workspace. Returnér kun det komplette nye filindhold uden markdown-hegn. Fil: \(path). Opgave: \(brief). Eksisterende begyndelse: \(existing)"
-            let request = try V2ChatRequest(message: String(prompt.prefix(2_000)), sessionID: "codebot-ios")
+            let target = path
+            let prompt = "Analysér filen og opgaven. Foreslå kun en direkte anvendelig ændring, der kan laves i denne fil med de viste forudsætninger. Ved manglende kontekst eller afhængigheder: feasible=false og forklar hvorfor. Svar kun JSON med feasible (bool), reason (tekst), content (hele nye filen eller null), tests (liste med konkrete testtrin). Fil: \(target)\nOpgave: \(brief)\nIndhold:\n\(content)"
+            let request = try V2ChatRequest(message: prompt, sessionID: UUID().uuidString)
             var generated = ""
             try await api.v2Chat(request) { event in
                 await MainActor.run {
@@ -2231,15 +2364,19 @@ private struct CodeWorkspaceView: View {
                     if event.type == .tool_status { codeStatus = event.content }
                 }
             }
-            let cleaned = generated
-                .replacingOccurrences(of: "```swift", with: "")
-                .replacingOccurrences(of: "```python", with: "")
-                .replacingOccurrences(of: "```", with: "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !cleaned.isEmpty else { throw V2Failure.invalidResponse }
+            let result = try JSONDecoder().decode(FeatureDraft.self, from: Data(generated.utf8))
+            guard result.feasible else {
+                codeStatus = String(result.reason.prefix(300))
+                return
+            }
+            let plan = result.tests.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            guard let cleaned = result.content, !cleaned.isEmpty, cleaned != content,
+                  (1...6).contains(plan.count), plan.allSatisfy({ !$0.isEmpty && $0.count <= 300 }),
+                  path == target else { throw V2Failure.invalidResponse }
+            proposal = try await api.v2CodeProposal(path: target, content: cleaned)
             content = cleaned
-            proposal = try await api.v2CodeProposal(path: path, content: cleaned)
-            codeStatus = "Forslaget er klar. Gennemgå diffen nedenfor."
+            testPlan = plan
+            codeStatus = "Forslaget er klar. Gennemgå diff og testplan."
         } catch {
             codeStatus = "Code Bot kunne ikke forberede ændringen. Ingen fil blev skrevet."
         }
@@ -2728,8 +2865,10 @@ private struct ChatView: View {
         let index = turns.count - 1
         let context = turns.dropLast().suffix(6).filter { !$0.reply.isEmpty }
             .map { "Bruger: \($0.prompt)\nSvar: \($0.reply)" }.joined(separator: "\n")
-        let modelMessage = enhancedPrompt(message)
-        let requiresPC = usePC || PhoneModels.prefersPC(modelMessage, previousCharacters: context.count)
+        let collectionQuestion = message.lowercased().hasPrefix("kortsamling:")
+        let modelMessage = collectionQuestion ? message : enhancedPrompt(message)
+        let requiresPC = usePC || collectionQuestion ||
+            PhoneModels.prefersPC(modelMessage, previousCharacters: context.count)
         status = "Venter på svar…"
         let input = ChatRequest(message: modelMessage, session_id: sessionID)
         save(pending: true)

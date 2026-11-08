@@ -2,6 +2,12 @@ import XCTest
 @testable import SweatCaster
 
 final class ContractTests: XCTestCase {
+    func testModuleManifestRestrictsUntrustedTabDefinitions() throws {
+        let json = #"{"version":1,"tabs":[{"id":"cards","title":"Kortsamling","kind":"cards"},{"id":"../health","title":"Sikkerhed","kind":"information"},{"id":"script","title":"Ny","kind":"web"}]}"#
+        let manifest = try JSONDecoder().decode(ModuleManifest.self, from: Data(json.utf8))
+        XCTAssertEqual(manifest.version, 1)
+        XCTAssertEqual(manifest.tabs.filter(\.supported).map(\.id), ["cards"])
+    }
     func testClipKeepsV1ShapeAndAcceptsFutureFolderMetadata() throws {
         let old = try JSONDecoder().decode(Clip.self, from: Data(#"{"id":"clip-one","name":"game.mp4","duration_seconds":12,"width":1920,"height":1080}"#.utf8))
         XCTAssertNil(old.folderName)

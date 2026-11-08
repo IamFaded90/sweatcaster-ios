@@ -150,7 +150,60 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
                     newRequest request: URLRequest) async -> URLRequest? { nil }
 }
 
+struct ModuleManifest: Decodable {
+    let version: Int
+    let tabs: [ModuleTab]
+}
+
+struct ModuleTab: Decodable, Identifiable {
+    let id, title, kind: String
+
+    var supported: Bool {
+        !id.isEmpty && id.count <= 48 && id.utf8.allSatisfy {
+            (97...122).contains($0) || (48...57).contains($0) || $0 == 45
+        } && !title.isEmpty && title.count <= 32 && ["cards", "information"].contains(kind)
+    }
+}
+
+struct ModuleCards: Decodable {
+    struct Card: Decodable, Identifiable {
+        let id, name, number, set, language: String
+        let price: Double?
+    }
+    let cards: [Card]
+}
+
+struct ModuleInformation: Decodable {
+    let text: String
+}
+
 struct LiveAPI: SweatAPI, ChatAPI {
+    private func moduleJSON<T: Decodable>(_ path: String, upload: Data? = nil) async throws -> T {
+        var endpoint = try v2Request("modules")
+        guard let url = endpoint.url,
+              var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            throw V2Failure.invalidInput
+        }
+        components.path = "/api/modules/v1/" + path
+        guard let target = components.url else { throw V2Failure.invalidInput }
+        endpoint = request(target, method: upload == nil ? "GET" : "PUT")
+        if let upload {
+            endpoint.httpBody = upload
+            endpoint.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let (data, response) = try await session.data(for: endpoint)
+        try checked(response, expected: 200, data: data)
+        guard data.count <= 2_000_000 else { throw V2Failure.invalidResponse }
+        return try JSONDecoder().decode(T.self, from: data)
+    }
+
+    func moduleManifest() async throws -> ModuleManifest { try await moduleJSON("manifest") }
+    func moduleCards(_ id: String, upload: Data? = nil) async throws -> ModuleCards {
+        try await moduleJSON("tabs/\(Server.segment(id))", upload: upload)
+    }
+    func moduleInformation(_ id: String) async throws -> ModuleInformation {
+        try await moduleJSON("tabs/\(Server.segment(id))")
+    }
     let server: Server
     private let token: String
     private let session: URLSession

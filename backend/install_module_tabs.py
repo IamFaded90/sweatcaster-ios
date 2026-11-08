@@ -1,0 +1,59 @@
+"""Install the additive module hooks into a compatible FadedAI PC checkpoint."""
+
+import argparse
+from pathlib import Path
+
+
+def install(root: Path) -> None:
+    package = root / "sweatcaster"
+    source = Path(__file__).resolve().parent / "sweatcaster" / "module_tabs.py"
+    changes = {
+        "api.py": (
+            "    register_v2(app, settings)\n",
+            "    register_v2(app, settings)\n"
+            "    from sweatcaster.module_tabs import register_modules\n"
+            "    register_modules(app, settings, _bearer)\n",
+        ),
+        "v2_api.py": (
+            '        yield sse("tool_status", "Preparing the selected model.")\n',
+            '        from sweatcaster.module_tabs import collection_answer\n'
+            '        message = str(body.get("message") or "")\n'
+            '        answer = collection_answer(settings, message)\n'
+            '        if answer is not None:\n'
+            '            if settings.token:\n'
+            '                answer = answer.replace(settings.token, "[token]")\n'
+            '            yield sse("tool_status", "Læser Kortsamling på PC’en.")\n'
+            '            for offset in range(0, len(answer), 2000):\n'
+            '                yield sse("text", answer[offset:offset + 2000])\n'
+            '            yield sse_json({"type": "done", "content": "",\n'
+            '                            "message_id": str(uuid.uuid4()), "model_id": model_id})\n'
+            '            return\n'
+            '        yield sse("tool_status", "Preparing the selected model.")\n',
+        ),
+    }
+    staged = {}
+    for name, (anchor, replacement) in changes.items():
+        path = package / name
+        original = path.read_text(encoding="utf-8")
+        if replacement in original:
+            continue
+        if original.count(anchor) != 1:
+            raise ValueError(f"Checkpoint has an unexpected {name}; no files were written.")
+        updated = original.replace(anchor, replacement)
+        compile(updated, str(path), "exec")
+        staged[path] = (original, updated)
+    module = source.read_text(encoding="utf-8")
+    compile(module, str(source), "exec")
+    for path, (original, _) in staged.items():
+        backup = path.with_suffix(".py.before-module-tabs")
+        if not backup.exists():
+            backup.write_text(original, encoding="utf-8")
+    (package / source.name).write_text(module, encoding="utf-8")
+    for path, (_, updated) in staged.items():
+        path.write_text(updated, encoding="utf-8")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("checkpoint", type=Path)
+    install(parser.parse_args().checkpoint.resolve())
