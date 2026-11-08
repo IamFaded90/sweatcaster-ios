@@ -391,7 +391,7 @@ struct Home: View {
         .fontDesign(design)
     }
 
-    var body: some View {
+    private var homeStartup: some View {
         homePresentation
         .onAppear {
             UIDevice.current.isBatteryMonitoringEnabled = true
@@ -413,6 +413,10 @@ struct Home: View {
         .task(id: renderActivityKey) {
             await RenderLiveActivity.shared.sync(jobs: model.jobs, server: model.address, enabled: !model.isDemo && model.connected)
         }
+    }
+
+    private var homeNotices: some View {
+        homeStartup
         .overlay(alignment: .top) {
             if let studioToast {
                 Text(studioToast.text).font(.callout)
@@ -430,6 +434,10 @@ struct Home: View {
         .alert("Fejlloggen kunne ikke eksporteres", isPresented: $diagnosticsError) {
             Button("OK", role: .cancel) {}
         }
+    }
+
+    private var homeVideoDialogs: some View {
+        homeNotices
         .confirmationDialog("Slet den redigerede video fra PC’en?", isPresented: Binding(
             get: { pcDeletion != nil }, set: { if !$0 { pcDeletion = nil } }
         ), presenting: pcDeletion) { target in
@@ -467,6 +475,10 @@ struct Home: View {
         } message: { mood in
             Text("Starter \(model.selected.count) valgte klip med \(mood.title).")
         }
+    }
+
+    private var homeSheets: some View {
+        homeVideoDialogs
         .sheet(isPresented: $showAgentHub) {
             AgentHub(api: model.api as? LiveAPI)
         }
@@ -491,6 +503,10 @@ struct Home: View {
                     .toolbar { Button("Luk") { showHelp = false } }
             }
         }
+    }
+
+    private var homePolling: some View {
+        homeSheets
         .task(id: phase) {
             if phase == .active { await model.refresh() }
         }
@@ -509,19 +525,28 @@ struct Home: View {
                 if !Task.isCancelled { await model.poll() }
             }
         }
-        .sheet(item: $media) { item in
-            Preview(media: item)
-        }
-        .sheet(isPresented: $showChat, onDismiss: {
-            if !model.isDemo { Task { await model.refresh() } }
-        }) {
-            ChatView(api: model.connected || model.isDemo ? model.api as? any ChatAPI : nil, demo: model.isDemo, initialDraft: "",
-                     connection: model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
-                     storageKey: "spaces.chat." + (model.isDemo ? "demo" : (model.connected ? model.address : "offline")))
-                .id(model.isDemo ? "demo" : (model.connected ? model.address : "offline"))
-        }
     }
 
+    var body: some View {
+        homePolling
+            .sheet(item: $media) { Preview(media: $0) }
+            .sheet(isPresented: $showChat, onDismiss: refreshAfterChat) { chatSheet }
+    }
+
+    private func refreshAfterChat() {
+        guard !model.isDemo else { return }
+        Task { await model.refresh() }
+    }
+
+    private var chatSheet: some View {
+        let session = model.isDemo ? "demo" : (model.connected ? model.address : "offline")
+        let api: (any ChatAPI)? = model.connected || model.isDemo ? model.api as? any ChatAPI : nil
+        let status = model.connected ? "Forbundet" : "Ikke forbundet"
+        let connection = model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(status)"
+        return ChatView(api: api, demo: model.isDemo, initialDraft: "", connection: connection,
+                        storageKey: "spaces.chat." + session)
+            .id(session)
+    }
 
     @ViewBuilder private var header: some View {
         Text("FadedAI").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
@@ -600,27 +625,7 @@ struct Home: View {
                 Button("Code Bot og Agent Workspace") { showCodeWorkspace = true }
                 CloudModelSettings()
             case .appearance:
-                Toggle("Følg iOS’ udseende", isOn: $followSystemAppearance)
-                if !followSystemAppearance { Toggle("Mørk tilstand", isOn: $manualDarkMode) }
-                Toggle("Brug OLED-sort baggrund i mørk tilstand", isOn: Binding(
-                    get: { theme == "OLED Sort" }, set: { theme = $0 ? "OLED Sort" : "System" }
-                ))
-                Slider(value: $textScale, in: 0...5, step: 1) { Text("Tekststørrelse") }
-                    .accessibilityLabel("Tekststørrelse i appen")
-                    .sensoryFeedback(.selection, trigger: textScale) { old, new in
-                        appHaptics && old != new && (new == 0 || new == 5)
-                    }
-                Picker("Skrift", selection: $font) {
-                    ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
-                }
-                Toggle("Bevægelse i baggrunden", isOn: $motion)
-                Toggle("Ekstra rolig bevægelse", isOn: $calmMotion)
-                Toggle("Haptisk feedback", isOn: $appHaptics)
-                Toggle("Husk seneste fane", isOn: $rememberLastSpace)
-                Toggle("Hold skærmen vågen", isOn: $keepScreenAwake)
-                Toggle("Kompakte klipkort", isOn: $compactClipCards)
-                Toggle("Vis kliplængde", isOn: $showClipDurations)
-                Toggle("Vis jobdetaljer", isOn: $showJobDetails)
+                appearanceSettings
             case .diagnostics:
                 Button(pinging ? "Tester PC…" : "Ping PC", systemImage: "network") {
                     Task {
@@ -642,6 +647,36 @@ struct Home: View {
             }
         }
         .navigationTitle("Indstillinger")
+    }
+
+    @ViewBuilder private var appearanceSettings: some View {
+        Toggle("Følg iOS’ udseende", isOn: $followSystemAppearance)
+        if !followSystemAppearance { Toggle("Mørk tilstand", isOn: $manualDarkMode) }
+        Toggle("Brug OLED-sort baggrund i mørk tilstand", isOn: Binding(
+            get: { theme == "OLED Sort" }, set: { theme = $0 ? "OLED Sort" : "System" }
+        ))
+        textSizeSetting
+        Picker("Skrift", selection: $font) {
+            ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
+        }
+        Toggle("Bevægelse i baggrunden", isOn: $motion)
+        Toggle("Ekstra rolig bevægelse", isOn: $calmMotion)
+        Toggle("Haptisk feedback", isOn: $appHaptics)
+        Toggle("Husk seneste fane", isOn: $rememberLastSpace)
+        Toggle("Hold skærmen vågen", isOn: $keepScreenAwake)
+        Toggle("Kompakte klipkort", isOn: $compactClipCards)
+        Toggle("Vis kliplængde", isOn: $showClipDurations)
+        Toggle("Vis jobdetaljer", isOn: $showJobDetails)
+    }
+
+    private var textSizeSetting: some View {
+        let slider = Slider<Text, EmptyView>(value: $textScale, in: 0.0...5.0, step: 1.0,
+                                             label: { Text("Tekststørrelse") })
+        return slider
+            .accessibilityLabel("Tekststørrelse i appen")
+            .sensoryFeedback(.selection, trigger: textScale) { (old: Double, new: Double) in
+                appHaptics && old != new && (new == 0 || new == 5)
+            }
     }
 
     private var renderActivityKey: String {

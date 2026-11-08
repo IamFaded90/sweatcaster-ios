@@ -254,7 +254,7 @@ struct OfflineStudio: View {
         NavigationStack { studioNavigation }
     }
 
-    private var studioNavigation: some View {
+    private var studioChrome: some View {
         studioContent
             .navigationTitle(sessionUnlocked ? "Privat bot" : "Privat område")
             .overlay(alignment: .top) {
@@ -299,6 +299,10 @@ struct OfflineStudio: View {
                     }
                 }
             }
+    }
+
+    private var studioPresentations: some View {
+        studioChrome
             .sheet(isPresented: $showModels, onDismiss: {
                 textContextLimit = contextWindow(for: effectiveTextModel)
             }) { PhoneModelsView() }
@@ -331,6 +335,10 @@ struct OfflineStudio: View {
             ), presenting: pendingImageDeletion) { file in
                 Button("Slet billede", role: .destructive) { deleteImage(file) }
             }
+    }
+
+    private var studioSessionLifecycle: some View {
+        studioPresentations
             .onAppear { activateChatIfNeeded(); resetIdleTimer() }
             .onChange(of: sessionUnlocked) { _, unlocked in
                 if unlocked { activateChatIfNeeded() }
@@ -352,6 +360,10 @@ struct OfflineStudio: View {
                 guard studioPhase != .active, privateSession, backgroundSince == started else { return }
                 wipeExpiredPrivateSession()
             }
+    }
+
+    private var studioNavigation: some View {
+        studioSessionLifecycle
             .onChange(of: task != nil) { _, _ in resetIdleTimer() }
             .onChange(of: autoSleepMinutes) { _, _ in resetIdleTimer() }
             .onChange(of: imagePrompt) { _, _ in resetIdleTimer() }
@@ -1666,7 +1678,7 @@ struct OfflineStudio: View {
 
     private func generateQueuedImages(_ request: StudioImageRequest) async throws {
         let folder = request.isPrivate ? temporaryImagesFolder : historyFolder
-        let ready = (try? MediaGenerationEnvironment.default.inspectModel(request.model, offline: true))?.isDownloaded == true
+        let ready = (try? await MediaGenerationEnvironment.default.inspectModel(request.model, offline: true))?.isDownloaded == true
         let localOnly = request.isPrivate || request.sourceImage != nil || request.seed != nil || request.prompt.count > 1_000
             || request.count > 1 || !request.negative.isEmpty || !request.lora.isEmpty
         if !ready && localOnly {
