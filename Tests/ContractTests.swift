@@ -437,6 +437,37 @@ final class ContractTests: XCTestCase {
         }
     }
 
+    @MainActor func testOfflineVideoDoesNotSendAfterSameAddressIsPairedAgain() async throws {
+        let host = "192.168.1.20"
+        let api = try stubAPI(address: host)
+        let suite = "Tests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: directory) }
+        defaults.set(host, forKey: Pairing.addressKey)
+
+        let first = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+        await first.refresh()
+        let folder = try await api.v2ClipPage(rootID: "2")
+        first.includeFolderClips(folder.clips, folderID: folder.root_id)
+        first.select(folder.clips)
+        let offline = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+        XCTAssertTrue(offline.queueVideoOffline(.hype))
+        let stored = try String(contentsOf: directory.appending(path: host + ".json"), encoding: .utf8)
+        XCTAssertFalse(stored.contains("test-only-token"))
+
+        let replacementAPI = try stubAPI(address: host, token: "test-replacement-token")
+        let rePaired = Model(api: replacementAPI, defaults: defaults, videoStateDirectory: directory)
+        await rePaired.refresh()
+        XCTAssertTrue(rePaired.connected)
+        await rePaired.deliverQueuedVideos()
+        XCTAssertTrue(rePaired.jobs.isEmpty)
+        XCTAssertEqual(rePaired.videoOutbox.first?.state, .rejected)
+        let queued = try XCTUnwrap(rePaired.videoOutbox.first)
+        rePaired.removeQueuedVideo(queued.id)
+        XCTAssertTrue(rePaired.videoOutbox.isEmpty)
+    }
+
     @MainActor func testIncompatibleVersionPreventsSubmission() async {
         let model = Model(api: UncertainAPI(version: "2"))
         await model.refresh()
@@ -444,10 +475,10 @@ final class ContractTests: XCTestCase {
         XCTAssertFalse(model.canSubmit)
     }
 
-    private func stubAPI(address: String = "192.168.1.20") throws -> LiveAPI {
+    private func stubAPI(address: String = "192.168.1.20", token: String = "test-only-token") throws -> LiveAPI {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [Stub.self]
-        return try LiveAPI(server: Server(address), token: "test-only-token", configuration: configuration)
+        return try LiveAPI(server: Server(address), token: token, configuration: configuration)
     }
 }
 
@@ -493,7 +524,7 @@ private final class Stub: URLProtocol {
         var mime = "application/json"
         if url.path == "/api/v1/health", auth == nil {
             status = 200; body = #"{"api_version":"1","status":"ok"}"#
-        } else if auth != "Bearer test-only-token" {
+        } else if auth != "Bearer test-only-token" && auth != "Bearer test-replacement-token" {
             status = 500; body = "{}"
         } else if url.path == "/api/modules/v1/tabs/cards", request.httpMethod == "GET" {
             status = 200; body = #"{"cards":[]}"#
@@ -679,12 +710,18 @@ extension ContractTests {
         let first = PCChatOutbox(file: file)
         let home = "192.168.1.42"
         let external = "100.64.1.42"
+        let target = "original-credential-fixture"
+        let replacement = "replacement-credential-fixture"
         let session = UUID()
-        let record = try first.enqueue(address: home, prompt: "Søg", message: "Søg i noter", sessionID: session, modelID: "qwen")
-        XCTAssertEqual(first.pendingCount(for: home), 1)
-        XCTAssertEqual(first.pendingCount(for: external), 0)
-        XCTAssertNil(try first.claim(record.id, for: external))
-        let attempt = try XCTUnwrap(first.claim(record.id, for: home))
+        let record = try first.enqueue(address: home, targetID: target, prompt: "Søg", message: "Søg i noter",
+                                       sessionID: session, modelID: "qwen")
+        XCTAssertEqual(first.pendingCount(for: home, targetID: target), 1)
+        XCTAssertEqual(first.pendingCount(for: external, targetID: target), 0)
+        XCTAssertEqual(first.pendingCount(for: home, targetID: replacement), 0)
+        XCTAssertEqual(first.reviewCount(for: home, targetID: replacement), 1)
+        XCTAssertNil(try first.claim(record.id, for: external, targetID: target))
+        XCTAssertNil(try first.claim(record.id, for: home, targetID: replacement))
+        let attempt = try XCTUnwrap(first.claim(record.id, for: home, targetID: target))
         let request = try attempt.request()
         XCTAssertEqual(request.request_id, record.id)
         XCTAssertEqual(request.session_id, session.uuidString)
@@ -692,11 +729,11 @@ extension ContractTests {
         XCTAssertEqual(request.model_id, "qwen")
 
         let reopened = PCChatOutbox(file: file)
-        XCTAssertNil(try reopened.claim(record.id, for: home))
-        XCTAssertEqual(reopened.reviewCount(for: home), 1)
+        XCTAssertNil(try reopened.claim(record.id, for: home, targetID: target))
+        XCTAssertEqual(reopened.reviewCount(for: home, targetID: target), 1)
         XCTAssertEqual(try reopened.entries(for: home).first?.state, .attempted)
-        try reopened.complete(record.id, for: home, reply: "Noterne er fundet.")
-        XCTAssertNil(try reopened.claim(record.id, for: home))
+        try reopened.complete(record.id, for: home, targetID: target, reply: "Noterne er fundet.")
+        XCTAssertNil(try reopened.claim(record.id, for: home, targetID: target))
         XCTAssertEqual(try reopened.entries(for: home).first?.reply, "Noterne er fundet.")
         XCTAssertEqual(try reopened.entries(for: home).first?.state, .completed)
     }
@@ -716,12 +753,13 @@ extension ContractTests {
         let address = "192.168.1.27"
         let api = try stubAPI(address: address)
         let outbox = PCChatOutbox(file: file)
-        try outbox.enqueue(address: address, prompt: "Se jobbet", message: "Se jobbet", sessionID: UUID(), modelID: nil)
+        try outbox.enqueue(address: address, targetID: api.queueTargetID, prompt: "Se jobbet", message: "Se jobbet",
+                           sessionID: UUID(), modelID: nil)
         let before = Stub.timedOutChatPosts.count
         await outbox.deliverReady(using: api)
         XCTAssertEqual(Stub.timedOutChatPosts.count - before, 1)
         let reopened = PCChatOutbox(file: file)
-        XCTAssertEqual(reopened.reviewCount(for: address), 1)
+        XCTAssertEqual(reopened.reviewCount(for: address, targetID: api.queueTargetID), 1)
         await reopened.deliverReady(using: api)
         XCTAssertEqual(Stub.timedOutChatPosts.count - before, 1)
     }

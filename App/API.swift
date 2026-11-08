@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import CryptoKit
 
 struct ChatRequest: Codable, Sendable {
     let message: String
@@ -251,12 +252,15 @@ struct LiveAPI: SweatAPI, ChatAPI {
         try await moduleJSON("code-batches/\(Server.segment(id))/approval", upload: JSONEncoder().encode(["approved": true]))
     }
     let server: Server
+    let queueTargetID: String
     private let token: String
     private let session: URLSession
     init(server: Server, token: String, configuration: URLSessionConfiguration = .ephemeral) throws {
         guard !token.isEmpty, token.utf8.allSatisfy({ (33...126).contains($0) }) else { throw APIError.token }
         self.server = server
         self.token = token
+        let target = Data("\(server.origin.absoluteString)\n\(token)".utf8)
+        queueTargetID = SHA256.hash(data: target).map { String(format: "%02x", $0) }.joined()
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 300
         configuration.allowsCellularAccess = server.profile == .tailscale

@@ -6,6 +6,7 @@ import Foundation
 
         let id: UUID
         let address: String
+        let targetID: String?
         let prompt: String
         let message: String
         let sessionID: UUID
@@ -44,20 +45,22 @@ import Foundation
         try read().filter { $0.address == address }
     }
 
-    func pendingCount(for address: String) -> Int {
-        (try? entries(for: address).filter { $0.state == .waiting }.count) ?? 0
+    func pendingCount(for address: String, targetID: String? = nil) -> Int {
+        (try? entries(for: address).filter { $0.state == .waiting && (targetID == nil || $0.targetID == targetID) }.count) ?? 0
     }
 
-    func reviewCount(for address: String) -> Int {
-        (try? entries(for: address).filter { $0.state == .attempted && !Self.isDelivering($0.id) }.count) ?? 0
+    func reviewCount(for address: String, targetID: String? = nil) -> Int {
+        (try? entries(for: address).filter {
+            !Self.isDelivering($0.id) && ($0.state == .attempted || (targetID != nil && $0.targetID != targetID))
+        }.count) ?? 0
     }
 
     static func isDelivering(_ id: UUID) -> Bool { inFlight.contains(id) }
 
     @discardableResult
-    func enqueue(address: String, prompt: String, message: String, sessionID: UUID, modelID: String?) throws -> Entry {
-        guard let server = try? Server(address), server.address == address else { throw Failure.invalidTarget }
-        let entry = Entry(id: UUID(), address: address, prompt: prompt, message: message, sessionID: sessionID,
+    func enqueue(address: String, targetID: String, prompt: String, message: String, sessionID: UUID, modelID: String?) throws -> Entry {
+        guard !targetID.isEmpty, let server = try? Server(address), server.address == address else { throw Failure.invalidTarget }
+        let entry = Entry(id: UUID(), address: address, targetID: targetID, prompt: prompt, message: message, sessionID: sessionID,
                           modelID: modelID, createdAt: .now, state: .waiting, reply: nil)
         _ = try entry.request()
         var stored = try read()
@@ -67,17 +70,21 @@ import Foundation
         return entry
     }
 
-    func claim(_ id: UUID, for address: String) throws -> Entry? {
+    func claim(_ id: UUID, for address: String, targetID: String) throws -> Entry? {
         var stored = try read()
-        guard let index = stored.firstIndex(where: { $0.id == id && $0.address == address && $0.state == .waiting }) else { return nil }
+        guard let index = stored.firstIndex(where: {
+            $0.id == id && $0.address == address && $0.targetID == targetID && $0.state == .waiting
+        }) else { return nil }
         stored[index].state = .attempted
         try write(stored)
         return stored[index]
     }
 
-    func complete(_ id: UUID, for address: String, reply: String) throws {
+    func complete(_ id: UUID, for address: String, targetID: String, reply: String) throws {
         var stored = try read()
-        guard let index = stored.firstIndex(where: { $0.id == id && $0.address == address && $0.state == .attempted }) else { return }
+        guard let index = stored.firstIndex(where: {
+            $0.id == id && $0.address == address && $0.targetID == targetID && $0.state == .attempted
+        }) else { return }
         stored[index].state = .completed
         stored[index].reply = reply
         try write(stored)
@@ -95,7 +102,7 @@ import Foundation
         guard Self.draining.insert(address).inserted else { return }
         defer { Self.draining.remove(address) }
         do {
-            let waiting = try entries(for: address).filter { $0.state == .waiting }
+            let waiting = try entries(for: address).filter { $0.state == .waiting && $0.targetID == api.queueTargetID }
             guard !waiting.isEmpty else { return }
             // Establish V2 support before consuming an attempt. GET has no job side effects.
             _ = try await api.v2Models()
@@ -115,13 +122,14 @@ import Foundation
             Self.inFlight.remove(item.id)
             NotificationCenter.default.post(name: Self.didChange, object: nil)
         }
-        guard try claim(item.id, for: api.server.address) != nil else { return }
+        guard try claim(item.id, for: api.server.address, targetID: api.queueTargetID) != nil else { return }
         try Task.checkCancellation()
         let answer = Answer()
         try await api.v2Chat(request) { event in
             if event.type == .text { await answer.append(event.content) }
         }
-        try complete(item.id, for: api.server.address, reply: api.redactChat(answer.text, complete: true))
+        try complete(item.id, for: api.server.address, targetID: api.queueTargetID,
+                     reply: api.redactChat(answer.text, complete: true))
     }
 
     private func read() throws -> [Entry] {

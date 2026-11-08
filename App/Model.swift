@@ -13,6 +13,7 @@ struct VideoOutboxItem: Codable, Identifiable, Sendable {
     let createdAt: Date
     let batch: Batch
     let clips: [SavedVideoClip]
+    let targetID: String?
     var state: State
     var message: String?
 }
@@ -368,13 +369,13 @@ private struct VideoStudioState: Codable {
     }
 
     func queueVideoOffline(_ mood: Mood) -> Bool {
-        guard canQueueVideoOffline else { return false }
+        guard canQueueVideoOffline, let live = api as? LiveAPI, live.server.address == address else { return false }
         let sources = savedVideoClips
         let batch = Batch(clip_ids: sources.map { $0.clip.id }, mood: mood, options: options)
         guard (try? batch.validate(limit: 10)) != nil else { return false }
         var updated = videoStudio
         updated.outbox.append(VideoOutboxItem(id: UUID(), createdAt: .now, batch: batch, clips: sources,
-                                            state: .waiting, message: nil))
+                                             targetID: live.queueTargetID, state: .waiting, message: nil))
         updated.mood = mood
         updated.clips = []
         guard saveVideoStudio(updated) else { return false }
@@ -397,6 +398,11 @@ private struct VideoStudioState: Codable {
         videoOutboxNotice = nil
         while !Task.isCancelled && connected && !uncertain && !isDemo && address == source {
             guard let item = videoOutbox.first(where: { $0.state == .waiting }) else { return }
+            guard item.targetID == live.queueTargetID else {
+                guard updateQueuedVideo(item.id, state: .rejected,
+                                        message: "PC-parringen kan ikke bekræftes. Fjern jobbet fra den lokale kø.") else { return }
+                continue
+            }
             if busy || refreshing || !cancelling.isEmpty {
                 do { try await Task.sleep(for: .milliseconds(250)) } catch { return }
                 continue

@@ -558,6 +558,7 @@ struct Home: View {
         }
         .onChange(of: model.isDemo) { hiddenJobs.removeAll() }
         .onChange(of: model.address) { hiddenJobs.removeAll(); readJobCache(); refreshQueueBadge() }
+        .onChange(of: (model.api as? LiveAPI)?.queueTargetID) { refreshQueueBadge() }
         .onChange(of: model.connected) { _, online in if online { cacheJobs() } }
         .onChange(of: model.jobs.map { "\($0.id):\($0.status.rawValue):\($0.progress)" }) { cacheJobs() }
     }
@@ -737,12 +738,17 @@ struct Home: View {
             }
         }
         .task(id: offlineRecoveryAddress) { await recoverPCConnection() }
-        .task(id: "\(phase == .active && model.connected && !model.isDemo):\(model.address)") {
+        .task(id: queueDeliveryTarget) {
             guard phase == .active, model.connected, !model.isDemo, let api = model.api as? LiveAPI else { return }
             await model.deliverQueuedVideos()
-            guard !Task.isCancelled, model.connected, !model.uncertain, model.address == api.server.address else { return }
+            guard !Task.isCancelled, queueDeliveryTarget == api.queueTargetID else { return }
             await PCChatOutbox().deliverReady(using: api)
         }
+    }
+
+    private var queueDeliveryTarget: String? {
+        guard phase == .active, model.connected, !model.isDemo, !model.uncertain else { return nil }
+        return (model.api as? LiveAPI)?.queueTargetID
     }
 
     private var offlineRecoveryAddress: String? {
@@ -807,9 +813,11 @@ struct Home: View {
         let api: (any ChatAPI)? = model.connected || model.isDemo ? model.api as? any ChatAPI : nil
         let status = model.connected ? "Forbundet" : "Ikke forbundet"
         let connection = model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(status)"
+        let target = model.api as? LiveAPI
         return ChatView(api: api, demo: model.isDemo, initialDraft: "", connection: connection,
                         storageKey: "spaces.chat." + session, onBack: { showChat = false },
-                        openImageStudio: openImagesFromChat, pcTargetAddress: (model.api as? LiveAPI)?.server.address,
+                        openImageStudio: openImagesFromChat, pcTargetAddress: target?.server.address,
+                        pcQueueTargetID: target?.queueTargetID,
                         pcConnectionError: model.error, reconnectPC: { Task { await model.refresh() } },
                         initialSearch: searchChatQuery)
             .id(session)
@@ -919,8 +927,9 @@ struct Home: View {
 
     private func refreshQueueBadge() {
         let queue = PCChatOutbox()
-        queuedChatCount = queue.pendingCount(for: model.address)
-        chatReviewCount = queue.reviewCount(for: model.address)
+        let targetID = (model.api as? LiveAPI)?.queueTargetID
+        queuedChatCount = queue.pendingCount(for: model.address, targetID: targetID)
+        chatReviewCount = queue.reviewCount(for: model.address, targetID: targetID)
     }
 
     @ViewBuilder private var dashboardConnection: some View {
@@ -4604,6 +4613,7 @@ private struct ChatView: View {
     let onBack: (() -> Void)?
     let openImageStudio: ((String) -> Void)?
     let pcTargetAddress: String?
+    let pcQueueTargetID: String?
     let pcConnectionError: APIError?
     let reconnectPC: (() -> Void)?
     let initialSearch: String
@@ -4684,7 +4694,8 @@ private struct ChatView: View {
 
     init(api: (any ChatAPI)?, demo: Bool, initialDraft: String, connection: String, storageKey: String,
          onBack: (() -> Void)? = nil, openImageStudio: ((String) -> Void)? = nil,
-         pcTargetAddress: String? = nil, pcConnectionError: APIError? = nil, reconnectPC: (() -> Void)? = nil,
+         pcTargetAddress: String? = nil, pcQueueTargetID: String? = nil,
+         pcConnectionError: APIError? = nil, reconnectPC: (() -> Void)? = nil,
          initialSearch: String = "") {
         self.api = api
         self.demo = demo
@@ -4694,6 +4705,7 @@ private struct ChatView: View {
         self.onBack = onBack
         self.openImageStudio = openImageStudio
         self.pcTargetAddress = pcTargetAddress
+        self.pcQueueTargetID = pcQueueTargetID
         self.pcConnectionError = pcConnectionError
         self.reconnectPC = reconnectPC
         self.initialSearch = initialSearch
@@ -4861,6 +4873,7 @@ private struct ChatView: View {
                     cloudKeyAvailable = CloudModelKey.exists()
                 }
                 .onReceive(NotificationCenter.default.publisher(for: PCChatOutbox.didChange)) { _ in reloadOutbox() }
+                .onChange(of: pcQueueTargetID) { reloadOutbox() }
                 .onChange(of: task != nil) { _, active in if !active { reloadOutbox() } }
                 .task { await loadModels() }
                 .sensoryFeedback(.success, trigger: completedReplies)
@@ -4950,7 +4963,10 @@ private struct ChatView: View {
         guard !demo else { return nil }
         return switch replySource {
         case .phone: nil
-        case .pc: api != nil ? nil : canQueuePC ? "PC’en kan ikke nås. Du kan sætte beskeden i udbakken." : "Forbind til PC’en for at sende."
+        case .pc:
+            api != nil ? nil : canQueuePC
+                ? "PC’en kan ikke nås. Udbakken sender automatisk, når denne PC er tilbage."
+                : "Forbind til PC’en for at sende."
         case .grok: cloudKeyAvailable
             ? "Beskeden og de seneste Grok-udvekslinger sendes til xAI. Forbrug kan koste penge."
             : "Gem en xAI-nøgle under Chatindstillinger for at sende til Grok."
@@ -4967,7 +4983,12 @@ private struct ChatView: View {
     }
 
     private var canQueuePC: Bool {
-        api == nil && !demo && !aiPrivateSession && pcTargetAddress != nil && PCChatOutbox.confirmedOffline(pcConnectionError)
+        api == nil && !demo && !aiPrivateSession && pcTargetAddress != nil && pcQueueTargetID != nil
+            && PCChatOutbox.confirmedOffline(pcConnectionError)
+    }
+
+    private func matchesQueueTarget(_ entry: PCChatOutbox.Entry) -> Bool {
+        pcQueueTargetID != nil && entry.targetID == pcQueueTargetID
     }
 
     private var outboxPanel: some View {
@@ -4978,8 +4999,7 @@ private struct ChatView: View {
                     let inFlight = activeOutboxIDs.contains(entry.id)
                     VStack(alignment: .leading, spacing: 4) {
                         Text(entry.prompt).lineLimit(2)
-                        Text(entry.state == .waiting ? "Sendes, når denne PC er tilbage."
-                             : inFlight ? "PC-beskeden behandles…" : "Kontrollér på PC’en. Denne besked gensendes aldrig automatisk.")
+                        Text(outboxStatus(entry, inFlight: inFlight))
                             .font(.caption).foregroundStyle(palette.secondary)
                         if !inFlight {
                             Menu("Udbakkehandlinger", systemImage: "ellipsis.circle") {
@@ -4993,13 +5013,19 @@ private struct ChatView: View {
                 }
                 if api == nil, let reconnectPC {
                     FadedSecondaryButton("Tjek forbindelse", icon: "arrow.clockwise", action: reconnectPC)
-                } else if let live = api as? LiveAPI, outboxEntries.contains(where: { $0.state == .waiting }) {
+                } else if let live = api as? LiveAPI, outboxEntries.contains(where: { $0.state == .waiting && matchesQueueTarget($0) }) {
                     FadedSecondaryButton("Send ventende", icon: "paperplane") {
                         Task { await PCChatOutbox().deliverReady(using: live) }
                     }.disabled(!activeOutboxIDs.isEmpty || task != nil)
                 }
             }
         }
+    }
+
+    private func outboxStatus(_ entry: PCChatOutbox.Entry, inFlight: Bool) -> String {
+        if !matchesQueueTarget(entry) { return "PC-forbindelsen er ændret. Beskeden sendes ikke." }
+        if entry.state == .waiting { return "Sendes, når denne PC er tilbage." }
+        return inFlight ? "PC-beskeden behandles…" : "Kontrollér på PC’en. Denne besked gensendes aldrig automatisk."
     }
 
     private func reloadOutbox() {
@@ -5011,10 +5037,10 @@ private struct ChatView: View {
         let outbox = PCChatOutbox()
         do {
             let stored = try outbox.entries(for: address)
-            outboxEntries = stored.filter { $0.state != .completed }
+            outboxEntries = stored.filter { $0.state != .completed || !matchesQueueTarget($0) }
             activeOutboxIDs = Set(stored.map(\.id).filter { PCChatOutbox.isDelivering($0) })
             guard loaded, task == nil else { return }
-            let completed = stored.filter { $0.state == .completed && !PCChatOutbox.isDelivering($0.id) }
+            let completed = stored.filter { $0.state == .completed && matchesQueueTarget($0) && !PCChatOutbox.isDelivering($0.id) }
             guard !completed.isEmpty else { return }
             var imported = Set<UUID>()
             let existing = Set(turns.map(\.id))
@@ -5670,9 +5696,9 @@ private struct ChatView: View {
     private func turnIndex(_ id: UUID) -> Int? { turns.firstIndex { $0.id == id } }
 
     private func queuePCMessage(_ prompt: String, outgoing: String, address: String) {
-        guard canQueuePC, pcTargetAddress == address else { return }
+        guard canQueuePC, pcTargetAddress == address, let pcQueueTargetID else { return }
         do {
-            try PCChatOutbox().enqueue(address: address, prompt: prompt, message: outgoing, sessionID: sessionID,
+            try PCChatOutbox().enqueue(address: address, targetID: pcQueueTargetID, prompt: prompt, message: outgoing, sessionID: sessionID,
                                        modelID: selectedModel.isEmpty ? nil : selectedModel)
             attachedNote = nil
             attachedQuote = nil
