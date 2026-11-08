@@ -30,4 +30,4 @@ Copy `sweatcaster/code_batch.py` into the same installed Python package as `repo
 .\.venv\Scripts\python.exe -m sweatcaster.code_batch show <job-id>
 ```
 
-The queue persists under the PC output directory. The worker serializes jobs and acquires the existing Ollama model lease shared with chat and rendering. It uses the configured local model. A job produces a review-only unified diff for up to five selected tracked files, plus a test plan. The worker does not apply proposals. Start the worker separately from the HTTP server. `worker --once` handles at most one queued job.
+The queue persists under the PC output directory. The worker starts with the PC HTTP server after installing the module hooks. It serializes jobs and acquires the existing Ollama model lease shared with chat and rendering. A job produces a unified diff for up to five selected tracked files and a test plan. In the compatible iOS app, open **Code Bot → Forslag til flere filer** to submit and review jobs. Approval creates a local `fadedai/review-*` branch in the bare repository snapshot. The source branch remains unchanged. `worker --once` is also available for standalone diagnostics.

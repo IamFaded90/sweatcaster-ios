@@ -17,6 +17,9 @@ def test_manifest_import_and_local_answers(tmp_path):
     with TestClient(create_app(settings)) as client:
         base = "/api/modules/v1/"
         assert client.get(base + "manifest").status_code == 401
+        assert client.get(base + "code-batches").status_code == 401
+        assert client.get(base + "code-batches", headers=headers).json() == {"jobs": []}
+        assert client.put(base + "code-batches/example/approval", headers=headers, json={"approved": False}).status_code == 422
         assert [tab["id"] for tab in client.get(base + "manifest", headers=headers).json()["tabs"]] == ["cards", "test"]
         assert client.get(base + "tabs/test", headers=headers).json() == {"text": "Klar"}
         card = {"navn": "Pikachu", "sæt": "Base Set", "nummer": "58", "sprog": "Engelsk"}

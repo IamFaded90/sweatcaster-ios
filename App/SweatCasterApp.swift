@@ -2171,6 +2171,125 @@ private struct ModuleTabView: View {
     }
 }
 
+private struct BatchReviewView: View {
+    let api: LiveAPI
+    @State private var jobs: [CodeBatchList.Job] = []
+    @State private var repo = ""
+    @State private var goal = ""
+    @State private var paths = ""
+    @State private var error = false
+    @State private var busy = false
+
+    var body: some View {
+        Form {
+            Section("Ny opgave") {
+                TextField("Repo (ejer/projekt)", text: $repo).textInputAutocapitalization(.never).autocorrectionDisabled()
+                TextField("Hvad skal ændres?", text: $goal, axis: .vertical)
+                TextField("Op til fem filstier, én pr. linje", text: $paths, axis: .vertical)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                Button("Sæt i kø") { Task { await enqueue() } }
+                    .disabled(busy || repo.isEmpty || goal.isEmpty || paths.isEmpty)
+            }
+            Section("Kodejob") {
+                if error { Text("Kodekøen kunne ikke opdateres. Kontrollér forbindelsen og oplysningerne.") }
+                Button("Opdatér liste") { Task { await reload() } }
+                ForEach(jobs) { job in
+                    NavigationLink {
+                        BatchProposalView(api: api, id: job.id)
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(job.goal)
+                            Text(batchStatus(job.status)).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }
+        .navigationTitle("Forslag til flere filer")
+        .task { await reload() }
+        .refreshable { await reload() }
+    }
+
+    private func reload() async {
+        do { jobs = try await api.codeBatches().jobs; error = false }
+        catch { error = true }
+    }
+
+    private func enqueue() async {
+        busy = true
+        defer { busy = false }
+        let files = paths.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+        do {
+            try await api.enqueueCodeBatch(repo: repo.trimmingCharacters(in: .whitespaces), goal: goal, files: files)
+            goal = ""
+            await reload()
+        } catch { error = true }
+    }
+}
+
+private func batchStatus(_ status: String) -> String {
+    switch status {
+    case "queued": "I kø"
+    case "running": "Arbejder"
+    case "review": "Afventer godkendelse"
+    case "applied": "Gemt på lokal gren"
+    case "declined": "Intet forslag"
+    default: "Jobbet stoppede"
+    }
+}
+
+private struct BatchProposalView: View {
+    let api: LiveAPI
+    let id: String
+    @State private var detail: CodeBatchDetail?
+    @State private var confirm = false
+    @State private var busy = false
+    @State private var notice: String?
+
+    var body: some View {
+        List {
+            if let detail { Text(batchStatus(detail.status)) }
+            if let notice { Text(notice) }
+            if let reason = detail?.result?.reason { Text(verbatim: reason) }
+            if let diff = detail?.result?.diff {
+                Section("Ændringer") {
+                    ScrollView(.horizontal) { Text(verbatim: diff).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
+                }
+            }
+            if let tests = detail?.result?.tests {
+                Section("Testplan") {
+                    ForEach(Array(tests.enumerated()), id: \.offset) { entry in Text(verbatim: entry.element) }
+                }
+            }
+            if let branch = detail?.result?.branch { Text(verbatim: branch).textSelection(.enabled) }
+            if detail?.status == "review" {
+                Button("Godkend og gem på lokal gren") { confirm = true }.disabled(busy)
+            }
+            Button("Opdatér") { Task { await reload() } }.disabled(busy)
+        }
+        .navigationTitle("Gennemgå forslag")
+        .task { await reload() }
+        .confirmationDialog("Godkend ændringerne?", isPresented: $confirm) {
+            Button("Opret lokal Git-gren") { Task { await approve() } }
+        } message: { Text("Forslaget gemmes på en separat gren i Agent Workspace på PC’en.") }
+    }
+
+    private func reload() async {
+        do { detail = try await api.codeBatch(id); notice = nil }
+        catch { notice = "Forslaget kunne ikke hentes." }
+    }
+
+    private func approve() async {
+        busy = true
+        defer { busy = false }
+        do {
+            let applied = try await api.approveCodeBatch(id)
+            await reload()
+            if let branch = applied.branch { notice = "Ændringerne er gemt på \(branch)." }
+        } catch { notice = "PC’en kunne ikke bekræfte godkendelsen. Opdatér for at se den aktuelle status." }
+    }
+}
+
 private struct CodeWorkspaceView: View {
     private struct FeatureDraft: Decodable {
         let feasible: Bool
@@ -2253,6 +2372,10 @@ private struct CodeWorkspaceView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 10) {
+                        if let api {
+                            NavigationLink("Forslag til flere filer") { BatchReviewView(api: api) }
+                                .buttonStyle(.bordered).frame(minHeight: 44)
+                        }
                         Text("Byg en lille funktion med PC-modellen").font(.title2.bold())
                         Text("Vælg eller skriv en filsti, beskriv én afgrænset ændring, og gennemgå altid diffen før godkendelse.")
                             .font(.callout).foregroundStyle(.secondary)

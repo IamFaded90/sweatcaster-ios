@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import sqlite3
 import unicodedata
 from collections import Counter
-from contextlib import closing
+from contextlib import asynccontextmanager, closing
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, Request
+from fastapi import Body, FastAPI, Request
 
 from sweatcaster.dto import ApiError
 
@@ -111,6 +112,60 @@ def collection_answer(settings, message: str) -> str | None:
 
 
 def register_modules(app: FastAPI, settings, authorize) -> None:
+    from sweatcaster.code_batch import BatchWorker, configured_batch
+    from sweatcaster.repository_library import RepositoryError
+
+    workspace = Path(os.environ.get("SWEATCASTER_WORKSPACE_DIR", "workspace"))
+    batch = configured_batch(settings, workspace)
+    original_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(application):
+        async with original_lifespan(application):
+            worker = BatchWorker(batch)
+            worker.start()
+            try:
+                yield
+            finally:
+                worker.stop()
+
+    app.router.lifespan_context = lifespan
+
+    @app.get("/api/modules/v1/code-batches", include_in_schema=False)
+    def batches(request: Request):
+        authorize(request, settings)
+        return {"jobs": batch.list()}
+
+    @app.put("/api/modules/v1/code-batches", include_in_schema=False)
+    def enqueue(request: Request, body: dict = Body(...)):
+        authorize(request, settings)
+        repo, goal, files = (body.get(key) for key in ("repo", "goal", "files"))
+        if (not isinstance(repo, str) or not isinstance(goal, str) or not isinstance(files, list)
+                or not all(isinstance(file, str) for file in files)):
+            raise ApiError(422, "INVALID_INPUT", "Vælg et repo, en opgave og kildefiler.")
+        try:
+            return {"id": batch.enqueue(repo, goal, files)}
+        except RepositoryError as exc:
+            raise ApiError(422, "INVALID_INPUT", str(exc)) from exc
+
+    @app.get("/api/modules/v1/code-batches/{job}", include_in_schema=False)
+    def batch_detail(request: Request, job: str):
+        authorize(request, settings)
+        try:
+            return batch.get(job)
+        except RepositoryError as exc:
+            raise ApiError(404, "NOT_FOUND", str(exc)) from exc
+
+    @app.put("/api/modules/v1/code-batches/{job}/approval", include_in_schema=False)
+    def approve_batch(request: Request, job: str, body: dict = Body(...)):
+        authorize(request, settings)
+        if body != {"approved": True} or body.get("approved") is not True:
+            raise ApiError(422, "INVALID_INPUT", "Forslaget kræver en eksplicit godkendelse.")
+        try:
+            return batch.apply(job)
+        except RepositoryError as exc:
+            raise ApiError(409, "NOT_READY", str(exc)) from exc
+
     @app.get("/api/modules/v1/manifest", include_in_schema=False)
     def manifest(request: Request):
         authorize(request, settings)

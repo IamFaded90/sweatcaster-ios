@@ -6,6 +6,8 @@ import argparse
 import difflib
 import json
 import sqlite3
+import tempfile
+import threading
 import time
 from contextlib import closing
 from pathlib import Path
@@ -54,6 +56,52 @@ class CodeBatch:
         if row is None:
             raise RepositoryError("Kodejobbet findes ikke.")
         return {**dict(row), "result": json.loads(row["result"]) if row["result"] else None}
+
+    def list(self) -> list[dict]:
+        with closing(self._connect()) as db:
+            return [dict(row) for row in db.execute(
+                "SELECT id, repo, goal, status FROM code_batch ORDER BY created DESC LIMIT 50")]
+
+    def apply(self, job: str) -> dict:
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT repo, status, result FROM code_batch WHERE id=?", (job,)).fetchone()
+            if row is None or row["status"] not in {"review", "applied"}:
+                raise RepositoryError("Forslaget er ikke klar til godkendelse.")
+            result = json.loads(row["result"])
+            if row["status"] == "applied":
+                return result
+            repo, current = self.repository._head(row["repo"])
+            base = result["base_revision"]
+            branch = f"fadedai/review-{job}"
+            ref = f"refs/heads/{branch}"
+            git = self.repository._git
+            if current != base:
+                raise RepositoryError("Projektet har ændret sig. Opret et nyt forslag.")
+            if git(repo, "rev-parse", "--is-bare-repository").strip() != b"true":
+                raise RepositoryError("Godkendelse kræver et lokalt, isoleret Git-snapshot.")
+            with tempfile.TemporaryDirectory() as staging:
+                index = Path(staging) / "index"
+                git(repo, "read-tree", base, index=index)
+                git(repo, "apply", "--cached", "--whitespace=nowarn", "-", index=index,
+                    stdin=result["diff"].encode("utf-8"))
+                tree = git(repo, "write-tree", index=index).decode("ascii").strip()
+            existing = git(repo, "for-each-ref", "--format=%(objectname)", ref).decode("ascii").strip()
+            if existing:
+                details = git(repo, "show", "-s", "--format=%T %P %s", existing).decode().strip()
+                if details != f"{tree} {base} FadedAI approved proposal {job}":
+                    raise RepositoryError("Forslagets lokale gren er allerede i brug.")
+                commit = existing
+            else:
+                commit = git(repo, "-c", "user.name=FadedAI", "-c", "user.email=fadedai@localhost",
+                             "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", base,
+                             "-m", f"FadedAI approved proposal {job}").decode("ascii").strip()
+                git(repo, "-c", "core.hooksPath=" + str(repo / "fadedai-disabled-hooks"), "update-ref", "--stdin",
+                    stdin=f"verify HEAD {base}\ncreate {ref} {commit}\n".encode("ascii"))
+            result.update(branch=branch, commit=commit, requires_approval=False)
+            db.execute("UPDATE code_batch SET status='applied', result=?, updated=? WHERE id=?",
+                       (json.dumps(result), time.time(), job))
+            return result
 
     def _claim(self):
         with closing(self._connect()) as db, db:
@@ -178,6 +226,35 @@ class ModelBusy(Exception):
     pass
 
 
+def configured_batch(settings, workspace: Path) -> CodeBatch:
+    root = settings.output_root / "agent-workflows"
+    library = RepositoryLibrary(workspace, root / "unused.sqlite", None)
+    return CodeBatch(root / "code-batch.sqlite3", library, ollama_generator(settings))
+
+
+class BatchWorker:
+    def __init__(self, batch: CodeBatch):
+        self.batch = batch
+        self.stopped = threading.Event()
+        self.thread = threading.Thread(target=self._run, name="fadedai-code-batch", daemon=True)
+
+    def _run(self):
+        while not self.stopped.is_set():
+            try:
+                self.batch.work_once()
+            except sqlite3.Error:
+                # A temporary database lock is retried on the next tick.
+                pass
+            self.stopped.wait(5)
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.stopped.set()
+        self.thread.join(timeout=2)
+
+
 def main() -> None:
     import os
 
@@ -195,9 +272,7 @@ def main() -> None:
     worker.add_argument("--once", action="store_true")
     args = parser.parse_args()
     settings = load_settings()
-    root = settings.output_root / "agent-workflows"
-    library = RepositoryLibrary(args.workspace, root / "unused.sqlite", None)
-    batch = CodeBatch(root / "code-batch.sqlite3", library, ollama_generator(settings))
+    batch = configured_batch(settings, args.workspace)
     if args.command == "enqueue":
         print(batch.enqueue(args.repo, args.goal, args.files))
     elif args.command == "show":

@@ -44,15 +44,18 @@ class RepositoryLibrary:
         return target
 
     @staticmethod
-    def _git(cwd: Path, *args: str, timeout: int = 20) -> bytes:
+    def _git(cwd: Path, *args: str, timeout: int = 20, index: Path | None = None,
+             stdin: bytes | None = None) -> bytes:
         env = {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["GCM_INTERACTIVE"] = "Never"
+        if index is not None:
+            env["GIT_INDEX_FILE"] = str(index)
         try:
             result = subprocess.run(
                 ["git", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
                  "-c", "http.followRedirects=false", *args], cwd=cwd, env=env,
-                capture_output=True, check=True, timeout=timeout,
+                input=stdin, capture_output=True, check=True, timeout=timeout,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise RepositoryError("Git-handlingen fejlede. Tjek lokal Git-adgang og projektnavn.") from exc

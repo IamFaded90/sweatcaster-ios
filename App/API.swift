@@ -177,6 +177,22 @@ struct ModuleInformation: Decodable {
     let text: String
 }
 
+struct CodeBatchList: Decodable {
+    struct Job: Decodable, Identifiable {
+        let id, repo, goal, status: String
+    }
+    let jobs: [Job]
+}
+
+struct CodeBatchDetail: Decodable {
+    struct Proposal: Decodable {
+        let diff, branch, reason: String?
+        let tests: [String]?
+    }
+    let id, status: String
+    let result: Proposal?
+}
+
 struct LiveAPI: SweatAPI, ChatAPI {
     private func moduleJSON<T: Decodable>(_ path: String, upload: Data? = nil) async throws -> T {
         var endpoint = try v2Request("modules")
@@ -203,6 +219,22 @@ struct LiveAPI: SweatAPI, ChatAPI {
     }
     func moduleInformation(_ id: String) async throws -> ModuleInformation {
         try await moduleJSON("tabs/\(Server.segment(id))")
+    }
+
+    func codeBatches() async throws -> CodeBatchList { try await moduleJSON("code-batches") }
+
+    func enqueueCodeBatch(repo: String, goal: String, files: [String]) async throws {
+        struct Input: Encodable { let repo, goal: String; let files: [String] }
+        struct Receipt: Decodable { let id: String }
+        let _: Receipt = try await moduleJSON("code-batches", upload: JSONEncoder().encode(Input(repo: repo, goal: goal, files: files)))
+    }
+
+    func codeBatch(_ id: String) async throws -> CodeBatchDetail {
+        try await moduleJSON("code-batches/\(Server.segment(id))")
+    }
+
+    func approveCodeBatch(_ id: String) async throws -> CodeBatchDetail.Proposal {
+        try await moduleJSON("code-batches/\(Server.segment(id))/approval", upload: JSONEncoder().encode(["approved": true]))
     }
     let server: Server
     private let token: String

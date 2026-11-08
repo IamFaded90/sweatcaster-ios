@@ -1,7 +1,10 @@
 from pathlib import Path
+import subprocess
+
+import pytest
 
 from sweatcaster.code_batch import CodeBatch, ModelBusy
-from sweatcaster.repository_library import RepositoryLibrary
+from sweatcaster.repository_library import RepositoryError, RepositoryLibrary
 
 
 class Snapshot(RepositoryLibrary):
@@ -53,3 +56,35 @@ def test_queue_refuses_proposed_paths_outside_selection(tmp_path):
     job = batch.enqueue("user/repo", "first", ["a.py"])
     assert batch.work_once()
     assert batch.get(job)["status"] == "failed"
+
+
+def test_approval_writes_only_new_branch_and_is_idempotent(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+
+    def git(root, *args):
+        return subprocess.check_output(["git", *args], cwd=root).decode().strip()
+
+    git(source, "init")
+    for path in ("a.py", "b.py"):
+        (source / path).write_bytes(b"value = 1\n")
+    git(source, "add", ".")
+    git(source, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture")
+    repo = tmp_path / "repositories" / "user" / "repo"
+    repo.parent.mkdir(parents=True)
+    git(source, "clone", "--bare", str(source), str(repo))
+    base = git(repo, "rev-parse", "HEAD")
+    library = RepositoryLibrary(tmp_path, tmp_path / "index.sqlite", None)
+    batch = CodeBatch(tmp_path / "jobs.sqlite", library, lambda _, files: {
+        "feasible": True, "files": {path: "value = 2\n" for path in files}, "tests": ["Run tests"],
+    })
+    job = batch.enqueue("user/repo", "Update values", ["a.py", "b.py"])
+    with pytest.raises(RepositoryError):
+        batch.apply(job)
+    assert batch.work_once()
+    assert git(repo, "for-each-ref", "refs/heads/fadedai") == ""
+    result = batch.apply(job)
+    assert result == batch.apply(job)
+    assert git(repo, "rev-parse", "HEAD") == base
+    for path in ("a.py", "b.py"):
+        assert git(repo, "show", f"{result['branch']}:{path}") == "value = 2"

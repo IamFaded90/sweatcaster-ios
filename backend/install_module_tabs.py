@@ -59,13 +59,18 @@ def install(root: Path) -> None:
         updated = base.replace(anchor, replacement)
         compile(updated, str(path), "exec")
         staged[path] = (original, updated)
-    module = source.read_text(encoding="utf-8")
-    compile(module, str(source), "exec")
+    modules = {}
+    for name in (source.name, "code_batch.py", "repository_library.py"):
+        path = source.parent / name
+        module = path.read_text(encoding="utf-8")
+        compile(module, str(path), "exec")
+        modules[name] = module
     for path, (original, _) in staged.items():
         backup = path.with_suffix(".py.before-module-tabs")
         if not backup.exists():
             backup.write_text(original, encoding="utf-8")
-    (package / source.name).write_text(module, encoding="utf-8")
+    for name, module in modules.items():
+        (package / name).write_text(module, encoding="utf-8")
     for path, (_, updated) in staged.items():
         path.write_text(updated, encoding="utf-8")
 
