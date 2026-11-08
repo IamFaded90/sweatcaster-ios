@@ -159,9 +159,13 @@ struct ModuleTab: Decodable, Identifiable {
     let id, title, kind: String
 
     var supported: Bool {
-        !id.isEmpty && id.count <= 48 && id.utf8.allSatisfy {
+        Self.validID(id) && !title.isEmpty && title.count <= 32 && ["cards", "information"].contains(kind)
+    }
+
+    static func validID(_ id: String) -> Bool {
+        (1...48).contains(id.utf8.count) && id.utf8.allSatisfy {
             (97...122).contains($0) || (48...57).contains($0) || $0 == 45
-        } && !title.isEmpty && title.count <= 32 && ["cards", "information"].contains(kind)
+        }
     }
 }
 
@@ -187,14 +191,14 @@ struct CodeBatchList: Decodable {
 struct CodeBatchDetail: Decodable {
     struct Proposal: Decodable {
         let diff, branch, reason: String?
-        let tests: [String]?
+        let tests, checks: [String]?
     }
     let id, status: String
     let result: Proposal?
 }
 
 struct LiveAPI: SweatAPI, ChatAPI {
-    private func moduleJSON<T: Decodable>(_ path: String, upload: Data? = nil) async throws -> T {
+    private func moduleJSON<T: Decodable>(_ path: String, upload: Data? = nil, timeout: TimeInterval? = nil) async throws -> T {
         var endpoint = try v2Request("modules")
         guard let url = endpoint.url,
               var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
@@ -203,30 +207,40 @@ struct LiveAPI: SweatAPI, ChatAPI {
         components.path = "/api/modules/v1/" + path
         guard let target = components.url else { throw V2Failure.invalidInput }
         endpoint = request(target, method: upload == nil ? "GET" : "PUT")
+        if let timeout { endpoint.timeoutInterval = timeout }
         if let upload {
             endpoint.httpBody = upload
             endpoint.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await session.data(for: endpoint)
+        let (data, response) = try await loggedData(for: endpoint)
         try checked(response, expected: 200, data: data)
-        guard data.count <= 2_000_000 else { throw V2Failure.invalidResponse }
-        return try JSONDecoder().decode(T.self, from: data)
+        guard data.count <= 2_000_000 else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
+        return try loggedDecode(T.self, from: data, decoder: JSONDecoder())
     }
 
     func moduleManifest() async throws -> ModuleManifest { try await moduleJSON("manifest") }
     func moduleCards(_ id: String, upload: Data? = nil) async throws -> ModuleCards {
-        try await moduleJSON("tabs/\(Server.segment(id))", upload: upload)
+        guard ModuleTab.validID(id) else { throw V2Failure.invalidInput }
+        return try await moduleJSON("tabs/\(id)", upload: upload)
     }
     func moduleInformation(_ id: String) async throws -> ModuleInformation {
-        try await moduleJSON("tabs/\(Server.segment(id))")
+        guard ModuleTab.validID(id) else { throw V2Failure.invalidInput }
+        return try await moduleJSON("tabs/\(id)")
     }
 
     func codeBatches() async throws -> CodeBatchList { try await moduleJSON("code-batches") }
 
+    func cloneCodeRepository(_ repo: String) async throws {
+        struct Receipt: Decodable { let repo, revision: String }
+        let data = try JSONEncoder().encode(["repo": repo])
+        let _: Receipt = try await moduleJSON("code-repositories", upload: data, timeout: 190)
+    }
+
     func enqueueCodeBatch(repo: String, goal: String, files: [String]) async throws {
         struct Input: Encodable { let repo, goal: String; let files: [String] }
         struct Receipt: Decodable { let id: String }
-        let _: Receipt = try await moduleJSON("code-batches", upload: JSONEncoder().encode(Input(repo: repo, goal: goal, files: files)))
+        let receipt: Receipt = try await moduleJSON("code-batches", upload: JSONEncoder().encode(Input(repo: repo, goal: goal, files: files)))
+        await JobNotifications.shared.trackCodeJob(server: server.address, id: receipt.id)
     }
 
     func codeBatch(_ id: String) async throws -> CodeBatchDetail {
@@ -266,13 +280,35 @@ struct LiveAPI: SweatAPI, ChatAPI {
         return .transport(error.errorCode)
     }
     private func checked(_ response: URLResponse, expected: Int, data: Data?) throws {
-        guard let http = response as? HTTPURLResponse else { throw APIError.malformed }
+        guard let http = response as? HTTPURLResponse else { throw AppDiagnostics.record(APIError.malformed) }
         guard http.statusCode == expected else {
             let decoded = data.flatMap { try? contractDecoder().decode(Envelope.self, from: $0).error }
             let safe = decoded.map {
                 Problem(code: redact($0.code), message: redact($0.message))
             }
-            throw APIError.http(http.statusCode, safe)
+            throw AppDiagnostics.record(APIError.http(http.statusCode, safe))
+        }
+    }
+
+    private func loggedData(for request: URLRequest) async throws -> (Data, URLResponse) {
+        do { return try await session.data(for: request) }
+        catch { throw AppDiagnostics.record(error) }
+    }
+
+    private func loggedBytes(for request: URLRequest) async throws -> (URLSession.AsyncBytes, URLResponse) {
+        do { return try await session.bytes(for: request) }
+        catch { throw AppDiagnostics.record(error) }
+    }
+
+    private func loggedDecode<T: Decodable>(_ type: T.Type, from data: Data, decoder: JSONDecoder = contractDecoder()) throws -> T {
+        do { return try decoder.decode(type, from: data) }
+        catch { throw AppDiagnostics.record(error) }
+    }
+
+    private func checkRenderBeforeChat() async throws {
+        let current = try await jobs()
+        guard !current.jobs.contains(where: { $0.status == .rendering }) else {
+            throw AppDiagnostics.record(APIError.http(503, nil))
         }
     }
     private func redact(_ text: String) -> String {
@@ -290,23 +326,24 @@ struct LiveAPI: SweatAPI, ChatAPI {
         return safe
     }
     private func json<T: Decodable>(_ path: String, status: Int = 200, post: Bool = false,
-                                     body: Batch? = nil, auth: Bool = true) async throws -> T {
+                                     body: Batch? = nil, auth: Bool = true, timeout: TimeInterval? = nil) async throws -> T {
         var req = request(server.endpoint(path), method: post ? "POST" : "GET", auth: auth)
+        if let timeout { req.timeoutInterval = timeout }
         if let body {
             req.httpBody = try JSONEncoder().encode(body)
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         do {
-            let (data, response) = try await session.data(for: req)
+            let (data, response) = try await loggedData(for: req)
             try checked(response, expected: status, data: data)
-            do { return try contractDecoder().decode(T.self, from: data) }
+            do { return try loggedDecode(T.self, from: data) }
             catch { throw APIError.malformed }
         } catch let error as URLError {
             if error.code == .cancelled && !post { throw CancellationError() }
             throw mapped(error, posting: post)
         }
     }
-    func health() async throws -> Health { try await json("health", auth: false) }
+    func health() async throws -> Health { try await json("health", auth: false, timeout: 3) }
     func capabilities() async throws -> Capabilities { try await json("capabilities") }
     func clips() async throws -> Clips { try await json("clips") }
     func jobs() async throws -> Jobs { try await json("jobs") }
@@ -319,24 +356,26 @@ struct LiveAPI: SweatAPI, ChatAPI {
         try await json("jobs/\(Server.segment(id))/cancel", post: true)
     }
     func deleteFailedJob(_ id: String) async throws {
-        guard validWireID(id) else { throw APIError.input }
-        var req = request(server.endpoint("jobs/\(Server.segment(id))"), method: "DELETE")
+        let segment = try Server.segment(id)
+        var req = request(server.endpoint("jobs/\(segment)"), method: "DELETE")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(["confirm_job_id": id])
-        let (data, response) = try await session.data(for: req)
+        let (data, response) = try await loggedData(for: req)
         try checked(response, expected: 200, data: data)
     }
     func chat(_ input: ChatRequest, receive: @Sendable (ChatEvent) async -> Void) async throws {
+        try await checkRenderBeforeChat()
         var req = request(server.endpoint("chat"), method: "POST")
         req.httpBody = try JSONEncoder().encode(input)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         var receivedResponse = false
         do {
-            let (bytes, response) = try await session.bytes(for: req)
+            let (bytes, response) = try await loggedBytes(for: req)
             defer { bytes.task.cancel() }
             receivedResponse = true
             guard let http = response as? HTTPURLResponse else { throw ChatFailure.rejected }
+            if http.statusCode == 503 { throw AppDiagnostics.record(APIError.http(503, nil)) }
             try ChatFailure.validate(status: http.statusCode, mime: http.mimeType)
             var parser = ChatSSEParser()
             for try await byte in bytes {
@@ -450,7 +489,7 @@ struct V2SSEFrames {
         afterCR = byte == 13
         if skip { return nil }
         guard byte == 10 || byte == 13 else {
-            guard line.count < 262_144 else { throw V2Failure.invalidResponse }
+            guard line.count < 262_144 else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
             line.append(byte)
             return nil
         }
@@ -469,7 +508,7 @@ struct V2SSEFrames {
             var field = line.dropFirst(5)
             if field.first == 32 { field = field.dropFirst() }
             eventBytes += field.count + 1
-            guard eventBytes <= 262_144 else { throw V2Failure.invalidResponse }
+            guard eventBytes <= 262_144 else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
             fields.append(Data(field))
         }
         return nil
@@ -482,11 +521,11 @@ struct V2ChatParser {
 
     mutating func feed(_ byte: UInt8) throws -> V2ChatEvent? {
         guard let payload = try frames.feed(byte) else { return nil }
-        guard !finished else { throw V2Failure.invalidResponse }
+        guard !finished else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
         let event = try JSONDecoder().decode(V2ChatEvent.self, from: payload)
         if event.type == .done {
             guard event.message_id?.isEmpty == false, event.model_id?.isEmpty == false else {
-                throw V2Failure.invalidResponse
+                throw AppDiagnostics.record(V2Failure.invalidResponse)
             }
             finished = true
         }
@@ -611,12 +650,12 @@ extension LiveAPI {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.setValue("image/png", forHTTPHeaderField: "Accept")
         req.httpBody = try JSONEncoder().encode(["prompt": message])
-        let (data, response) = try await session.data(for: req)
-        guard let http = response as? HTTPURLResponse else { throw V2Failure.invalidResponse }
+        let (data, response) = try await loggedData(for: req)
+        guard let http = response as? HTTPURLResponse else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
         guard http.statusCode == 200 else { throw v2HTTPError(http.statusCode, data: data) }
         guard http.value(forHTTPHeaderField: "Content-Type")?.lowercased().hasPrefix("image/png") == true,
               data.count <= 15_000_000, data.starts(with: [137, 80, 78, 71, 13, 10, 26, 10])
-        else { throw V2Failure.invalidResponse }
+        else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
         return data
     }
 
@@ -625,8 +664,8 @@ extension LiveAPI {
         var request = try v2Request("jobs/\(id)/video", method: "DELETE")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["confirm_job_id": id])
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw V2Failure.invalidResponse }
+        let (data, response) = try await loggedData(for: request)
+        guard let http = response as? HTTPURLResponse else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
         guard http.statusCode == 200 else { throw v2HTTPError(http.statusCode, data: data) }
     }
 
@@ -643,10 +682,10 @@ extension LiveAPI {
         var request = try v2Request("code/proposals", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["path": path, "content": content])
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw V2Failure.invalidResponse }
+        let (data, response) = try await loggedData(for: request)
+        guard let http = response as? HTTPURLResponse else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
         guard http.statusCode == 200 else { throw v2HTTPError(http.statusCode, data: data) }
-        return try contractDecoder().decode(V2CodeProposal.self, from: data)
+        return try loggedDecode(V2CodeProposal.self, from: data)
     }
 
     func v2ApplyCodeProposal(_ id: String, approved: Bool) async throws -> V2CodeApplied {
@@ -654,10 +693,10 @@ extension LiveAPI {
         var request = try v2Request("code/proposals/\(id)/apply", method: "POST")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONEncoder().encode(["approved": approved])
-        let (data, response) = try await session.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw V2Failure.invalidResponse }
+        let (data, response) = try await loggedData(for: request)
+        guard let http = response as? HTTPURLResponse else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
         guard http.statusCode == 200 else { throw v2HTTPError(http.statusCode, data: data) }
-        return try contractDecoder().decode(V2CodeApplied.self, from: data)
+        return try loggedDecode(V2CodeApplied.self, from: data)
     }
 
     func v2History(agentID: String, cursor: String? = nil) async throws -> V2Page<V2History> {
@@ -690,26 +729,26 @@ extension LiveAPI {
     }
 
     private func v2JSON<T: Decodable>(_ path: String, query: [URLQueryItem] = []) async throws -> T {
-        let (data, response) = try await session.data(for: v2Request(path, query: query))
-        guard let http = response as? HTTPURLResponse else { throw V2Failure.invalidResponse }
+        let (data, response) = try await loggedData(for: v2Request(path, query: query))
+        guard let http = response as? HTTPURLResponse else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
         guard http.statusCode == 200 else { throw v2HTTPError(http.statusCode, data: data) }
-        return try contractDecoder().decode(T.self, from: data)
+        return try loggedDecode(T.self, from: data)
     }
 
     private func v2HTTPError(_ status: Int, data: Data) -> V2Failure {
         let problem = (try? JSONDecoder().decode(Envelope.self, from: data))?.error
-        return .http(status: status, code: problem.map { redact($0.code) },
-                     message: problem.map { redact($0.message) })
+        return AppDiagnostics.record(V2Failure.http(status: status, code: problem.map { redact($0.code) },
+                                                    message: problem.map { redact($0.message) }))
     }
 
     private func v2Stream(_ request: URLRequest) async throws -> URLSession.AsyncBytes {
         var req = request
         req.timeoutInterval = 120
         req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        let (bytes, response) = try await session.bytes(for: req)
+        let (bytes, response) = try await loggedBytes(for: req)
         guard let http = response as? HTTPURLResponse else {
             bytes.task.cancel()
-            throw V2Failure.invalidResponse
+            throw AppDiagnostics.record(V2Failure.invalidResponse)
         }
         guard http.statusCode == 200 else {
             defer { bytes.task.cancel() }
@@ -724,12 +763,13 @@ extension LiveAPI {
         }
         guard http.mimeType == "text/event-stream" else {
             bytes.task.cancel()
-            throw V2Failure.invalidResponse
+            throw AppDiagnostics.record(V2Failure.invalidResponse)
         }
         return bytes
     }
 
     func v2Chat(_ input: V2ChatRequest, receive: @Sendable (V2ChatEvent) async -> Void) async throws {
+        try await checkRenderBeforeChat()
         var req = try v2Request("chat", method: "POST")
         req.httpBody = try JSONEncoder().encode(input)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -747,9 +787,10 @@ extension LiveAPI {
             }
         } catch is URLError {
             try Task.checkCancellation()
-            throw V2Failure.interrupted
+            throw AppDiagnostics.record(V2Failure.interrupted)
         }
-        try parser.end()
+        do { try parser.end() }
+        catch { throw AppDiagnostics.record(error) }
     }
 
     func v2HubEvents(after revision: Int, receive: @Sendable (V2HubEvent) async -> Void) async throws {
@@ -768,7 +809,7 @@ extension LiveAPI {
                 await receive(event)
                 return
             }
-            guard let next = event.revision else { throw V2Failure.invalidResponse }
+            guard let next = event.revision else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
             if next > latest {
                 latest = next
                 await receive(event)
@@ -802,9 +843,18 @@ enum Pairing {
         add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else { throw APIError.storage }
     }
+
+    static func removeAll() throws {
+        var filter = query("")
+        filter.removeValue(forKey: kSecAttrAccount as String)
+        let result = SecItemDelete(filter as CFDictionary)
+        guard result == errSecSuccess || result == errSecItemNotFound else { throw APIError.storage }
+    }
 }
 
 enum CloudModelKey {
+    static let didChange = Notification.Name("FadedAI.cloudModelKeyDidChange")
+
     private static var query: [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
          kSecAttrService as String: "FadedAI optional cloud models",
@@ -817,16 +867,167 @@ enum CloudModelKey {
 
     static func save(_ value: String) throws {
         let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !key.isEmpty else { throw APIError.input }
+        guard isValid(key) else { throw APIError.input }
         let data = Data(key.utf8)
         let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if updated == errSecSuccess { return }
-        guard updated == errSecItemNotFound else { throw APIError.storage }
-        var item = query
-        item[kSecValueData as String] = data
-        item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
-        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw APIError.storage }
+        if updated != errSecSuccess {
+            guard updated == errSecItemNotFound else { throw APIError.storage }
+            var item = query
+            item[kSecValueData as String] = data
+            item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw APIError.storage }
+        }
+        NotificationCenter.default.post(name: didChange, object: nil)
     }
 
-    static func remove() { SecItemDelete(query as CFDictionary) }
+    static func load() throws -> String {
+        var item: CFTypeRef?
+        var filter = query
+        filter[kSecReturnData as String] = true
+        guard SecItemCopyMatching(filter as CFDictionary, &item) == errSecSuccess,
+              let data = item as? Data, let key = String(data: data, encoding: .utf8), isValid(key) else {
+            throw GrokFailure.missingKey
+        }
+        return key
+    }
+
+    static func remove() {
+        SecItemDelete(query as CFDictionary)
+        NotificationCenter.default.post(name: didChange, object: nil)
+    }
+
+    static func isValid(_ key: String) -> Bool {
+        (1...512).contains(key.utf8.count) && key.utf8.allSatisfy { (33...126).contains($0) }
+    }
+}
+
+enum GrokFailure: Error, Equatable {
+    case missingKey, interrupted, invalidResponse, unavailable, http(Int)
+
+    var message: String {
+        switch self {
+        case .missingKey: "Gem en gyldig xAI-nøgle i AI- eller chatindstillingerne."
+        case .http(401), .http(403): "xAI afviste nøglen eller adgangen til Grok. Tjek din xAI-konto."
+        case .http(402): "Tjek din saldo eller fakturering hos xAI."
+        case .http(404): "Grok-modellen er ikke tilgængelig for din xAI-konto."
+        case .http(429): "xAI har nået en brugsgrænse. Prøv igen om lidt."
+        case .http, .unavailable: "Kunne ikke få svar fra Grok. Tjek internetforbindelsen, og prøv igen."
+        case .interrupted: "Grok-svaret blev afbrudt."
+        case .invalidResponse: "Grok sendte et svar, som appen ikke kunne læse."
+        }
+    }
+}
+
+struct GrokResponsesParser {
+    private struct Event: Decodable { let type: String }
+    private struct TextDelta: Decodable { let delta: String }
+
+    private var frames = V2SSEFrames()
+    private(set) var finished = false
+
+    mutating func feed(_ byte: UInt8) throws -> String? {
+        guard !finished else { return nil }
+        guard let payload = try frames.feed(byte) else { return nil }
+        guard let event = try? JSONDecoder().decode(Event.self, from: payload) else { throw GrokFailure.invalidResponse }
+        switch event.type {
+        case "response.output_text.delta", "response.refusal.delta":
+            guard let event = try? JSONDecoder().decode(TextDelta.self, from: payload) else { throw GrokFailure.invalidResponse }
+            return event.delta
+        case "response.completed":
+            finished = true
+        case "response.failed", "response.incomplete", "response.cancelled", "error":
+            throw GrokFailure.interrupted
+        default: break
+        }
+        return nil
+    }
+
+    func end() throws {
+        guard finished else { throw GrokFailure.interrupted }
+    }
+}
+
+enum GrokAPI {
+    static let sourceLabel = "Grok · Cloud"
+
+    struct Message: Encodable, Sendable {
+        enum Role: String, Encodable, Sendable { case user, assistant }
+        let role: Role
+        let content: String
+    }
+
+    private struct RequestBody: Encodable {
+        struct Reasoning: Encodable { let effort = "low" }
+        let model = "grok-4.7"
+        let input: [Message]
+        let stream = true
+        let store = false
+        let max_output_tokens = 2_048
+        let reasoning = Reasoning()
+    }
+
+    static func request(input: [Message], key: String) throws -> URLRequest {
+        guard CloudModelKey.isValid(key) else { throw GrokFailure.missingKey }
+        let sanitized = input.map {
+            Message(role: $0.role, content: $0.content.replacingOccurrences(of: key, with: "[skjult]"))
+        }
+        var request = URLRequest(url: URL(string: "https://api.x.ai/v1/responses")!,
+                                 cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 120)
+        request.httpMethod = "POST"
+        request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.httpBody = try JSONEncoder().encode(RequestBody(input: sanitized))
+        return request
+    }
+
+    static func reply(input: [Message], receive: @Sendable (String) async -> Void) async throws {
+        let key = try CloudModelKey.load()
+        let request = try Self.request(input: input, key: key)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForResource = 300
+        configuration.urlCache = nil
+        configuration.urlCredentialStorage = nil
+        configuration.httpShouldSetCookies = false
+        let session = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
+        defer { session.invalidateAndCancel() }
+        var parser = GrokResponsesParser()
+        var output = ""
+        var outputBytes = 0
+        do {
+            let (bytes, response) = try await session.bytes(for: request)
+            defer { bytes.task.cancel() }
+            guard let http = response as? HTTPURLResponse, http.url == request.url else { throw GrokFailure.invalidResponse }
+            guard http.statusCode == 200 else { throw GrokFailure.http(http.statusCode) }
+            guard http.mimeType == "text/event-stream" else { throw GrokFailure.invalidResponse }
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                if let delta = try parser.feed(byte), !delta.isEmpty {
+                    outputBytes += delta.utf8.count
+                    guard outputBytes <= 262_144 else { throw GrokFailure.invalidResponse }
+                    output += delta
+                    await receive(redacted(output, key: key, streaming: true))
+                }
+                if parser.finished { break }
+            }
+            try Task.checkCancellation()
+            try parser.end()
+        } catch is URLError {
+            try Task.checkCancellation()
+            throw output.isEmpty ? GrokFailure.unavailable : GrokFailure.interrupted
+        } catch is V2Failure {
+            throw GrokFailure.invalidResponse
+        }
+        guard !output.isEmpty else { throw GrokFailure.invalidResponse }
+        await receive(redacted(output, key: key, streaming: false))
+    }
+
+    static func redacted(_ text: String, key: String, streaming: Bool) -> String {
+        var safe = text.replacingOccurrences(of: key, with: "[skjult]")
+        let limit = min(safe.count, key.count - 1)
+        if streaming, limit > 0, let match = (1...limit).reversed().first(where: { safe.hasSuffix(String(key.prefix($0))) }) {
+            safe.removeLast(match)
+        }
+        return safe
+    }
 }

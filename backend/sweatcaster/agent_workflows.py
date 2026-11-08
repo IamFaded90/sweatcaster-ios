@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 import struct
+import tempfile
 import threading
 from contextlib import closing
 from datetime import datetime
@@ -97,29 +98,67 @@ class AgentWorkflows:
         self.observe(job, "manager", "Test: forslag klar til gennemgang", "completed")
         return checks
 
-    def run_due(self, now: datetime) -> None:
+    def routines(self) -> list[dict]:
         try:
             with (self.root / "routines.json").open("rb") as source:
                 raw = source.read(16385)
             routines = json.loads(raw) if len(raw) <= 16384 else []
         except (OSError, ValueError, RecursionError):
-            return
-        if not isinstance(routines, list):
-            return
+            return []
+        return [row for row in routines[:10] if self._valid_routine(row)] if isinstance(routines, list) else []
+
+    @staticmethod
+    def _valid_routine(row) -> bool:
+        return (isinstance(row, dict) and set(row) == {"action", "repo", "hour"}
+                and row["action"] in ("reindex_repository", "refresh_repository")
+                and isinstance(row["repo"], str) and 1 <= len(row["repo"]) <= 150
+                and type(row["hour"]) is int and 0 <= row["hour"] <= 23)
+
+    def configure_routines(self, routines: list[dict]) -> None:
+        if len(routines) > 10 or not all(self._valid_routine(row) for row in routines):
+            raise RepositoryError("Angiv op til 10 Git-rutiner med gyldig time og repo.")
+        for row in routines:
+            self.library._head(row["repo"])
+        pairs = {(row["repo"].lower(), row["action"]) for row in routines}
+        if len(pairs) != len(routines):
+            raise RepositoryError("Samme handling må kun planlægges én gang pr. repo.")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.root, delete=False) as file:
+            temp = Path(file.name)
+            json.dump(routines, file)
+        try:
+            temp.replace(self.root / "routines.json")
+        finally:
+            temp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _run_key(local: datetime, routine: dict) -> str:
+        suffix = ":refresh" if routine["action"] == "refresh_repository" else ""
+        return hashlib.sha256(f"{local.date()}:{routine['repo'].strip().lower()}{suffix}".encode()).hexdigest()
+
+    def routine_status(self, now: datetime) -> list[dict]:
         local = now.astimezone(ZoneInfo("Europe/Copenhagen"))
-        for routine in routines[:10]:
-            if not isinstance(routine, dict) or routine.get("action") != "reindex_repository":
+        with closing(self._connect()) as db:
+            entries = []
+            for routine in self.routines():
+                row = db.execute("SELECT status FROM routine_runs WHERE id=?", (self._run_key(local, routine),)).fetchone()
+                entries.append({**routine, "today": row[0] if row else "waiting"})
+            return entries
+
+    def run_due(self, now: datetime) -> None:
+        local = now.astimezone(ZoneInfo("Europe/Copenhagen"))
+        for routine in self.routines():
+            repo, hour, action = (routine[key] for key in ("repo", "hour", "action"))
+            if hour > local.hour:
                 continue
-            repo, hour = routine.get("repo"), routine.get("hour")
-            if not isinstance(repo, str) or type(hour) is not int or not 0 <= hour <= local.hour:
-                continue
-            key = hashlib.sha256(f"{local.date()}:{repo.strip().lower()}".encode()).hexdigest()
+            key = self._run_key(local, routine)
             with closing(self._connect()) as db, db:
                 claimed = db.execute("INSERT OR IGNORE INTO routine_runs VALUES (?, 'running')", (key,)).rowcount
             if not claimed:
                 continue
             self.observe(key, "researcher", "Planlagt lokal indeksering", "running")
             try:
+                if action == "refresh_repository":
+                    self.library.refresh(repo)
                 self.library.index(repo)
                 state = "completed"
             except Exception:

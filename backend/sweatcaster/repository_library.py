@@ -75,8 +75,29 @@ class RepositoryLibrary:
 
     def _head(self, slug: str) -> tuple[Path, str]:
         repo = self._repo(slug)
+        if not repo.is_dir():
+            raise RepositoryError("Projektet er ikke klonet i Agent Workspace.")
+        directory = Path(os.fsdecode(self._git(repo, "rev-parse", "--absolute-git-dir").rstrip(b"\r\n"))).resolve()
+        if directory not in {repo, repo / ".git"}:
+            raise RepositoryError("Projektet bruger et Git-lager uden for Agent Workspace.")
         revision = self._git(repo, "rev-parse", "--verify", "HEAD^{commit}").decode("ascii").strip()
         return repo, revision
+
+    def refresh(self, slug: str) -> str:
+        repo, base = self._head(slug)
+        if self._git(repo, "rev-parse", "--is-bare-repository").strip() != b"true":
+            raise RepositoryError("GitHub-opdatering kræver et isoleret Git-snapshot.")
+        ref = self._git(repo, "symbolic-ref", "HEAD").decode("ascii").strip()
+        if not ref.startswith("refs/heads/"):
+            raise RepositoryError("Git-snapshottet har ingen kildegren.")
+        self._git(repo, "fetch", "--no-tags", "--no-recurse-submodules", "--no-auto-maintenance",
+                  f"https://github.com/{slug}.git", ref, timeout=180)
+        revision = self._git(repo, "rev-parse", "--verify", "FETCH_HEAD^{commit}").decode("ascii").strip()
+        if base != revision:
+            self._git(repo, "merge-base", "--is-ancestor", base, revision)
+            self._git(repo, "-c", "core.hooksPath=" + str(repo / "fadedai-disabled-hooks"),
+                      "update-ref", ref, revision, base)
+        return revision
 
     @staticmethod
     def _allowed(path: str) -> bool:
@@ -163,6 +184,24 @@ class RepositoryLibrary:
         return [{"path": path, "line": line, "text": body} for _, path, line, body in sorted(matches, reverse=True)[:5]]
 
 
+def mcp_server(library: RepositoryLibrary, **options):
+    from mcp.server.fastmcp import FastMCP
+
+    server = FastMCP("FadedAI repository library", **options)
+
+    @server.tool()
+    def read_repository_file(repository: str, path: str) -> str:
+        """Read a source file from an approved local GitHub snapshot."""
+        return library.read(repository, path)
+
+    @server.tool()
+    def search_repository(repository: str, query: str) -> list[dict]:
+        """Find related source passages in the local repository index."""
+        return library.search(repository, query)
+
+    return server
+
+
 def main() -> None:
     import argparse
     import json
@@ -189,21 +228,7 @@ def main() -> None:
 
     library = RepositoryLibrary(args.workspace, args.database, embed)
     if args.command == "mcp":
-        from mcp.server.fastmcp import FastMCP
-
-        server = FastMCP("FadedAI repository library")
-
-        @server.tool()
-        def read_repository_file(repository: str, path: str) -> str:
-            """Read a source file from an approved local GitHub snapshot."""
-            return library.read(repository, path)
-
-        @server.tool()
-        def search_repository(repository: str, query: str) -> list[dict]:
-            """Find related source passages in the local repository index."""
-            return library.search(repository, query)
-
-        server.run(transport="stdio")
+        mcp_server(library).run(transport="stdio")
     else:
         operation = library.clone if args.command == "clone" else library.index
         print(json.dumps(operation(args.repository), ensure_ascii=False))

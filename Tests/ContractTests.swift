@@ -2,12 +2,59 @@ import XCTest
 @testable import SweatCaster
 
 final class ContractTests: XCTestCase {
+    func testPairingQRRecognizesLocalAndTailscaleProfiles() throws {
+        let home = try PairingQRCode.parse(#"{"version":1,"address":"192.168.1.42","token":"fixture-token"}"#)
+        let remote = try PairingQRCode.parse(#"{"version":1,"address":"100.64.1.42","token":"fixture-token"}"#)
+        XCTAssertEqual(try Server(home.address).profile, .home)
+        XCTAssertEqual(try Server(remote.address).profile, .tailscale)
+    }
+
+    func testPairingQRRejectsPublicAddressesAndHeaderInjection() {
+        for payload in [
+            #"{"version":1,"address":"8.8.8.8","token":"fixture-token"}"#,
+            #"{"version":1,"address":"http://192.168.1.42:8765/api/v1?token=x","token":"fixture-token"}"#,
+            #"{"version":1,"address":"192.168.1.42","token":"a\r\nb"}"#,
+            #"{"version":2,"address":"192.168.1.42","token":"fixture-token"}"#,
+        ] { XCTAssertThrowsError(try PairingQRCode.parse(payload)) }
+    }
+
+    func testCodeBotRemovesOnlyOuterMarkdownFence() throws {
+        let object = #"{"content":"keep ``` inside"}"#
+        for reply in [object, "```json\n\(object)\n```", "```JSON\r\n\(object)\r\n```"] {
+            let value = try JSONDecoder().decode([String: String].self, from: ModelJSON.payload(reply))
+            XCTAssertEqual(value["content"], "keep ``` inside")
+        }
+        XCTAssertThrowsError(try JSONDecoder().decode([String: String].self, from: ModelJSON.payload("```json\n\(object)")))
+    }
+
+    func testRenderingStopsDirectV2ChatBeforeTheLLMRequest() async throws {
+        let api = try stubAPI(address: "192.168.1.21")
+        do {
+            try await api.v2Chat(V2ChatRequest(message: "Hej")) { _ in XCTFail("Unexpected chat stream") }
+            XCTFail("Expected the PC-busy error")
+        } catch let APIError.http(status, _) {
+            XCTAssertEqual(status, 503)
+        }
+    }
     func testModuleManifestRestrictsUntrustedTabDefinitions() throws {
         let json = #"{"version":1,"tabs":[{"id":"cards","title":"Kortsamling","kind":"cards"},{"id":"../health","title":"Sikkerhed","kind":"information"},{"id":"script","title":"Ny","kind":"web"}]}"#
         let manifest = try JSONDecoder().decode(ModuleManifest.self, from: Data(json.utf8))
         XCTAssertEqual(manifest.version, 1)
         XCTAssertEqual(manifest.tabs.filter(\.supported).map(\.id), ["cards"])
     }
+
+    func testShortModuleIDsUseAuthenticatedModuleRoutes() async throws {
+        let api = try stubAPI()
+        let cards = try await api.moduleCards("cards")
+        let information = try await api.moduleInformation("a")
+        XCTAssertTrue(cards.cards.isEmpty)
+        XCTAssertEqual(information.text, "Lokal information")
+        do {
+            _ = try await api.moduleInformation("../health")
+            XCTFail("Expected a rejected module ID")
+        } catch V2Failure.invalidInput {}
+    }
+
     func testClipKeepsV1ShapeAndAcceptsFutureFolderMetadata() throws {
         let old = try JSONDecoder().decode(Clip.self, from: Data(#"{"id":"clip-one","name":"game.mp4","duration_seconds":12,"width":1920,"height":1080}"#.utf8))
         XCTAssertNil(old.folderName)
@@ -309,10 +356,10 @@ final class ContractTests: XCTestCase {
         XCTAssertFalse(model.canSubmit)
     }
 
-    private func stubAPI() throws -> LiveAPI {
+    private func stubAPI(address: String = "192.168.1.20") throws -> LiveAPI {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [Stub.self]
-        return try LiveAPI(server: Server("192.168.1.20"), token: "test-only-token", configuration: configuration)
+        return try LiveAPI(server: Server(address), token: "test-only-token", configuration: configuration)
     }
 }
 
@@ -348,8 +395,15 @@ private final class Stub: URLProtocol {
             status = 200; body = #"{"api_version":"1","status":"ok"}"#
         } else if auth != "Bearer test-only-token" {
             status = 500; body = "{}"
+        } else if url.path == "/api/modules/v1/tabs/cards", request.httpMethod == "GET" {
+            status = 200; body = #"{"cards":[]}"#
+        } else if url.path == "/api/modules/v1/tabs/a", request.httpMethod == "GET" {
+            status = 200; body = #"{"text":"Lokal information"}"#
         } else if url.path == "/api/v1/clips" {
             status = 200; body = "bad JSON"
+        } else if url.path == "/api/v1/jobs", request.httpMethod == "GET" {
+            status = 200
+            body = url.host == "192.168.1.21" ? #"{"jobs":[{"id":"job-render","clip_id":"clip-one","mood":"hype","status":"rendering","progress":0.8,"message":"Rendering","warnings":[],"created_at":"2026-11-06T16:00:00Z","updated_at":"2026-11-06T16:00:00Z","output_url":null,"error":null}]}"# : #"{"jobs":[]}"#
         } else if url.path == "/api/v1/chat", request.httpMethod == "POST",
                   request.value(forHTTPHeaderField: "Accept") == "text/event-stream" {
             status = 200
@@ -397,4 +451,106 @@ private actor UncertainAPI: SweatAPI {
     }
     func cancel(_ id: String) async throws -> Job { try await mock.cancel(id) }
     func video(_ job: Job) async throws -> URL { try await mock.video(job) }
+}
+
+extension ContractTests {
+    func testWorkspacePatchEditsLongFileWithoutChangingOtherLines() throws {
+        let before = Array(repeating: "// eksisterende linje\r\n", count: 110).joined()
+        let source = before + "let value = 3\r\nlet stillHere = true\r\n"
+        let context = try WorkspacePatch.context(goal: "Set value to 4", path: "File.swift",
+                                                 source: source, firstLine: 111)
+        XCTAssertEqual(context.lines, 110..<112)
+        XCTAssertLessThanOrEqual(context.prompt.unicodeScalars.count, 2_000)
+        let diff = """
+        --- a/File.swift
+        +++ b/File.swift
+        @@ -111,2 +111,2 @@
+        -let value = 3
+        +let value = 4
+         let stillHere = true
+        """
+        let patched = try WorkspacePatch.applying(diff, to: source, path: "File.swift", within: context.lines)
+        XCTAssertEqual(Array(patched.utf8), Array((before + "let value = 4\r\nlet stillHere = true\r\n").utf8))
+    }
+
+    func testWorkspacePatchPreservesMissingFinalNewline() throws {
+        let diff = #"""
+        --- a/File.txt
+        +++ b/File.txt
+        @@ -2 +2 @@
+        -gammel
+        \ No newline at end of file
+        +ny
+        \ No newline at end of file
+        """#
+        XCTAssertEqual(try WorkspacePatch.applying(diff, to: "behold\ngammel", path: "File.txt", within: 1..<2),
+                       "behold\nny")
+    }
+
+    func testWorkspacePatchRejectsWrongPathRangeAndContext() {
+        let diff = "--- a/File.txt\n+++ b/File.txt\n@@ -2 +2 @@\n-gammel\n+ny\n"
+        for (source, path, window) in [
+            ("behold\ngammel\n", "Other.txt", 1..<2),
+            ("behold\ngammel\n", "File.txt", 0..<1),
+            ("behold\nændret\n", "File.txt", 1..<2),
+        ] {
+            XCTAssertThrowsError(try WorkspacePatch.applying(diff, to: source, path: path, within: window))
+        }
+        let invalidCount = diff.replacingOccurrences(of: "+2 @@", with: "+2,2 @@")
+        XCTAssertThrowsError(try WorkspacePatch.applying(invalidCount, to: "behold\ngammel\n", path: "File.txt", within: 1..<2))
+        XCTAssertThrowsError(try WorkspacePatch.applying(diff + diff, to: "behold\ngammel\n", path: "File.txt", within: 1..<2))
+    }
+
+    func testWorkspacePatchSupportsZeroCountInsertionAndMultipleHunks() throws {
+        let diff = """
+        --- a/File.txt
+        +++ b/File.txt
+        @@ -0,0 +1 @@
+        +prefix
+        @@ -3 +4 @@
+        -third
+        +new
+        """
+        XCTAssertEqual(try WorkspacePatch.applying(diff, to: "first\nsecond\nthird\n",
+                                                  path: "File.txt", within: 0..<3), "prefix\nfirst\nsecond\nnew\n")
+    }
+}
+
+extension ContractTests {
+    func testGrokRequestUsesOnlyFixedHTTPSAndDisablesResponseStorage() throws {
+        let key = "fixture-cloud-secret"
+        let request = try GrokAPI.request(input: [.init(role: .user, content: "Test \(key)")], key: key)
+        XCTAssertEqual(request.url?.absoluteString, "https://api.x.ai/v1/responses")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(key)")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "text/event-stream")
+        let bytes = try XCTUnwrap(request.httpBody)
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "grok-4.7")
+        XCTAssertEqual(body["store"] as? Bool, false)
+        XCTAssertEqual(body["stream"] as? Bool, true)
+        XCTAssertEqual((body["input"] as? [[String: String]])?.first?["content"], "Test [skjult]")
+        XCTAssertThrowsError(try GrokAPI.request(input: [], key: "bad\nheader"))
+    }
+
+    func testGrokParserStreamsUnicodeAndRequiresCompletion() throws {
+        let frames = "event: response.created\r\ndata: {\"type\":\"response.created\"}\r\n\r\n"
+            + "data: {\"type\":\"future_event\",\"delta\":{}}\n\n"
+            + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hej æøå\"}\r\n\r\n"
+        var parser = GrokResponsesParser()
+        let chunks = try frames.utf8.compactMap { try parser.feed($0) }
+        XCTAssertEqual(chunks, ["Hej æøå"])
+        XCTAssertThrowsError(try parser.end()) { XCTAssertEqual($0 as? GrokFailure, .interrupted) }
+        for byte in "data: {\"type\":\"response.completed\"}\n\n".utf8 { _ = try parser.feed(byte) }
+        XCTAssertNoThrow(try parser.end())
+    }
+
+    func testGrokInterruptionsAndStreamingKeyRedaction() throws {
+        var parser = GrokResponsesParser()
+        XCTAssertThrowsError(try "data: {\"type\":\"response.incomplete\"}\n\n".utf8.forEach { _ = try parser.feed($0) }) {
+            XCTAssertEqual($0 as? GrokFailure, .interrupted)
+        }
+        XCTAssertEqual(GrokAPI.redacted("Hej, fixture-", key: "fixture-secret", streaming: true), "Hej, ")
+        XCTAssertEqual(GrokAPI.redacted("Hej, fixture-secret", key: "fixture-secret", streaming: false), "Hej, [skjult]")
+    }
 }

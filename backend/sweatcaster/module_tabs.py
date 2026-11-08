@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
 import sqlite3
 import unicodedata
 from collections import Counter
-from contextlib import asynccontextmanager, closing
+from contextlib import AsyncExitStack, asynccontextmanager, closing
+from datetime import datetime, timezone
+from inspect import signature
 from pathlib import Path
 from uuid import UUID
 
@@ -119,10 +122,49 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
     batch = configured_batch(settings, workspace)
     workflows = batch.workflows
     original_lifespan = app.router.lifespan_context
+    mcp = None
+    try:
+        from mcp.server.fastmcp import FastMCP
+        from mcp.server.transport_security import TransportSecuritySettings
+    except ImportError:
+        pass
+    else:
+        from sweatcaster.repository_library import mcp_server
+
+        if "max_request_body_size" in signature(FastMCP).parameters:
+            mcp = mcp_server(workflows.library, stateless_http=True, json_response=True,
+                             max_request_body_size=32_768,
+                             transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+        else:
+            logging.getLogger(__name__).warning("HTTP MCP requires mcp>=1.29.1,<2; the remaining API is available.")
+
+    if mcp is not None:
+        from starlette.routing import Route
+        from sweatcaster.security import is_phone_host
+
+        mcp.streamable_http_app()
+
+        class AuthenticatedMCP:
+            async def __call__(self, scope, receive, send):
+                request = Request(scope, receive)
+                try:
+                    host = request.url.hostname or ""
+                    permitted = host in {"localhost", "127.0.0.1", "::1"} or is_phone_host(host)
+                except ValueError:
+                    permitted = False
+                if not permitted or "origin" in request.headers:
+                    raise ApiError(403, "INVALID_INPUT", "MCP kræver en godkendt lokal adresse og en lokal klient.")
+                authorize(request, settings)
+                await mcp.session_manager.handle_request(scope, receive, send)
+
+        app.router.routes.append(Route("/api/modules/v1/mcp", AuthenticatedMCP(), methods=["GET", "POST", "DELETE"]))
 
     @asynccontextmanager
     async def lifespan(application):
-        async with original_lifespan(application):
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(original_lifespan(application))
+            if mcp is not None:
+                await stack.enter_async_context(mcp.session_manager.run())
             worker = BatchWorker(batch)
             worker.start()
             try:
@@ -131,6 +173,38 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
                 worker.stop()
 
     app.router.lifespan_context = lifespan
+
+    @app.put("/api/modules/v1/code-repositories", include_in_schema=False)
+    def clone_repository(request: Request, body: dict = Body(...)):
+        authorize(request, settings)
+        repo = body.get("repo")
+        if not isinstance(repo, str) or len(repo) > 150:
+            raise ApiError(422, "INVALID_INPUT", "Angiv et GitHub-repo som ejer/projekt.")
+        try:
+            target = workflows.library._repo(repo)
+            if not target.exists():
+                workflows.library.clone(repo)
+            _, revision = workflows.library._head(repo)
+            return {"repo": repo.lower(), "revision": revision}
+        except (RepositoryError, OSError) as exc:
+            raise ApiError(422, "INVALID_INPUT", "GitHub-repoet kunne ikke klones eller læses med PC’ens Git-adgang.") from exc
+
+    @app.get("/api/modules/v1/routines", include_in_schema=False)
+    def routines(request: Request):
+        authorize(request, settings)
+        return {"routines": workflows.routine_status(datetime.now(timezone.utc))}
+
+    @app.put("/api/modules/v1/routines", include_in_schema=False)
+    def configure_routines(request: Request, body: dict = Body(...)):
+        authorize(request, settings)
+        entries = body.get("routines")
+        if not isinstance(entries, list):
+            raise ApiError(422, "INVALID_INPUT", "Angiv rutiner som en liste.")
+        try:
+            workflows.configure_routines(entries)
+        except RepositoryError as exc:
+            raise ApiError(422, "INVALID_INPUT", str(exc)) from exc
+        return {"routines": workflows.routines()}
 
     @app.get("/api/modules/v1/agent-memory", include_in_schema=False)
     def memories(request: Request):

@@ -1,6 +1,8 @@
 import json
+from inspect import signature
 from uuid import uuid4
 
+import pytest
 from tests.conftest import make_settings
 from fastapi.testclient import TestClient
 
@@ -19,6 +21,9 @@ def test_manifest_import_and_local_answers(tmp_path):
         assert client.get(base + "manifest").status_code == 401
         assert client.get(base + "code-batches").status_code == 401
         assert client.get(base + "code-batches", headers=headers).json() == {"jobs": []}
+        assert client.get(base + "routines").status_code == 401
+        assert client.put(base + "routines", headers=headers, json={"routines": []}).json() == {"routines": []}
+        assert client.put(base + "code-repositories", headers=headers, json={"repo": "https://example.org/a"}).status_code == 422
         assert client.put(base + "code-batches/example/approval", headers=headers, json={"approved": False}).status_code == 422
         assert [tab["id"] for tab in client.get(base + "manifest", headers=headers).json()["tabs"]] == ["cards", "test"]
         assert client.get(base + "tabs/test", headers=headers).json() == {"text": "Klar"}
@@ -37,3 +42,32 @@ def test_manifest_import_and_local_answers(tmp_path):
         assert [frame["type"] for frame in frames] == ["tool_status", "text", "done"]
         assert "dubletgrupper" in frames[1]["content"]
         assert client.post("/api/v2/chat", headers=headers, json=chat).status_code == 409
+
+
+def test_module_mcp_rejects_untrusted_clients_and_lists_read_tools(tmp_path):
+    fastmcp = pytest.importorskip("mcp.server.fastmcp")
+    if "max_request_body_size" not in signature(fastmcp.FastMCP).parameters:
+        pytest.skip("HTTP MCP requires an SDK with bounded request bodies.")
+    settings = make_settings(tmp_path)
+    headers = {"Authorization": "Bearer " + settings.token, "Accept": "application/json, text/event-stream"}
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    with TestClient(create_app(settings), base_url="http://127.0.0.1:8765") as client:
+        url = "/api/modules/v1/mcp"
+        assert client.post(url, json=request).status_code == 401
+        assert client.post(url, headers={**headers, "Host": "evil.example"}, json=request).status_code == 403
+        assert client.post(url, headers={**headers, "Origin": "http://127.0.0.1:8765"}, json=request).status_code == 403
+        reply = client.post(url, headers=headers, json=request)
+        assert reply.status_code == 200, reply.text
+        assert {tool["name"] for tool in reply.json()["result"]["tools"]} == {"read_repository_file", "search_repository"}
+
+
+def test_older_optional_mcp_does_not_prevent_api_startup(tmp_path, monkeypatch):
+    fastmcp = pytest.importorskip("mcp.server.fastmcp")
+
+    def legacy_fastmcp(name):
+        pytest.fail("The legacy SDK cannot serve bounded HTTP requests.")
+
+    monkeypatch.setattr(fastmcp, "FastMCP", legacy_fastmcp)
+    with TestClient(create_app(make_settings(tmp_path))) as client:
+        assert client.get("/api/v1/health").status_code == 200
+        assert client.post("/api/modules/v1/mcp", json={}).status_code == 404

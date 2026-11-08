@@ -31,3 +31,16 @@ Copy `sweatcaster/code_batch.py` into the same installed Python package as `repo
 ```
 
 The queue persists under the PC output directory. The worker starts with the PC HTTP server after installing the module hooks. It serializes jobs and acquires the existing Ollama model lease shared with chat and rendering. A job produces a unified diff for up to five selected tracked files and a test plan. In the compatible iOS app, open **Code Bot → Forslag til flere filer** to submit and review jobs. Approval creates a local `fadedai/review-*` branch in the bare repository snapshot. The source branch remains unchanged. `worker --once` is also available for standalone diagnostics.
+
+## Forbindelse med QR
+
+Åbn en interaktiv Windows Terminal i projektmappen. QR-værktøjet kræver Python-pakken `qrcode`.
+
+```powershell
+python -m pip install qrcode
+python backend/show_pairing_qr.py 192.168.1.50
+```
+
+Brug PC’ens egen LAN- eller Tailscale-adresse. Indsæt det eksisterende token i den skjulte prompt, eller tilføj `--token-file 'D:\FadedAIData\PAIRING_TOKEN.txt'` med stien til tokenfilen. Vælg **Scan QR fra PC’en** på iPhonen, og tryk derefter **Test og Forbind**.
+
+QR-koden indeholder tokenet. Vis den kun på din egen skærm, og luk visningen med Enter efter scanning. Forstør terminalvinduet, hvis QR-koden ikke kan være der.

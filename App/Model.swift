@@ -19,6 +19,8 @@ import Observation
     private(set) var uncertain = false
     private(set) var mediaLoading = false
     private(set) var connected = false
+    private(set) var latencyMs: Int?
+    private(set) var jobsObservationWindow: Int = 0
     var error: APIError?
     var options = Options()
     var address: String { defaults.string(forKey: Pairing.addressKey) ?? "" }
@@ -77,6 +79,7 @@ import Observation
         isDemo = demo
         revision += 1
         clips = []; jobs = []; selected = []; capabilities = nil; connected = false
+        latencyMs = nil
         waitingForStop = []
         pendingKey = demo ? nil : "pending." + address
         uncertain = pendingKey.map { defaults.object(forKey: $0) != nil } ?? false
@@ -90,11 +93,13 @@ import Observation
 
     func saveProfile(_ profile: ConnectionProfile, address: String, token: String) async {
         await connect(address: address, token: token, profile: profile, activateBeforeTest: false)
+        await tryAlternateProfile(after: profile)
     }
 
     func selectProfile(_ profile: ConnectionProfile) async {
         guard let address = savedAddresses[profile] else { return }
         await connect(address: address, token: "", profile: profile, activateBeforeTest: true)
+        await tryAlternateProfile(after: profile)
     }
 
     private func connect(address: String, token input: String, profile: ConnectionProfile, activateBeforeTest: Bool) async {
@@ -129,21 +134,56 @@ import Observation
         install(live, demo: false)
     }
 
-    private func initial(_ api: any SweatAPI) async throws -> (Capabilities, [Clip], [Job]) {
+    private func tryAlternateProfile(after profile: ConnectionProfile) async {
+        guard !Task.isCancelled, let error else { return }
+        switch error {
+        case .offline, .localNetwork, .transport: break
+        default: return
+        }
+        let alternate: ConnectionProfile = profile == .home ? .tailscale : .home
+        guard let saved = savedAddresses[alternate] else { return }
+        await connect(address: saved, token: "", profile: alternate, activateBeforeTest: false)
+    }
+
+    func ping() async -> String {
+        guard let live = api as? LiveAPI, !isDemo else { return "Forbind til din PC først." }
+        let source = address
+        let start = ContinuousClock.now
+        do {
+            let health = try await live.health()
+            guard health.status == "ok", health.api_version == "1", source == address else { return "PC’en er ikke klar." }
+            let ms = Self.milliseconds(since: start)
+            latencyMs = ms
+            return "PC’en svarer · \(ms) ms"
+        } catch {
+            if source == address { latencyMs = nil }
+            return "PC’en svarede ikke inden for tre sekunder."
+        }
+    }
+
+    private static func milliseconds(since start: ContinuousClock.Instant) -> Int {
+        let duration = start.duration(to: .now).components
+        return max(1, Int(duration.seconds * 1_000 + duration.attoseconds / 1_000_000_000_000_000))
+    }
+
+    private func initial(_ api: any SweatAPI) async throws -> (Capabilities, [Clip], [Job], Int?) {
+        let start = ContinuousClock.now
         let health = try await api.health()
+        let latency = api is LiveAPI ? Self.milliseconds(since: start) : nil
         guard health.api_version == "1" else { throw APIError.version }
         guard health.status == "ok" else { throw APIError.unhealthy }
         async let capabilities = api.capabilities()
         async let clips = api.clips()
         async let jobs = api.jobs()
-        return try await (capabilities, clips.clips, jobs.jobs)
+        return try await (capabilities, clips.clips, jobs.jobs, latency)
     }
-    private func apply(_ data: (Capabilities, [Clip], [Job])) {
+    private func apply(_ data: (Capabilities, [Clip], [Job], Int?)) {
         capabilities = data.0
         clips = data.1
         selected = Set(clips.filter { selected.contains($0.id) }.prefix(data.0.limit).map(\.id))
         replaceJobs(data.2)
         connected = true
+        latencyMs = data.3
     }
 
     func refresh() async {
@@ -158,7 +198,15 @@ import Observation
             try Task.checkCancellation()
             apply(result)
         } catch {
-            if !Task.isCancelled { connected = false; report(error) }
+            if !Task.isCancelled {
+                connected = false
+                latencyMs = nil
+                report(error)
+                if !isDemo {
+                    refreshing = false
+                    await tryAlternateProfile(after: activeProfile)
+                }
+            }
         }
     }
 
@@ -261,9 +309,28 @@ import Observation
         } catch {
             if snapshot == revision, !busy, !refreshing, !Task.isCancelled {
                 connected = false
+                latencyMs = nil
                 report(error)
+                if !isDemo { await tryAlternateProfile(after: activeProfile) }
             }
         }
+    }
+
+    func pollCodeJobs() async -> Bool {
+        guard connected, !isDemo, let live = api as? LiveAPI else { return false }
+        let server = address
+        do {
+            let jobs = try await live.codeBatches().jobs
+            guard connected, !isDemo, address == server, !Task.isCancelled else { return false }
+            let active = jobs.filter { ["queued", "running"].contains($0.status) }.map(\.id)
+            let finished = jobs.filter { ["review", "applied", "completed"].contains($0.status) }.map(\.id)
+            observeCompletions(kind: "code", active: active, finished: finished, title: "Dit Code Bot-forslag er klar!")
+        } catch let APIError.http(status, _) where [401, 403, 404, 405].contains(status) {
+            return false
+        } catch {
+            if Task.isCancelled { return false }
+        }
+        return true
     }
 
     func cancel(_ job: Job) async {
@@ -293,12 +360,31 @@ import Observation
     private func replaceJobs(_ current: [Job]) {
         jobs = current
         waitingForStop.formIntersection(current.filter { $0.status.active }.map(\.id))
+        observeVideos()
     }
 
     private func merge(_ incoming: [Job]) {
         for job in incoming {
             if let index = jobs.firstIndex(where: { $0.id == job.id }) { jobs[index] = job }
             else { jobs.append(job) }
+        }
+        observeVideos()
+    }
+
+    private func observeVideos() {
+        jobsObservationWindow = hasActive ? Int(Date.now.timeIntervalSinceReferenceDate / 15) : 0
+        observeCompletions(kind: "video", active: jobs.filter { $0.status.active }.map(\.id),
+                           finished: jobs.filter { $0.status == .completed }.map(\.id), title: "Din video er klar!")
+    }
+
+    private func observeCompletions(kind: String, active: [String], finished: [String], title: String) {
+        guard !isDemo, !address.isEmpty else { return }
+        let server = address
+        let key = "notifications.active.\(kind).\(server)"
+        let previous = Set(defaults.stringArray(forKey: key) ?? [])
+        defaults.set(active, forKey: key)
+        for id in previous.intersection(finished) {
+            Task { await JobNotifications.shared.completed(kind: kind, server: server, id: id, title: title) }
         }
     }
 }

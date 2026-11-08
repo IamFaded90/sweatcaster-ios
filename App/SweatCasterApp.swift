@@ -6,6 +6,7 @@ import Speech
 import Observation
 import AppIntents
 import SwiftUI
+import UIKit
 
 struct OpenSweatCasterChat: AppIntent {
     static let title: LocalizedStringResource = "Åbn FadedAI-chat"
@@ -25,34 +26,47 @@ struct OpenSweatCasterVideo: AppIntent {
     }
 }
 
+struct OpenFadedAIPrivateChat: AppIntent {
+    static let title: LocalizedStringResource = "Start privat chat"
+    static let openAppWhenRun = true
+
+    @MainActor func perform() async throws -> some IntentResult {
+        UserDefaults.standard.set("private-chat", forKey: "spaces.shortcut")
+        return .result()
+    }
+}
+
 struct SweatCasterShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: OpenSweatCasterChat(), phrases: ["Åbn chat i \(.applicationName)"],
                     shortTitle: "Åbn chat", systemImageName: "bubble.left")
         AppShortcut(intent: OpenSweatCasterVideo(), phrases: ["Vælg klip i \(.applicationName)"],
                     shortTitle: "Vælg klip", systemImageName: "film")
+        AppShortcut(intent: OpenFadedAIPrivateChat(), phrases: ["Start privat chat i \(.applicationName)"],
+                    shortTitle: "Privat chat", systemImageName: "lock.shield")
     }
 }
 
 private struct PromptExample: Identifiable {
-    let category: String
     let text: String
     var id: String { text }
     static let examples = [
-        Self(category: "Video", text: "Lav et hype-klip af den nyeste fil."),
-        Self(category: "Analyse", text: "Analyser denne tekst:"),
-        Self(category: "Video", text: "Foreslå en kort titel til mit næste klip."),
-        Self(category: "Planlægning", text: "Lav en tjekliste til min næste optagelse."),
-        Self(category: "Idéer", text: "Giv mig tre idéer til et sjovt gamingklip.")
+        Self(text: "Lav et hype-klip af den nyeste fil."),
+        Self(text: "Analyser denne tekst:"),
+        Self(text: "Foreslå en kort titel til mit næste klip."),
+        Self(text: "Lav en tjekliste til min næste optagelse."),
+        Self(text: "Giv mig tre idéer til et sjovt gamingklip.")
     ]
 }
 
 @main struct SweatCasterApp: App {
+    @UIApplicationDelegateAdaptor(FadedAIModelDownloadDelegate.self) private var modelDownloadDelegate
     @AppStorage("app.text.scale") private var textScale = 0.0
+    @AppStorage("app.resetGeneration") private var resetGeneration = ""
     @Environment(\.dynamicTypeSize) private var systemTextSize
     var body: some Scene {
         WindowGroup {
-            Home().dynamicTypeSize(textScale == 0 ? systemTextSize :
+            Home().id(resetGeneration).dynamicTypeSize(textScale == 0 ? systemTextSize :
                 [DynamicTypeSize.large, .xLarge, .xxLarge, .xxxLarge,
                  .accessibility1, .accessibility2][min(5, max(0, Int(textScale)))])
         }
@@ -66,6 +80,13 @@ private struct Media: Identifiable {
 }
 
 struct Home: View {
+    private enum SettingsCategory: String, CaseIterable {
+        case connection = "Forbindelse", models = "AI-modeller", appearance = "Udseende", diagnostics = "Fejlfinding"
+    }
+    private struct StudioToast: Identifiable {
+        let id = UUID()
+        let text: String
+    }
     private enum Space: String, CaseIterable, Identifiable {
         case brain = "Brain", notes = "Notes", gallery = "Gallery", tasks = "Tasks", library = "Library"
         var id: Self { self }
@@ -73,10 +94,16 @@ struct Home: View {
 
     @Environment(\.scenePhase) private var phase
     @State private var model = Model()
-    @State private var setup = true
-    @State private var address = ""
-    @State private var token = ""
-    @State private var editedProfile: ConnectionProfile = .home
+    @State private var showLogin = false
+    @State private var settingsCategory = SettingsCategory.connection
+    @State private var pingResult: String?
+    @State private var pinging = false
+    @AppStorage("studio.images.autoSavePhotos") private var saveImagesToPhotos = false
+    @AppStorage("app.followSystemAppearance") private var followSystemAppearance = true
+    @AppStorage("app.manualDarkMode") private var manualDarkMode = true
+    @Environment(\.colorScheme) private var systemColorScheme
+    @State private var diagnosticsExport: DiagnosticsExport?
+    @State private var diagnosticsError = false
     @State private var media: Media?
     @State private var showChat = false
     @State private var errorDetails = false
@@ -92,6 +119,7 @@ struct Home: View {
     @State private var showCodeWorkspace = false
     @State private var showPhoneModels = false
     @State private var showOfflineStudio = false
+    @State private var studioToast: StudioToast?
     @State private var nsfwSessionUnlocked = false
     @State private var showSavedVideos = false
     @State private var savedVideos: [URL] = []
@@ -112,7 +140,6 @@ struct Home: View {
     @State private var saveVideoNotice: String?
     @State private var confirmClear = false
     @State private var hiddenJobs = Set<String>()
-    @AppStorage("spaces.notes") private var notes = ""
     @AppStorage("spaces.onboarded") private var onboarded = false
     @AppStorage("spaces.theme") private var theme = "OLED Sort"
     @AppStorage("spaces.font") private var font = "Standard"
@@ -134,9 +161,6 @@ struct Home: View {
     @AppStorage("qol.connectionBanner") private var showConnectionBanner = true
     @AppStorage("qol.lastSpace") private var lastSpace = Space.brain.rawValue
     @State private var pendingVideoMood: Mood?
-    @State private var cloudKeyDraft = ""
-    @State private var cloudKeySaved = CloudModelKey.exists()
-    @State private var cloudKeyNotice: String?
 
     private var visibleJobs: [Job] {
         model.jobs.filter { job in
@@ -156,11 +180,20 @@ struct Home: View {
                 selectedModuleTab = value
             }
         })) {
-            NavigationStack { tabPage("Hjem") { header; connectionSettings; loadingStatus; appearanceSettings } }
+            NavigationStack {
+                tabPage("Hjem") {
+                    header
+                    loadingStatus
+                    NavigationLink { settingsPage } label: {
+                        Label("Indstillinger", systemImage: "gearshape").frame(minHeight: 48)
+                    }
+                }
+            }
                 .tabItem { Label("Hjem", systemImage: "house.fill") }.tag(Space.brain.rawValue)
             ChatView(api: model.api as? any ChatAPI, demo: model.isDemo, initialDraft: "",
                      connection: model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
                      storageKey: "spaces.chat." + (model.isDemo ? "demo" : model.address))
+                .id(model.isDemo ? "demo" : model.address)
                 .tabItem { Label("Chat", systemImage: "bubble.left.fill") }.tag(Space.notes.rawValue)
             NavigationStack { tabPage("Video Studio") { videoStudioHeader; clipSection; moodSection; advanced(Binding(get: { model.options }, set: { model.options = $0 })); jobSection } }
                 .tabItem { Label("Video", systemImage: "film.fill") }.tag(Space.gallery.rawValue)
@@ -296,8 +329,12 @@ struct Home: View {
         }
     }
 
+    private var usesOLED: Bool {
+        theme == "OLED Sort" && (followSystemAppearance ? systemColorScheme == .dark : manualDarkMode)
+    }
+
     @ViewBuilder private var homeBackground: some View {
-        if theme == "OLED Sort" {
+        if usesOLED {
             Color.black.ignoresSafeArea()
         } else if motion && !reduceMotion && !calmMotion {
             LinearGradient(colors: [.blue.opacity(0.12), .clear],
@@ -314,12 +351,8 @@ struct Home: View {
     private var homeLifecycle: some View {
         homeContent
         .onAppear {
-            edit(model.activeProfile)
-            setup = model.address.isEmpty || model.isDemo
             prunePreviews()
-            openShortcut()
         }
-        .onChange(of: shortcut) { openShortcut() }
         .onChange(of: model.error?.title) { _, title in
             errorDetails = false
             if title != nil { errorFocus = true }
@@ -330,25 +363,29 @@ struct Home: View {
 
     private var homeFeedback: some View {
         let completed: [String] = model.jobs.filter { $0.status == .completed }.map(\.id)
-        let statuses: [String] = model.jobs.map { $0.id + $0.status.rawValue }
+        let rendering: [String] = model.jobs.filter { $0.status == .rendering }.map(\.id)
         return homeLifecycle
             .sensoryFeedback(.selection, trigger: appHaptics ? space.rawValue : "")
             .sensoryFeedback(.success, trigger: completed) { old, new in
-                new.count > old.count
+                appHaptics && !Set(new).subtracting(old).isEmpty
             }
-            .sensoryFeedback(.selection, trigger: statuses) { old, new in
-                old.count == new.count && !old.isEmpty
+            .sensoryFeedback(.impact(weight: .light), trigger: rendering) { old, new in
+                appHaptics && !Set(new).subtracting(old).isEmpty
             }
     }
 
     private var homePresentation: some View {
-        let scheme: ColorScheme? = theme == "Lys" ? .light :
-            (theme == "Mørk" || theme == "OLED Sort" ? .dark : nil)
+        let scheme: ColorScheme? = followSystemAppearance ? nil : (manualDarkMode ? .dark : .light)
         let design: Font.Design = font == "Afrundet" ? .rounded :
             (font == "Monospace" ? .monospaced : .default)
         return ZStack {
             homeBackground
-            homeFeedback
+            if model.connected || model.isDemo {
+                homeFeedback
+            } else {
+                LoginView(model: model, openLocalChat: { showChat = true },
+                          openLocalStudio: { showOfflineStudio = true }, exportDiagnostics: exportDiagnostics)
+            }
         }
         .preferredColorScheme(scheme)
         .fontDesign(design)
@@ -356,6 +393,43 @@ struct Home: View {
 
     var body: some View {
         homePresentation
+        .onAppear {
+            UIDevice.current.isBatteryMonitoringEnabled = true
+            StudioScratch.purgeOnceAtLaunch()
+            openShortcut()
+        }
+        .onOpenURL { url in
+            guard url.scheme == "fadedai" else { return }
+            switch url.host {
+            case "video": space = .gallery; showClips += 1
+            default: break
+            }
+        }
+        .onChange(of: shortcut) { openShortcut() }
+        .onChange(of: phase, initial: true) { _, value in
+            if value == .background { LocalCompute.suspend() }
+            if value == .active { LocalCompute.resume() }
+        }
+        .task(id: renderActivityKey) {
+            await RenderLiveActivity.shared.sync(jobs: model.jobs, server: model.address, enabled: !model.isDemo && model.connected)
+        }
+        .overlay(alignment: .top) {
+            if let studioToast {
+                Text(studioToast.text).font(.callout)
+                    .padding(12).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    .padding(.top, 8)
+            }
+        }
+        .task(id: studioToast?.id) {
+            guard let id = studioToast?.id else { return }
+            do { try await Task.sleep(for: .seconds(4)) } catch { return }
+            if studioToast?.id == id { studioToast = nil }
+        }
+        .sheet(isPresented: $showLogin) { LoginView(model: model, close: { showLogin = false }) }
+        .sheet(item: $diagnosticsExport) { DiagnosticsShareSheet(url: $0.url) }
+        .alert("Fejlloggen kunne ikke eksporteres", isPresented: $diagnosticsError) {
+            Button("OK", role: .cancel) {}
+        }
         .confirmationDialog("Slet den redigerede video fra PC’en?", isPresented: Binding(
             get: { pcDeletion != nil }, set: { if !$0 { pcDeletion = nil } }
         ), presenting: pcDeletion) { target in
@@ -401,8 +475,9 @@ struct Home: View {
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
         .sheet(isPresented: $showOfflineStudio) {
-            OfflineStudio(api: model.isDemo ? nil : model.api as? LiveAPI,
-                          sessionUnlocked: $nsfwSessionUnlocked)
+            OfflineStudio(api: model.isDemo || !model.connected ? nil : model.api as? LiveAPI,
+                          sessionUnlocked: $nsfwSessionUnlocked,
+                          onPrivateSessionEnded: { studioToast = StudioToast(text: "Privat session afsluttet og slettet.") })
         }
         .sheet(isPresented: $showSavedVideos) { savedVideoLibrary }
         .sheet(isPresented: $showHelp) {
@@ -419,6 +494,14 @@ struct Home: View {
         .task(id: phase) {
             if phase == .active { await model.refresh() }
         }
+        .task { await JobNotifications.shared.configure() }
+        .task(id: "\(phase == .active && model.connected && !model.isDemo):\(model.address)") {
+            guard phase == .active, model.connected, !model.isDemo else { return }
+            while !Task.isCancelled {
+                guard await model.pollCodeJobs() else { return }
+                do { try await Task.sleep(for: .seconds(8)) } catch { return }
+            }
+        }
         .task(id: phase == .active && model.hasActive) {
             guard phase == .active && model.hasActive else { return }
             while !Task.isCancelled && model.hasActive {
@@ -430,12 +513,12 @@ struct Home: View {
             Preview(media: item)
         }
         .sheet(isPresented: $showChat, onDismiss: {
-            chatDraft = ""
             if !model.isDemo { Task { await model.refresh() } }
         }) {
-            ChatView(api: model.api as? any ChatAPI, demo: model.isDemo, initialDraft: chatDraft,
+            ChatView(api: model.connected || model.isDemo ? model.api as? any ChatAPI : nil, demo: model.isDemo, initialDraft: "",
                      connection: model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
-                     storageKey: "spaces.chat." + (model.isDemo ? "demo" : model.address))
+                     storageKey: "spaces.chat." + (model.isDemo ? "demo" : (model.connected ? model.address : "offline")))
+                .id(model.isDemo ? "demo" : (model.connected ? model.address : "offline"))
         }
     }
 
@@ -443,30 +526,9 @@ struct Home: View {
     @ViewBuilder private var header: some View {
         Text("FadedAI").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
         if !model.isDemo && showConnectionBanner {
-            Label("\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
-                  systemImage: model.connected ? "checkmark.circle" : "exclamationmark.circle")
-                .font(.subheadline)
+            connectionIndicator
         }
-        if !model.savedAddresses.isEmpty {
-            Menu {
-                ForEach(ConnectionProfile.allCases) { profile in
-                    Button(profile.title) {
-                        if model.savedAddresses[profile] == nil {
-                            edit(profile)
-                            setup = true
-                        } else {
-                            Task {
-                                await model.selectProfile(profile)
-                                edit(profile)
-                            }
-                        }
-                    }
-                }
-            } label: {
-                Label("Skift forbindelse", systemImage: "arrow.left.arrow.right")
-                    .frame(minHeight: 48)
-            }.disabled(switchDisabled)
-        }
+        action("Skift forbindelse") { showLogin = true }.disabled(switchDisabled)
         action("Chat med AI-holdet") { showChat = true }
             .disabled(model.busy)
         if model.isDemo {
@@ -496,48 +558,10 @@ struct Home: View {
                 }
                 action("Prøv igen") {
                     if model.connected || !model.address.isEmpty { Task { await model.refresh() } }
-                    else { setup = true }
+                    else { showLogin = true }
                 }.disabled(switchDisabled)
             }
         }
-    }
-
-    @ViewBuilder private var connectionSettings: some View {
-        DisclosureGroup("Indstillinger · Forbindelse til PC", isExpanded: $setup) {
-            VStack(alignment: .leading, spacing: 12) {
-                Picker("Profil", selection: $editedProfile) {
-                    ForEach(ConnectionProfile.allCases) { profile in
-                        Text(profile.title).tag(profile)
-                    }
-                }.disabled(switchDisabled)
-                .onChange(of: editedProfile) { _, profile in edit(profile) }
-                Text(editedProfile == .home ? "Indtast PC’ens lokale adresse." : "Indtast PC’ens IPv4-adresse fra Tailscale.")
-                TextField("Adresse fra PC’en", text: $address)
-                    .accessibilityLabel("PC-adresse")
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .keyboardType(.URL).textFieldStyle(.roundedBorder)
-                    .frame(minHeight: 48)
-                SecureField("Adgangskode fra PC’en", text: $token)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .textFieldStyle(.roundedBorder).frame(minHeight: 48)
-                action("Test og gem profil") {
-                    Task {
-                        await model.saveProfile(editedProfile, address: address, token: token)
-                        if model.error == nil && !model.isDemo { token = ""; setup = false }
-                    }
-                }.disabled(switchDisabled)
-                Text("\(model.activeProfile.route) · \(model.connected ? "Forbundet til PC" : "Ingen forbindelse")")
-                    .font(.headline)
-                ForEach(ConnectionProfile.allCases) { profile in
-                    action("Skift til \(profile.title)") {
-                        edit(profile)
-                        if model.savedAddresses[profile] != nil {
-                            Task { await model.selectProfile(profile) }
-                        }
-                    }.disabled(switchDisabled)
-                }
-            }.padding(.top, 12)
-        }.font(.body)
     }
 
     @ViewBuilder private var loadingStatus: some View {
@@ -546,114 +570,102 @@ struct Home: View {
         }
     }
 
-    @ViewBuilder private var spaceContent: some View {
-        @Bindable var model = model
-        switch space {
-        case .brain:
-            if let latest = visibleJobs.max(by: { $0.created_at < $1.created_at }) {
-                VStack(alignment: .leading, spacing: 4) {
-                    heading("Fortsæt hvor du slap")
-                    Text(latest.mood.title + " · " + latest.status.title)
-                    action("Åbn Video Studio") { space = .gallery }
+    private var connectionIndicator: some View {
+        let latency = model.latencyMs
+        let color: Color = latency.map { $0 < 100 ? .green : $0 < 300 ? .yellow : .red } ?? .secondary
+        return HStack(spacing: 8) {
+            Circle().fill(color).frame(width: 8, height: 8).accessibilityHidden(true)
+            Label("\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
+                  systemImage: model.connected ? "checkmark.circle" : "exclamationmark.circle")
+            if let latency { Text("\(latency) ms").foregroundStyle(.secondary) }
+        }.font(.subheadline)
+    }
+
+    private var settingsPage: some View {
+        Form {
+            Picker("Kategori", selection: $settingsCategory) {
+                ForEach(SettingsCategory.allCases, id: \.self) { category in
+                    Text(category.rawValue).tag(category)
                 }
             }
-            action("Åbn Video Studio") { space = .gallery }
-            action("Chat med din AI") { showChat = true }
-            action("Besøg pixelbyen") { showAgentHub = true }
-        case .notes:
-            heading("Noter")
-            TextEditor(text: $notes).frame(minHeight: 180)
-                .accessibilityLabel("Noter på denne enhed")
-        case .gallery:
-            videoStudioHeader
-            clipSection
-            moodSection
-            advanced($model.options)
-            jobSection
-        case .tasks:
-            heading("Aktive opgaver")
-            if pendingJobs == 0 { Text("Ingen aktive videojobs.") }
-            ForEach(model.jobs.filter { $0.status.active }) { job in
-                Text(job.mood.title + " · " + job.status.title)
-            }
-        case .library:
-            heading("Promptbibliotek")
-            ForEach(PromptExample.examples) { example in
-                VStack(alignment: .leading) {
-                    Text(example.category).font(.headline)
-                    action(example.text) {
-                        chatDraft = example.text
-                        showChat = true
+            switch settingsCategory {
+            case .connection:
+                connectionIndicator
+                Button("Skift forbindelse") { showLogin = true }.disabled(switchDisabled)
+                Toggle("Vis forbindelsesbanner", isOn: $showConnectionBanner)
+                Toggle("Opdatér ved faneskift", isOn: $autoRefreshTabs)
+            case .models:
+                Button("Lokale modeller") { showPhoneModels = true }
+                Button("Privat studie") { showOfflineStudio = true }
+                Button("Code Bot og Agent Workspace") { showCodeWorkspace = true }
+                CloudModelSettings()
+            case .appearance:
+                Toggle("Følg iOS’ udseende", isOn: $followSystemAppearance)
+                if !followSystemAppearance { Toggle("Mørk tilstand", isOn: $manualDarkMode) }
+                Toggle("Brug OLED-sort baggrund i mørk tilstand", isOn: Binding(
+                    get: { theme == "OLED Sort" }, set: { theme = $0 ? "OLED Sort" : "System" }
+                ))
+                Slider(value: $textScale, in: 0...5, step: 1) { Text("Tekststørrelse") }
+                    .accessibilityLabel("Tekststørrelse i appen")
+                    .sensoryFeedback(.selection, trigger: textScale) { old, new in
+                        appHaptics && old != new && (new == 0 || new == 5)
                     }
+                Picker("Skrift", selection: $font) {
+                    ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
                 }
+                Toggle("Bevægelse i baggrunden", isOn: $motion)
+                Toggle("Ekstra rolig bevægelse", isOn: $calmMotion)
+                Toggle("Haptisk feedback", isOn: $appHaptics)
+                Toggle("Husk seneste fane", isOn: $rememberLastSpace)
+                Toggle("Hold skærmen vågen", isOn: $keepScreenAwake)
+                Toggle("Kompakte klipkort", isOn: $compactClipCards)
+                Toggle("Vis kliplængde", isOn: $showClipDurations)
+                Toggle("Vis jobdetaljer", isOn: $showJobDetails)
+            case .diagnostics:
+                Button(pinging ? "Tester PC…" : "Ping PC", systemImage: "network") {
+                    Task {
+                        pinging = true
+                        defer { pinging = false }
+                        pingResult = await model.ping()
+                    }
+                }.disabled(pinging)
+                if let pingResult { Text(pingResult).font(.caption).foregroundStyle(.secondary) }
+                ResourceMonitor()
+                Button("Eksportér fejllog", systemImage: "square.and.arrow.up", action: exportDiagnostics)
+                Toggle("Gem genererede billeder i Fotos", isOn: $saveImagesToPhotos)
+                Toggle("Bekræft før video startes", isOn: $confirmVideoStart)
+                Button("Ryd midlertidige previews") {
+                    prunePreviews(); saveVideoNotice = "Midlertidige previews er ryddet."
+                }
+                Button("Skjul afsluttede jobs på denne telefon", role: .destructive) { confirmClear = true }
+                NukeLocalDataButton()
             }
         }
+        .navigationTitle("Indstillinger")
     }
 
-    @ViewBuilder private var appearanceSettings: some View {
-        action("Lokale modeller") { showPhoneModels = true }
-        action("NSFW / Uncensored") { showOfflineStudio = true }
-        action("Code Bot og Agent Workspace") { showCodeWorkspace = true }
-        DisclosureGroup("Visning og jobhistorik") {
-            Picker("Tema", selection: $theme) {
-                ForEach(["System", "Lys", "Mørk", "OLED Sort"], id: \.self) { Text($0) }
-            }
-            Slider(value: $textScale, in: 0...5, step: 1) { Text("Tekststørrelse") }
-                .accessibilityLabel("Tekststørrelse i appen")
-            Picker("Skrift", selection: $font) {
-                ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
-            }
-            Toggle("Bevægelse i baggrunden", isOn: $motion)
-            Toggle("Bekræft før video startes", isOn: $confirmVideoStart)
-            Toggle("Kompakte klipkort", isOn: $compactClipCards)
-            Toggle("Vis kliplængde", isOn: $showClipDurations)
-            Toggle("Vis jobdetaljer", isOn: $showJobDetails)
-            Toggle("Hold skærmen vågen", isOn: $keepScreenAwake)
-            Toggle("Haptisk feedback", isOn: $appHaptics)
-            Toggle("Ekstra rolig bevægelse", isOn: $calmMotion)
-            Toggle("Husk seneste fane", isOn: $rememberLastSpace)
-            Toggle("Opdatér ved faneskift", isOn: $autoRefreshTabs)
-            Toggle("Vis forbindelsesbanner", isOn: $showConnectionBanner)
-            Button("Ryd midlertidige previews") {
-                prunePreviews(); saveVideoNotice = "Midlertidige previews er ryddet."
-            }.frame(minHeight: 48)
-            Button("Ryd afsluttede jobs på denne telefon", role: .destructive) { confirmClear = true }
-                .frame(minHeight: 48)
-        }
-        DisclosureGroup("Valgfri xAI-nøgle") {
-            Text("Nøglen gemmes kun i iPhones Keychain. Cloud-chat er ikke aktiv, før en særskilt integration er godkendt.")
-                .font(.caption).foregroundStyle(.secondary)
-            SecureField("xAI API-nøgle", text: $cloudKeyDraft)
-                .textInputAutocapitalization(.never).autocorrectionDisabled()
-            Button("Gem nøgle") {
-                do {
-                    try CloudModelKey.save(cloudKeyDraft)
-                    cloudKeyDraft = ""; cloudKeySaved = true; cloudKeyNotice = "Nøglen er gemt på telefonen."
-                } catch { cloudKeyNotice = "Nøglen kunne ikke gemmes." }
-            }.disabled(cloudKeyDraft.isEmpty)
-            if cloudKeySaved {
-                Button("Fjern nøgle", role: .destructive) {
-                    CloudModelKey.remove(); cloudKeySaved = false; cloudKeyNotice = "Nøglen er fjernet."
-                }
-            }
-            if let cloudKeyNotice { Text(cloudKeyNotice).font(.caption) }
-        }
+    private var renderActivityKey: String {
+        "\(model.address):\(model.connected):\(model.isDemo):\(model.jobsObservationWindow):" + model.jobs.filter { $0.status.active }
+            .map { "\($0.id):\($0.status.rawValue):\($0.progress)" }.joined(separator: ",")
     }
 
-    @State private var chatDraft = ""
+    private func exportDiagnostics() {
+        do { diagnosticsExport = DiagnosticsExport(url: try AppDiagnostics.export()) }
+        catch { diagnosticsError = true }
+    }
 
     private func openShortcut() {
         guard !shortcut.isEmpty else { return }
         let destination = shortcut
         shortcut = ""
-        space = .brain
-        if destination == "chat" { showChat = true }
-    }
-
-    private func edit(_ profile: ConnectionProfile) {
-        editedProfile = profile
-        address = model.savedAddresses[profile] ?? ""
-        token = ""
+        switch destination {
+        case "private-chat":
+            nsfwSessionUnlocked = false
+            showOfflineStudio = true
+        case "chat": showChat = true
+        case "video": space = .gallery; showClips += 1
+        default: break
+        }
     }
 
     private var switchDisabled: Bool {
@@ -1108,7 +1120,7 @@ struct Home: View {
                 .frame(minHeight: 48)
                 .padding(.horizontal, 16)
                 .background {
-                    if theme == "OLED Sort" {
+                    if usesOLED {
                         RoundedRectangle(cornerRadius: 14)
                             .fill(.thinMaterial)
                             .overlay {
@@ -1119,7 +1131,7 @@ struct Home: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .foregroundStyle(theme == "OLED Sort" ? Color.white : Color.accentColor)
+        .foregroundStyle(usesOLED ? Color.white : Color.accentColor)
     }
 }
 
@@ -1154,6 +1166,7 @@ private struct VillageBotFile: FileDocument {
 }
 
 struct VillageBotBuilder: View {
+    var api: LiveAPI? = nil
     @Environment(\.dismiss) private var dismiss
     @AppStorage("village.bots") private var savedBots = Data()
     @State private var draft = VillageBot()
@@ -1166,6 +1179,7 @@ struct VillageBotBuilder: View {
     @State private var testing = false
     @State private var testQuestion = ""
     @State private var testReply = ""
+    @State private var generatingSprite = false
 
     private var bots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: savedBots)) ?? [] }
 
@@ -1211,6 +1225,12 @@ struct VillageBotBuilder: View {
                     let id = draft.id
                     Task { await loadSprite(item, botID: id) }
                 }
+            if let api {
+                Button(generatingSprite ? "PC’en tegner figuren…" : "Generér pixelfigur på PC’en") {
+                    Task { await generateSprite(api) }
+                }
+                .disabled(generatingSprite)
+            }
             if let data = draft.sprite, let image = UIImage(data: data) {
                 Image(uiImage: image).resizable().interpolation(.none)
                     .scaledToFill().frame(width: 112, height: 112).clipShape(Circle())
@@ -1267,16 +1287,38 @@ struct VillageBotBuilder: View {
 
     private func loadSprite(_ item: PhotosPickerItem, botID: UUID) async {
         guard let data = try? await item.loadTransferable(type: Data.self),
-              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let sprite = spriteThumbnail(data),
+              draft.id == botID, selectedSprite == item else { return }
+        draft.sprite = sprite
+        selectedSprite = nil
+    }
+
+    private func spriteThumbnail(_ data: Data) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                   kCGImageSourceCreateThumbnailFromImageAlways: true,
                   kCGImageSourceCreateThumbnailWithTransform: true,
                   kCGImageSourceThumbnailMaxPixelSize: 64
-              ] as CFDictionary),
-              let sprite = UIImage(cgImage: thumbnail).pngData(),
-              draft.id == botID, selectedSprite == item else { return }
-        draft.sprite = sprite
-        selectedSprite = nil
+              ] as CFDictionary) else { return nil }
+        return UIImage(cgImage: thumbnail).pngData()
+    }
+
+    private func generateSprite(_ api: LiveAPI) async {
+        guard !generatingSprite else { return }
+        generatingSprite = true
+        defer { generatingSprite = false }
+        let id = draft.id
+        let prompt = "Single friendly full body robot, 2D isometric pixel art sprite, centered with margin, simple solid dark backdrop, no text. Color: \(draft.color). Personality: \(draft.personality ?? "rolig")."
+        do {
+            let data = try await api.v2GenerateImage(prompt: prompt)
+            guard draft.id == id else { return }
+            guard let sprite = spriteThumbnail(data) else { throw APIError.malformed }
+            draft.sprite = sprite
+            notice = "Figuren er klar. Tryk Gem bot for at bruge den i Landsbyen."
+        } catch {
+            guard draft.id == id else { return }
+            notice = "PC’en kunne ikke lave figuren. Kontrollér billedtjenesten, eller vælg et billede fra Fotos."
+        }
     }
 
     private var localTest: some View {
@@ -1357,6 +1399,7 @@ struct VillageBotBuilder: View {
 
 private struct AgentHub: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var hubPhase
     let api: LiveAPI?
     @State private var selectedRoom = "research"
     @AppStorage("village.bots") private var localBotsData = Data()
@@ -1382,6 +1425,20 @@ private struct AgentHub: View {
     @State private var badgeError: String?
     @State private var detailsLoading = false
     @State private var badgesLoading = false
+
+    private struct VillagePiece: Identifiable {
+        enum Kind {
+            case building(Int)
+            case agent(V2Hub.Agent)
+            case bot(VillageBot, routine: Int, sleeping: Bool)
+        }
+
+        let id: String
+        let kind: Kind
+        let zone: Int
+        let point: CGPoint
+        let depth: CGFloat
+    }
 
     var body: some View {
         NavigationStack {
@@ -1419,7 +1476,7 @@ private struct AgentHub: View {
             .navigationTitle("Landsbyen")
             .toolbarVisibility(cinematic ? .hidden : .visible, for: .navigationBar)
             .sensoryFeedback(.success, trigger: completions)
-            .sheet(isPresented: $showBuilder) { VillageBotBuilder() }
+            .sheet(isPresented: $showBuilder) { VillageBotBuilder(api: api) }
             .sheet(item: $localBot) { bot in
                 NavigationStack {
                     List {
@@ -1434,7 +1491,9 @@ private struct AgentHub: View {
                     .toolbar { Button("Luk") { localBot = nil } }
                 }
             }
-            .task(id: attempt) { await followHub() }
+            .task(id: "\(attempt):\(hubPhase == .active):\(api?.server.origin.absoluteString ?? "offline")") {
+                if hubPhase == .active { await followHub() }
+            }
             .refreshable { attempt += 1 }
             .toolbar { Button("Luk") { dismiss() } }
             .sheet(item: $details) { agent in agentDetails(agent) }
@@ -1448,29 +1507,14 @@ private struct AgentHub: View {
             let night = hour < 7 || hour >= 20
             GeometryReader { geometry in
                 let size = geometry.size
+                let time = timeline.date.timeIntervalSinceReferenceDate
                 ZStack {
                     RoundedRectangle(cornerRadius: 20)
                         .fill(night ? Color(red: 0.03, green: 0.06, blue: 0.14) :
                             Color(red: 0.10, green: 0.19, blue: 0.29))
                     Canvas { context, canvas in
                         let pixelRect: (CGRect) -> Path = { frame in Path { $0.addRect(frame) } }
-                        let diamond: (CGPoint, CGFloat, CGFloat) -> Path = { center, width, height in
-                            Path { path in
-                                path.move(to: CGPoint(x: center.x, y: center.y - height / 2))
-                                path.addLine(to: CGPoint(x: center.x + width / 2, y: center.y))
-                                path.addLine(to: CGPoint(x: center.x, y: center.y + height / 2))
-                                path.addLine(to: CGPoint(x: center.x - width / 2, y: center.y))
-                                path.closeSubpath()
-                            }
-                        }
-                        let quad: (CGPoint, CGPoint, CGPoint, CGPoint) -> Path = { a, b, c, d in
-                            Path { path in
-                                path.move(to: a); path.addLine(to: b)
-                                path.addLine(to: c); path.addLine(to: d); path.closeSubpath()
-                            }
-                        }
-                        context.fill(pixelRect(CGRect(origin: .zero, size: canvas)),
-                                     with: .color(night ? Color(red: 0.04, green: 0.14, blue: 0.15) : Color(red: 0.10, green: 0.34, blue: 0.22)))
+                        context.fill(pixelRect(CGRect(origin: .zero, size: canvas)), with: .color(villageGround(night: night)))
                         let tile: CGFloat = 12
                         for row in 0..<Int(canvas.height / tile) {
                             for column in 0..<Int(canvas.width / tile) where (row * 7 + column * 11) % 13 == 0 {
@@ -1483,31 +1527,6 @@ private struct AgentHub: View {
                                      with: .color(Color(red: 0.70, green: 0.59, blue: 0.40).opacity(0.78)))
                         context.fill(pixelRect(CGRect(x: 0, y: canvas.height * 0.48, width: canvas.width, height: 26)),
                                      with: .color(Color(red: 0.70, green: 0.59, blue: 0.40).opacity(0.78)))
-                        for zone in 0..<4 {
-                            let center = villagePoint(zone, size: canvas)
-                            let colors: [Color] = [.indigo, .blue, .orange, .purple]
-                            let x = center.x, y = center.y
-                            context.fill(diamond(CGPoint(x: x + 10, y: y + 41), 154, 86),
-                                         with: .color(.black.opacity(0.34)))
-                            context.fill(diamond(CGPoint(x: x, y: y + 22), 148, 80),
-                                         with: .color(Color(red: 0.36, green: 0.48, blue: 0.39)))
-                            context.fill(quad(CGPoint(x: x - 57, y: y - 28), CGPoint(x: x, y: y + 1),
-                                              CGPoint(x: x, y: y + 47), CGPoint(x: x - 57, y: y + 18)),
-                                         with: .color(colors[zone].opacity(0.72)))
-                            context.fill(quad(CGPoint(x: x, y: y + 1), CGPoint(x: x + 57, y: y - 28),
-                                              CGPoint(x: x + 57, y: y + 18), CGPoint(x: x, y: y + 47)),
-                                         with: .color(colors[zone].opacity(0.48)))
-                            context.fill(diamond(CGPoint(x: x, y: y - 29), 132, 66),
-                                         with: .color(colors[zone].opacity(0.96)))
-                            context.stroke(diamond(CGPoint(x: x, y: y - 29), 132, 66),
-                                           with: .color(.white.opacity(0.38)), lineWidth: 2)
-                            context.fill(quad(CGPoint(x: x - 13, y: y + 13), CGPoint(x: x, y: y + 20),
-                                              CGPoint(x: x, y: y + 45), CGPoint(x: x - 13, y: y + 38)),
-                                         with: .color(.black.opacity(0.56)))
-                            context.fill(quad(CGPoint(x: x + 17, y: y + 17), CGPoint(x: x + 34, y: y + 8),
-                                              CGPoint(x: x + 34, y: y + 22), CGPoint(x: x + 17, y: y + 31)),
-                                         with: .color(night ? .yellow.opacity(0.84) : .cyan.opacity(0.82)))
-                        }
                         for tree in 0..<12 {
                             let x = canvas.width * (0.08 + Double((tree * 31) % 83) / 100)
                             let y = canvas.height * (0.11 + Double((tree * 47) % 75) / 100)
@@ -1515,33 +1534,14 @@ private struct AgentHub: View {
                             context.fill(pixelRect(CGRect(x: x, y: y, width: 13, height: 10)),
                                          with: .color(Color(red: 0.08, green: 0.52, blue: 0.30)))
                         }
-                        if offline {
-                            let phase = reduceMotion ? 0 : Int(timeline.date.timeIntervalSince1970 * 24) % 100
-                            for drop in 0..<30 {
-                                let x = canvas.width * Double((drop * 37) % 100) / 100
-                                let y = canvas.height * Double((drop * 61 + phase) % 100) / 100
-                                let line = Path { path in
-                                    path.move(to: CGPoint(x: x, y: y))
-                                    path.addLine(to: CGPoint(x: x - 4, y: y + 10))
-                                }
-                                context.stroke(line, with: .color(.cyan.opacity(0.45)), lineWidth: 1)
-                            }
-                        }
-                    }.accessibilityHidden(true)
-                    ForEach(Array(["Research Lab", "Video Studio", "Kaffeområde", "Sovekrog"].enumerated()), id: \.offset) { item in
-                        let point = villagePoint(item.offset, size: size)
-                        Label(item.element, systemImage: ["books.vertical.fill", "film.fill", "cup.and.saucer.fill", "moon.stars.fill"][item.offset])
-                            .font(.caption2.bold()).labelStyle(.titleAndIcon)
-                            .position(x: point.x, y: point.y + 25)
-                    }
-                    ForEach(Array((snapshot?.agents ?? []).enumerated()), id: \.element.id) { item in
-                        villageAvatar(item.element, index: item.offset, time: timeline.date.timeIntervalSinceReferenceDate, size: size)
-                    }
-                    ForEach(Array(localVillageBots.enumerated()), id: \.element.id) { item in
-                        localVillageAvatar(item.element, index: item.offset, hour: hour,
-                                           time: timeline.date.timeIntervalSinceReferenceDate, size: size)
+                    }.accessibilityHidden(true).allowsHitTesting(false)
+                    ForEach(villagePieces(hour: hour, time: time, size: size)) { piece in
+                        villagePiece(piece, night: night)
+                            .zIndex(Double(piece.depth))
+                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.75), value: piece.zone)
                     }
                 }
+                .overlay { if offline { villageRain(at: timeline.date) } }
                 .scaleEffect(villageZoom)
                 .offset(villageOffset)
                 .gesture(MagnifyGesture().onChanged { villageZoom = min(2, max(1, $0.magnification)) })
@@ -1565,11 +1565,111 @@ private struct AgentHub: View {
         (try? JSONDecoder().decode([VillageBot].self, from: localBotsData)) ?? []
     }
 
-    private func localVillageAvatar(_ bot: VillageBot, index: Int, hour: Int, time: TimeInterval, size: CGSize) -> some View {
+    private func villageGround(night: Bool) -> Color {
+        night ? Color(red: 0.04, green: 0.14, blue: 0.15) : Color(red: 0.10, green: 0.34, blue: 0.22)
+    }
+
+    private func villageRain(at date: Date) -> some View {
+        Canvas { context, size in
+            let phase = reduceMotion ? 0 : Int(date.timeIntervalSince1970 * 24) % 100
+            for drop in 0..<30 {
+                let x = size.width * Double((drop * 37) % 100) / 100
+                let y = size.height * Double((drop * 61 + phase) % 100) / 100
+                let line = Path { path in
+                    path.move(to: CGPoint(x: x, y: y))
+                    path.addLine(to: CGPoint(x: x - 4, y: y + 10))
+                }
+                context.stroke(line, with: .color(.cyan.opacity(0.45)), lineWidth: 1)
+            }
+        }.allowsHitTesting(false).accessibilityHidden(true)
+    }
+
+    private func villageBuilding(_ zone: Int, center: CGPoint, night: Bool) -> some View {
+        let names = ["Research Lab", "Video Studio", "Kaffeområde", "Sovekrog"]
+        let symbols = ["books.vertical.fill", "film.fill", "cup.and.saucer.fill", "moon.stars.fill"]
+        let colors: [Color] = [.indigo, .blue, .orange, .purple]
+        let color = colors[zone]
+        return ZStack {
+            Canvas { context, _ in
+                func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: center.x + x, y: center.y + y) }
+                func quad(_ a: CGPoint, _ b: CGPoint, _ c: CGPoint, _ d: CGPoint) -> Path {
+                    Path { path in
+                        path.move(to: a)
+                        path.addLine(to: b)
+                        path.addLine(to: c)
+                        path.addLine(to: d)
+                        path.closeSubpath()
+                    }
+                }
+                func diamond(_ x: CGFloat, _ y: CGFloat, width: CGFloat, height: CGFloat) -> Path {
+                    quad(point(x, y - height / 2), point(x + width / 2, y),
+                         point(x, y + height / 2), point(x - width / 2, y))
+                }
+                let west = quad(point(-57, -28), point(0, 1), point(0, 47), point(-57, 18))
+                let east = quad(point(0, 1), point(57, -28), point(57, 18), point(0, 47))
+                let roof = diamond(0, -29, width: 132, height: 66)
+                context.fill(diamond(10, 41, width: 154, height: 86), with: .color(.black.opacity(0.34)))
+                context.fill(diamond(0, 22, width: 148, height: 80), with: .color(Color(red: 0.36, green: 0.48, blue: 0.39)))
+                // Back the tinted faces with opaque color so a sprite behind a wall cannot show through it.
+                for face in [west, east, roof] { context.fill(face, with: .color(villageGround(night: night))) }
+                context.fill(west, with: .color(color.opacity(0.72)))
+                context.fill(east, with: .color(color.opacity(0.48)))
+                context.fill(roof, with: .color(color.opacity(0.96)))
+                context.stroke(roof, with: .color(.white.opacity(0.38)), lineWidth: 2)
+                context.fill(quad(point(-13, 13), point(0, 20), point(0, 45), point(-13, 38)),
+                             with: .color(.black.opacity(0.56)))
+                context.fill(quad(point(17, 17), point(34, 8), point(34, 22), point(17, 31)),
+                             with: .color(night ? .yellow.opacity(0.84) : .cyan.opacity(0.82)))
+            }.accessibilityHidden(true)
+            Label(names[zone], systemImage: symbols[zone])
+                .font(.caption2.bold()).labelStyle(.titleAndIcon)
+                .position(x: center.x, y: center.y + 25)
+        }.allowsHitTesting(false)
+    }
+
+    private func villagePieces(hour: Int, time: TimeInterval, size: CGSize) -> [VillagePiece] {
+        var pieces = (0..<4).map { zone in
+            let point = villagePoint(zone, size: size)
+            return VillagePiece(id: "building-\(zone)", kind: .building(zone), zone: zone, point: point,
+                                depth: point.y + 47)
+        }
+        var agentSlots = [0, 0, 0, 0]
+        for (index, agent) in (snapshot?.agents ?? []).enumerated() {
+            let sleeping = offline || agent.status == .offline
+            let zone = sleeping ? 3 : agent.status == .ready ? 2 : agent.room_id.lowercased().contains("video") ? 1 : 0
+            let phase = reduceMotion || sleeping ? nil : time * 0.55 + Double(index)
+            let foot = villageFoot(zone, slot: agentSlots[zone], local: false, phase: phase, size: size)
+            pieces.append(VillagePiece(id: "agent-\(agent.id)", kind: .agent(agent), zone: zone, point: foot,
+                                       depth: foot.y))
+            agentSlots[zone] += 1
+        }
+        var botSlots = [0, 0, 0, 0]
         let sleeping = offline || villagePause || hour < 7 || hour >= 22
-        let routine = (hour + index) % 3
-        let zone = sleeping ? 3 : routine
-        let center = villagePoint(zone, size: size)
+        for (index, bot) in localVillageBots.enumerated() {
+            let routine = (hour + index) % 3
+            let zone = sleeping ? 3 : routine
+            let phase = reduceMotion || sleeping ? nil : time * 0.7 + Double(index)
+            let foot = villageFoot(zone, slot: botSlots[zone], local: true, phase: phase, size: size)
+            pieces.append(VillagePiece(id: "bot-\(bot.id)", kind: .bot(bot, routine: routine, sleeping: sleeping),
+                                       zone: zone, point: foot, depth: foot.y))
+            botSlots[zone] += 1
+        }
+        return pieces
+    }
+
+    @ViewBuilder private func villagePiece(_ piece: VillagePiece, night: Bool) -> some View {
+        switch piece.kind {
+        case .building(let zone):
+            villageBuilding(zone, center: piece.point, night: night)
+        case .agent(let agent):
+            villageAvatar(agent).position(x: piece.point.x, y: piece.point.y - 21)
+        case .bot(let bot, let routine, let sleeping):
+            localVillageAvatar(bot, routine: routine, sleeping: sleeping)
+                .position(x: piece.point.x, y: piece.point.y - 5)
+        }
+    }
+
+    private func localVillageAvatar(_ bot: VillageBot, routine: Int, sleeping: Bool) -> some View {
         let personality = bot.personality ?? "Nysgerrig"
         let routines: [String] = switch personality {
         case "Rolig": ["Læser i biblioteket", "Ordner studiet", "Drikker te"]
@@ -1589,30 +1689,44 @@ private struct AgentHub: View {
                 } else {
                     Image(systemName: sleeping ? "moon.stars.fill" : "sparkle").foregroundStyle(color)
                 }
-                }.frame(width: 38, height: 38).opacity(sleeping ? 0.55 : 1)
+                }.frame(width: 38, height: 38, alignment: .bottom).opacity(sleeping ? 0.55 : 1)
                 Text(bot.name).font(.caption2.bold()).lineLimit(1)
                 if !sleeping { Text(activity).font(.system(size: 8)).lineLimit(1) }
-            }.frame(width: 92, height: 66)
+            }.frame(width: 92, height: 66, alignment: .top)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(bot.name + ", " + (bot.personality ?? "Nysgerrig") + ", " + activity)
-        .position(x: center.x + CGFloat(index % 5 - 2) * 23 + (reduceMotion || sleeping ? 0 : CGFloat(sin(time * 0.7 + Double(index))) * 18),
-                  y: center.y + 42 + CGFloat(index / 5) * 20 + (reduceMotion || sleeping ? 0 : CGFloat(cos(time * 0.7 + Double(index))) * 8))
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.75), value: zone)
     }
 
     private func villagePoint(_ zone: Int, size: CGSize) -> CGPoint {
-        let columns = [0.27, 0.73, 0.27, 0.73]
-        let rows = [0.28, 0.37, 0.65, 0.74]
-        return CGPoint(x: size.width * columns[zone], y: size.height * rows[zone])
+        let rooms = [CGPoint(x: -0.67, y: -0.21), CGPoint(x: -0.03, y: -0.49),
+                     CGPoint(x: 0.07, y: 0.53), CGPoint(x: 0.71, y: 0.25)]
+        return isometric(rooms[zone], origin: CGPoint(x: size.width / 2, y: size.height / 2),
+                         halfTile: CGSize(width: size.width / 2, height: size.height / 4))
     }
 
-    private func villageAvatar(_ agent: V2Hub.Agent, index: Int, time: TimeInterval, size: CGSize) -> some View {
+    private func isometric(_ tile: CGPoint, origin: CGPoint, halfTile: CGSize) -> CGPoint {
+        CGPoint(x: origin.x + (tile.x - tile.y) * halfTile.width,
+                y: origin.y + (tile.x + tile.y) * halfTile.height)
+    }
+
+    private func villageFoot(_ zone: Int, slot: Int, local: Bool, phase: Double?, size: CGSize) -> CGPoint {
+        let columns = local ? 5 : 4
+        let lane = (CGFloat(slot % columns) - CGFloat(columns - 1) / 2) * (local ? 0.34 : 0.43)
+        let row = CGFloat(slot / columns)
+        let front = (local ? 2.25 : 1.63) + row * 0.42
+        let wanderX = phase.map { CGFloat(sin($0)) * 0.32 } ?? 0
+        let wanderY = phase.map { CGFloat(cos($0)) * 0.32 } ?? 0
+        let tile = CGPoint(x: front + lane + wanderX, y: front - lane + wanderY)
+        let foot = isometric(tile, origin: villagePoint(zone, size: size), halfTile: CGSize(width: 32, height: 16))
+        let margin: CGFloat = local ? 46 : 22
+        return CGPoint(x: min(max(margin, foot.x), max(margin, size.width - margin)),
+                       y: min(foot.y, size.height - (local ? 20 : 5)))
+    }
+
+    private func villageAvatar(_ agent: V2Hub.Agent) -> some View {
         let sleeping = offline || agent.status == .offline
         let resting = agent.status == .ready
-        let zone = sleeping ? 3 : resting ? 2 : agent.room_id.lowercased().contains("video") ? 1 : 0
-        let point = villagePoint(zone, size: size)
-        let offset = CGFloat(index % 4) * 29 - 43.5
         let matchingSprite = localVillageBots.first {
             $0.name.localizedCaseInsensitiveCompare(agent.name) == .orderedSame ||
             $0.name.localizedCaseInsensitiveCompare(agent.id) == .orderedSame
@@ -1627,7 +1741,7 @@ private struct AgentHub: View {
                     Image(systemName: sleeping ? "moon.zzz.fill" : icon(agent.icon)).font(.title2)
                 }
             }
-            .frame(width: 42, height: 42)
+            .frame(width: 42, height: 42, alignment: .bottom)
             .opacity(sleeping ? 0.55 : 1)
             .modifier(AgentPulse(active: !sleeping && !resting))
         }
@@ -1638,9 +1752,6 @@ private struct AgentHub: View {
                 Button("Vis historik og hukommelse") { details = agent }
             }
         }
-        .position(x: point.x + offset + (reduceMotion || sleeping ? 0 : CGFloat(sin(time * 0.55 + Double(index))) * 16),
-                  y: point.y - 5 - CGFloat(index / 4) * 28 + (reduceMotion || sleeping ? 0 : CGFloat(cos(time * 0.55 + Double(index))) * 7))
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.75), value: zone)
     }
 
     private func missionHUD(_ summary: V2Hub.Summary) -> some View {
@@ -1739,10 +1850,14 @@ private struct AgentHub: View {
     private func followHub() async {
         failure = nil
         guard let api else { failure = "Forbind til din PC i Indstillinger."; return }
-        do {
-            while !Task.isCancelled {
+        var delay = 2
+        while !Task.isCancelled {
+            do {
                 let initial = try await api.v2Hub()
+                try Task.checkCancellation()
                 apply(initial)
+                failure = nil
+                delay = 2
                 try await api.v2HubEvents(after: initial.revision) { event in
                     guard let updated = try? await api.v2Hub() else { return }
                     await MainActor.run {
@@ -1751,16 +1866,17 @@ private struct AgentHub: View {
                         }
                     }
                 }
-                try await Task.sleep(for: .seconds(2))
-            }
-        } catch {
-            if !Task.isCancelled {
+            } catch {
+                guard !Task.isCancelled else { return }
                 if let networkError = error as? URLError {
                     offline = [.notConnectedToInternet, .cannotConnectToHost, .networkConnectionLost,
                                .timedOut, .cannotFindHost].contains(networkError.code)
                 }
                 failure = "Kunne ikke hente Agent-Hub. Tjek forbindelsen til PC’en."
             }
+            do { try await Task.sleep(for: .seconds(delay)) }
+            catch { return }
+            delay = min(delay * 2, 30)
         }
     }
 
@@ -2098,6 +2214,50 @@ private struct SavedAgentSession: Codable {
     let pending: Bool
 }
 
+private enum ChatArchive {
+    static let key = "spaces.chat.archive.v1"
+
+    static func append(_ session: SavedAgentSession) {
+        guard !session.turns.isEmpty else { return }
+        let defaults = UserDefaults.standard
+        let saved = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode([SavedAgentSession].self, from: $0) } ?? []
+        let updated = [session] + saved.filter { $0.id != session.id }
+        if let data = try? JSONEncoder().encode(Array(updated.prefix(100))) { defaults.set(data, forKey: key) }
+    }
+
+    static func turns() -> [ChatTurn] {
+        let defaults = UserDefaults.standard
+        let decoder = JSONDecoder()
+        var found = defaults.data(forKey: key).flatMap { try? decoder.decode([SavedAgentSession].self, from: $0) }?.flatMap(\.turns) ?? []
+        for (name, value) in defaults.dictionaryRepresentation() where name.hasPrefix("spaces.chat.") && name != key {
+            guard let data = value as? Data else { continue }
+            if let session = try? decoder.decode(SavedAgentSession.self, from: data) { found += session.turns }
+            else if let legacy = try? decoder.decode([ChatTurn].self, from: data) { found += legacy }
+        }
+        var seen = Set<UUID>()
+        return found.sorted { ($0.createdAt ?? .distantPast) > ($1.createdAt ?? .distantPast) }
+            .filter { seen.insert($0.id).inserted }
+    }
+}
+
+private struct AgentToolWave: View {
+    let status: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 15, paused: reduceMotion)) { context in
+            let time = reduceMotion ? 0 : context.date.timeIntervalSinceReferenceDate * 6
+            HStack(spacing: 3) {
+                ForEach(0..<7, id: \.self) { index in
+                    Capsule().fill(.cyan).frame(width: 3, height: 6 + CGFloat(abs(sin(time + Double(index) * 0.8))) * 12)
+                }
+            }.frame(height: 20)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(status)
+    }
+}
+
 private struct ModuleTabView: View {
     let tab: ModuleTab
     let api: LiveAPI
@@ -2177,13 +2337,15 @@ private struct BatchReviewView: View {
     @State private var repo = ""
     @State private var goal = ""
     @State private var paths = ""
-    @State private var error = false
+    @State private var failure: String?
     @State private var busy = false
 
     var body: some View {
         Form {
             Section("Ny opgave") {
                 TextField("Repo (ejer/projekt)", text: $repo).textInputAutocapitalization(.never).autocorrectionDisabled()
+                Button("Klon GitHub-repo til PC’en") { Task { await clone() } }
+                    .disabled(busy || repo.trimmingCharacters(in: .whitespaces).isEmpty)
                 TextField("Hvad skal ændres?", text: $goal, axis: .vertical)
                 TextField("Op til fem filstier, én pr. linje", text: $paths, axis: .vertical)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
@@ -2191,7 +2353,7 @@ private struct BatchReviewView: View {
                     .disabled(busy || repo.isEmpty || goal.isEmpty || paths.isEmpty)
             }
             Section("Kodejob") {
-                if error { Text("Kodekøen kunne ikke opdateres. Kontrollér forbindelsen og oplysningerne.") }
+                if let failure { Text(failure) }
                 Button("Opdatér liste") { Task { await reload() } }
                 ForEach(jobs) { job in
                     NavigationLink {
@@ -2211,8 +2373,8 @@ private struct BatchReviewView: View {
     }
 
     private func reload() async {
-        do { jobs = try await api.codeBatches().jobs; error = false }
-        catch { error = true }
+        do { jobs = try await api.codeBatches().jobs; failure = nil }
+        catch { failure = pcBusyMessage(error) ?? "Kodekøen kunne ikke hentes. Kontrollér forbindelsen til PC’en." }
     }
 
     private func enqueue() async {
@@ -2223,7 +2385,16 @@ private struct BatchReviewView: View {
             try await api.enqueueCodeBatch(repo: repo.trimmingCharacters(in: .whitespaces), goal: goal, files: files)
             goal = ""
             await reload()
-        } catch { error = true }
+        } catch { failure = pcBusyMessage(error) ?? "Opgaven kunne ikke sættes i kø. Tjek repo og filstier." }
+    }
+
+    private func clone() async {
+        busy = true
+        defer { busy = false }
+        do {
+            try await api.cloneCodeRepository(repo.trimmingCharacters(in: .whitespaces))
+            failure = nil
+        } catch { failure = pcBusyMessage(error) ?? "Repoet kunne ikke klones. Tjek navnet og PC’ens adgang til GitHub." }
     }
 }
 
@@ -2261,6 +2432,11 @@ private struct BatchProposalView: View {
                     ForEach(Array(tests.enumerated()), id: \.offset) { entry in Text(verbatim: entry.element) }
                 }
             }
+            if let checks = detail?.result?.checks, !checks.isEmpty {
+                Section("Kontroller kørt på PC’en") {
+                    ForEach(Array(checks.enumerated()), id: \.offset) { entry in Text(verbatim: entry.element) }
+                }
+            }
             if let branch = detail?.result?.branch { Text(verbatim: branch).textSelection(.enabled) }
             if detail?.status == "review" {
                 Button("Godkend og gem på lokal gren") { confirm = true }.disabled(busy)
@@ -2291,11 +2467,31 @@ private struct BatchProposalView: View {
 }
 
 private struct CodeWorkspaceView: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     private struct FeatureDraft: Decodable {
         let feasible: Bool
         let reason: String
-        let content: String?
+        let diff: String?
         let tests: [String]
+    }
+    private struct GeneratedProposal {
+        let original: String?
+        let revised: String
+    }
+    @MainActor private final class DraftStream {
+        var text = ""
+        var overflowed = false
+
+        func append(_ part: String) {
+            guard !overflowed else { return }
+            if text.utf8.count + part.utf8.count > 64_000 {
+                overflowed = true
+                text = ""
+            } else {
+                text += part
+            }
+        }
     }
     private enum Autonomy: String, CaseIterable {
         case strict = "Strict"
@@ -2323,6 +2519,8 @@ private struct CodeWorkspaceView: View {
     @State private var message: String?
     @State private var approval = false
     @State private var featureRequest = ""
+    @State private var firstEditLine = "1"
+    @State private var generatedProposal: GeneratedProposal?
     @State private var codeStatus = ""
     @State private var testPlan: [String] = []
 
@@ -2351,6 +2549,7 @@ private struct CodeWorkspaceView: View {
                         if files.isEmpty && !loading { Text("Ingen tekstfiler i Agent Workspace endnu.") }
                         ForEach(files) { file in
                             Button {
+                                guard !loading else { return }
                                 if selected.contains(file.path) { selected.remove(file.path) }
                                 else { selected.insert(file.path) }
                                 persistContext()
@@ -2367,6 +2566,7 @@ private struct CodeWorkspaceView: View {
                                 }.frame(minHeight: 52)
                             }
                             .buttonStyle(.bordered)
+                            .disabled(loading)
                             .accessibilityLabel("\(file.path), \(selected.contains(file.path) ? "valgt som kontekst" : "ikke valgt")")
                         }
                     }
@@ -2377,10 +2577,15 @@ private struct CodeWorkspaceView: View {
                                 .buttonStyle(.bordered).frame(minHeight: 44)
                         }
                         Text("Byg en lille funktion med PC-modellen").font(.title2.bold())
-                        Text("Vælg eller skriv en filsti, beskriv én afgrænset ændring, og gennemgå altid diffen før godkendelse.")
+                        Text("Vælg en fil og beskriv én afgrænset ændring. I en lang fil kan du vælge en startlinje tæt på ændringen.")
                             .font(.callout).foregroundStyle(.secondary)
                         TextField("Beskriv funktionen", text: $featureRequest, axis: .vertical)
                             .lineLimit(2...6).textFieldStyle(.roundedBorder)
+                            .disabled(loading)
+                        LabeledContent("Startlinje i filen") {
+                            TextField("Startlinje", text: $firstEditLine).keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing).frame(minHeight: 44).disabled(loading)
+                        }
                         Button("Lad Code Bot forberede ændringen") { Task { await generateFeature() } }
                             .buttonStyle(.borderedProminent).controlSize(.large)
                             .disabled(api == nil || loading || path.isEmpty || featureRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -2392,9 +2597,11 @@ private struct CodeWorkspaceView: View {
                         TextField("Relativ filsti", text: $path).textInputAutocapitalization(.never)
                             .autocorrectionDisabled().textFieldStyle(.roundedBorder)
                             .accessibilityLabel("Filsti i Agent Workspace")
+                            .disabled(loading)
                         TextEditor(text: $content).frame(minHeight: 180)
                             .overlay(RoundedRectangle(cornerRadius: 10).stroke(.secondary.opacity(0.35)))
                             .accessibilityLabel("Nyt filindhold")
+                            .disabled(loading)
                         Button("Forbered ændring") { Task { await prepare() } }
                             .buttonStyle(.borderedProminent).controlSize(.large)
                             .disabled(api == nil || loading || path.isEmpty)
@@ -2418,7 +2625,7 @@ private struct CodeWorkspaceView: View {
                                     .buttonStyle(.bordered).controlSize(.large)
                                 Button("Godkend ændring") { approval = true }
                                     .buttonStyle(.borderedProminent).controlSize(.large)
-                            }
+                            }.disabled(loading)
                         }.padding().background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
                     }
 
@@ -2429,7 +2636,7 @@ private struct CodeWorkspaceView: View {
                     }
                 }.padding(20).frame(maxWidth: 680).frame(maxWidth: .infinity)
             }
-            .background(Color.black.ignoresSafeArea())
+            .background((colorScheme == .dark ? Color.black : Color(uiColor: .systemBackground)).ignoresSafeArea())
             .navigationTitle("Agent Workspace")
             .toolbar { Button("Luk") { dismiss() }.accessibilityLabel("Luk Agent Workspace") }
             .refreshable { await load() }
@@ -2439,88 +2646,151 @@ private struct CodeWorkspaceView: View {
             } message: { item in
                 Text("Kun \(item.path) i Agent Workspace bliver ændret.")
             }
-        }.preferredColorScheme(.dark)
+        }
     }
 
     private func load() async {
         guard let api else { message = "Forbind til PC’en for at åbne Agent Workspace."; return }
+        guard !loading else { return }
         loading = true; defer { loading = false }
-        do { files = try await api.v2CodeWorkspace().files; message = nil }
+        do { try await reloadFiles(api); message = nil }
         catch { message = "Agent Workspace kunne ikke hentes. Tryk og prøv igen." }
     }
 
+    private func reloadFiles(_ api: LiveAPI) async throws {
+        files = try await api.v2CodeWorkspace().files
+    }
+
     private func open(_ file: String) async {
-        guard let api else { return }
-        do { let found = try await api.v2CodeFile(path: file); path = found.path; content = found.content }
+        guard let api, !loading else { return }
+        loading = true; defer { loading = false }
+        do {
+            let found = try await api.v2CodeFile(path: file)
+            path = found.path
+            content = found.content
+            firstEditLine = "1"
+        }
         catch { message = "Filen kunne ikke åbnes sikkert." }
     }
 
     private func prepare() async {
-        guard let api else { return }
+        guard let api, !loading else { return }
         proposal = nil
+        generatedProposal = nil
         testPlan = []
+        codeStatus = ""
         loading = true; defer { loading = false }
         do { proposal = try await api.v2CodeProposal(path: path, content: content); message = nil }
         catch { message = "Ændringen kunne ikke forberedes. Tjek filstien og prøv igen." }
     }
 
     private func generateFeature() async {
-        guard let api else { return }
+        guard let api, !loading else { return }
         let brief = featureRequest.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !brief.isEmpty else { return }
-        guard content.count <= 1_200 else {
-            codeStatus = "Filen er for stor til sikker automatisk omskrivning. Vælg en mindre fil eller opret en ny komponentfil."
+        let target = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !brief.isEmpty, !target.isEmpty else { return }
+        guard let firstLine = Int(firstEditLine.trimmingCharacters(in: .whitespacesAndNewlines)), firstLine > 0 else {
+            codeStatus = "Indtast en gyldig startlinje."
             return
         }
         proposal = nil
+        generatedProposal = nil
         testPlan = []
-        loading = true; codeStatus = "PC-modellen forbereder filen…"
+        loading = true; codeStatus = "Henter den aktuelle fil fra PC’en…"
         defer { loading = false }
         do {
-            let target = path
-            let prompt = "Analysér filen og opgaven. Foreslå kun en direkte anvendelig ændring, der kan laves i denne fil med de viste forudsætninger. Ved manglende kontekst eller afhængigheder: feasible=false og forklar hvorfor. Svar kun JSON med feasible (bool), reason (tekst), content (hele nye filen eller null), tests (liste med konkrete testtrin). Fil: \(target)\nOpgave: \(brief)\nIndhold:\n\(content)"
-            let request = try V2ChatRequest(message: prompt, sessionID: UUID().uuidString)
-            var generated = ""
+            let original = try await workspaceSource(api, path: target)
+            let source = original ?? ""
+            let context = try WorkspacePatch.context(goal: brief, path: target, source: source, firstLine: firstLine)
+            let request = try V2ChatRequest(message: context.prompt)
+            codeStatus = context.lines.isEmpty ? "PC-modellen forbereder en ny fil…"
+                : "PC-modellen gennemgår linje \(firstLine)–\(context.lines.upperBound)…"
+            let stream = DraftStream()
             try await api.v2Chat(request) { event in
                 await MainActor.run {
-                    if event.type == .text { generated += event.content }
-                    if event.type == .tool_status { codeStatus = event.content }
+                    if event.type == .text { stream.append(event.content) }
+                    if event.type == .tool_status { codeStatus = codeStatusText(event.content, api: api) }
                 }
             }
-            let result = try JSONDecoder().decode(FeatureDraft.self, from: Data(generated.utf8))
+            guard !stream.overflowed else { throw WorkspacePatch.Failure.invalidDiff }
+            let result = try JSONDecoder().decode(FeatureDraft.self, from: ModelJSON.payload(stream.text))
             guard result.feasible else {
-                codeStatus = String(result.reason.prefix(300))
+                codeStatus = codeStatusText(result.reason, api: api)
                 return
             }
             let plan = result.tests.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            guard let cleaned = result.content, !cleaned.isEmpty, cleaned != content,
-                  (1...6).contains(plan.count), plan.allSatisfy({ !$0.isEmpty && $0.count <= 300 }),
-                  path == target else { throw V2Failure.invalidResponse }
-            proposal = try await api.v2CodeProposal(path: target, content: cleaned)
-            content = cleaned
-            testPlan = plan
+            guard let diff = result.diff,
+                  (1...6).contains(plan.count), plan.allSatisfy({ !$0.isEmpty && $0.count <= 300 })
+            else { throw WorkspacePatch.Failure.invalidDiff }
+            let revised = try WorkspacePatch.applying(diff, to: source, path: target, within: context.lines)
+            try await checkSource(api, path: target, original: original)
+            let prepared = try await api.v2CodeProposal(path: target, content: revised)
+            guard prepared.requires_approval, prepared.path == target, !prepared.diff.isEmpty else {
+                throw V2Failure.invalidResponse
+            }
+            try await checkSource(api, path: target, original: original)
+            generatedProposal = GeneratedProposal(original: original, revised: revised)
+            proposal = prepared
+            testPlan = plan.map { codeStatusText($0, api: api) }
             codeStatus = "Forslaget er klar. Gennemgå diff og testplan."
         } catch {
-            codeStatus = "Code Bot kunne ikke forberede ændringen. Ingen fil blev skrevet."
+            codeStatus = (error as? WorkspacePatch.Failure)?.message
+                ?? pcBusyMessage(error) ?? "Code Bot kunne ikke forberede ændringen. Ingen fil blev skrevet."
         }
     }
 
+    private func codeStatusText(_ text: String, api: LiveAPI) -> String {
+        let safe = api.redactChat(text, complete: true).trimmingCharacters(in: .whitespacesAndNewlines)
+        if safe.contains("Traceback (most recent call last)") { return "PC’en sendte en intern fejl." }
+        return String(safe.prefix(300)).replacingOccurrences(of: #"(?i)(?:\b[A-Z]:[\\/]|\\\\)[^\r\n`\"<>]+"#,
+                                                              with: "[filsti skjult]", options: .regularExpression)
+    }
+
+    private func workspaceSource(_ api: LiveAPI, path: String) async throws -> String? {
+        do {
+            let file = try await api.v2CodeFile(path: path)
+            guard file.path == path else { throw WorkspacePatch.Failure.stale }
+            return file.content
+        } catch V2Failure.http(status: 404, code: _, message: _) {
+            return nil
+        }
+    }
+
+    private func checkSource(_ api: LiveAPI, path: String, original: String?) async throws {
+        let current = try await workspaceSource(api, path: path)
+        if let original, let current, original.utf8.elementsEqual(current.utf8) { return }
+        guard original == nil && current == nil else { throw WorkspacePatch.Failure.stale }
+    }
+
     private func reject(_ item: V2CodeProposal) async {
-        guard let api else { return }
+        guard let api, !loading else { return }
+        loading = true; defer { loading = false }
         do { _ = try await api.v2ApplyCodeProposal(item.change_id, approved: false) }
         catch { /* A rejection is confirmed by the server's NOT_READY response. */ }
         proposal = nil
+        generatedProposal = nil
+        codeStatus = ""
         message = "Ændringen blev afvist. Intet blev skrevet."
     }
 
     private func apply(_ item: V2CodeProposal) async {
-        guard let api else { return }
+        guard let api, !loading else { return }
         loading = true; defer { loading = false }
         do {
+            if let generatedProposal {
+                try await checkSource(api, path: item.path, original: generatedProposal.original)
+            }
             let result = try await api.v2ApplyCodeProposal(item.change_id, approved: true)
             proposal = nil
+            if result.applied, item.path == path, let generatedProposal { content = generatedProposal.revised }
+            generatedProposal = nil
+            codeStatus = ""
             message = result.applied ? "Ændringen er skrevet til \(result.path)." : "Intet blev ændret."
-            await load()
+            try? await reloadFiles(api)
+        } catch let failure as WorkspacePatch.Failure {
+            proposal = nil
+            generatedProposal = nil
+            codeStatus = failure.message
         } catch { message = "PC’en bekræftede ikke ændringen. Intet nyt forsøg blev sendt." }
     }
 
@@ -2533,6 +2803,39 @@ private struct CodeWorkspaceView: View {
     }
 }
 
+private struct CloudModelSettings: View {
+    @State private var draft = ""
+    @State private var hasKey = CloudModelKey.exists()
+    @State private var notice: String?
+
+    var body: some View {
+        DisclosureGroup("Valgfri xAI-nøgle") {
+            Text("Nøglen gemmes i iPhones Keychain. Vælg Grok i chatten for at sende til xAI. Forbruget kan koste penge.")
+                .font(.caption).foregroundStyle(.secondary)
+            SecureField("xAI API-nøgle", text: $draft)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("Gem nøgle") {
+                do {
+                    try CloudModelKey.save(draft)
+                    draft = ""
+                    notice = "Nøglen er gemt på telefonen."
+                } catch { notice = "Nøglen kunne ikke gemmes." }
+            }.disabled(draft.isEmpty)
+            if hasKey {
+                Button("Fjern nøgle", role: .destructive) {
+                    CloudModelKey.remove()
+                    notice = CloudModelKey.exists() ? "Nøglen kunne ikke fjernes." : "Nøglen er fjernet."
+                }
+            }
+            if let notice { Text(notice).font(.caption) }
+        }
+        .onAppear { hasKey = CloudModelKey.exists() }
+        .onReceive(NotificationCenter.default.publisher(for: CloudModelKey.didChange)) { _ in
+            hasKey = CloudModelKey.exists()
+        }
+    }
+}
+
 private struct ChatView: View {
     @Environment(\.dismiss) private var dismiss
     let api: (any ChatAPI)?
@@ -2542,6 +2845,7 @@ private struct ChatView: View {
     let storageKey: String
     @State private var sessionID = UUID()
     @State private var draft = ""
+    @AppStorage private var savedDraft: String
     @State private var turns: [ChatTurn] = []
     @State private var status: String?
     @State private var streamedText = ""
@@ -2552,11 +2856,14 @@ private struct ChatView: View {
     @State private var sourceExcerpt: String?
     @State private var models: [V2Models.Entry] = []
     @State private var selectedModel = ""
+    @State private var cloudKeyAvailable = CloudModelKey.exists()
+    @State private var cloudSelected = false
     @State private var modelsLoading = true
     @State private var modelsError: String?
     @State private var legacyChat = false
     @State private var completedReplies = 0
     @AppStorage("phone.model") private var phoneModel = "apple"
+    @State private var phoneBatteryLevel = UIDevice.current.batteryLevel
     @State private var usePC = false
     @State private var dictation = ChatDictation()
     @State private var speech = AVSpeechSynthesizer()
@@ -2565,6 +2872,7 @@ private struct ChatView: View {
     @AppStorage("village.bots") private var voiceBotData = Data()
     @FocusState private var composerFocused: Bool
     @State private var chatSearch = ""
+    @State private var archivedTurns: [ChatTurn] = []
     @State private var favoritesOnly = false
     @State private var scrollRequest = 0
     @AppStorage("ai.tone") private var aiTone = "Naturlig"
@@ -2597,6 +2905,15 @@ private struct ChatView: View {
     @AppStorage("ai.timestamps") private var aiTimestamps = false
     @AppStorage("ai.wordCount") private var aiWordCount = false
     @AppStorage("ai.showTools") private var aiShowTools = true
+
+    init(api: (any ChatAPI)?, demo: Bool, initialDraft: String, connection: String, storageKey: String) {
+        self.api = api
+        self.demo = demo
+        self.initialDraft = initialDraft
+        self.connection = connection
+        self.storageKey = storageKey
+        _savedDraft = AppStorage(wrappedValue: "", storageKey + ".draft")
+    }
 
     private var voiceBots: [VillageBot] {
         (try? JSONDecoder().decode([VillageBot].self, from: voiceBotData)) ?? []
@@ -2641,33 +2958,29 @@ private struct ChatView: View {
                                 Text(connection).font(.subheadline).foregroundStyle(.secondary)
                             }
                             Spacer(minLength: 0)
-                            if !models.isEmpty {
-                                Menu {
-                                    ForEach(models.filter(\.available), id: \.id) { entry in
-                                        Button(entry.label) { selectedModel = entry.id }
-                                    }
-                                } label: {
-                                    Label(models.first(where: { $0.id == selectedModel })?.label ?? "Model",
-                                          systemImage: "chevron.down")
-                                        .font(.caption.bold()).lineLimit(1)
-                                }
-                                .disabled(task != nil)
-                                .accessibilityLabel("Skift AI-model")
-                            }
+                            quickModelPicker
                         }
+                        TextField(aiPrivateSession ? "Søg i privat samtale" : "Søg i alle samtaler", text: $chatSearch)
+                            .textFieldStyle(.roundedBorder)
+                            .onChange(of: chatSearch) { old, new in
+                                if old.isEmpty && !new.isEmpty && !aiPrivateSession { archivedTurns = ChatArchive.turns() }
+                                if new.isEmpty { archivedTurns = [] }
+                            }
                         DisclosureGroup("Chatindstillinger") {
                             VStack(alignment: .leading, spacing: 12) {
                                 StatsBar(turns: turns.count, streaming: task != nil)
-                                Toggle("Brug PC til næste svar", isOn: $usePC).disabled(task != nil)
-                                Text("Korte svar forsøges på telefonen. PC-opgaver sendes til din PC.")
-                                    .font(.caption).foregroundStyle(.secondary)
-                                modelControls
+                                if !cloudSelected {
+                                    Toggle("Brug PC til næste svar", isOn: $usePC).disabled(task != nil)
+                                    Text("Korte svar forsøges på telefonen. PC-opgaver sendes til din PC.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                    modelControls
+                                }
+                                if api == nil && !demo && !aiPrivateSession { CloudModelSettings() }
                                 voiceControls
                                 aiBoostControls
                                 if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
                                 Text("Researcher bruger internettet, når en websøgning er nødvendig.")
                                     .font(.caption).foregroundStyle(.secondary)
-                                TextField("Søg i samtalen", text: $chatSearch).textFieldStyle(.roundedBorder)
                                 Toggle("Vis kun favoritter", isOn: $favoritesOnly)
                                 ShareLink(item: conversationText) {
                                     Label("Eksportér samtale", systemImage: "square.and.arrow.up")
@@ -2675,7 +2988,8 @@ private struct ChatView: View {
                                 }.disabled(turns.isEmpty)
                             }.padding(.top, 8)
                         }
-                        transcriptRows
+                        if chatSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { transcriptRows }
+                        else { globalSearchRows }
                         if aiShowTools && !searchSteps.isEmpty {
                             DisclosureGroup("Agentaktivitet · \(searchSteps.count) trin") {
                                 ForEach(searchSteps.indices, id: \.self) { index in
@@ -2683,7 +2997,7 @@ private struct ChatView: View {
                                 }
                             }
                         }
-                        if let status { Text(status).font(.callout).foregroundStyle(.cyan) }
+                        if let status, task != nil { AgentToolWave(status: status) }
                         if task != nil && streamedText.isEmpty { LoadingSkeleton(label: "Venter på AI…") }
                         if let sourceExcerpt {
                             DisclosureGroup("Lokal reference · Notes") {
@@ -2701,7 +3015,20 @@ private struct ChatView: View {
                 .onChange(of: turns.count) { scrollChat(proxy) }
                 .onChange(of: streamedText) { scrollChat(proxy) }
                 .onChange(of: scrollRequest) { scrollChat(proxy) }
-                .onChange(of: draft) { UserDefaults.standard.set(draft, forKey: storageKey + ".draft") }
+                .onChange(of: draft) { _, value in
+                    if loaded && !aiPrivateSession { savedDraft = value }
+                }
+                .onChange(of: aiPrivateSession) { _, isPrivate in
+                    if isPrivate { cloudSelected = false }
+                    turns = []
+                    searchSteps = []
+                    sourceExcerpt = nil
+                    sessionID = UUID()
+                    archivedTurns = []
+                    chatSearch = ""
+                    draft = isPrivate ? "" : savedDraft
+                    if !isPrivate { loadHistory() }
+                }
                 .safeAreaInset(edge: .bottom) { composer }
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
@@ -2714,17 +3041,48 @@ private struct ChatView: View {
                 }
                 .navigationBarTitleDisplayMode(.inline)
                 .onAppear {
+                    phoneBatteryLevel = UIDevice.current.batteryLevel
+                    cloudKeyAvailable = CloudModelKey.exists()
                     guard !loaded else { return }
                     loaded = true
-                    draft = initialDraft
                     loadHistory()
-                    if draft.isEmpty { draft = UserDefaults.standard.string(forKey: storageKey + ".draft") ?? initialDraft }
+                    draft = initialDraft.isEmpty && !aiPrivateSession ? savedDraft : initialDraft
                     scrollChat(proxy)
                 }
                 .onDisappear { stop(); dictation.stop(); speech.stopSpeaking(at: .immediate) }
+                .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in
+                    phoneBatteryLevel = UIDevice.current.batteryLevel
+                }
+                .onReceive(NotificationCenter.default.publisher(for: CloudModelKey.didChange)) { _ in
+                    cloudKeyAvailable = CloudModelKey.exists()
+                }
                 .task { await loadModels() }
                 .sensoryFeedback(.success, trigger: completedReplies)
             }
+        }
+    }
+
+    @ViewBuilder private var quickModelPicker: some View {
+        let offersCloud = !demo && !aiPrivateSession && cloudKeyAvailable
+        if !models.isEmpty || offersCloud || cloudSelected {
+            Menu {
+                if offersCloud || cloudSelected {
+                    Button("Telefon / PC") { cloudSelected = false }
+                }
+                ForEach(models) { entry in
+                    Button(entry.label) { selectedModel = entry.id; cloudSelected = false }
+                }
+                if offersCloud {
+                    Button("Grok 4.7 · Cloud", systemImage: "cloud") { cloudSelected = true }
+                }
+            } label: {
+                let name = cloudSelected ? GrokAPI.sourceLabel : models.first(where: { $0.id == selectedModel })?.label ?? "Model"
+                Label(name, systemImage: "chevron.down")
+                    .font(.caption.bold()).lineLimit(1)
+            }
+            .disabled(task != nil)
+            .accessibilityLabel("Skift AI-model")
+            .accessibilityValue(cloudSelected ? GrokAPI.sourceLabel : models.first(where: { $0.id == selectedModel })?.label ?? "Telefon / PC")
         }
     }
 
@@ -2737,6 +3095,14 @@ private struct ChatView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if cloudSelected {
+                Text("Beskeden og de seneste Grok-udvekslinger sendes til xAI. Forbrug kan koste penge.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if phoneBatteryLevel >= 0, phoneBatteryLevel < 0.20, PhoneModels.liteModeActive(for: phoneModel) {
+                Label("Lite Mode · LFM2.5", systemImage: "battery.25percent")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if task == nil {
                 HStack {
                     Menu("Skabeloner") {
@@ -2773,9 +3139,9 @@ private struct ChatView: View {
                 Button { stop() } label: { Text("Stop modtagelse").frame(minHeight: 48) }
                     .buttonStyle(.bordered)
             } else {
-                Button { send() } label: { Text("Send besked").frame(minHeight: 48) }
+                Button { send() } label: { Text(cloudSelected ? "Send til Grok" : "Send besked").frame(minHeight: 48) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 2000)
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 2000 || (cloudSelected && !cloudKeyAvailable))
             }
         }.padding(12).background(.regularMaterial)
     }
@@ -2830,7 +3196,7 @@ private struct ChatView: View {
                 Toggle("Fremhæv risici", isOn: $aiRisks)
                 Toggle("Vis fordele og ulemper", isOn: $aiProsCons)
                 Toggle("Lav tjekliste ved opgaver", isOn: $aiChecklist)
-                Toggle("Privat session uden historik", isOn: $aiPrivateSession)
+                Toggle("Privat session uden historik", isOn: $aiPrivateSession).disabled(task != nil)
                 Toggle("Vis klokkeslæt", isOn: $aiTimestamps)
                 Toggle("Vis antal ord", isOn: $aiWordCount)
                 Toggle("Vis værktøjsaktivitet", isOn: $aiShowTools)
@@ -2877,7 +3243,7 @@ private struct ChatView: View {
                 }
                 if !turn.reply.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label(turn.source ?? "AI", systemImage: turn.source == "Telefon" ? "iphone" : "desktopcomputer")
+                        Label(turn.source ?? "AI", systemImage: sourceIcon(turn.source))
                             .font(.caption.bold()).foregroundStyle(.cyan)
                         if aiTimestamps, let date = turn.createdAt {
                             Text(date, format: .dateTime.hour().minute()).font(.caption2).foregroundStyle(.secondary)
@@ -2910,6 +3276,7 @@ private struct ChatView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contextMenu {
+                Button("Kopiér prompt") { UIPasteboard.general.string = turn.prompt }
                 Button("Kopiér svar") { UIPasteboard.general.string = turn.reply }
                 Button("Prøv igen") { draft = turn.prompt }.disabled(task != nil)
                 Button("Start ny gren") { newConversation(); draft = turn.prompt }.disabled(task != nil)
@@ -2930,6 +3297,28 @@ private struct ChatView: View {
         return turns.filter { turn in
             (!favoritesOnly || turn.favorite == true) &&
             (query.isEmpty || turn.prompt.localizedCaseInsensitiveContains(query) || turn.reply.localizedCaseInsensitiveContains(query))
+        }
+    }
+
+    @ViewBuilder private var globalSearchRows: some View {
+        let query = chatSearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentIDs = Set(turns.map(\.id))
+        let source = aiPrivateSession ? turns : turns + archivedTurns.filter { !currentIDs.contains($0.id) }
+        let hits = source.filter {
+            (!favoritesOnly || $0.favorite == true) &&
+            ($0.prompt.localizedCaseInsensitiveContains(query) || $0.reply.localizedCaseInsensitiveContains(query))
+        }
+        if hits.isEmpty { Text("Ingen samtaler matcher søgningen.").foregroundStyle(.secondary) }
+        ForEach(hits.prefix(80)) { turn in
+            VStack(alignment: .leading, spacing: 6) {
+                Text(turn.prompt).font(.headline).textSelection(.enabled)
+                if let date = turn.createdAt { Text(date, format: .dateTime.day().month().year()).font(.caption) }
+                if !turn.reply.isEmpty { Text(turn.reply).lineLimit(5).textSelection(.enabled) }
+            }
+            .contextMenu {
+                Button("Kopiér prompt") { UIPasteboard.general.string = turn.prompt }
+                Button("Brug prompt") { draft = turn.prompt; chatSearch = "" }.disabled(task != nil)
+            }
         }
     }
 
@@ -2980,22 +3369,27 @@ private struct ChatView: View {
         dictation.stop()
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard task == nil, !message.isEmpty else { return }
+        let routeGrok = cloudSelected && !demo && !aiPrivateSession
+        let cloudMessages = routeGrok ? grokMessages(endingWith: message) : []
         draft = ""
+        if !aiPrivateSession { savedDraft = "" }
         searchSteps = []
-        sourceExcerpt = localReference(for: message)
+        sourceExcerpt = routeGrok ? nil : localReference(for: message)
         streamedText = ""
         turns.append(ChatTurn(prompt: message, createdAt: .now))
         let index = turns.count - 1
+        let turnID = turns[index].id
         let context = turns.dropLast().suffix(6).filter { !$0.reply.isEmpty }
             .map { "Bruger: \($0.prompt)\nSvar: \($0.reply)" }.joined(separator: "\n")
         let collectionQuestion = message.lowercased().hasPrefix("kortsamling:")
-        let modelMessage = collectionQuestion ? message : enhancedPrompt(message)
+        let modelMessage = routeGrok || collectionQuestion ? message : enhancedPrompt(message)
         let requiresPC = usePC || collectionQuestion ||
             PhoneModels.prefersPC(modelMessage, previousCharacters: context.count)
         status = "Venter på svar…"
-        let input = ChatRequest(message: modelMessage, session_id: sessionID)
+        let input = ChatRequest(message: modelMessage, session_id: aiPrivateSession ? nil : sessionID)
         save(pending: true)
         task = Task {
+            defer { status = nil; task = nil; save() }
             do {
                 if demo {
                     status = "Demo · Finder et testklip…"
@@ -3003,6 +3397,8 @@ private struct ChatView: View {
                     turns[index].reply = "Jeg fandt et testklip. "
                     try await Task.sleep(for: .milliseconds(600))
                     turns[index].reply += "Demoen starter ikke et video-job."
+                } else if routeGrok {
+                    try await answerOnGrok(cloudMessages, index: index, turnID: turnID)
                 } else {
                     var answered = false
                     if !requiresPC {
@@ -3010,21 +3406,54 @@ private struct ChatView: View {
                     }
                     if !answered { try await answerOnPC(input, index: index) }
                 }
-                if turns[index].notice == nil {
+                if turns.indices.contains(index), turns[index].id == turnID, turns[index].notice == nil {
                     completedReplies += 1
                     if voiceMode && !turns[index].reply.isEmpty && !dictation.active {
                         speak(turns[index].reply)
                     }
                 }
             } catch is CancellationError {
-                turns[index].notice = "Modtagelsen er stoppet."
+                if turns.indices.contains(index), turns[index].id == turnID {
+                    turns[index].notice = "Modtagelsen er stoppet."
+                }
             } catch {
-                turns[index].notice = error is V2Failure ? v2Message(error)
-                    : (error as? ChatFailure ?? .interrupted).message
+                if turns.indices.contains(index), turns[index].id == turnID {
+                    turns[index].notice = (error as? GrokFailure)?.message ?? pcBusyMessage(error)
+                        ?? (error is V2Failure ? v2Message(error)
+                            : (error as? APIError)?.title ?? (error as? ChatFailure ?? .interrupted).message)
+                }
             }
-            status = nil
-            task = nil
-            save()
+        }
+    }
+
+    private func sourceIcon(_ source: String?) -> String {
+        switch source ?? "" {
+        case "Telefon": "iphone"
+        case GrokAPI.sourceLabel: "cloud"
+        default: "desktopcomputer"
+        }
+    }
+
+    private func grokMessages(endingWith message: String) -> [GrokAPI.Message] {
+        let history = turns.filter { $0.source == GrokAPI.sourceLabel && $0.notice == nil && !$0.reply.isEmpty }
+            .suffix(4).flatMap { turn in
+                [GrokAPI.Message(role: .user, content: String(turn.prompt.prefix(2000))),
+                 GrokAPI.Message(role: .assistant, content: String(turn.reply.prefix(4000)))]
+            }
+        return (history + [GrokAPI.Message(role: .user, content: message)]).map {
+            GrokAPI.Message(role: $0.role, content: (api as? LiveAPI)?.redactChat($0.content, complete: true) ?? $0.content)
+        }
+    }
+
+    private func answerOnGrok(_ messages: [GrokAPI.Message], index: Int, turnID: UUID) async throws {
+        turns[index].source = GrokAPI.sourceLabel
+        status = "Grok · Venter på svar…"
+        try await GrokAPI.reply(input: messages) { output in
+            await MainActor.run {
+                guard !Task.isCancelled, turns.indices.contains(index), turns[index].id == turnID else { return }
+                streamedText = output
+                turns[index].reply = safeText(output, complete: true)
+            }
         }
     }
 
@@ -3032,7 +3461,7 @@ private struct ChatView: View {
         status = "Telefon · Forbereder svar…"
         let prompt = context.isEmpty ? message : "\(context)\nBruger: \(message)"
         do {
-            try await PhoneModels.reply(modelID: phoneModel, prompt: prompt) { answer in
+            try await PhoneModels.reply(modelID: PhoneModels.effectiveModelID(phoneModel), prompt: prompt) { answer in
                 turns[index].source = "Telefon"
                 turns[index].reply = safeText(answer)
                 streamedText = answer
@@ -3041,6 +3470,14 @@ private struct ChatView: View {
             return true
         } catch {
             try Task.checkCancellation()
+            if case .busy? = error as? LocalComputeError {
+                turns[index].notice = "Telefonen kører allerede en lokal AI-opgave. Prøv igen om lidt."
+                return true
+            }
+            if case .lowMemory? = error as? LocalComputeError, api == nil {
+                turns[index].notice = "Telefonen har for lidt ledig hukommelse til denne model lige nu."
+                return true
+            }
             if !turns[index].reply.isEmpty {
                 turns[index].notice = "Telefonsvaret blev afbrudt."
                 return true
@@ -3057,7 +3494,7 @@ private struct ChatView: View {
         turns[index].source = "PC"
         status = "PC · Venter på svar…"
         if let live = api as? LiveAPI, !legacyChat {
-            let request = try V2ChatRequest(message: input.message, sessionID: sessionID.uuidString,
+            let request = try V2ChatRequest(message: input.message, sessionID: input.session_id?.uuidString,
                                             modelID: selectedModel.isEmpty ? nil : selectedModel)
             try await live.v2Chat(request) { event in
                 await MainActor.run {
@@ -3082,7 +3519,7 @@ private struct ChatView: View {
             try Task.checkCancellation()
         } catch {
             turns[index].notice = Task.isCancelled ? "Modtagelsen er stoppet. Et job kan stadig køre."
-                : (error as? ChatFailure ?? .interrupted).message
+                : pcBusyMessage(error) ?? (error as? APIError)?.title ?? (error as? ChatFailure ?? .interrupted).message
         }
     }
 
@@ -3126,12 +3563,12 @@ private struct ChatView: View {
     private func stop() { task?.cancel() }
 
     private func newConversation() {
-        if !turns.isEmpty, let data = try? JSONEncoder().encode(turns) {
-            UserDefaults.standard.set(data, forKey: storageKey + ".previous")
+        if !aiPrivateSession && !turns.isEmpty {
+            ChatArchive.append(SavedAgentSession(id: sessionID, turns: turns, toolSteps: searchSteps, pending: false))
         }
         turns = []
         draft = ""
-        UserDefaults.standard.removeObject(forKey: storageKey + ".draft")
+        if !aiPrivateSession { savedDraft = "" }
         searchSteps = []
         sourceExcerpt = nil
         sessionID = UUID()

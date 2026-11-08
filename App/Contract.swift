@@ -134,7 +134,7 @@ enum APIError: Error, Sendable {
         case .storage: "Appen kunne ikke gemme data på telefonen."
         case .http(404, _): "Klippet eller jobbet findes ikke længere."
         case .http(409, _): "Videoen er ikke klar endnu."
-        case .http(503, _): "PC’en mangler noget for at kunne lave videoen."
+        case .http(503, _): "PC’en arbejder, skifter model eller mangler en tjeneste. Prøv igen om lidt."
         case .transport: "Forbindelsen blev afbrudt. Tjek PC’en og Wi-Fi."
         case .http: "PC’en kunne ikke udføre handlingen."
         }

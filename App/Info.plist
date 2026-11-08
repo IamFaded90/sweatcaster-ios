@@ -11,12 +11,21 @@
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
     <key>CFBundleVersion</key><string>1</string>
+    <key>NSSupportsLiveActivities</key><true/>
+    <key>CFBundleURLTypes</key>
+    <array><dict>
+        <key>CFBundleTypeRole</key><string>Editor</string>
+        <key>CFBundleURLName</key><string>dk.sweatcaster.ios.shortcuts</string>
+        <key>CFBundleURLSchemes</key><array><string>fadedai</string></array>
+    </dict></array>
     <key>UILaunchScreen</key><dict/>
     <key>UISupportedInterfaceOrientations</key>
     <array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Appen bruger dit lokale netværk til at hente klip og videoer fra din PC.</string>
     <key>NSFaceIDUsageDescription</key><string>Face ID beskytter dit lokale studie.</string>
+    <key>NSCameraUsageDescription</key><string>Kameraet scanner forbindelseskoden fra din PC.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key><string>FadedAI gemmer genererede billeder i Fotos, når du har slået automatisk lagring til.</string>
     <key>NSMicrophoneUsageDescription</key><string>Mikrofonen bruges, når du dikterer en chatbesked.</string>
     <key>NSSpeechRecognitionUsageDescription</key><string>FadedAI bruger lokal talegenkendelse til at skrive din chatkladde.</string>
     <key>NSAppTransportSecurity</key>
