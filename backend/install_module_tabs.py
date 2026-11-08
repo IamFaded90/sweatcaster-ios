@@ -60,7 +60,7 @@ def install(root: Path) -> None:
         compile(updated, str(path), "exec")
         staged[path] = (original, updated)
     modules = {}
-    for name in (source.name, "code_batch.py", "repository_library.py"):
+    for name in (source.name, "code_batch.py", "repository_library.py", "agent_workflows.py"):
         path = source.parent / name
         module = path.read_text(encoding="utf-8")
         compile(module, str(path), "exec")

@@ -117,6 +117,7 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
 
     workspace = Path(os.environ.get("SWEATCASTER_WORKSPACE_DIR", "workspace"))
     batch = configured_batch(settings, workspace)
+    workflows = batch.workflows
     original_lifespan = app.router.lifespan_context
 
     @asynccontextmanager
@@ -130,6 +131,29 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
                 worker.stop()
 
     app.router.lifespan_context = lifespan
+
+    @app.get("/api/modules/v1/agent-memory", include_in_schema=False)
+    def memories(request: Request):
+        authorize(request, settings)
+        return {"items": workflows.memories()}
+
+    @app.put("/api/modules/v1/agent-memory", include_in_schema=False)
+    def remember(request: Request, body: dict = Body(...)):
+        authorize(request, settings)
+        scope, kind, note = (body.get(key) for key in ("scope", "kind", "text"))
+        if not all(isinstance(value, str) for value in (scope, kind, note)):
+            raise ApiError(422, "INVALID_INPUT", "Angiv scope, kind og text.")
+        if settings.token and settings.token in note:
+            raise ApiError(422, "INVALID_INPUT", "Hukommelsen kan ikke gemme pairing-tokenet.")
+        try:
+            return {"id": workflows.remember(scope, kind, note)}
+        except RepositoryError as exc:
+            raise ApiError(422, "INVALID_INPUT", str(exc)) from exc
+
+    @app.delete("/api/modules/v1/agent-memory/{key}", include_in_schema=False)
+    def forget(request: Request, key: str):
+        authorize(request, settings)
+        return {"deleted": workflows.forget(key)}
 
     @app.get("/api/modules/v1/code-batches", include_in_schema=False)
     def batches(request: Request):
