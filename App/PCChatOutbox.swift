@@ -23,6 +23,7 @@ import Foundation
     enum Failure: Error { case invalidTarget, full, invalidStorage }
 
     static let didChange = Notification.Name("FadedAI.pcChatOutboxDidChange")
+    private static let maximumBytes = 3_000_000
     private static var draining = Set<String>()
     private static var inFlight = Set<UUID>()
     private let file: URL
@@ -111,6 +112,7 @@ import Foundation
                 try await deliver(item, using: api)
             }
         } catch {
+            AppDiagnostics.record(error)
             // Network failures stop this drain. Claimed requests remain attempted and cannot replay.
         }
     }
@@ -134,21 +136,31 @@ import Foundation
 
     private func read() throws -> [Entry] {
         guard FileManager.default.fileExists(atPath: file.path) else { return [] }
-        let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        guard (1...3_000_000).contains(size) else { throw Failure.invalidStorage }
-        let stored = try JSONDecoder().decode([Entry].self, from: Data(contentsOf: file, options: .mappedIfSafe))
+        _ = try checkedFolder()
+        let data = try LocalFileStore.readBytes(from: file, maximumBytes: Self.maximumBytes)
+        guard !data.isEmpty else { throw Failure.invalidStorage }
+        let stored = try JSONDecoder().decode([Entry].self, from: data)
         guard stored.count <= 32, Set(stored.map(\.id)).count == stored.count else { throw Failure.invalidStorage }
         return stored
     }
 
     private func write(_ stored: [Entry]) throws {
-        var folder = file.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let data = try JSONEncoder().encode(stored)
+        guard data.count <= Self.maximumBytes else { throw Failure.full }
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var folder = try checkedFolder()
         var properties = URLResourceValues()
         properties.isExcludedFromBackup = true
         try folder.setResourceValues(properties)
-        try JSONEncoder().encode(stored).write(to: file, options: [.atomic, .completeFileProtection])
+        try LocalFileStore.writeBytes(data, to: file, within: folder)
         NotificationCenter.default.post(name: Self.didChange, object: nil)
+    }
+
+    private func checkedFolder() throws -> URL {
+        let folder = file.deletingLastPathComponent()
+        let values = try folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        guard values.isDirectory == true, values.isSymbolicLink != true else { throw Failure.invalidStorage }
+        return folder
     }
 
     @MainActor private final class Answer {

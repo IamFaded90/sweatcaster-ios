@@ -23,6 +23,47 @@ struct FadedSectionLabel: View {
     }
 }
 
+struct FadedFieldLabel: View {
+    let title: String
+    @Environment(\.fadedPalette) private var palette
+
+    init(_ title: String) { self.title = title }
+
+    var body: some View {
+        Text(title).font(FadedTypography.section).foregroundStyle(palette.text)
+            .accessibilityHidden(true)
+    }
+}
+
+struct FadedDetailText: View {
+    let text: String
+    @Environment(\.fadedPalette) private var palette
+
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text).font(.subheadline).foregroundStyle(palette.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+struct FadedSectionHeader: View {
+    let title: String
+    let detail: String?
+
+    init(_ title: String, detail: String? = nil) {
+        self.title = title
+        self.detail = detail
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            FadedSectionLabel(title)
+            if let detail { FadedDetailText(detail) }
+        }
+    }
+}
+
 struct FadedButtonStyle: ButtonStyle {
     enum Kind: Equatable { case primary, secondary, destructive }
 
@@ -30,8 +71,8 @@ struct FadedButtonStyle: ButtonStyle {
     @Environment(\.fadedPalette) private var palette
     @Environment(\.isEnabled) private var enabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage("qol.haptics") private var haptics = true
-    @AppStorage("qol.reduceMotion") private var calmMotion = false
+    @AppStorage(AppStorageKeys.qolHaptics) private var haptics = true
+    @AppStorage(AppStorageKeys.qolReduceMotion) private var calmMotion = false
 
     private var primary: Bool { kind == .primary }
     private var destructive: Bool { kind == .destructive }
@@ -48,8 +89,8 @@ struct FadedButtonStyle: ButtonStyle {
             .background(fill, in: shape)
             .overlay { shape.strokeBorder(destructive && enabled ? palette.coral : palette.border, lineWidth: primary && enabled ? 0 : 1) }
             .shadow(color: enabled && primary ? palette.lime.opacity(0.25) : .clear, radius: 12, y: 4)
-            .scaleEffect(enabled && configuration.isPressed && !reduceMotion ? 0.97 : 1)
-            .animation(reduceMotion ? nil : .easeOut(duration: calmMotion ? 0.2 : 0.1), value: configuration.isPressed)
+            .scaleEffect(enabled && configuration.isPressed && !reduceMotion && !calmMotion ? 0.97 : 1)
+            .animation(reduceMotion || calmMotion ? nil : .easeOut(duration: 0.1), value: configuration.isPressed)
             .sensoryFeedback(.impact(weight: primary ? .medium : .light), trigger: configuration.isPressed) { _, pressed in
                 haptics && enabled && pressed
             }
@@ -130,7 +171,7 @@ struct FadedChip: View {
     let icon: String?
     let action: () -> Void
     @Environment(\.fadedPalette) private var palette
-    @AppStorage("qol.haptics") private var haptics = true
+    @AppStorage(AppStorageKeys.qolHaptics) private var haptics = true
 
     init(_ title: String, accent: Color, selected: Bool, icon: String? = nil, action: @escaping () -> Void) {
         self.title = title
@@ -187,16 +228,29 @@ struct FadedEmptyState: View {
     let icon: String
     let title: String
     let detail: String
+    let actionTitle: String?
+    let action: (() -> Void)?
     @Environment(\.fadedPalette) private var palette
     @ScaledMetric(relativeTo: .title) private var iconSize = 48.0
+
+    init(icon: String, title: String, detail: String, actionTitle: String? = nil, action: (() -> Void)? = nil) {
+        self.icon = icon
+        self.title = title
+        self.detail = detail
+        self.actionTitle = actionTitle
+        self.action = action
+    }
 
     var body: some View {
         FadedCard {
             VStack(alignment: .leading, spacing: 8) {
                 Image(systemName: icon).font(.system(size: iconSize)).foregroundStyle(palette.secondary)
                     .accessibilityHidden(true)
-                Text(title).font(FadedTypography.title).tracking(-0.5)
+                Text(title).font(FadedTypography.title).tracking(-0.5).accessibilityAddTraits(.isHeader)
                 Text(detail).font(FadedTypography.body).foregroundStyle(palette.secondary)
+                if let actionTitle, let action {
+                    FadedSecondaryButton(actionTitle, action: action)
+                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -234,7 +288,7 @@ struct FadedJobFeedback: ViewModifier {
     @Environment(\.fadedPalette) private var palette
     @Environment(\.scenePhase) private var phase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage("qol.reduceMotion") private var calmMotion = false
+    @AppStorage(AppStorageKeys.qolReduceMotion) private var calmMotion = false
     @State private var signal: Stage?
     @State private var flash = false
     @State private var offset: CGFloat = 0
@@ -261,7 +315,7 @@ struct FadedJobFeedback: ViewModifier {
         guard let signal, phase == .active else { return }
         let scale = calmMotion ? 2.0 : 1.0
         flash = true
-        if signal == .failed && !reduceMotion {
+        if signal == .failed && !reduceMotion && !calmMotion {
             let steps: [CGFloat] = [-4, 4, -4, 4, 0]
             for step in steps {
                 guard !Task.isCancelled else { return }

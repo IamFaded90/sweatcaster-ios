@@ -53,8 +53,10 @@ enum FadedSearchDestination: Hashable, Sendable {
     case savedVideo(URL)
     case file(path: String?)
     case connection
+    case connections
     case note
     case settings
+    case privateStudio
 }
 
 struct FadedSearchRecord: Identifiable, Hashable, Sendable {

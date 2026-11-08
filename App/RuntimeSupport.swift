@@ -7,12 +7,13 @@ import UserNotifications
 
 enum AppDiagnostics {
     private static let lock = NSLock()
-    private static let key = "diagnostics.api.v1"
+    private static let key = AppStorageKeys.diagnosticsApiV1
 
     @discardableResult
     static func record<E: Error>(_ error: E) -> E {
         let label: String
         switch error {
+        case is CancellationError: return error
         case let api as APIError:
             switch api {
             case .http(let status, _): label = "APIError HTTP \(status)"
@@ -26,26 +27,32 @@ enum AppDiagnostics {
             case .invalidResponse: label = "V2Failure invalidResponse"
             case .interrupted: label = "V2Failure interrupted"
             }
-        case let network as URLError where network.code != .cancelled:
+        case let network as URLError:
+            guard network.code != .cancelled else { return error }
             label = "URLSession \(network.errorCode)"
         case is DecodingError: label = "JSON: ugyldigt svarformat"
-        default: return error
+        default: label = "App-fejl · " + String(describing: type(of: error))
         }
         lock.withLock {
             var entries = UserDefaults.standard.stringArray(forKey: key) ?? []
-            entries.append("\(ISO8601DateFormatter().string(from: .now))  \(label)")
+            let entry = "\(ISO8601DateFormatter().string(from: .now))  \(label)"
+            guard entries.last != entry else { return }
+            entries.append(entry)
             UserDefaults.standard.set(Array(entries.suffix(50)), forKey: key)
         }
         return error
     }
 
-    static func export() throws -> URL {
+    static func export(phoneModel: String? = nil, pcConnected: Bool? = nil) throws -> URL {
         let entries = lock.withLock { UserDefaults.standard.stringArray(forKey: key) ?? [] }
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("FadedAI-diagnostics", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let url = folder.appendingPathComponent("FadedAI-fejllog.txt")
+        var header = ["FadedAI · API-fejllog", "Eksporteret \(ISO8601DateFormatter().string(from: .now))"]
+        if let phoneModel { header.append("Telefonmodel · \(phoneModel)") }
+        if let pcConnected { header.append(pcConnected ? "PC · Forbundet" : "PC · Ingen aktiv forbindelse") }
         let content = entries.isEmpty ? "Ingen API-fejl registreret." : entries.joined(separator: "\n")
-        try Data(("FadedAI · API-fejllog\n\n" + content + "\n").utf8).write(to: url, options: [.atomic, .completeFileProtection])
+        let data = Data((header.joined(separator: "\n") + "\n\n" + content + "\n").utf8)
+        try LocalFileStore.writeBytes(data, to: url, within: FileManager.default.temporaryDirectory)
         return url
     }
 }
@@ -78,13 +85,7 @@ extension Notification.Name {
 }
 
 func pcBusyMessage(_ error: Error) -> String? {
-    if case .http(503, _)? = error as? APIError {
-        return "PC’en arbejder eller skifter model. Prøv igen om lidt."
-    }
-    if case .http(status: 503, code: _, message: _)? = error as? V2Failure {
-        return "PC’en arbejder, skifter model eller mangler en tjeneste. Prøv igen om lidt."
-    }
-    return nil
+    AppErrorPresentation.pcBusy(error)?.title
 }
 
 @MainActor enum LocalCompute {
@@ -197,7 +198,7 @@ struct StudioRAMStatus: View {
             while !Task.isCancelled {
                 footprint = LocalCompute.footprint()
                 do { try await Task.sleep(for: .seconds(2)) }
-                catch { return }
+                catch { AppDiagnostics.record(error); return }
             }
         }
     }
@@ -207,12 +208,24 @@ struct StudioRAMStatus: View {
     }
 }
 
+// @unchecked Sendable: Singleton accessed only via @MainActor methods.
+// All mutable state goes through UserDefaults or @MainActor entrypoints.
+// No unlocked mutable stored properties.
 final class JobNotifications: NSObject, UNUserNotificationCenterDelegate, @unchecked Sendable {
     static let shared = JobNotifications()
+    private static let videoCategory = "fadedai.video"
+    private static let codeCategory = "fadedai.code"
 
     @MainActor func configure() async {
         let center = UNUserNotificationCenter.current()
         center.delegate = self
+        let dismiss = UNNotificationAction(identifier: "dismiss", title: "Afvis", options: [])
+        let video = UNNotificationAction(identifier: "video-jobs", title: "Se video", options: .foreground)
+        let code = UNNotificationAction(identifier: "code", title: "Se kode", options: .foreground)
+        center.setNotificationCategories([
+            UNNotificationCategory(identifier: Self.videoCategory, actions: [video, dismiss], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: Self.codeCategory, actions: [code, dismiss], intentIdentifiers: [], options: [])
+        ])
         if await center.notificationSettings().authorizationStatus == .notDetermined {
             _ = try? await center.requestAuthorization(options: [.alert, .sound])
         }
@@ -220,26 +233,41 @@ final class JobNotifications: NSObject, UNUserNotificationCenterDelegate, @unche
 
     @MainActor func completed(kind: String, server: String, id: String, title: String) async {
         let center = UNUserNotificationCenter.current()
-        let authorization = await center.notificationSettings().authorizationStatus
-        guard authorization == .authorized || authorization == .provisional else { return }
+        await completed(kind: kind, server: server, id: id, title: title, defaults: .standard,
+                        authorization: { await center.notificationSettings().authorizationStatus },
+                        add: { try await center.add($0) })
+    }
+
+    @MainActor func completed(kind: String, server: String, id: String, title: String, defaults: UserDefaults,
+                              authorization: @MainActor () async -> UNAuthorizationStatus,
+                              add: @MainActor (UNNotificationRequest) async throws -> Void) async {
+        guard defaults.object(forKey: AppStorageKeys.notificationsEnabled(kind)) as? Bool ?? true else { return }
+        let status = await authorization()
+        guard status == .authorized || status == .provisional else { return }
         let identifier = "\(kind):\(server):\(id)"
-        let key = "notifications.sent.v1"
-        var sent = UserDefaults.standard.stringArray(forKey: key) ?? []
+        let key = AppStorageKeys.notificationsSentV1
+        var sent = defaults.stringArray(forKey: key) ?? []
         guard !sent.contains(identifier) else { return }
         sent.append(identifier)
-        UserDefaults.standard.set(Array(sent.suffix(300)), forKey: key)
+        defaults.set(Array(sent.suffix(300)), forKey: key)
         let content = UNMutableNotificationContent()
         content.title = title
         content.sound = .default
-        do { try await center.add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) }
+        switch kind {
+        case "video", "video-failed": content.categoryIdentifier = Self.videoCategory
+        case "code": content.categoryIdentifier = Self.codeCategory
+        default: break
+        }
+        do { try await add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) }
         catch {
-            let current = UserDefaults.standard.stringArray(forKey: key) ?? []
-            UserDefaults.standard.set(current.filter { $0 != identifier }, forKey: key)
+            AppDiagnostics.record(error)
+            let current = defaults.stringArray(forKey: key) ?? []
+            defaults.set(current.filter { $0 != identifier }, forKey: key)
         }
     }
 
     @MainActor func trackCodeJob(server: String, id: String) {
-        let key = "notifications.active.code.\(server)"
+        let key = AppStorageKeys.notificationsActive("code", server: server)
         var active = Set(UserDefaults.standard.stringArray(forKey: key) ?? [])
         active.insert(id)
         UserDefaults.standard.set(Array(active), forKey: key)
@@ -247,6 +275,35 @@ final class JobNotifications: NSObject, UNUserNotificationCenterDelegate, @unche
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
         [.banner, .list, .sound]
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse) async {
+        let destination: String
+        switch response.actionIdentifier {
+        case "video-jobs", "code": destination = response.actionIdentifier
+        case UNNotificationDefaultActionIdentifier:
+            switch response.notification.request.content.categoryIdentifier {
+            case Self.videoCategory: destination = "video-jobs"
+            case Self.codeCategory: destination = "code"
+            default: return
+            }
+        default: return
+        }
+        await MainActor.run { UserDefaults.standard.set(destination, forKey: AppStorageKeys.spacesShortcut) }
+    }
+}
+
+struct JobNotificationSettings: View {
+    @AppStorage(AppStorageKeys.notificationsEnabledVideo) private var video = true
+    @AppStorage(AppStorageKeys.notificationsEnabledVideoFailed) private var videoFailure = true
+    @AppStorage(AppStorageKeys.notificationsEnabledCode) private var code = true
+    @AppStorage(AppStorageKeys.notificationsEnabledImageModel) private var imageModel = true
+
+    var body: some View {
+        Toggle("Video færdig", isOn: $video)
+        Toggle("Video fejlede", isOn: $videoFailure)
+        Toggle("Kodeforslag klar", isOn: $code)
+        Toggle("Billedmodel hentet", isOn: $imageModel)
     }
 }
 
@@ -451,20 +508,41 @@ struct ResourceMonitor: View {
         LocalCompute.suspend()
         defer { LocalCompute.resume() }
         PhoneModelDownloads.shared.cancel()
-        let manager = FileManager.default
-        for root in [URL.documentsDirectory, URL.applicationSupportDirectory, URL.cachesDirectory, manager.temporaryDirectory] {
-            if !manager.fileExists(atPath: root.path) { continue }
-            for child in try manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) {
-                try manager.removeItem(at: child)
-            }
-        }
+        try deleteOwnedData(documents: .documentsDirectory, support: .applicationSupportDirectory,
+                            temporary: FileManager.default.temporaryDirectory)
         try Pairing.removeAll()
         CloudModelKey.remove()
         let center = UNUserNotificationCenter.current()
         center.removeAllPendingNotificationRequests()
         center.removeAllDeliveredNotifications()
         if let bundle = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: bundle) }
-        UserDefaults.standard.set(UUID().uuidString, forKey: "app.resetGeneration")
+        MigratedAppData.shared.resetCachedValues()
+        UserDefaults.standard.set(UUID().uuidString, forKey: AppStorageKeys.appResetGeneration)
+    }
+
+    static func deleteOwnedData(documents: URL, support: URL, temporary: URL) throws {
+        let manager = FileManager.default
+        let roots = [
+            (documents, ["Models"]),
+            (support, ["FadedAI", "ImportedPhoneModels", "PCChatOutbox", "SavedVideos", "StudioImages",
+                       "StudioLoRAPreviews", "VideoStudio"]),
+            (temporary, ["FadedAI-diagnostics"])
+        ]
+        for (root, names) in roots where manager.fileExists(atPath: root.path) {
+            let children = try manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+            for child in children {
+                let name = child.lastPathComponent
+                let isPreview = root == temporary && ["Sweat-", "Demo-"].contains { prefix in
+                    name.hasPrefix(prefix) && child.pathExtension == "mp4" &&
+                    UUID(uuidString: String(child.deletingPathExtension().lastPathComponent.dropFirst(prefix.count))) != nil
+                }
+                let isPrivateScratch = root == temporary && name.hasPrefix(StudioScratch.prefix) &&
+                    UUID(uuidString: String(name.dropFirst(StudioScratch.prefix.count))) != nil
+                guard names.contains(name) || isPreview || isPrivateScratch else { continue }
+                // Removing a link unlinks the directory entry; resolving it here would target another location.
+                try manager.removeItem(at: child)
+            }
+        }
     }
 }
 
@@ -478,8 +556,8 @@ struct NukeLocalDataButton: View {
             .confirmationDialog("Ryd FadedAI på denne telefon?", isPresented: $confirmation) {
                 Button("Slet modeller, chats og billeder", role: .destructive) {
                     do { try AppLocalReset.wipe() }
-                    catch LocalComputeError.busy { failure = "Stop den lokale AI-opgave, og prøv igen." }
-                    catch { failure = "Oprydningen blev afbrudt. Noget kan allerede være slettet. Prøv igen." }
+                    catch LocalComputeError.busy { AppDiagnostics.record(LocalComputeError.busy); failure = "Stop den lokale AI-opgave, og prøv igen." }
+                    catch { AppDiagnostics.record(error); failure = "Oprydningen blev afbrudt. Noget kan allerede være slettet. Prøv igen." }
                 }
             } message: {
                 Text("Forbindelser, indstillinger og data i FadedAI slettes. Kopier i Fotos og data på PC’en bliver liggende.")

@@ -5,7 +5,8 @@ import UIKit
 enum DemoMovie {
     // A silent title card, visibly marked even when shared outside the app.
     static func make() async throws -> URL {
-        let url = FileManager.default.temporaryDirectory.appendingPathComponent("Demo-\(UUID()).mp4")
+        let folder = FileManager.default.temporaryDirectory
+        let url = try LocalFileStore.safeWriteURL(folder.appendingPathComponent("Demo-\(UUID()).mp4"), within: folder)
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
         let width = 360, height = 640
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
@@ -47,6 +48,7 @@ enum DemoMovie {
         input.markAsFinished()
         await writer.finishWriting()
         guard writer.status == .completed else { throw APIError.storage }
+        try LocalFileStore.protectFile(url)
         success = true
         return url
     }

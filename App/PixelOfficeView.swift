@@ -39,7 +39,7 @@ struct PixelOfficeView: View {
     @Environment(\.displayScale) private var displayScale
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @AppStorage("qol.reduceMotion") private var calmMotion = false
+    @AppStorage(AppStorageKeys.qolReduceMotion) private var calmMotion = false
 
     private let canvasSize = CGSize(width: 320, height: 180)
     private let stationCount = 8
@@ -55,9 +55,10 @@ struct PixelOfficeView: View {
         VStack(alignment: .leading, spacing: 12) {
             officeScene
             if workers.isEmpty {
-                FadedEmptyState(icon: "desktopcomputer", title: "Kontoret er tomt", detail: "Bots vises her, når de er tilgængelige.")
+                FadedEmptyState(icon: "desktopcomputer", title: "Kontoret er tomt",
+                                detail: "Opret en bot under Mine bots nedenfor, eller forbind til PC’en for at se dens agenter.")
             } else {
-                FadedSectionLabel("På kontoret")
+                FadedSectionHeader("På kontoret")
                 if workers.count > stationCount {
                     Text("Kortet viser de første \(stationCount) bots. Hele holdet står herunder.")
                         .font(.footnote).foregroundStyle(palette.secondary)
@@ -145,7 +146,7 @@ struct PixelOfficeView: View {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(worker.name).font(FadedTypography.action).foregroundStyle(palette.text)
                         if !worker.specialty.isEmpty {
-                            Text(worker.specialty).font(.subheadline).foregroundStyle(palette.secondary)
+                            FadedDetailText(worker.specialty)
                         }
                         Text(worker.status.title).font(.system(.caption, design: .monospaced).weight(.semibold))
                             .foregroundStyle(palette.secondary)

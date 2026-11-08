@@ -21,6 +21,8 @@
     <key>UILaunchScreen</key><dict/>
     <key>UISupportedInterfaceOrientations</key>
     <array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array><string>UIInterfaceOrientationPortrait</string><string>UIInterfaceOrientationPortraitUpsideDown</string><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Appen bruger dit lokale netværk til at hente klip og videoer fra din PC.</string>
     <key>NSFaceIDUsageDescription</key><string>Face ID beskytter dit lokale studie.</string>

@@ -1,5 +1,58 @@
+import SwiftUI
 import XCTest
 @testable import SweatCaster
+
+extension ContractTests {
+    @MainActor func testDedicatedPrivateStudioDropsSuppliedPCClient() throws {
+        let pc = try LiveAPI(server: Server("192.168.1.20"), token: "fixture")
+        let studio = OfflineStudio(api: pc, sessionUnlocked: .constant(false), ephemeralOnly: true)
+        XCTAssertNil(studio.api)
+        XCTAssertEqual(OfflineStudio.Page.allCases, [.chat, .images, .gallery])
+    }
+
+    func testFivePhoneModelsIncludeOnlySupportedDownloadChoices() {
+        XCTAssertEqual(Set(PhoneModels.catalog.map(\.name)),
+                       Set(["MiniCPM5 1B", "Gemma 4 E2B", "Qwen3.5 0.8B", "Qwen3-VL 2B", "LFM2.5 350M"]))
+        XCTAssertEqual(PhoneModels.catalog.filter { PhoneModels.supportsLocalInference($0.id) }.map(\.name),
+                       ["Gemma 4 E2B", "LFM2.5 350M"])
+    }
+
+    func testDarkModeFollowsSystemAndAppStorage() {
+        XCTAssertNil(FadedAppearance.system.preferredScheme(for: .faded))
+        XCTAssertEqual(FadedAppearance.system.resolve(theme: .faded, system: .light), .day)
+        XCTAssertEqual(FadedAppearance.system.resolve(theme: .faded, system: .dark), .faded)
+        XCTAssertEqual(FadedAppearance.system.resolve(theme: .oled, system: .light), .oled)
+        XCTAssertEqual(FadedAppearance.dark.resolve(theme: .day, system: .light), .faded)
+        XCTAssertEqual(FadedAppearance.light.resolve(theme: .oled, system: .dark), .day)
+        let suite = UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else { return XCTFail("Mangler testlager") }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let storage = AppStorage(wrappedValue: FadedAppearance.system, "appearance.mode", store: defaults)
+        storage.wrappedValue = .light
+        XCTAssertEqual(defaults.string(forKey: "appearance.mode"), FadedAppearance.light.rawValue)
+        XCTAssertEqual(AppStorage(wrappedValue: FadedAppearance.system, "appearance.mode", store: defaults).wrappedValue, .light)
+    }
+
+    @MainActor func testWipeOnlyDeletesOwnFolders() throws {
+        let files = FileManager.default
+        let root = files.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let documents = root.appendingPathComponent("Documents", isDirectory: true)
+        let support = root.appendingPathComponent("Support", isDirectory: true)
+        let temporary = root.appendingPathComponent("Temp", isDirectory: true)
+        defer { try? files.removeItem(at: root) }
+        let model = documents.appendingPathComponent("Models", isDirectory: true)
+        let saved = support.appendingPathComponent("SavedVideos", isDirectory: true)
+        let keep = support.appendingPathComponent("OtherTool", isDirectory: true)
+        let scratch = temporary.appendingPathComponent(StudioScratch.prefix + UUID().uuidString, isDirectory: true)
+        for folder in [model, saved, keep, scratch] { try files.createDirectory(at: folder, withIntermediateDirectories: true) }
+        let personal = documents.appendingPathComponent("Personlig.txt")
+        let unrelatedPreview = temporary.appendingPathComponent("Sweat-min-fil.mp4")
+        for file in [personal, unrelatedPreview] { try Data("behold".utf8).write(to: file) }
+        try AppLocalReset.deleteOwnedData(documents: documents, support: support, temporary: temporary)
+        for removed in [model, saved, scratch] { XCTAssertFalse(files.fileExists(atPath: removed.path)) }
+        for retained in [personal, unrelatedPreview, keep] { XCTAssertTrue(files.fileExists(atPath: retained.path)) }
+    }
+}
 
 extension ContractTests {
     func testSearchFindsChatBotVideoAndFile() {
@@ -762,5 +815,79 @@ extension ContractTests {
         XCTAssertEqual(reopened.reviewCount(for: address, targetID: api.queueTargetID), 1)
         await reopened.deliverReady(using: api)
         XCTAssertEqual(Stub.timedOutChatPosts.count - before, 1)
+    }
+}
+
+extension ContractTests {
+    func testAutoRouterPrefersReadyPCCodeModelThenReadyPhoneFallback() {
+        let unavailable = ModelRouter.Candidate(id: "qwen25-7b", name: "Qwen 2.5 7B", location: .pc, ready: false, favorite: true)
+        let pc = ModelRouter.Candidate(id: "authoritative-pc-id", name: "Qwen 3 8B", location: .pc, ready: true)
+        let phone = ModelRouter.Candidate(id: "minicpm5-1b", name: "MiniCPM5 1B", location: .phone, ready: true)
+        XCTAssertEqual(ModelRouter.choose(text: "Ret denne Swift-funktion", candidates: [unavailable, phone, pc])?.candidate, pc)
+        XCTAssertEqual(ModelRouter.choose(text: "Find buggen", candidates: [unavailable, phone])?.candidate, phone)
+    }
+
+    func testAutoRouterUsesLongModelsAndSuitableFavorites() {
+        let long = String(repeating: "å", count: 1_001)
+        let pc = ModelRouter.Candidate(id: "gemma4-9b", name: "Gemma 4 9B", location: .pc, ready: true)
+        let phone = ModelRouter.Candidate(id: "gemma4-e2b", name: "Gemma 4 E2B", location: .phone, ready: true, favorite: true)
+        let unrelated = ModelRouter.Candidate(id: "favorite", name: "Almindelig favorit", location: .phone, ready: true, favorite: true)
+        XCTAssertEqual(ModelRouter.intent(for: String(long.dropLast())), .text)
+        XCTAssertEqual(ModelRouter.intent(for: long), .long)
+        XCTAssertEqual(ModelRouter.choose(text: long, candidates: [pc, unrelated])?.candidate, pc)
+        XCTAssertEqual(ModelRouter.choose(text: long, candidates: [pc, phone])?.candidate, phone)
+    }
+
+    func testAutoRouterRequiresImageInputCapabilityAndKeepsPCOnlyToolsOnPC() {
+        let phone = ModelRouter.Candidate(id: "qwen3-vl-2b", name: "Qwen3-VL 2B", location: .phone, ready: true)
+        let vision = ModelRouter.Candidate(id: "vision-pc", name: "Vision", location: .pc, ready: true, acceptsImages: true)
+        XCTAssertEqual(ModelRouter.intent(for: "Skriv en idé til et billede"), .text)
+        XCTAssertNil(ModelRouter.choose(text: "Se her", hasImage: true, candidates: [phone]))
+        XCTAssertEqual(ModelRouter.choose(text: "Se her", hasImage: true, candidates: [phone, vision])?.candidate, vision)
+        XCTAssertNil(ModelRouter.choose(text: "Kortsamling: Vis dubletter", candidates: [phone]))
+    }
+
+    func testAutoRouterPicksReadyGeneralModelsWithoutInventingIDs() {
+        let phone = ModelRouter.Candidate(id: "minicpm5-1b", name: "MiniCPM5 1B", location: .phone, ready: false)
+        let pc = ModelRouter.Candidate(id: "opaque-from-pc", name: "Ornith 1.0 9B", location: .pc, ready: true)
+        XCTAssertEqual(ModelRouter.choose(text: "Hej", candidates: [phone, pc])?.candidate.id, "opaque-from-pc")
+        XCTAssertNil(ModelRouter.choose(text: "Hej", candidates: [phone]))
+    }
+}
+
+extension ContractTests {
+    func testBotNotebookSeparatesAndDeletesBotOwnedRecords() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let firstID = UUID()
+        let first = TeamBotNotebookStore(botID: firstID, support: folder)
+        let second = TeamBotNotebookStore(botID: UUID(), support: folder)
+        let note = TeamBotNotebookStore.Memory(id: UUID(), title: "Kode", text: "Brug små ændringer")
+        let skill = TeamBotNotebookStore.Skill(id: UUID(), title: "Review", steps: ["Læs diffen", "Kør test"], sop: "Rapportér resultatet.")
+        try first.save(note)
+        try first.save(skill)
+        XCTAssertEqual(try first.memories(), [note])
+        XCTAssertEqual(try first.skills(), [skill])
+        XCTAssertTrue(try second.memories().isEmpty)
+        XCTAssertTrue(try second.skills().isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appending(path: "FadedAI/Bots/\(firstID.uuidString)/Skills/\(skill.id.uuidString).json").path))
+        XCTAssertTrue(skill.prompt.contains("2. Kør test"))
+        try first.deleteMemory(note.id)
+        try first.deleteSkill(skill.id)
+        XCTAssertTrue(try first.memories().isEmpty)
+        XCTAssertTrue(try first.skills().isEmpty)
+    }
+
+    func testBotNotebookRejectsOversizedSOPAndEmptySkills() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let sop = folder.appending(path: "SOP.txt")
+        try Data("\u{FEFF}Læs instruktionen.".utf8).write(to: sop)
+        XCTAssertEqual(try TeamBotNotebookStore.readSOP(sop), "Læs instruktionen.")
+        try Data(repeating: 65, count: 16_385).write(to: sop)
+        XCTAssertThrowsError(try TeamBotNotebookStore.readSOP(sop))
+        let store = TeamBotNotebookStore(botID: UUID(), support: folder)
+        XCTAssertThrowsError(try store.save(.init(id: UUID(), title: "Tom", steps: ["  "], sop: nil)))
     }
 }

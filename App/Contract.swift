@@ -110,7 +110,7 @@ struct Batch: Codable, Sendable {
 }
 
 enum APIError: Error, Sendable {
-    case address, token, input, version, unhealthy, malformed, unsafeVideo, offline, localNetwork, storage
+    case address, token, pairingExpired, input, version, unhealthy, malformed, unsafeVideo, offline, localNetwork, storage
     case transport(Int)
     case http(Int, Problem?)
     var ambiguous: Bool {
@@ -124,6 +124,7 @@ enum APIError: Error, Sendable {
         switch self {
         case .address: "Indsæt den lokale adresse, der vises på PC’en."
         case .token, .http(401, _): "Tjek adgangskoden fra PC’en."
+        case .pairingExpired: "QR-koden er udløbet eller mangler en udløbstid. Lav en ny kode på PC’en, eller indtast IP og token."
         case .input, .http(422, _): "Tjek de valgte klip og indstillinger."
         case .version: "PC’en bruger en anden API-version. Appen kræver version 1."
         case .unhealthy: "PC’ens server er ikke klar."

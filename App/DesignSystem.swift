@@ -10,13 +10,32 @@ enum FadedTheme: String, CaseIterable, Identifiable {
 
     static func migrateIfNeeded(_ defaults: UserDefaults = .standard) {
         guard let domain = Bundle.main.bundleIdentifier,
-              let saved = defaults.persistentDomain(forName: domain), saved["appearance.theme"] == nil else { return }
-        if saved["app.followSystemAppearance"] as? Bool == false,
-           saved["app.manualDarkMode"] as? Bool == false {
-            defaults.set(day.rawValue, forKey: "appearance.theme")
-        } else if saved["spaces.theme"] as? String == oled.rawValue {
-            defaults.set(oled.rawValue, forKey: "appearance.theme")
+              let saved = defaults.persistentDomain(forName: domain), saved[AppStorageKeys.appearanceTheme] == nil else { return }
+        if saved[AppStorageKeys.appFollowSystemAppearance] as? Bool == false,
+           saved[AppStorageKeys.appManualDarkMode] as? Bool == false {
+            defaults.set(day.rawValue, forKey: AppStorageKeys.appearanceTheme)
+        } else if saved[AppStorageKeys.spacesTheme] as? String == oled.rawValue {
+            defaults.set(oled.rawValue, forKey: AppStorageKeys.appearanceTheme)
         }
+    }
+}
+
+enum FadedAppearance: String, CaseIterable {
+    case system = "Følg system"
+    case dark = "Altid mørk"
+    case light = "Altid lys"
+
+    func preferredScheme(for theme: FadedTheme) -> ColorScheme? {
+        switch self {
+        case .system: theme == .faded ? nil : theme.colorScheme
+        case .dark: .dark
+        case .light: .light
+        }
+    }
+
+    func resolve(theme: FadedTheme, system: ColorScheme) -> FadedTheme {
+        if (preferredScheme(for: theme) ?? system) == .light { return .day }
+        return theme == .oled ? .oled : .faded
     }
 }
 
@@ -29,7 +48,8 @@ enum FadedColors {
     static let text = Color(red: 242 / 255, green: 242 / 255, blue: 237 / 255)
     static let secondary = Color(red: 168 / 255, green: 171 / 255, blue: 184 / 255)
     static let muted = Color(red: 107 / 255, green: 110 / 255, blue: 125 / 255)
-    static let lime = Color(red: 212 / 255, green: 255 / 255, blue: 63 / 255)
+    static let babyBlue = Color(red: 168 / 255, green: 216 / 255, blue: 255 / 255)
+    static let lime = babyBlue
     static let cyan = Color(red: 63 / 255, green: 232 / 255, blue: 255 / 255)
     static let purple = Color(red: 183 / 255, green: 140 / 255, blue: 255 / 255)
     static let green = Color(red: 74 / 255, green: 222 / 255, blue: 128 / 255)
