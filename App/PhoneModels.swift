@@ -410,6 +410,7 @@ private enum ModelDiskStorage {
 
 struct PhoneModelsView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.fadedPalette) private var palette
     @AppStorage(PhoneModels.selectionKey) private var selected = "apple"
     @AppStorage(PhoneModels.liteBatteryKey) private var liteBattery = false
     @AppStorage("phone.model.favorites") private var favoriteModels = ""
@@ -452,37 +453,23 @@ struct PhoneModelsView: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Group {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
                     if typeSize.isAccessibilitySize { pagePicker.pickerStyle(.menu) }
                     else { pagePicker.pickerStyle(.segmented) }
-                }
-                switch page {
-                case .models:
-                    favoriteSection
-                    Section("Standard") {
-                        HStack {
-                            Button { selected = "apple"; benchmarkResult = nil } label: {
-                                modelLabel("Apple Foundation Models", id: "apple")
-                            }.buttonStyle(.borderless)
-                            Spacer()
-                            favoriteButton("apple")
-                        }
-                        Text(PhoneModels.appleAvailable ? "Klar på denne telefon."
-                             : "Kræver iOS 26 og en aktiv, kompatibel Apple Intelligence-model.")
-                            .font(.caption)
+                    modelPage
+                    if let notice {
+                        Text(notice).font(.footnote).foregroundStyle(palette.secondary)
+                            .accessibilityAddTraits(.updatesFrequently)
                     }
-                    catalogSection
-                    importSection
-                case .storage:
-                    storageSection
-                    imageFilesSection
-                case .performance:
-                    benchmarkSection
                 }
-                if let notice { Text(notice) }
+                .padding(16).frame(maxWidth: 640).frame(maxWidth: .infinity)
             }
+            .background { FadedBackground() }
+            .foregroundStyle(palette.text)
+            .tint(palette.isDark ? palette.lime : palette.text)
             .navigationTitle("Lokale modeller")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Luk") { dismiss() }.disabled(working) }
             .interactiveDismissDisabled(working)
             .task(id: storageRevision) { await refreshStorage() }
@@ -500,6 +487,21 @@ struct PhoneModelsView: View {
         }
     }
 
+    @ViewBuilder private var modelPage: some View {
+        switch page {
+        case .models:
+            favoriteSection
+            appleCard
+            catalogSection
+            importSection
+        case .storage:
+            storageSection
+            imageFilesSection
+        case .performance:
+            benchmarkSection
+        }
+    }
+
     private var pagePicker: some View {
         Picker("Sektion", selection: $page) {
             ForEach(Page.allCases, id: \.self) { Text($0.rawValue).tag($0) }
@@ -511,131 +513,227 @@ struct PhoneModelsView: View {
         let showApple = favorites.contains("apple")
         let showImported = favorites.contains("imported") && PhoneModels.installedDirectory("imported") != nil
         if showApple || showImported || !installed.isEmpty {
-            Section("Favoritter") {
-                if showApple {
-                    Button { selected = "apple"; benchmarkResult = nil } label: {
-                        modelLabel("Apple Foundation Models", id: "apple")
-                    }
-                }
-                ForEach(installed) { entry in
-                    Button { selected = entry.id; benchmarkResult = nil } label: {
-                        modelLabel(entry.model.name, id: entry.id)
-                    }
-                }
-                if showImported {
-                    Button { selected = "imported"; benchmarkResult = nil } label: {
-                        modelLabel("Importeret model", id: "imported")
-                    }
-                }
-            }
-        }
-    }
-
-    @ViewBuilder private var storageSection: some View {
-        Section("Lagerplads") {
-            if let storage {
-                Text("Modeller og LoRA: \(ModelDiskStorage.gigabytes(storage.total))")
-                if let used = storage.used, let capacity = storage.capacity {
-                    Text("Telefonen bruger \(ModelDiskStorage.gigabytes(used)) af \(ModelDiskStorage.gigabytes(capacity)).")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            } else {
-                ProgressView("Måler modelplads…")
-            }
-        }
-    }
-
-    @ViewBuilder private var catalogSection: some View {
-        Section("Core ML-modeller") {
-            Text("Størrelser er cirka. RAM afhænger af telefonen og længden af chatten.")
-                .font(.caption)
-            ForEach(orderedCatalog) { entry in
+            FadedCard {
                 VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        Text(entry.model.name).font(.headline)
-                        Spacer()
-                        favoriteButton(entry.id)
+                    FadedSectionLabel("Favoritter")
+                    if showApple { favoriteRow("Apple Foundation Models", id: "apple") }
+                    ForEach(installed) { entry in
+                        favoriteRow(entry.model.name, id: entry.id)
                     }
-                    Text("\(entry.model.size) · \(entry.memory)").font(.caption)
-                    if downloader.downloadingModelId == entry.id && downloader.isDownloading {
-                        let progress = min(1, max(0, downloader.progress))
-                        ProgressView(value: progress) {
-                            Text("Henter modellen · \(progress.formatted(.percent.precision(.fractionLength(0))))")
-                        }
-                        Text("Download fortsætter normalt i baggrunden, når iOS tillader det.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Button("Annuller download", role: .destructive) { PhoneModelDownloads.shared.cancel(); storageRevision += 1 }
-                            .frame(minHeight: 44)
-                    } else if !PhoneModels.supportsLocalInference(entry.id) {
-                        Text("Midlertidigt utilgængelig. Modellen kræver en særskilt lokal afspiller.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else if PhoneModels.installedDirectory(entry.id) != nil {
-                        Button { selected = entry.id; benchmarkResult = nil } label: { modelLabel("Brug modellen", id: entry.id) }
-                    } else {
-                        Button("Hent og vælg") { download(entry) }
-                            .disabled(mutationBusy)
-                    }
-                    if let bytes = storage?.text[entry.id] {
-                        Text("På telefonen: \(ModelDiskStorage.gigabytes(bytes))").font(.caption)
-                        Button("Slet \(entry.model.name)", role: .destructive) {
-                            deleteTarget = .text(id: entry.id, name: entry.model.name)
-                        }.frame(minHeight: 44).disabled(mutationBusy)
-                    }
-                }
+                    if showImported { favoriteRow("Importeret model", id: "imported") }
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
 
-    @ViewBuilder private var importSection: some View {
-        Section("Importér fra Filer") {
-            Text("Gem modellen via AirDrop eller en filserver i Filer. Pak ZIP-filen ud, og vælg hele Core ML-modelmappen.")
-                .font(.caption)
-            Button("Vælg modelmappe") { importing = true }.disabled(mutationBusy)
-            if working { ProgressView("Importerer model…") }
-            if PhoneModels.installedDirectory("imported") != nil {
-                HStack {
-                    Button { selected = "imported"; benchmarkResult = nil } label: { modelLabel("Brug importeret model", id: "imported") }
-                        .buttonStyle(.borderless)
-                    Spacer()
-                    favoriteButton("imported")
+    private func favoriteRow(_ title: String, id: String) -> some View {
+        Button { select(id) } label: { modelLabel(title, id: id).frame(minHeight: 44) }.buttonStyle(.plain)
+    }
+
+    private var appleCard: some View {
+        let ready = PhoneModels.appleAvailable
+        return FadedCard(accent: selected == "apple" ? palette.lime : nil) {
+            VStack(alignment: .leading, spacing: 10) {
+                modelHeader("Apple Foundation Models", icon: "sparkles", id: "apple")
+                modelStatus(ready ? "Klar" : "Ikke tilgængelig", color: ready ? palette.green : palette.secondary)
+                if !ready {
+                    Text("Kræver iOS 26 og en aktiv, kompatibel Apple Intelligence-model.")
+                        .font(.caption).foregroundStyle(palette.secondary)
                 }
-                if let bytes = storage?.text["imported"] {
-                    Text("På telefonen: \(ModelDiskStorage.gigabytes(bytes))").font(.caption)
+                if selected != "apple" {
+                    FadedSecondaryButton("Brug modellen", icon: "checkmark") { select("apple") }
                 }
-                Button("Slet importeret model", role: .destructive) {
-                    deleteTarget = .text(id: "imported", name: "Importeret model")
-                }.frame(minHeight: 44).disabled(mutationBusy)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var storageSection: some View {
+        FadedCard(accent: palette.cyan) {
+            VStack(alignment: .leading, spacing: 10) {
+                FadedSectionLabel("Lagerplads")
+                if let storage {
+                    Text("Modeller og LoRA: \(ModelDiskStorage.gigabytes(storage.total))").font(.headline)
+                    if let used = storage.used, let capacity = storage.capacity, capacity > 0 {
+                        FadedProgress(value: Double(used) / Double(capacity))
+                        Text("Telefonen bruger \(ModelDiskStorage.gigabytes(used)) af \(ModelDiskStorage.gigabytes(capacity)).")
+                            .font(.caption).foregroundStyle(palette.secondary)
+                    }
+                } else {
+                    ProgressView("Måler modelplads…")
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var catalogSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            FadedSectionLabel("Core ML-modeller")
+            Text("Størrelser er cirka. RAM afhænger af telefonen og længden af chatten.")
+                .font(.caption).foregroundStyle(palette.secondary)
+            ForEach(orderedCatalog, content: modelCard)
+        }
+    }
+
+    private func modelCard(_ entry: PhoneModels.Entry) -> some View {
+        let downloading = downloader.downloadingModelId == entry.id && downloader.isDownloading
+        let supported = PhoneModels.supportsLocalInference(entry.id)
+        let ready = PhoneModels.installedDirectory(entry.id) != nil
+        let status = downloading ? "Henter" : ready ? "Klar" : supported ? "Ikke hentet" : "Utilgængelig"
+        let color = downloading ? palette.lime : ready ? palette.green : palette.secondary
+        return FadedCard(accent: selected == entry.id ? palette.lime : nil) {
+            VStack(alignment: .leading, spacing: 10) {
+                modelHeader(entry.model.name, icon: "cpu", id: entry.id)
+                modelStatus(status, color: color)
+                Text("\(entry.model.size) · \(entry.memory)").font(.caption).foregroundStyle(palette.secondary)
+                if downloading {
+                    downloadProgress
+                } else if !supported {
+                    Text("Modellen kræver en særskilt lokal modelmotor.").font(.caption).foregroundStyle(palette.secondary)
+                } else if ready && selected != entry.id {
+                    FadedSecondaryButton("Brug modellen", icon: "checkmark") { select(entry.id) }
+                } else if !ready {
+                    FadedSecondaryButton("Hent og vælg", icon: "arrow.down.circle") { download(entry) }.disabled(mutationBusy)
+                }
+                if let bytes = storage?.text[entry.id] {
+                    storageActions(entry.model.name, id: entry.id, bytes: bytes)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var downloadProgress: some View {
+        let progress = min(1, max(0, downloader.progress))
+        return VStack(alignment: .leading, spacing: 8) {
+            FadedProgress(value: progress)
+            Text("Henter modellen · \(progress.formatted(.percent.precision(.fractionLength(0))))")
+                .font(.caption.monospacedDigit()).foregroundStyle(palette.secondary)
+            Text("Download fortsætter normalt i baggrunden, når iOS tillader det.")
+                .font(.caption).foregroundStyle(palette.secondary)
+            FadedSecondaryButton("Annuller download", icon: "xmark", role: .destructive) {
+                PhoneModelDownloads.shared.cancel()
+                storageRevision += 1
             }
+        }
+    }
+
+    private func modelHeader(_ title: String, icon: String, id: String) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon).font(.title3).foregroundStyle(palette.cyan)
+                .frame(width: 40, height: 40).background(palette.raised, in: .rect(cornerRadius: 10))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                if selected == id {
+                    Label("Valgt", systemImage: "checkmark.circle.fill").font(.caption)
+                        .foregroundStyle(palette.isDark ? palette.lime : palette.text)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            favoriteButton(id)
+        }
+    }
+
+    private func modelStatus(_ title: String, color: Color) -> some View {
+        HStack(spacing: 5) {
+            Circle().fill(color).frame(width: 7, height: 7).accessibilityHidden(true)
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(palette.isDark ? color : palette.text)
+        }
+        .padding(.horizontal, 8).padding(.vertical, 4).background(palette.raised, in: .capsule)
+    }
+
+    private func storageActions(_ name: String, id: String, bytes: Int64) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("På telefonen: \(ModelDiskStorage.gigabytes(bytes))").font(.caption).foregroundStyle(palette.secondary)
+            FadedSecondaryButton("Slet model", icon: "trash", role: .destructive) {
+                deleteTarget = .text(id: id, name: name)
+            }.disabled(mutationBusy).accessibilityLabel("Slet \(name)")
+        }
+    }
+
+    private var importSection: some View {
+        let installed = PhoneModels.installedDirectory("imported") != nil
+        return FadedCard(accent: selected == "imported" ? palette.lime : nil) {
+            VStack(alignment: .leading, spacing: 10) {
+                FadedSectionLabel("Importér fra Filer")
+                Text("Gem modellen via AirDrop eller en filserver i Filer. Pak ZIP-filen ud, og vælg hele Core ML-modelmappen.")
+                    .font(.caption).foregroundStyle(palette.secondary)
+                FadedPrimaryButton("Vælg modelmappe", icon: "folder") { importing = true }.disabled(mutationBusy)
+                if working { ProgressView("Arbejder…") }
+                if installed {
+                    modelHeader("Importeret model", icon: "tray.and.arrow.down", id: "imported")
+                    modelStatus("Klar", color: palette.green)
+                    if selected != "imported" {
+                        FadedSecondaryButton("Brug importeret model", icon: "checkmark") { select("imported") }
+                    }
+                    if let bytes = storage?.text["imported"] {
+                        storageActions("Importeret model", id: "imported", bytes: bytes)
+                    } else {
+                        FadedSecondaryButton("Slet importeret model", icon: "trash", role: .destructive) {
+                            deleteTarget = .text(id: "imported", name: "Importeret model")
+                        }.disabled(mutationBusy)
+                    }
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     @ViewBuilder private var imageFilesSection: some View {
         if let files = storage?.files, !files.isEmpty {
-            Section("Billedmodelfiler og LoRA") {
+            VStack(alignment: .leading, spacing: 10) {
+                FadedSectionLabel("Billedmodelfiler og LoRA")
                 Text("Billedmodeller kan dele filer. Når du sletter en delt fil, kan den skulle hentes igen for andre modeller.")
-                    .font(.caption)
-                ForEach(files) { file in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(verbatim: file.name).font(.headline)
-                        Text("\(file.kind) · \(ModelDiskStorage.gigabytes(file.bytes))").font(.caption)
-                        Button("Slet", role: .destructive) { deleteTarget = .image(file) }
-                            .accessibilityLabel("Slet \(file.name)").frame(minHeight: 44).disabled(mutationBusy)
-                    }
-                }
+                    .font(.caption).foregroundStyle(palette.secondary)
+                ForEach(files, content: imageFileCard)
             }
         }
     }
 
-    @ViewBuilder private var benchmarkSection: some View {
-        Section("Hastighed og batteri") {
-            Toggle("Skift automatisk til lille model ved under 20 % batteri", isOn: $liteBattery)
-            if liteBattery && PhoneModels.installedDirectory(ModelDownloader.ModelInfo.lfm2_5_350m.id) == nil {
-                Text("Hent LFM2.5 350M for at bruge batteritilstanden.").font(.caption)
-            }
-            Button(benchmarkRunning ? "Måler…" : "Benchmark") { benchmark() }
-                .frame(minHeight: 44).disabled(mutationBusy)
-            if let benchmarkResult { Text(benchmarkResult).accessibilityAddTraits(.updatesFrequently) }
+    private func imageFileCard(_ file: ModelDiskStorage.Item) -> some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(file.name, systemImage: "photo.on.rectangle").font(.headline)
+                Text("\(file.kind) · \(ModelDiskStorage.gigabytes(file.bytes))").font(.caption).foregroundStyle(palette.secondary)
+                FadedSecondaryButton("Slet fil", icon: "trash", role: .destructive) { deleteTarget = .image(file) }
+                    .accessibilityLabel("Slet \(file.name)").disabled(mutationBusy)
+            }.frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private var benchmarkSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            benchmarkCard
+            FadedCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    FadedSectionLabel("Batteri")
+                    Toggle("Skift automatisk til lille model ved under 20 % batteri", isOn: $liteBattery)
+                    if liteBattery && PhoneModels.installedDirectory(ModelDownloader.ModelInfo.lfm2_5_350m.id) == nil {
+                        Text("Hent LFM2.5 350M for at bruge batteritilstanden.")
+                            .font(.caption).foregroundStyle(palette.secondary)
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var benchmarkCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            FadedSectionLabel("Benchmark")
+            Text("Mål den valgte model direkte på telefonen.").font(.subheadline).foregroundStyle(palette.secondary)
+            FadedPrimaryButton(benchmarkRunning ? "Måler…" : "Start benchmark", icon: "speedometer", action: benchmark)
+                .disabled(mutationBusy)
+            if let benchmarkResult {
+                Text(benchmarkResult).font(.system(.headline, design: .monospaced)).foregroundStyle(palette.text)
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
+        .background(LinearGradient(colors: [palette.lime.opacity(0.19), palette.card, palette.purple.opacity(0.15)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing), in: .rect(cornerRadius: 20))
+        .overlay { RoundedRectangle(cornerRadius: 20).strokeBorder(palette.lime.opacity(0.28)) }
+    }
+
+    private func select(_ id: String) {
+        selected = id
+        benchmarkResult = nil
     }
 
     private func modelLabel(_ title: String, id: String) -> some View {

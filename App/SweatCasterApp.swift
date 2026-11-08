@@ -1,4 +1,5 @@
 import AVKit
+import AVFoundation
 import UniformTypeIdentifiers
 import PhotosUI
 import ImageIO
@@ -79,14 +80,80 @@ private struct Media: Identifiable {
     let demo: Bool
 }
 
+private struct DashboardVideoCard: View {
+    let file: URL
+    @Environment(\.fadedPalette) private var palette
+    @State private var preview: UIImage?
+    @State private var duration: String?
+
+    var body: some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 8) {
+                ZStack {
+                    Rectangle().fill(palette.raised)
+                    if let preview {
+                        Image(uiImage: preview).resizable().scaledToFill()
+                    } else {
+                        Image(systemName: "film").font(.title2).foregroundStyle(palette.secondary)
+                    }
+                }
+                .aspectRatio(16.0 / 9.0, contentMode: .fit).clipped()
+                .clipShape(RoundedRectangle(cornerRadius: FadedRadius.media))
+                .accessibilityHidden(true)
+                Text(file.deletingPathExtension().lastPathComponent).font(FadedTypography.action).lineLimit(1)
+                if let duration { Text(duration).font(FadedTypography.number).foregroundStyle(palette.secondary) }
+            }
+        }
+        .task(id: file) { await loadPreview() }
+    }
+
+    private func loadPreview() async {
+        let asset = AVURLAsset(url: file)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 420, height: 320)
+        if let result = try? await generator.image(at: .zero), !Task.isCancelled {
+            preview = UIImage(cgImage: result.image)
+        }
+        if let value = try? await asset.load(.duration), value.seconds.isFinite, !Task.isCancelled {
+            let seconds = max(0, Int(value.seconds.rounded()))
+            duration = String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        }
+    }
+}
+
 struct Home: View {
     private enum SettingsCategory: String, CaseIterable {
-        case connection = "Forbindelse", models = "AI-modeller", appearance = "Udseende", diagnostics = "Fejlfinding"
+        case connection = "Forbindelse", models = "Modeller", appearance = "Udseende"
+        case chat = "Chat", audio = "Lyd", diagnostics = "Diagnostik"
+
+        var icon: String {
+            switch self {
+            case .connection: "network"
+            case .models: "cpu"
+            case .appearance: "paintpalette"
+            case .chat: "bubble.left"
+            case .audio: "speaker.wave.2"
+            case .diagnostics: "stethoscope"
+            }
+        }
+
+        var detail: String {
+            switch self {
+            case .connection: "Hjem, Tailscale og PC-status"
+            case .models: "Kåre, Core ML og Grok"
+            case .appearance: "Tema, tekst og bevægelse"
+            case .chat: "Værktøjsstatus og genveje"
+            case .audio: "Stemme og haptik"
+            case .diagnostics: "Ping, log og lokale data"
+            }
+        }
     }
     private struct StudioToast: Identifiable {
         let id = UUID()
         let text: String
     }
+    private enum SettingsFollowup { case login, models, privateChat, bots, code, export }
     private enum Space: String, CaseIterable, Identifiable {
         case brain = "Brain", notes = "Notes", gallery = "Gallery", tasks = "Tasks", library = "Library"
         var id: Self { self }
@@ -96,13 +163,14 @@ struct Home: View {
     @State private var model = Model()
     @State private var showLogin = false
     @State private var showSettings = false
-    @State private var settingsCategory = SettingsCategory.connection
+    @State private var settingsFollowup: SettingsFollowup?
+    @State private var recentChats: [ChatTurn] = []
     @State private var pingResult: String?
     @State private var pinging = false
     @AppStorage("studio.images.autoSavePhotos") private var saveImagesToPhotos = false
-    @AppStorage("app.followSystemAppearance") private var followSystemAppearance = true
-    @AppStorage("app.manualDarkMode") private var manualDarkMode = true
-    @Environment(\.colorScheme) private var systemColorScheme
+    @AppStorage("appearance.theme") private var theme = FadedTheme.faded
+    @AppStorage("chat.voiceMode") private var readChatAloud = false
+    @AppStorage("ai.showTools") private var showChatTools = true
     @State private var diagnosticsExport: DiagnosticsExport?
     @State private var diagnosticsError = false
     @State private var media: Media?
@@ -133,6 +201,7 @@ struct Home: View {
     @State private var failedJobDeletion: (id: String, api: LiveAPI)?
     @State private var deletingPCVideo = false
     @AppStorage("app.text.scale") private var textScale = 0.0
+    @Environment(\.dynamicTypeSize) private var videoTypeSize
     @State private var clipGame = ""
     @State private var shortClips = false
     @State private var recentJobsFirst = false
@@ -151,12 +220,10 @@ struct Home: View {
     @State private var confirmClear = false
     @State private var hiddenJobs = Set<String>()
     @AppStorage("spaces.onboarded") private var onboarded = false
-    @AppStorage("spaces.theme") private var theme = "OLED Sort"
     @AppStorage("spaces.font") private var font = "Standard"
     @AppStorage("spaces.motion") private var motion = false
     @AppStorage("spaces.shortcut") private var shortcut = ""
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var backgroundPhase = false
     @AppStorage("video.lastMood") private var selectedVideoMood: Mood = .hype
     @State private var jobFilter = 0
     @AppStorage("qol.confirmVideo") private var confirmVideoStart = true
@@ -172,6 +239,8 @@ struct Home: View {
     @AppStorage("qol.lastSpace") private var lastSpace = Space.brain.rawValue
     @State private var pendingVideoMood: Mood?
 
+    private var palette: FadedPalette { FadedPalette(theme: theme) }
+
     private var visibleJobs: [Job] {
         model.jobs.filter { job in
             !hiddenJobs.contains(job.id) &&
@@ -179,7 +248,6 @@ struct Home: View {
              (jobFilter == 2 && job.status == .completed) || (jobFilter == 3 && job.status == .failed))
         }
     }
-    private var pendingJobs: Int { model.jobs.filter { $0.status.active }.count }
 
     private var homeContent: some View {
         TabView(selection: Binding(get: { selectedModuleTab ?? space.rawValue }, set: { value in
@@ -191,25 +259,34 @@ struct Home: View {
             }
         })) {
             homeTab
+                .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Hjem", systemImage: "house.fill") }.tag(Space.brain.rawValue)
             chatTab
+                .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Chat", systemImage: "bubble.left.fill") }.tag(Space.notes.rawValue)
             videoStudio
+                .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Video", systemImage: "film.fill") }.tag(Space.gallery.rawValue)
-            AgentHub(api: model.api as? LiveAPI, studioUnlocked: $nsfwSessionUnlocked,
+            AgentHub(api: model.api as? LiveAPI, isVisible: space == .tasks && selectedModuleTab == nil,
+                     studioUnlocked: $nsfwSessionUnlocked,
                      onPrivateSessionEnded: showPrivateSessionNotice, onBack: { selectSpace(.brain) })
+                .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Landsby", systemImage: "house.lodge.fill") }.tag(Space.tasks.rawValue)
             CodeWorkspaceView(api: model.api as? LiveAPI, onBack: { selectSpace(.brain) })
+                .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Code Bot", systemImage: "chevron.left.forwardslash.chevron.right") }.tag(Space.library.rawValue)
             if moduleAddress == model.address, let api = model.api as? LiveAPI {
                 ForEach(moduleTabs) { tab in
-                    ModuleTabView(tab: tab, api: api)
+                    ModuleTabView(tab: tab, api: api, onBack: { selectSpace(.brain) })
                         .id(model.address + ":" + tab.id)
+                        .toolbarVisibility(.hidden, for: .tabBar)
                         .tabItem { Label(tab.title, systemImage: tab.kind == "cards" ? "rectangle.on.rectangle" : "info.circle") }
                         .tag("module:" + tab.id)
                 }
             }
         }
+        .toolbarVisibility(.hidden, for: .tabBar)
+        .safeAreaInset(edge: .bottom, spacing: 0) { spacesBar }
         .onChange(of: showJobs) { selectedModuleTab = nil; space = .gallery; jobsFocus = true }
         .onChange(of: showClips) { selectedModuleTab = nil; space = .gallery }
         .task(id: "\(model.isDemo):\(model.address):\(phase == .active)") {
@@ -217,12 +294,14 @@ struct Home: View {
         }
         .onChange(of: space) { _, value in
             selectedModuleTab = nil
+            if value == .brain { refreshDashboard() }
             if rememberLastSpace { lastSpace = value.rawValue }
             if autoRefreshTabs && !model.isDemo { Task { await model.refresh() } }
         }
         .onChange(of: keepScreenAwake) { UIApplication.shared.isIdleTimerDisabled = keepScreenAwake }
         .onAppear {
             if rememberLastSpace, let saved = Space(rawValue: lastSpace) { space = saved }
+            refreshDashboard()
             UIApplication.shared.isIdleTimerDisabled = keepScreenAwake
         }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
@@ -251,8 +330,8 @@ struct Home: View {
 
     private func tabPage<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20, content: content)
-                .padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
+            VStack(alignment: .leading, spacing: FadedSpacing.section, content: content)
+                .padding(FadedSpacing.edge).frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
         .navigationTitle(title)
         .refreshable { await model.refresh(); await loadModuleTabs() }
@@ -261,20 +340,32 @@ struct Home: View {
     private var homeTab: some View {
         NavigationStack {
             tabPage("Hjem") {
+                FadedSignature()
                 header
                 loadingStatus
             }
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Text("FadedAI").font(FadedTypography.title).tracking(-0.5)
+                        .accessibilityAddTraits(.isHeader)
+                }
+                ToolbarItem(placement: .principal) { dashboardConnection }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button("Indstillinger", systemImage: "gearshape") { showSettings = true }
+                        Button("Skift forbindelse", systemImage: "network") { showLogin = true }.disabled(switchDisabled)
                         Button("Hvad kan jeg?", systemImage: "questionmark.circle") { showHelp = true }
                     } label: {
-                        Image(systemName: "ellipsis.circle").frame(minWidth: 44, minHeight: 44)
+                        Image(systemName: "ellipsis")
+                            .frame(width: 40, height: 40)
+                            .background(palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.small))
+                            .overlay { RoundedRectangle(cornerRadius: FadedRadius.small).strokeBorder(palette.border) }
+                            .frame(minWidth: 44, minHeight: 44)
                     }.accessibilityLabel("Flere muligheder")
                 }
             }
-            .navigationDestination(isPresented: $showSettings) { settingsPage }
+            .toolbarBackground(palette.background, for: .navigationBar)
         }
     }
 
@@ -286,6 +377,8 @@ struct Home: View {
                 chatEntry("Billeder", detail: "Generér billeder, eller åbn dit galleri.", icon: "photo") { openStudio(.images) }
                 chatEntry("Mine bots", detail: "Åbn en bot, og prøv dens personlighed og stemme.", icon: "person.2") { showBots = true }
             }
+            .scrollContentBackground(.hidden)
+            .safeAreaInset(edge: .top, spacing: 0) { FadedSignature().padding(.horizontal, FadedSpacing.edge) }
             .navigationTitle("Chat")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -297,16 +390,21 @@ struct Home: View {
 
     private func chatEntry(_ title: String, detail: String, icon: String, work: @escaping () -> Void) -> some View {
         Button(action: work) {
-            HStack(spacing: 12) {
-                Image(systemName: icon).frame(width: 24).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(title).font(.headline)
-                    Text(detail).font(.subheadline).foregroundStyle(.secondary)
+            FadedCard {
+                HStack(spacing: 12) {
+                    Image(systemName: icon).frame(width: 24).accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title).font(FadedTypography.action)
+                        Text(detail).font(.subheadline).foregroundStyle(palette.secondary)
+                    }
+                    Spacer()
+                    Image(systemName: "chevron.right").foregroundStyle(palette.secondary).accessibilityHidden(true)
                 }
-                Spacer()
-                Image(systemName: "chevron.right").foregroundStyle(.secondary).accessibilityHidden(true)
             }.frame(minHeight: 52)
         }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
     }
 
     private func selectSpace(_ destination: Space) {
@@ -316,66 +414,88 @@ struct Home: View {
     }
 
     private var spacesBar: some View {
+        ViewThatFits(in: .horizontal) {
+            tabButtons
+            ScrollView(.horizontal) { tabButtons }.scrollIndicators(.hidden)
+        }
+        .padding(6)
+        .background(palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.media))
+        .overlay { RoundedRectangle(cornerRadius: FadedRadius.media).strokeBorder(palette.border).allowsHitTesting(false) }
+        .frame(maxWidth: 570)
+        .padding(.horizontal, 12).padding(.bottom, 4)
+    }
+
+    private var tabButtons: some View {
         HStack(spacing: 2) {
             ForEach(Space.allCases) { item in
+                let selected = selectedModuleTab == nil && space == item
                 Button {
-                    space = item
+                    if reduceMotion { selectSpace(item) }
+                    else { withAnimation(.spring(response: calmMotion ? 0.70 : 0.35, dampingFraction: 0.8)) { selectSpace(item) } }
                 } label: {
                     VStack(spacing: 3) {
-                        Image(systemName: spaceIcon(item)).font(.title3)
-                        Text(spaceTitle(item)).font(.caption2.bold()).lineLimit(1)
+                        Image(systemName: spaceIcon(item)).font(.body)
+                        Text(spaceTitle(item)).font(.caption2.bold()).fixedSize(horizontal: true, vertical: false)
                     }
-                    .foregroundStyle(space == item ? Color.cyan : Color.primary)
-                    .frame(maxWidth: .infinity, minHeight: 56)
+                    .padding(.horizontal, 4)
+                    .foregroundStyle(selected ? FadedColors.deep : palette.secondary)
+                    .frame(minWidth: 44, maxWidth: .infinity, minHeight: 48)
+                    .background(selected ? palette.lime : Color.clear, in: RoundedRectangle(cornerRadius: FadedRadius.small))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Åbn " + spaceTitle(item))
-                .accessibilityAddTraits(space == item ? .isSelected : [])
+                .accessibilityAddTraits(selected ? .isSelected : [])
             }
+            if moduleAddress == model.address, !moduleTabs.isEmpty { moduleTabMenu }
         }
-        .padding(6)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22))
-        .overlay(RoundedRectangle(cornerRadius: 22).strokeBorder(.white.opacity(0.20)))
-        .padding(.horizontal, 12).padding(.bottom, 4)
+    }
+
+    private var moduleTabMenu: some View {
+        Menu {
+            ForEach(moduleTabs) { tab in
+                Button(tab.title) { selectedModuleTab = "module:" + tab.id }
+            }
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: "ellipsis").font(.body)
+                Text("Mere").font(.caption2.bold())
+            }
+            .frame(minWidth: 44, minHeight: 48)
+            .foregroundStyle(selectedModuleTab != nil ? FadedColors.deep : palette.secondary)
+            .background(selectedModuleTab != nil ? palette.lime : Color.clear, in: RoundedRectangle(cornerRadius: FadedRadius.small))
+        }
+        .accessibilityLabel("Flere faner")
     }
 
     private func spaceTitle(_ item: Space) -> String {
         switch item {
         case .brain: "Hjem"
-        case .notes: "Noter"
+        case .notes: "Chat"
         case .gallery: "Video"
-        case .tasks: "Opgaver"
-        case .library: "Bibliotek"
+        case .tasks: "Landsby"
+        case .library: "Code Bot"
         }
     }
 
     private func spaceIcon(_ item: Space) -> String {
         switch item {
         case .brain: "house.fill"
-        case .notes: "note.text"
+        case .notes: "bubble.left.fill"
         case .gallery: "play.rectangle.fill"
-        case .tasks: "checklist"
-        case .library: "books.vertical.fill"
+        case .tasks: "house.lodge.fill"
+        case .library: "chevron.left.forwardslash.chevron.right"
         }
     }
 
-    private var usesOLED: Bool {
-        theme == "OLED Sort" && (followSystemAppearance ? systemColorScheme == .dark : manualDarkMode)
-    }
-
-    @ViewBuilder private var homeBackground: some View {
-        if usesOLED {
-            Color.black.ignoresSafeArea()
-        } else if motion && !reduceMotion && !calmMotion {
-            LinearGradient(colors: [.blue.opacity(0.12), .clear],
-                           startPoint: backgroundPhase ? .topLeading : .bottomTrailing, endPoint: .center)
-                .ignoresSafeArea()
-                .onAppear {
-                    withAnimation(.easeInOut(duration: 5).repeatForever(autoreverses: true)) {
-                        backgroundPhase.toggle()
-                    }
-                }
+    private var homeBackground: some View {
+        FadedBackground().overlay {
+            if motion && !reduceMotion && phase == .active && theme == .faded && space == .brain {
+                TimelineView(.animation(minimumInterval: 1.0 / 12)) { clock in
+                    let strength = 0.04 + 0.02 * sin(clock.date.timeIntervalSinceReferenceDate / (calmMotion ? 4 : 2))
+                    LinearGradient(colors: [palette.cyan.opacity(strength), .clear], startPoint: .topLeading, endPoint: .center)
+                }.ignoresSafeArea().allowsHitTesting(false).accessibilityHidden(true)
+            }
         }
     }
 
@@ -395,18 +515,21 @@ struct Home: View {
     private var homeFeedback: some View {
         let completed: [String] = model.jobs.filter { $0.status == .completed }.map(\.id)
         let rendering: [String] = model.jobs.filter { $0.status == .rendering }.map(\.id)
+        let failed: [String] = model.jobs.filter { $0.status == .failed }.map(\.id)
         return homeLifecycle
-            .sensoryFeedback(.selection, trigger: appHaptics ? space.rawValue : "")
+            .sensoryFeedback(.impact(weight: .light), trigger: appHaptics ? selectedModuleTab ?? space.rawValue : "")
             .sensoryFeedback(.success, trigger: completed) { old, new in
                 appHaptics && !Set(new).subtracting(old).isEmpty
             }
             .sensoryFeedback(.impact(weight: .light), trigger: rendering) { old, new in
                 appHaptics && !Set(new).subtracting(old).isEmpty
             }
+            .sensoryFeedback(.error, trigger: failed) { old, new in
+                appHaptics && !Set(new).subtracting(old).isEmpty
+            }
     }
 
     private var homePresentation: some View {
-        let scheme: ColorScheme? = followSystemAppearance ? nil : (manualDarkMode ? .dark : .light)
         let design: Font.Design = font == "Afrundet" ? .rounded :
             (font == "Monospace" ? .monospaced : .default)
         return ZStack {
@@ -419,13 +542,13 @@ struct Home: View {
                           exportDiagnostics: exportDiagnostics)
             }
         }
-        .preferredColorScheme(scheme)
         .fontDesign(design)
     }
 
     private var homeStartup: some View {
         homePresentation
         .onAppear {
+            FadedTheme.migrateIfNeeded()
             UIDevice.current.isBatteryMonitoringEnabled = true
             StudioScratch.purgeOnceAtLaunch()
             openShortcut()
@@ -462,6 +585,7 @@ struct Home: View {
             if studioToast?.id == id { studioToast = nil }
         }
         .sheet(isPresented: $showLogin) { LoginView(model: model, close: { showLogin = false }) }
+        .sheet(isPresented: $showSettings, onDismiss: openSettingsFollowup) { settingsSheet }
         .sheet(item: $diagnosticsExport) { DiagnosticsShareSheet(url: $0.url) }
         .alert("Fejlloggen kunne ikke eksporteres", isPresented: $diagnosticsError) {
             Button("OK", role: .cancel) {}
@@ -518,7 +642,8 @@ struct Home: View {
         .sheet(isPresented: $showOfflineStudio) {
             OfflineStudio(api: studioAPI, sessionUnlocked: $nsfwSessionUnlocked,
                           onPrivateSessionEnded: showPrivateSessionNotice,
-                          initialPage: studioPage, initialImagePrompt: studioImagePrompt)
+                          initialPage: studioPage, initialImagePrompt: studioImagePrompt,
+                          ephemeralOnly: studioPage == .chat)
         }
         .sheet(isPresented: $showBots) {
             VillageBotLibrary(api: studioAPI, studioUnlocked: $nsfwSessionUnlocked,
@@ -564,9 +689,14 @@ struct Home: View {
         homePolling
             .sheet(item: $media) { Preview(media: $0) }
             .sheet(isPresented: $showChat, onDismiss: refreshAfterChat) { chatSheet }
+            .environment(\.fadedPalette, palette)
+            .preferredColorScheme(theme.colorScheme)
+            .tint(palette.isDark ? palette.lime : palette.text)
+            .foregroundStyle(palette.text)
     }
 
     private func refreshAfterChat() {
+        refreshDashboard()
         if let prompt = imagePromptAfterChat {
             imagePromptAfterChat = nil
             openStudio(.images, prompt: prompt)
@@ -607,26 +737,23 @@ struct Home: View {
     }
 
     @ViewBuilder private var header: some View {
-        Text("FadedAI").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-        if !model.isDemo && showConnectionBanner {
-            connectionIndicator
-        }
-        action("Skift forbindelse") { showLogin = true }.disabled(switchDisabled)
-        action("Chat") { selectSpace(.notes) }
-            .disabled(model.busy)
         if model.isDemo {
-            Text("Demotilstand · Kun testdata").font(.headline)
+            FadedCard(accent: palette.purple) { Text("Demo · Kun testdata").font(FadedTypography.action) }
         }
-        action(pendingJobs == 0 ? "Video Studio" : "Video Studio · \(pendingJobs) aktive") { selectSpace(.gallery) }
-        action("Landsbyen") { selectSpace(.tasks) }
-        action("Gemte videoer") { reloadSavedVideos(); showSavedVideos = true }
+        dashboardActiveJob
+        FadedSectionLabel("Hurtige handlinger")
+        quickActions
+        dashboardRecentChats
+        dashboardVideos
         if !onboarded {
-            VStack(alignment: .leading, spacing: 8) {
-                heading("Kom godt i gang")
-                Label("1. Forbind til PC", systemImage: "desktopcomputer")
-                Label("2. Vælg klip", systemImage: "film")
-                Label("3. Chat med din AI", systemImage: "bubble.left")
-                action("Forstået") { onboarded = true }
+            FadedCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    heading("Kom godt i gang")
+                    Label("1. Forbind til PC", systemImage: "desktopcomputer")
+                    Label("2. Vælg klip", systemImage: "film")
+                    Label("3. Chat med din AI", systemImage: "bubble.left")
+                    FadedSecondaryButton("Klar") { onboarded = true }
+                }
             }
         }
         if let error = model.error {
@@ -643,6 +770,102 @@ struct Home: View {
                 }.disabled(switchDisabled)
             }
         }
+    }
+
+    @ViewBuilder private var dashboardConnection: some View {
+        if showConnectionBanner && !model.isDemo {
+            let status = model.connected ? "PC · \(model.address)" : "Telefon"
+            HStack(spacing: 6) {
+                Circle().fill(model.connected ? palette.cyan : palette.green).frame(width: 7, height: 7)
+                    .accessibilityHidden(true)
+                Text(status).font(.caption.monospacedDigit()).lineLimit(1)
+            }
+            .foregroundStyle(palette.secondary)
+            .accessibilityLabel("Kører på: \(status)")
+        }
+    }
+
+    @ViewBuilder private var dashboardActiveJob: some View {
+        if let job = model.jobs.first(where: { $0.status.active }) {
+            FadedSectionLabel("I gang")
+            FadedCard(accent: palette.cyan) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("\(job.mood.title) · \(job.status.title)").font(FadedTypography.title)
+                    FadedProgress(value: job.progress)
+                    FadedSecondaryButton("Følg video", icon: "film") {
+                        selectSpace(.gallery)
+                        showJobs += 1
+                    }
+                }
+                .padding(8)
+                .background(LinearGradient(colors: [palette.lime.opacity(0.13), palette.cyan.opacity(0.12)],
+                                           startPoint: .topLeading, endPoint: .bottomTrailing),
+                            in: RoundedRectangle(cornerRadius: FadedRadius.small))
+            }
+        }
+    }
+
+    private var quickActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 8) { quickActionCards }
+            VStack(spacing: 8) { quickActionCards }
+        }
+    }
+
+    @ViewBuilder private var quickActionCards: some View {
+        quickAction("Ny chat", detail: "Dit AI-hold", icon: "message", accent: palette.green) { selectSpace(.notes) }
+        quickAction("Ny video", detail: "Video Studio", icon: "video", accent: palette.cyan) { selectSpace(.gallery) }
+        quickAction("Ny bot", detail: "Byg din makker", icon: "person.crop.circle.badge.plus", accent: palette.purple) { showBots = true }
+    }
+
+    private func quickAction(_ title: String, detail: String, icon: String, accent: Color,
+                             action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            FadedCard {
+                VStack(alignment: .leading, spacing: 6) {
+                    Image(systemName: icon).foregroundStyle(FadedColors.deep).frame(width: 32, height: 32)
+                        .background(accent, in: Circle()).accessibilityHidden(true)
+                    Text(title).font(FadedTypography.action).fixedSize(horizontal: true, vertical: false)
+                    Text(detail).font(.caption).foregroundStyle(palette.secondary)
+                }
+            }
+        }.buttonStyle(.plain)
+    }
+
+    @ViewBuilder private var dashboardRecentChats: some View {
+        if !recentChats.isEmpty {
+            FadedSectionLabel("Sidste chats")
+            ForEach(recentChats) { turn in
+                FadedCard(accent: dashboardSourceColor(turn.source)) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(turn.prompt).font(FadedTypography.body).lineLimit(2)
+                        if let date = turn.createdAt { Text(date, format: .dateTime.day().month().hour().minute()) }
+                    }.foregroundStyle(palette.text)
+                }
+            }
+        }
+    }
+
+    private func dashboardSourceColor(_ source: String?) -> Color {
+        if source == GrokAPI.sourceLabel { return palette.purple }
+        if source == "PC" { return palette.cyan }
+        return palette.green
+    }
+
+    private var dashboardVideos: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            FadedSectionLabel("Gemte videoer")
+            ForEach(savedVideos.prefix(3), id: \.self) { file in
+                Button { media = Media(url: file, demo: false) } label: { DashboardVideoCard(file: file) }
+                    .buttonStyle(.plain)
+            }
+            FadedSecondaryButton("Åbn videobibliotek", icon: "film.stack") { reloadSavedVideos(); showSavedVideos = true }
+        }
+    }
+
+    private func refreshDashboard() {
+        reloadSavedVideos()
+        recentChats = Array(ChatArchive.turns().prefix(3))
     }
 
     @ViewBuilder private var loadingStatus: some View {
@@ -662,27 +885,72 @@ struct Home: View {
         }.font(.subheadline)
     }
 
-    private var settingsPage: some View {
-        Form {
-            Picker("Kategori", selection: $settingsCategory) {
-                ForEach(SettingsCategory.allCases, id: \.self) { category in
-                    Text(category.rawValue).tag(category)
-                }
+    private var settingsSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: FadedSpacing.section) {
+                    ForEach(SettingsCategory.allCases, id: \.self) { category in
+                        NavigationLink { settingsPage(category) } label: { settingsRow(category) }
+                            .buttonStyle(.plain)
+                    }
+                }.padding(FadedSpacing.edge)
             }
-            switch settingsCategory {
+            .background(FadedBackground())
+            .navigationTitle("Indstillinger")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("Luk") { showSettings = false } }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(palette.background)
+    }
+
+    private func settingsRow(_ category: SettingsCategory) -> some View {
+        let accent: Color = switch category {
+        case .connection: palette.cyan
+        case .models: palette.purple
+        case .appearance: palette.lime
+        case .chat: palette.green
+        case .audio: palette.coral
+        case .diagnostics: palette.secondary
+        }
+        return FadedCard {
+            HStack(spacing: 12) {
+                Image(systemName: category.icon).foregroundStyle(FadedColors.deep)
+                    .frame(width: 34, height: 34).background(accent, in: Circle()).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    FadedSectionLabel(category.rawValue)
+                    Text(category.detail).font(.subheadline).foregroundStyle(palette.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").foregroundStyle(palette.secondary).accessibilityHidden(true)
+            }
+        }
+    }
+
+    private func settingsPage(_ category: SettingsCategory) -> some View {
+        Form {
+            switch category {
             case .connection:
                 connectionIndicator
-                Button("Skift forbindelse") { showLogin = true }.disabled(switchDisabled)
+                Button("Skift forbindelse") { closeSettings(for: .login) }.disabled(switchDisabled)
                 Toggle("Vis forbindelsesbanner", isOn: $showConnectionBanner)
                 Toggle("Opdatér ved faneskift", isOn: $autoRefreshTabs)
             case .models:
-                Button("Lokale modeller") { showPhoneModels = true }
-                Button("Privat chat (NSFW)") { openStudio(.chat) }
-                Button("Mine bots") { showBots = true }
-                Button("Code Bot og Agent Workspace") { showCodeWorkspace = true }
+                Button("Lokale modeller") { closeSettings(for: .models) }
+                Button("Privat chat (NSFW)") { closeSettings(for: .privateChat) }
+                Button("Mine bots") { closeSettings(for: .bots) }
+                Button("Code Bot og Agent Workspace") { closeSettings(for: .code) }
                 CloudModelSettings()
             case .appearance:
                 appearanceSettings
+            case .chat:
+                Toggle("Vis værktøjsstatus", isOn: $showChatTools)
+                Button("Åbn AI-chat", systemImage: "bubble.left") { showSettings = false; selectSpace(.notes) }
+            case .audio:
+                Toggle("Læs chatsvar op", isOn: $readChatAloud)
+                Toggle("Haptisk feedback", isOn: $appHaptics)
+                Text("Vælg stemme i chatten eller på din bots profil.").font(.callout).foregroundStyle(palette.secondary)
             case .diagnostics:
                 Button(pinging ? "Tester PC…" : "Ping PC", systemImage: "network") {
                     Task {
@@ -693,7 +961,7 @@ struct Home: View {
                 }.disabled(pinging)
                 if let pingResult { Text(pingResult).font(.caption).foregroundStyle(.secondary) }
                 ResourceMonitor()
-                Button("Eksportér fejllog", systemImage: "square.and.arrow.up", action: exportDiagnostics)
+                Button("Eksportér fejllog", systemImage: "square.and.arrow.up") { closeSettings(for: .export) }
                 Toggle("Gem genererede billeder i Fotos", isOn: $saveImagesToPhotos)
                 Toggle("Bekræft før video startes", isOn: $confirmVideoStart)
                 Button("Ryd midlertidige previews") {
@@ -703,22 +971,39 @@ struct Home: View {
                 NukeLocalDataButton()
             }
         }
-        .navigationTitle("Indstillinger")
+        .scrollContentBackground(.hidden)
+        .background(FadedBackground())
+        .navigationTitle(category.rawValue)
+    }
+
+    private func closeSettings(for destination: SettingsFollowup) {
+        settingsFollowup = destination
+        showSettings = false
+    }
+
+    private func openSettingsFollowup() {
+        guard let destination = settingsFollowup else { return }
+        settingsFollowup = nil
+        switch destination {
+        case .login: showLogin = true
+        case .models: showPhoneModels = true
+        case .privateChat: openStudio(.chat)
+        case .bots: showBots = true
+        case .code: showCodeWorkspace = true
+        case .export: exportDiagnostics()
+        }
     }
 
     @ViewBuilder private var appearanceSettings: some View {
-        Toggle("Følg iOS’ udseende", isOn: $followSystemAppearance)
-        if !followSystemAppearance { Toggle("Mørk tilstand", isOn: $manualDarkMode) }
-        Toggle("Brug OLED-sort baggrund i mørk tilstand", isOn: Binding(
-            get: { theme == "OLED Sort" }, set: { theme = $0 ? "OLED Sort" : "System" }
-        ))
+        Picker("Tema", selection: $theme) {
+            ForEach(FadedTheme.allCases) { choice in Text(choice.rawValue).tag(choice) }
+        }
         textSizeSetting
         Picker("Skrift", selection: $font) {
             ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
         }
         Toggle("Bevægelse i baggrunden", isOn: $motion)
         Toggle("Ekstra rolig bevægelse", isOn: $calmMotion)
-        Toggle("Haptisk feedback", isOn: $appHaptics)
         Toggle("Husk seneste fane", isOn: $rememberLastSpace)
         Toggle("Hold skærmen vågen", isOn: $keepScreenAwake)
         Toggle("Kompakte klipkort", isOn: $compactClipCards)
@@ -803,6 +1088,7 @@ struct Home: View {
             .padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
         .navigationTitle("Video Studio")
+        .background { FadedBackground(variant: .standard) }
         .toolbar { videoToolbar(scroll) }
         .safeAreaInset(edge: .bottom) { videoBottomBar(scroll) }
         .refreshable { await refreshVideoStudio() }
@@ -830,15 +1116,15 @@ struct Home: View {
         if !model.selected.isEmpty {
             VStack(spacing: 4) {
                 if selectedGameFolder != nil {
-                    Button("Luk mappe", systemImage: "chevron.up") {
+                    FadedSecondaryButton("Luk mappe", icon: "chevron.up") {
                         closeVideoFolder(andShow: "recipe", scroll: scroll)
-                    }.frame(minHeight: 44)
+                    }
                 }
                 videoStartControls
             }
             .padding(.horizontal, 20).padding(.vertical, 8)
             .frame(maxWidth: .infinity)
-            .background(.regularMaterial)
+            .background(palette.raised.opacity(0.96))
         }
     }
 
@@ -849,13 +1135,13 @@ struct Home: View {
 
     private var videoStudioHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("VIDEO AGENT", systemImage: "circle.fill")
-                .font(.caption.bold()).tracking(3).foregroundStyle(.cyan)
-            Text("Skab noget, der rammer.")
-                .font(.largeTitle.weight(.light)).accessibilityAddTraits(.isHeader)
+            FadedSignature()
+            FadedSectionLabel("Video Studio")
+            Text("Skab noget, der rammer.").font(.largeTitle.bold())
+                .foregroundStyle(palette.text).accessibilityAddTraits(.isHeader)
             Text("Vælg dine klip. Din agent klarer resten.")
-                .font(.title3).foregroundStyle(.secondary)
-            action(model.isDemo ? "Opdatér testklip" : "Opdatér spilmapper") {
+                .font(.body).foregroundStyle(palette.secondary)
+            FadedSecondaryButton(model.isDemo ? "Opdatér testklip" : "Opdatér spilmapper", icon: "arrow.clockwise") {
                 Task { await refreshVideoStudio() }
             }.disabled(switchDisabled || catalogLoading != nil || pageLoading != nil)
         }
@@ -863,41 +1149,47 @@ struct Home: View {
 
     @ViewBuilder private var videoFeedback: some View {
         if model.selected.isEmpty, let message = videoStartNotice ?? model.errorTitle {
-            Text(message).font(.headline).accessibilityFocused($errorFocus)
+            FadedCard(accent: palette.coral) {
+                Label(message, systemImage: "exclamationmark.circle").font(.headline)
+                    .accessibilityFocused($errorFocus)
+            }
         }
     }
 
     private func clipSection(onDone: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            heading("Vælg klip")
-            Text("\(model.selected.count) valgt af maks. \(model.capabilities?.limit ?? 10)")
-                .font(.subheadline).foregroundStyle(.secondary)
-            if !model.selected.isEmpty {
-                let seconds = model.clips.filter { model.selected.contains($0.id) }.reduce(0) { $0 + $1.duration_seconds }
-                Text("Valgt spilletid · \(durationLabel(seconds))").font(.caption.bold()).foregroundStyle(.cyan)
-                Button("Ryd klipvalg") { model.clearSelection() }
-                    .frame(minHeight: 44).disabled(model.busy)
-            }
-            if model.isDemo {
-                clipFolder(id: "demo", title: "Testklip", subtitle: nil, onDone: onDone)
-            } else if catalogLoading != nil || (videoFolderServer != model.address && folderNotice == nil) {
-                LoadingSkeleton(label: "Henter spilmapper…")
-            } else if videoFolderServer == model.address {
-                if legacyClipCatalog {
-                    clipFolder(id: "legacy", title: "PC’ens V1-klipliste", subtitle: "Ældre server uden spilmapper", onDone: onDone)
-                } else {
-                    ForEach(clipRoots) { root in
-                        let subtitle = root.indexing || !root.ready ? "PC’en indekserer klip" : "\(root.file_count) filer på PC’en"
-                        clipFolder(id: root.id, title: root.label, subtitle: subtitle, onDone: onDone)
-                    }
+        FadedCard {
+            VStack(alignment: .leading, spacing: 12) {
+                FadedSectionLabel("Vælg klip")
+                Text("\(model.selected.count) valgt af maks. \(model.capabilities?.limit ?? 10)")
+                    .font(.subheadline).foregroundStyle(palette.secondary)
+                if !model.selected.isEmpty {
+                    let seconds = model.clips.filter { model.selected.contains($0.id) }.reduce(0) { $0 + $1.duration_seconds }
+                    Text("Valgt spilletid · \(durationLabel(seconds))").font(.caption.bold())
+                        .foregroundStyle(palette.isDark ? palette.lime : palette.text)
+                    FadedSecondaryButton("Ryd klipvalg", icon: "xmark") { model.clearSelection() }.disabled(model.busy)
                 }
+                videoFolders(onDone: onDone)
+                if let folderNotice { Text(folderNotice).font(.caption).foregroundStyle(palette.secondary) }
             }
-            if let folderNotice { Text(folderNotice).font(.caption).foregroundStyle(.secondary) }
         }
         .id("clips")
-        .padding(16)
-        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 22))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(.cyan.opacity(0.18)))
+    }
+
+    @ViewBuilder private func videoFolders(onDone: @escaping () -> Void) -> some View {
+        if model.isDemo {
+            clipFolder(id: "demo", title: "Testklip", subtitle: nil, onDone: onDone)
+        } else if catalogLoading != nil || (videoFolderServer != model.address && folderNotice == nil) {
+            LoadingSkeleton(label: "Henter spilmapper…")
+        } else if videoFolderServer == model.address {
+            if legacyClipCatalog {
+                clipFolder(id: "legacy", title: "PC’ens V1-klipliste", subtitle: "Ældre server uden spilmapper", onDone: onDone)
+            } else {
+                ForEach(clipRoots) { root in
+                    let subtitle = root.indexing || !root.ready ? "PC’en indekserer klip" : "\(root.file_count) filer på PC’en"
+                    clipFolder(id: root.id, title: root.label, subtitle: subtitle, onDone: onDone)
+                }
+            }
+        }
     }
 
     private func clipFolder(id: String, title: String, subtitle: String?, onDone: @escaping () -> Void) -> some View {
@@ -910,13 +1202,13 @@ struct Home: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Label(title, systemImage: expanded ? "folder.fill" : "folder")
                             .font(.headline)
-                        if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+                        if let subtitle { Text(subtitle).font(.caption).foregroundStyle(palette.secondary) }
                     }
                     Spacer()
                     Image(systemName: expanded ? "chevron.up" : "chevron.down").accessibilityHidden(true)
                 }.frame(minHeight: 48).contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(FadedButtonStyle(kind: .secondary))
             .accessibilityValue(expanded ? "Åben" : "Lukket")
             if expanded {
                 if id == "demo" {
@@ -927,11 +1219,11 @@ struct Home: View {
                     clipList(clips, onDone: onDone)
                 }
                 if let notice = folderPageNotices[id] {
-                    Text(notice).font(.caption).foregroundStyle(.secondary)
-                    Button("Opdatér mappen") {
+                    Text(notice).font(.caption).foregroundStyle(palette.secondary)
+                    FadedSecondaryButton("Opdatér mappen", icon: "arrow.clockwise") {
                         guard let server = videoFolderScope else { return }
                         Task { await loadFolderPage(id, for: server, force: true) }
-                    }.frame(minHeight: 44)
+                    }
                 }
             }
         }
@@ -952,47 +1244,67 @@ struct Home: View {
                 Text("Datoen kommer fra tidligere job med klippet.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            HStack {
-                Button("Vælg synlige") { model.select(filtered) }
-                    .disabled(model.busy || filtered.isEmpty)
-                Spacer()
-                Button("Færdig med klipvalg", action: onDone)
-            }.frame(minHeight: 44)
-            if clips.isEmpty { Text("Ingen klip at vise i denne mappe.") }
-            if !clips.isEmpty && filtered.isEmpty { Text("Ingen klip matcher filteret.") }
-            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible())], spacing: 14) {
-                ForEach(filtered) { clip in
-                    let selected = model.selected.contains(clip.id)
-                    Button { model.toggle(clip) } label: {
-                        VStack(alignment: .leading, spacing: 8) {
-                            ZStack(alignment: .topTrailing) {
-                                LinearGradient(colors: [clipColor(clip).opacity(0.38), .black.opacity(0.82)],
-                                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                                    .font(.title2).foregroundStyle(selected ? .cyan : .white.opacity(0.75)).padding(8)
-                                if showClipDurations {
-                                    Text(durationLabel(clip.duration_seconds))
-                                        .font(.caption.monospacedDigit()).padding(5)
-                                        .background(.black.opacity(0.72), in: Capsule()).padding(8)
-                                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-                                }
-                            }
-                            .frame(height: compactClipCards ? 76 : 105)
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
-                            .overlay(RoundedRectangle(cornerRadius: 14)
-                                .stroke(selected ? Color.cyan : Color.white.opacity(0.12), lineWidth: selected ? 3 : 1))
-                            Text(clip.name).font(.subheadline.bold()).lineLimit(1)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("\(clip.name), \(durationLabel(clip.duration_seconds))")
-                    .accessibilityValue(selected ? "Valgt" : "Ikke valgt")
-                    .accessibilityAddTraits(selected ? .isSelected : [])
-                    .disabled(model.busy || (!selected && model.selected.count >= (model.capabilities?.limit ?? 0)))
+            ViewThatFits(in: .horizontal) {
+                HStack { clipListActions(filtered, onDone: onDone) }
+                VStack(alignment: .leading) { clipListActions(filtered, onDone: onDone) }
+            }
+            if filtered.isEmpty {
+                FadedEmptyState(icon: "film", title: clips.isEmpty ? "Mappen er tom" : "Ingen klip matcher",
+                                detail: clips.isEmpty ? "PC’en har ingen klip klar i denne mappe." : "Prøv et andet filnavn eller filter.")
+            } else {
+                Text("PC’en sender klipnavne og varighed.").font(.caption).foregroundStyle(palette.secondary)
+                LazyVGrid(columns: videoClipColumns, spacing: 12) {
+                    ForEach(filtered) { clip in videoClipCard(clip) }
                 }
             }
         }
+    }
+
+    @ViewBuilder private func clipListActions(_ clips: [Clip], onDone: @escaping () -> Void) -> some View {
+        FadedSecondaryButton("Vælg synlige", icon: "checkmark.circle") { model.select(clips) }
+            .disabled(model.busy || clips.isEmpty)
+        FadedSecondaryButton("Færdig med klipvalg", icon: "chevron.up", action: onDone)
+    }
+
+    private var videoClipColumns: [GridItem] {
+        videoTypeSize.isAccessibilitySize ? [GridItem(.flexible())] : [GridItem(.adaptive(minimum: 132, maximum: 260), spacing: 12)]
+    }
+
+    private func videoClipCard(_ clip: Clip) -> some View {
+        let selected = model.selected.contains(clip.id)
+        let shape = RoundedRectangle(cornerRadius: 14)
+        return Button { model.toggle(clip) } label: {
+            ZStack(alignment: .bottomLeading) {
+                LinearGradient(colors: [clipColor(clip).opacity(0.58), Color.black.opacity(0.88)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: "film").font(.title2.weight(.light)).foregroundStyle(.white.opacity(0.72))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity).accessibilityHidden(true)
+                LinearGradient(colors: [.clear, .black.opacity(0.9)], startPoint: .center, endPoint: .bottom)
+                Text(clip.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.96))
+                    .lineLimit(2).padding(10)
+            }
+            .frame(minHeight: compactClipCards ? 86 : 116)
+            .overlay(alignment: .topLeading) {
+                if selected {
+                    Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(palette.lime)
+                        .padding(6).background(.black.opacity(0.9), in: Circle()).padding(8)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if showClipDurations {
+                    Text(durationLabel(clip.duration_seconds)).font(.caption.monospacedDigit())
+                        .foregroundStyle(.white).padding(5).background(.black.opacity(0.9), in: Capsule()).padding(8)
+                }
+            }
+            .clipShape(shape)
+            .overlay { shape.strokeBorder(selected ? palette.lime : palette.border, lineWidth: selected ? 2 : 1) }
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(clip.name), \(durationLabel(clip.duration_seconds))")
+        .accessibilityValue(selected ? "Valgt" : "Ikke valgt")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .disabled(model.busy || (!selected && model.selected.count >= (model.capabilities?.limit ?? 0)))
     }
 
     private func durationLabel(_ seconds: Double) -> String {
@@ -1014,7 +1326,7 @@ struct Home: View {
     }
 
     private func clipColor(_ clip: Clip) -> Color {
-        let colors: [Color] = [.green, .purple, .blue, .orange, .pink, .teal]
+        let colors = [palette.green, palette.purple, palette.cyan, palette.coral]
         return colors[Int(clip.id.hashValue.magnitude % UInt(colors.count))]
     }
 
@@ -1144,41 +1456,36 @@ struct Home: View {
     private var videoStartControls: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let message = videoStartNotice ?? model.errorTitle ?? videoStartBlocker {
-                Text(message).font(.caption).foregroundStyle(.secondary)
+                Label(message, systemImage: "info.circle").font(.caption).foregroundStyle(palette.secondary)
             }
-            Button {
+            FadedPrimaryButton(model.busy ? "Sender videojob…" : "Start videomagi · \(model.selected.count) klip",
+                               icon: "play.fill") {
                 guard let mood = availableVideoMood else { return }
                 if confirmVideoStart { pendingVideoMood = mood }
                 else { startVideo(mood) }
-            } label: {
-                Label(model.busy ? "Sender videojob…" : "Start videomagi · \(model.selected.count) klip", systemImage: "sparkles")
-                    .font(.headline).frame(maxWidth: .infinity, minHeight: 52)
             }
-            .buttonStyle(.borderedProminent).tint(.cyan)
             .disabled(!model.canSubmit || videoStartBlocker != nil)
         }
         .frame(maxWidth: 640)
     }
 
     private var moodSection: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("OPSKRIFT").font(.caption.bold()).tracking(4).foregroundStyle(.secondary)
-            Text("Vælg din energi").font(.title2.weight(.light))
+        FadedCard {
+            VStack(alignment: .leading, spacing: 12) { videoRecipeContents }
+        }
+    }
+
+    @ViewBuilder private var videoRecipeContents: some View {
+            FadedSectionLabel("Opskrift")
+            Text("Vælg din energi").font(FadedTypography.title).foregroundStyle(palette.text)
             if let caps = model.capabilities {
-                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                    ForEach(Mood.allCases) { mood in
-                        if caps.moods.contains(mood) {
-                            Button {
-                                selectedVideoMood = mood
-                            } label: {
-                                Text(mood.title).font(.headline)
-                                    .frame(maxWidth: .infinity, minHeight: 56)
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .tint(availableVideoMood == mood ? .cyan : Color.white.opacity(0.08))
-                            .accessibilityAddTraits(availableVideoMood == mood ? .isSelected : [])
-                            .disabled(model.busy)
-                        }
+                let columns = videoTypeSize.isAccessibilitySize ? [GridItem(.flexible(), alignment: .leading)] :
+                    [GridItem(.adaptive(minimum: 118), alignment: .leading)]
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+                    ForEach(Mood.allCases.filter(caps.moods.contains)) { mood in
+                        FadedChip(mood.title, accent: palette.lime, selected: availableVideoMood == mood) {
+                            selectedVideoMood = mood
+                        }.disabled(model.busy)
                     }
                 }
             }
@@ -1187,12 +1494,14 @@ struct Home: View {
                     get: { model.options.commentary != false },
                     set: { model.options.commentary = $0 ? nil : false }
                 ))
-                .disabled(model.busy)
+                .tint(palette.lime).disabled(model.busy)
                 Text(model.options.commentary == false ? "Video uden tale og undertekster" : "Engelsk reaktion med stemme og undertekster")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.caption).foregroundStyle(palette.secondary)
             }
             if let caps = model.capabilities {
-                if model.blocked { Text("PC’en er ikke klar til at lave videoer.").font(.headline) }
+                Toggle("Fjern støj", isOn: Binding(get: { model.options.denoise }, set: { model.options.denoise = $0 }))
+                    .tint(palette.lime).disabled(model.busy)
+                if model.blocked { Label("PC’en er ikke klar til at lave videoer.", systemImage: "exclamationmark.circle").font(.headline) }
                 if !caps.dependencies.isEmpty {
                     DisclosureGroup("Status på PC’en") {
                         ForEach(caps.dependencies, id: \.name) { dependency in
@@ -1203,26 +1512,15 @@ struct Home: View {
                 if caps.moods.isEmpty { Text("PC’en tilbyder ingen stilarter lige nu.") }
                 advanced(Binding(get: { model.options }, set: { model.options = $0 }))
                     .disabled(model.busy)
-                ZStack {
-                    LinearGradient(colors: [.green.opacity(0.18), .blue.opacity(0.12), .black],
-                                   startPoint: .top, endPoint: .bottom)
-                    VStack(spacing: 10) {
-                        Image(systemName: "play.circle").font(.system(size: 52, weight: .light))
-                        Text(model.options.crop_mode == .auto ? "9:16 · Auto crop" : "9:16 · Midten")
-                            .font(.caption.monospaced())
-                    }
-                }
-                .frame(height: 170).clipShape(RoundedRectangle(cornerRadius: 18))
+                Label(model.options.crop_mode == .auto ? "9:16 · Automatisk beskæring" : "9:16 · Beskær til midten",
+                      systemImage: "aspectratio")
+                    .font(.caption.monospaced()).foregroundStyle(palette.secondary)
             }
-        }
-        .padding(16)
-        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 22))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(.cyan.opacity(0.18)))
     }
 
     private var jobSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            heading("3. Følg dine videoer").accessibilityFocused($jobsFocus)
+            FadedSectionLabel("Dine videojobs").accessibilityFocused($jobsFocus)
             Picker("Vis jobs", selection: $jobFilter) {
                 Text("Alle").tag(0)
                 Text("Aktive").tag(1)
@@ -1230,88 +1528,118 @@ struct Home: View {
                 Text("Fejl").tag(3)
             }.pickerStyle(.segmented)
             if model.uncertain {
-                Text("Starten blev ikke bekræftet. Tjek joblisten for at se, om dine klip allerede er i gang.")
-                action("Jeg har tjekket listen") {
-                    Task { await model.acknowledgeAfterReview() }
-                }.disabled(switchDisabled)
+                FadedCard(accent: palette.coral) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Starten blev ikke bekræftet. Tjek joblisten for at se, om dine klip allerede er i gang.")
+                        FadedSecondaryButton("Jeg har tjekket listen", icon: "checkmark") {
+                            Task { await model.acknowledgeAfterReview() }
+                        }.disabled(switchDisabled)
+                    }
+                }
             }
-            if visibleJobs.isEmpty { Text("Ingen videoer endnu.") }
-            if let saveVideoNotice { Text(saveVideoNotice) }
+            if visibleJobs.isEmpty {
+                FadedEmptyState(icon: "film", title: "Ingen videoer at vise", detail: "Job vises her, når du starter en video.")
+            }
+            if let saveVideoNotice { Text(saveVideoNotice).foregroundStyle(palette.secondary) }
             ForEach(visibleJobs.sorted { $0.created_at > $1.created_at }) { job in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(model.clips.first { $0.id == job.clip_id }?.name ?? "Klip")
-                        .font(.headline).accessibilityAddTraits(.isHeader)
-                    Text(job.mood.title + " · " + job.status.title)
-                    Text(job.message)
-                    if showJobDetails {
-                        Text("\(job.id) · \(job.progress.formatted(.percent.precision(.fractionLength(0))))")
-                            .font(.caption.monospaced()).foregroundStyle(.secondary)
-                    }
-                    if job.status == .failed {
-                        action("Prøv igen") { Task { await model.retry(job) } }
-                            .disabled(!model.canRetry(job))
-                        Button("Skjul fejlet job på telefonen", role: .destructive) {
-                            hiddenJobs.insert(job.id)
-                        }.frame(minHeight: 44)
-                        if !model.isDemo, let api = model.api as? LiveAPI {
-                            Button("Slet fejlet job fra PC’en", role: .destructive) {
-                                failedJobDeletion = (job.id, api)
-                            }.frame(minHeight: 44)
-                        }
-                    }
-                    if job.status.active {
-                        let progress = min(1, max(0, job.progress))
-                        ProgressView(value: progress)
-                            .accessibilityLabel("Fremskridt")
-                            .accessibilityValue(progress.formatted(.percent.precision(.fractionLength(0))))
-                        if model.waitingForStop.contains(job.id) {
-                            Text("Venter på, at jobbet stopper.")
-                        } else if model.capabilities?.features.cancel == true {
-                            action(model.cancelling.contains(job.id) ? "Beder PC’en stoppe…" : "Stop job") {
-                                Task { await model.cancel(job) }
-                            }.disabled(model.cancelling.contains(job.id) || model.busy || model.refreshing)
-                        }
-                    }
-                    if job.status == .completed, job.output_url != nil {
-                        action(model.isDemo ? "Se testvideo" : "Se video") {
-                            Task {
-                                let demo = model.isDemo
-                                if let url = await model.video(job) { media = Media(url: url, demo: demo) }
-                            }
-                        }.disabled(model.mediaLoading)
-                        if !model.isDemo {
-                            action("Gem på telefonen") { Task { await saveVideo(job) } }.disabled(model.mediaLoading)
-                        }
-                        if !model.isDemo, let api = model.api as? LiveAPI {
-                            Button("Slet redigeret video fra PC’en", role: .destructive) {
-                                pcDeletion = (job.id, api)
-                            }
-                            .frame(minHeight: 44)
-                            .disabled(deletingPCVideo || model.mediaLoading)
-                        }
-                        action("Del job-resultat") {
-                            Task {
-                                if let url = await model.video(job) { shareResult = Media(url: url, demo: model.isDemo) }
-                            }
-                        }.disabled(model.mediaLoading)
-                    }
-                    if !job.warnings.isEmpty || job.error != nil {
-                        DisclosureGroup("Detaljer om jobbet") {
-                            ForEach(Array(job.warnings.enumerated()), id: \.offset) {
-                                Text($0.element)
-                            }
-                            if let problem = job.error { Text(problem.message) }
-                        }
-                    }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14).background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+                videoJobCard(job)
             }
-        }.id("jobs")
-            .sheet(item: $shareResult) { result in
-                ShareLink(item: result.url) {
-                    Label("Del video", systemImage: "square.and.arrow.up").frame(minHeight: 48)
-                }.padding()
+        }
+        .sheet(item: $shareResult) { result in
+            ShareLink(item: result.url) {
+                Label("Del video", systemImage: "square.and.arrow.up").frame(minHeight: 48)
+            }.buttonStyle(FadedButtonStyle(kind: .secondary)).padding()
+        }
+    }
+
+    private func videoJobCard(_ job: Job) -> some View {
+        let progress = job.status == .completed ? 1 : min(1, max(0, job.progress))
+        let accent = videoJobAccent(job.status)
+        return FadedCard(accent: accent) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(model.clips.first { $0.id == job.clip_id }?.name ?? "Klip")
+                    .font(FadedTypography.section).accessibilityAddTraits(.isHeader)
+                Label(job.status.title + " · " + job.mood.title, systemImage: videoJobIcon(job.status))
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(palette.isDark ? accent : palette.text)
+                Text(job.message).font(.subheadline).foregroundStyle(palette.secondary)
+                if job.status.active || job.status == .completed || job.status == .failed {
+                    FadedProgress(value: progress, failed: job.status == .failed)
+                }
+                if showJobDetails {
+                    Text("\(job.id) · \(progress.formatted(.percent.precision(.fractionLength(0))))")
+                        .font(.caption.monospaced()).foregroundStyle(palette.secondary)
+                }
+                videoJobActions(job)
+                if !job.warnings.isEmpty || job.error != nil {
+                    DisclosureGroup("Detaljer om jobbet") {
+                        ForEach(Array(job.warnings.enumerated()), id: \.offset) { Text($0.element) }
+                        if let problem = job.error { Text(problem.message) }
+                    }
+                }
             }
+        }.modifier(FadedJobFeedback(status: job.status))
+    }
+
+    private func videoJobAccent(_ status: Stage) -> Color {
+        switch status {
+        case .completed: palette.green
+        case .failed: palette.coral
+        case .cancelled: palette.muted
+        default: palette.cyan
+        }
+    }
+
+    private func videoJobIcon(_ status: Stage) -> String {
+        switch status {
+        case .completed: "checkmark.circle"
+        case .failed: "exclamationmark.circle"
+        case .cancelled: "stop.circle"
+        default: "clock"
+        }
+    }
+
+    @ViewBuilder private func videoJobActions(_ job: Job) -> some View {
+        if job.status == .failed {
+            FadedSecondaryButton("Prøv igen", icon: "arrow.clockwise") { Task { await model.retry(job) } }
+                .disabled(!model.canRetry(job))
+            FadedSecondaryButton("Skjul fejlet job på telefonen", icon: "eye.slash") { hiddenJobs.insert(job.id) }
+            if !model.isDemo, let api = model.api as? LiveAPI {
+                FadedSecondaryButton("Slet fejlet job fra PC’en", icon: "trash", role: .destructive) {
+                    failedJobDeletion = (job.id, api)
+                }
+            }
+        }
+        if job.status.active {
+            if model.waitingForStop.contains(job.id) {
+                Text("Venter på, at jobbet stopper.")
+            } else if model.capabilities?.features.cancel == true {
+                FadedSecondaryButton(model.cancelling.contains(job.id) ? "Beder PC’en stoppe…" : "Stop job",
+                                     icon: "stop.circle") { Task { await model.cancel(job) } }
+                    .disabled(model.cancelling.contains(job.id) || model.busy || model.refreshing)
+            }
+        }
+        if job.status == .completed, job.output_url != nil {
+            FadedSecondaryButton(model.isDemo ? "Se testvideo" : "Se video", icon: "play") {
+                Task {
+                    let demo = model.isDemo
+                    if let url = await model.video(job) { media = Media(url: url, demo: demo) }
+                }
+            }.disabled(model.mediaLoading)
+            if !model.isDemo {
+                FadedSecondaryButton("Gem på telefonen", icon: "square.and.arrow.down") { Task { await saveVideo(job) } }
+                    .disabled(model.mediaLoading)
+            }
+            FadedSecondaryButton("Del job-resultat", icon: "square.and.arrow.up") {
+                Task {
+                    if let url = await model.video(job) { shareResult = Media(url: url, demo: model.isDemo) }
+                }
+            }.disabled(model.mediaLoading)
+            if !model.isDemo, let api = model.api as? LiveAPI {
+                FadedSecondaryButton("Slet redigeret video fra PC’en", icon: "trash", role: .destructive) {
+                    pcDeletion = (job.id, api)
+                }.disabled(deletingPCVideo || model.mediaLoading)
+            }
+        }
     }
 
     @State private var shareResult: Media?
@@ -1388,7 +1716,6 @@ struct Home: View {
                     Text("Automatisk").tag(Crop.auto)
                     Text("Midten").tag(Crop.center)
                 }.frame(minHeight: 48)
-                Toggle("Fjern støj", isOn: options.denoise).frame(minHeight: 48)
                 Text("Område til tekstlæsning").font(.headline)
                 Text("Brug tal fra 0 til 1, målt fra øverste venstre hjørne.")
                 coordinate("Fra venstre", options.roi.x)
@@ -1411,29 +1738,10 @@ struct Home: View {
         }
     }
     private func heading(_ title: String) -> some View {
-        Text(title).font(.title2.bold()).accessibilityAddTraits(.isHeader)
+        Text(title).font(FadedTypography.title).tracking(-0.5).accessibilityAddTraits(.isHeader)
     }
     private func action(_ title: String, _ work: @escaping () -> Void) -> some View {
-        Button {
-            if appHaptics { UIImpactFeedbackGenerator(style: .light).impactOccurred() }
-            work()
-        } label: {
-            Text(title)
-                .frame(minHeight: 48)
-                .padding(.horizontal, 16)
-                .background {
-                    if usesOLED {
-                        RoundedRectangle(cornerRadius: 14)
-                            .fill(.thinMaterial)
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 14).strokeBorder(.white.opacity(0.15))
-                            }
-                    }
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(usesOLED ? Color.white : Color.accentColor)
+        FadedSecondaryButton(title, action: work)
     }
 }
 
@@ -1456,9 +1764,23 @@ struct VillageBot: Codable, Identifiable {
     }
 
     var previewSentence: String {
-        playbackVoice?.language.hasPrefix("en") == true
-            ? "Hi, I'm \(name.isEmpty ? "your bot" : name). How can I help you today?"
-            : "Hej, jeg er \(name.isEmpty ? "din bot" : name). Hvad kan jeg hjælpe dig med i dag?"
+        let trait = personality ?? "Nysgerrig"
+        if playbackVoice?.language.hasPrefix("en") == true {
+            let englishTrait = ["Nysgerrig": "curious", "Rolig": "calm", "Sjov": "playful", "Omsorgsfuld": "caring"][trait] ?? trait.lowercased()
+            return "Hi, I'm \(name.isEmpty ? "your bot" : name). I'm \(englishTrait)."
+        }
+        return "Hej, jeg er \(name.isEmpty ? "din bot" : name). Jeg er \(trait.lowercased())."
+    }
+
+    var voiceDetails: String { playbackVoice.map(LocalSpeechVoice.label) ?? "Systemstemme" }
+
+    var voiceQuality: String {
+        switch playbackVoice?.quality {
+        case .premium?: "Premium"
+        case .enhanced?: "Forbedret"
+        case .default?: "Standard"
+        default: "Systemstemme"
+        }
     }
 
     func utterance(_ text: String) -> AVSpeechUtterance {
@@ -1494,6 +1816,7 @@ struct VillageBotBuilder: View {
     private let onBack: (() -> Void)?
     private let fixedProfile: Bool
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.fadedPalette) private var palette
     @Environment(\.dynamicTypeSize) private var typeSize
     @AppStorage("village.bots") private var savedBots = Data()
     @AppStorage(PhoneModels.selectionKey) private var phoneModel = "apple"
@@ -1503,6 +1826,7 @@ struct VillageBotBuilder: View {
     @State private var selectedSprite: PhotosPickerItem?
     @State private var exporting = false
     @State private var exportFile: VillageBotFile?
+    @State private var confirmDelete = false
     @State private var notice: String?
     @State private var improving = false
     @State private var testTask: Task<Void, Never>?
@@ -1531,17 +1855,23 @@ struct VillageBotBuilder: View {
                         ForEach(bots) { bot in Button(bot.name) { selectDraft(bot) } }
                         Button("Ny bot") { selectDraft(VillageBot()) }.disabled(bots.count >= 10)
                         Button("Importér JSON") { importing = true }.disabled(bots.count >= 10 || testing)
-                    }
+                    }.listRowBackground(palette.card)
                 }
-                if typeSize.isAccessibilitySize { pagePicker.pickerStyle(.menu) }
-                else { pagePicker.pickerStyle(.segmented) }
+                Group {
+                    if typeSize.isAccessibilitySize { pagePicker.pickerStyle(.menu) }
+                    else { pagePicker.pickerStyle(.segmented) }
+                }.listRowBackground(palette.card)
                 switch page {
-                case .profile: editor.disabled(testing)
-                case .voice: voiceSettings.disabled(testing)
-                case .test: localTest
+                case .profile: editor.disabled(testing).listRowBackground(palette.card)
+                case .voice: voiceSettings.disabled(testing).listRowBackground(palette.card)
+                case .test: localTest.listRowBackground(palette.card)
                 }
-                if let notice { Text(notice) }
+                if let notice { Text(notice).listRowBackground(palette.card) }
             }
+            .scrollContentBackground(.hidden)
+            .background { FadedBackground() }
+            .foregroundStyle(palette.text)
+            .tint(palette.isDark ? palette.lime : palette.text)
             .navigationTitle("Botbygger")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1552,13 +1882,21 @@ struct VillageBotBuilder: View {
                     Button("Færdig") {
                         if !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { save(draft) }
                         close()
-                    }.buttonStyle(.borderedProminent)
+                    }.fontWeight(.semibold)
                 }
             }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.json], onCompletion: importBot)
             .fileExporter(isPresented: $exporting, document: exportFile, contentType: .json,
                           defaultFilename: "FadedAI-bot") { result in
                 if case .failure = result { notice = "Botten kunne ikke eksporteres." }
+            }
+            .confirmationDialog("Slet botprofil?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button("Slet bot", role: .destructive) {
+                    persist(bots.filter { $0.id != draft.id })
+                    if fixedProfile { close() } else { selectDraft(VillageBot()) }
+                }
+            } message: {
+                Text("Botprofilen fjernes fra telefonen og Landsbyen.")
             }
             .onDisappear { stopPreview() }
         }
@@ -1617,10 +1955,7 @@ struct VillageBotBuilder: View {
             Button("Gem bot") { save(draft) }.disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             if bots.contains(where: { $0.id == draft.id }) {
                 Button("Eksportér bot") { exportFile = VillageBotFile(bot: draft); exporting = true }
-                Button("Slet lokal bot", role: .destructive) {
-                    persist(bots.filter { $0.id != draft.id })
-                    draft = VillageBot()
-                }
+                FadedSecondaryButton("Slet bot", icon: "trash", role: .destructive) { confirmDelete = true }
             }
         }
     }
@@ -1640,8 +1975,7 @@ struct VillageBotBuilder: View {
                 Slider(value: Binding(get: { draft.voiceRate ?? 1 }, set: { draft.voiceRate = $0 }),
                        in: 0.7...1.3, step: 0.1)
             }
-            Button("Prøv stemme", systemImage: "speaker.wave.2") { speakPreview(draft.previewSentence) }
-                .frame(minHeight: 44)
+            FadedSecondaryButton("Prøv stemme", icon: "speaker.wave.2") { speakPreview(draft.previewSentence) }
         }
     }
 
@@ -1686,10 +2020,9 @@ struct VillageBotBuilder: View {
             Text(canTest ? "Din valgte telefonmodel er klar." : "Vælg en klar model under Lokale modeller.")
             TextField("Besked til botten", text: $testQuestion, axis: .vertical)
                 .disabled(testing)
-            Button(testing ? "Svarer på telefonen…" : "Prøv på telefonen") {
+            FadedPrimaryButton(testing ? "Svarer på telefonen…" : "Prøv på telefonen", icon: "arrow.up") {
                 testTask = Task { await testBot() }
             }
-            .frame(minHeight: 44)
             .disabled(testing || !canTest || testQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             if !testReply.isEmpty {
                 Label("Telefon", systemImage: "iphone")
@@ -1785,44 +2118,118 @@ struct VillageBotBuilder: View {
     }
 }
 
+private struct VillageBotAvatar: View {
+    let bot: VillageBot
+    let size: CGFloat
+    let radius: CGFloat
+    @Environment(\.fadedPalette) private var palette
+
+    private var tint: Color {
+        switch bot.color {
+        case "Grøn": palette.lime
+        case "Lilla": palette.purple
+        default: palette.cyan
+        }
+    }
+
+    var body: some View {
+        ZStack {
+            LinearGradient(colors: [tint.opacity(0.42), palette.raised], startPoint: .topLeading, endPoint: .bottomTrailing)
+            if let data = bot.sprite, let image = UIImage(data: data) {
+                Image(uiImage: image).resizable().interpolation(.none).scaledToFill()
+            } else {
+                Image(systemName: "face.smiling.inverse")
+                    .font(.system(size: size * 0.43, weight: .medium)).foregroundStyle(tint)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipShape(.rect(cornerRadius: radius))
+        .overlay { RoundedRectangle(cornerRadius: radius).strokeBorder(tint.opacity(0.35)) }
+        .accessibilityHidden(true)
+    }
+}
+
 private struct VillageBotLibrary: View {
     let api: LiveAPI?
     @Binding var studioUnlocked: Bool
     let onPrivateSessionEnded: () -> Void
     let onBack: () -> Void
+    @Environment(\.fadedPalette) private var palette
     @AppStorage("village.bots") private var savedBots = Data()
     @State private var showBuilder = false
+    @State private var editingBot: VillageBot?
+    @State private var chattingBot: VillageBot?
 
     private var bots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: savedBots)) ?? [] }
 
     var body: some View {
         NavigationStack {
             List {
+                FadedPrimaryButton("Ny bot", icon: "plus") { showBuilder = true }
+                    .disabled(bots.count >= 10)
+                    .listRowInsets(rowInsets).listRowSeparator(.hidden).listRowBackground(Color.clear)
                 if bots.isEmpty {
-                    Text("Du har ingen bots endnu. Tryk Opret bot for at begynde.")
-                        .foregroundStyle(.secondary)
+                    FadedEmptyState(icon: "person.crop.circle.badge.plus", title: "Du har ingen bots endnu",
+                                    detail: "Opret din første bot med et navn, en stemme og en personlighed.")
+                        .listRowInsets(rowInsets).listRowSeparator(.hidden).listRowBackground(Color.clear)
                 }
                 ForEach(bots) { bot in
                     NavigationLink {
                         VillageBotProfile(botID: bot.id, api: api, studioUnlocked: $studioUnlocked,
                                           onPrivateSessionEnded: onPrivateSessionEnded)
                     } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(bot.name).font(.headline)
-                            if let personality = bot.personality { Text(personality).font(.subheadline).foregroundStyle(.secondary) }
-                        }.frame(minHeight: 44)
+                        botRow(bot)
+                    }
+                    .listRowInsets(rowInsets).listRowSeparator(.hidden).listRowBackground(Color.clear)
+                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                        Button { chattingBot = bot } label: { Label("Chat", systemImage: "bubble.left") }.tint(palette.lime)
+                    }
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        Button { editingBot = bot } label: { Label("Redigér", systemImage: "pencil") }.tint(palette.purple)
                     }
                 }
-                Button("Opret bot", systemImage: "person.crop.circle.badge.plus") { showBuilder = true }
-                    .frame(minHeight: 44)
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .background { FadedBackground() }
+            .foregroundStyle(palette.text)
             .navigationTitle("Mine bots")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Tilbage", systemImage: "chevron.left", action: onBack)
                 }
             }
             .sheet(isPresented: $showBuilder) { VillageBotBuilder(api: api, onBack: { showBuilder = false }) }
+            .sheet(item: $editingBot) { bot in
+                VillageBotBuilder(api: api, bot: bot, onBack: { editingBot = nil })
+            }
+            .sheet(item: $chattingBot) { bot in
+                OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
+                              initialPage: .chat, initialBotID: bot.id)
+            }
+        }
+    }
+
+    private var rowInsets: EdgeInsets { EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16) }
+
+    private func botRow(_ bot: VillageBot) -> some View {
+        FadedCard {
+            HStack(alignment: .top, spacing: 12) {
+                VillageBotAvatar(bot: bot, size: 56, radius: 12)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(bot.name).font(.headline)
+                    Text(bot.personality ?? "Nysgerrig").font(.subheadline).foregroundStyle(palette.secondary)
+                    Text(bot.voiceQuality)
+                        .font(.caption.weight(.semibold)).foregroundStyle(palette.text)
+                        .padding(.horizontal, 8).padding(.vertical, 3)
+                        .background(palette.raised, in: .capsule)
+                        .accessibilityLabel("Stemme: \(bot.voiceQuality)")
+                }
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
         }
     }
 }
@@ -1832,64 +2239,209 @@ private struct VillageBotProfile: View {
     let api: LiveAPI?
     @Binding var studioUnlocked: Bool
     let onPrivateSessionEnded: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.fadedPalette) private var palette
     @AppStorage("village.bots") private var savedBots = Data()
+    @AppStorage(PhoneModels.selectionKey) private var phoneModel = "apple"
     @State private var showBuilder = false
     @State private var showPrivateChat = false
+    @State private var showModels = false
+    @State private var fullPrompt = false
+    @State private var confirmDelete = false
+    @State private var testQuestion = ""
+    @State private var testReply = ""
+    @State private var testTask: Task<Void, Never>?
+    @State private var notice: String?
     @State private var speech = AVSpeechSynthesizer()
 
     private var bot: VillageBot? {
         (try? JSONDecoder().decode([VillageBot].self, from: savedBots))?.first { $0.id == botID }
     }
 
+    private var modelID: String { PhoneModels.effectiveModelID(phoneModel) }
+    private var canTest: Bool {
+        modelID == "apple" ? PhoneModels.appleAvailable : PhoneModels.installedDirectory(modelID) != nil
+    }
+
     var body: some View {
-        List {
-            if let bot {
-                Section("Profil") {
-                    if let data = bot.sprite, let image = UIImage(data: data) {
-                        Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
-                            .frame(width: 80, height: 80).accessibilityLabel("Bottens figur")
-                    }
-                    LabeledContent("Personlighed", value: bot.personality ?? "Nysgerrig")
+        ScrollView {
+            VStack(spacing: 16) {
+                if let bot {
+                    hero(bot)
+                    voiceCard(bot)
+                    personalityCard(bot)
+                    testCard(bot)
+                    profileActions
+                } else {
+                    FadedEmptyState(icon: "person.crop.circle.badge.questionmark", title: "Botprofilen findes ikke længere",
+                                    detail: "Du kan vælge en anden bot under Mine bots.")
                 }
-                Section {
-                    Button("Chat med botten", systemImage: "lock.shield") {
-                        speech.stopSpeaking(at: .immediate)
-                        showPrivateChat = true
-                    }.frame(minHeight: 44)
-                    Button("Prøv stemme", systemImage: "speaker.wave.2") {
-                        speech.stopSpeaking(at: .immediate)
-                        speech.speak(bot.utterance(bot.previewSentence))
-                    }.frame(minHeight: 44)
-                    Button("Redigér eller prøv personlighed", systemImage: "pencil") {
-                        speech.stopSpeaking(at: .immediate)
-                        showBuilder = true
-                    }.frame(minHeight: 44)
+                if let notice {
+                    Text(notice).font(.footnote).foregroundStyle(palette.coralText)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-            } else {
-                Text("Botprofilen findes ikke længere.")
             }
+            .padding(16).frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
-        .navigationTitle(bot?.name ?? "Botprofil")
-        .onDisappear { speech.stopSpeaking(at: .immediate) }
+        .background { FadedBackground() }
+        .foregroundStyle(palette.text)
+        .navigationTitle("Botprofil")
+        .navigationBarTitleDisplayMode(.inline)
+        .onDisappear { speech.stopSpeaking(at: .immediate); testTask?.cancel() }
         .sheet(isPresented: $showBuilder) {
             if let bot { VillageBotBuilder(api: api, bot: bot, onBack: { showBuilder = false }) }
         }
+        .sheet(isPresented: $showModels) { PhoneModelsView() }
         .sheet(isPresented: $showPrivateChat) {
             OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
                           initialPage: .chat, initialBotID: botID)
         }
+        .confirmationDialog("Slet botprofil?", isPresented: $confirmDelete, titleVisibility: .visible) {
+            Button("Slet bot", role: .destructive, action: deleteBot)
+        } message: {
+            Text("Botprofilen fjernes fra telefonen og Landsbyen.")
+        }
+    }
+
+    private func hero(_ bot: VillageBot) -> some View {
+        VStack(spacing: 10) {
+            VillageBotAvatar(bot: bot, size: 120, radius: 28)
+            Text(bot.name).font(.largeTitle.bold()).multilineTextAlignment(.center).accessibilityAddTraits(.isHeader)
+            Text(bot.personality ?? "Nysgerrig")
+                .font(.subheadline.weight(.semibold)).foregroundStyle(palette.isDark ? palette.purple : palette.text)
+                .padding(.horizontal, 12).padding(.vertical, 6).background(palette.raised, in: .capsule)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 12)
+    }
+
+    private func voiceCard(_ bot: VillageBot) -> some View {
+        FadedCard(accent: palette.cyan) {
+            VStack(alignment: .leading, spacing: 10) {
+                FadedSectionLabel("Stemme")
+                Text(bot.voiceDetails).font(.subheadline).foregroundStyle(palette.secondary)
+                FadedSecondaryButton("Prøv stemme", icon: "speaker.wave.2") {
+                    speech.stopSpeaking(at: .immediate)
+                    speech.speak(bot.utterance(bot.previewSentence))
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func personalityCard(_ bot: VillageBot) -> some View {
+        FadedCard(accent: palette.purple) {
+            VStack(alignment: .leading, spacing: 10) {
+                FadedSectionLabel("Personlighed")
+                if bot.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    Text("Du kan tilføje en systemprompt under Redigér.").font(.subheadline).foregroundStyle(palette.secondary)
+                } else {
+                    Text(bot.prompt).font(.body).lineLimit(fullPrompt ? nil : 5).textSelection(.enabled)
+                    Button(fullPrompt ? "Vis mindre" : "Vis hele") { fullPrompt.toggle() }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(palette.isDark ? palette.purple : palette.text).frame(minHeight: 44)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func testCard(_ bot: VillageBot) -> some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 10) {
+                FadedSectionLabel("Prøv personligheden")
+                if canTest {
+                    testComposer(bot)
+                } else {
+                    Text("Vælg en klar telefonmodel for at prøve botten.").font(.subheadline).foregroundStyle(palette.secondary)
+                    FadedSecondaryButton("Lokale modeller", icon: "iphone") { showModels = true }
+                }
+                if !testReply.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Svar fra telefonen", systemImage: "iphone")
+                            .font(.caption.weight(.semibold)).foregroundStyle(palette.isDark ? palette.cyan : palette.text)
+                        Text(testReply).textSelection(.enabled)
+                    }
+                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(palette.raised, in: .rect(cornerRadius: 12))
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func testComposer(_ bot: VillageBot) -> some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            TextField("Skriv til botten…", text: $testQuestion, axis: .vertical)
+                .textFieldStyle(.plain).lineLimit(1...4).padding(12).frame(minHeight: 48)
+                .background(palette.raised, in: .rect(cornerRadius: 12))
+                .disabled(testTask != nil)
+            if let testTask {
+                FadedSecondaryButton("Stop", icon: "stop.fill") { testTask.cancel() }
+            } else {
+                Button { startTest(bot) } label: { Image(systemName: "arrow.up").frame(minWidth: 24) }
+                    .buttonStyle(FadedButtonStyle(kind: .primary))
+                    .disabled(testQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityLabel("Send testbesked")
+            }
+        }
+    }
+
+    private var profileActions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            FadedSecondaryButton("Chat med botten", icon: "lock.shield") {
+                speech.stopSpeaking(at: .immediate)
+                showPrivateChat = true
+            }
+            FadedSecondaryButton("Redigér", icon: "pencil") {
+                speech.stopSpeaking(at: .immediate)
+                showBuilder = true
+            }
+            FadedSecondaryButton("Slet bot", icon: "trash", role: .destructive) { confirmDelete = true }
+        }.frame(maxWidth: .infinity, alignment: .leading).disabled(testTask != nil)
+    }
+
+    private func startTest(_ bot: VillageBot) {
+        let question = testQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canTest, !question.isEmpty, testTask == nil else { return }
+        let selectedModel = modelID
+        testReply = ""
+        notice = nil
+        testTask = Task {
+            defer { testTask = nil }
+            do {
+                try await PhoneModels.reply(modelID: selectedModel, prompt: question,
+                                            instructions: OfflineStudio.companionInstructions(for: bot)) {
+                    if !Task.isCancelled { testReply = $0 }
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                notice = "Telefonen kunne ikke svare. Tjek din lokale model, og prøv igen."
+            }
+        }
+    }
+
+    private func deleteBot() {
+        guard let bots = try? JSONDecoder().decode([VillageBot].self, from: savedBots),
+              let remaining = try? JSONEncoder().encode(bots.filter { $0.id != botID }) else {
+            notice = "Botprofilen kunne ikke slettes."
+            return
+        }
+        savedBots = remaining
+        dismiss()
     }
 }
 
 private struct AgentHub: View {
     @Environment(\.scenePhase) private var hubPhase
+    @Environment(\.fadedPalette) private var palette
     let api: LiveAPI?
+    let isVisible: Bool
     @Binding var studioUnlocked: Bool
     let onPrivateSessionEnded: () -> Void
     let onBack: () -> Void
     @State private var selectedRoom = "research"
     @AppStorage("village.bots") private var localBotsData = Data()
     @State private var localBot: VillageBot?
+    @State private var villageChatBot: VillageBot?
     @State private var villagePause = false
     @State private var cinematic = false
     @State private var villageZoom: CGFloat = 1
@@ -1898,6 +2450,7 @@ private struct AgentHub: View {
     @State private var offline = false
     @State private var completions = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage("qol.reduceMotion") private var calmMotion = false
     @State private var details: V2Hub.Agent?
     @State private var achievements = false
 
@@ -1929,41 +2482,19 @@ private struct AgentHub: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    village
-                    if !cinematic {
-                        Toggle("Lad lokale bots hvile", isOn: $villagePause)
-                        Text("Lokale bots følger telefonens ur. PC-agenter følger deres live-status.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    if offline { Text("PC’en er offline. Botsene hviler.") }
-                    if !cinematic {
-                    Button("Mine bots", systemImage: "person.2") { showBuilder = true }
-                        .frame(minHeight: 48)
-                    if let failure {
-                        RetryNotice(message: failure) { attempt += 1 }
-                    }
-                    if let snapshot {
-                    missionHUD(snapshot.summary)
-                    Picker("Rum", selection: $selectedRoom) {
-                        ForEach(snapshot.rooms) { room in Text(room.name).tag(room.id) }
-                    }.frame(minHeight: 48)
-                    ForEach(snapshot.agents.filter { $0.room_id == selectedRoom }) { agent in
-                        agentCard(agent)
-                    }
-                    Button("Achievements", systemImage: "trophy") { achievements = true }
-                        .frame(minHeight: 48)
-                    } else if failure == nil {
-                        LoadingSkeleton(label: "Henter agenter…")
-                    }
-                    }
-                }.padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
+                hubContent
             }
+            .background { FadedBackground(variant: .village) }
+            .foregroundStyle(palette.text)
             .navigationTitle("Landsbyen")
             .toolbarVisibility(cinematic ? .hidden : .visible, for: .navigationBar)
             .sensoryFeedback(.success, trigger: completions)
             .sheet(isPresented: $showBuilder) { botLibrary }
             .sheet(item: $localBot, content: botProfile)
+            .sheet(item: $villageChatBot) { bot in
+                OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
+                              initialPage: .chat, initialBotID: bot.id)
+            }
             .task(id: "\(attempt):\(hubPhase == .active):\(api?.server.origin.absoluteString ?? "offline")") {
                 if hubPhase == .active { await followHub() }
             }
@@ -1975,6 +2506,95 @@ private struct AgentHub: View {
             }
             .sheet(item: $details) { agent in agentDetails(agent) }
             .sheet(isPresented: $achievements) { achievementPage }
+        }
+    }
+
+    private var hubContent: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.action) {
+            if !cinematic {
+                FadedSignature()
+                Text("Agent-Hub").font(FadedTypography.title).accessibilityAddTraits(.isHeader)
+            }
+            village
+            if !cinematic {
+                if offline {
+                    Label("PC’en er offline. Botsene hviler.", systemImage: "cloud.rain")
+                        .font(.subheadline).foregroundStyle(palette.secondary)
+                }
+                villageActivity
+                hubAgents
+            }
+        }
+        .padding(FadedSpacing.edge).frame(maxWidth: 640).frame(maxWidth: .infinity)
+    }
+
+    private var villageActivity: some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 12) {
+                FadedSectionLabel("Aktivitet i landsbyen")
+                Toggle("Lad lokale bots hvile", isOn: $villagePause).tint(palette.lime)
+                if villageVisible {
+                    TimelineView(.periodic(from: .now, by: 60)) { timeline in
+                        villageBotRows(hour: Calendar.current.component(.hour, from: timeline.date))
+                    }
+                } else {
+                    villageBotRows(hour: Calendar.current.component(.hour, from: .now))
+                }
+                FadedSecondaryButton("Mine bots", icon: "person.2") { showBuilder = true }
+            }
+        }
+    }
+
+    @ViewBuilder private func villageBotRows(hour: Int) -> some View {
+        if localVillageBots.isEmpty {
+            Text("Opret en bot under Mine bots, så kan du følge dens hverdag her.")
+                .font(.subheadline).foregroundStyle(palette.secondary)
+        }
+        ForEach(Array(localVillageBots.enumerated()), id: \.element.id) { item in
+            let bot = item.element
+            let activity = botActivity(bot, routine: (hour + item.offset) % 3, sleeping: villageBotsSleep(hour: hour))
+            Divider().overlay(palette.border)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 12) {
+                    VillageBotAvatar(bot: bot, size: 44, radius: FadedRadius.small)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(bot.name).font(FadedTypography.section)
+                        Text(activity).font(.subheadline).foregroundStyle(palette.secondary)
+                    }
+                }
+                ViewThatFits(in: .horizontal) {
+                    HStack { villageBotActions(bot) }
+                    VStack(alignment: .leading) { villageBotActions(bot) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func villageBotActions(_ bot: VillageBot) -> some View {
+        FadedSecondaryButton("Profil", icon: "person.crop.circle") { localBot = bot }
+            .accessibilityLabel("Åbn profil for \(bot.name)")
+        FadedSecondaryButton("Chat", icon: "bubble.left") { villageChatBot = bot }
+            .accessibilityLabel("Start privat chat med \(bot.name)")
+    }
+
+    @ViewBuilder private var hubAgents: some View {
+        FadedSectionLabel("PC-agenter")
+        if let failure {
+            RetryNotice(message: failure) { attempt += 1 }
+        }
+        if let snapshot {
+            missionHUD(snapshot.summary)
+            if !snapshot.rooms.isEmpty {
+                Picker("Rum", selection: $selectedRoom) {
+                    ForEach(snapshot.rooms) { room in Text(room.name).tag(room.id) }
+                }.frame(minHeight: 48)
+            }
+            ForEach(snapshot.agents.filter { $0.room_id == selectedRoom }) { agent in
+                agentCard(agent)
+            }
+            FadedSecondaryButton("Achievements", icon: "trophy") { achievements = true }
+        } else if failure == nil {
+            LoadingSkeleton(label: "Henter agenter…")
         }
     }
 
@@ -1995,54 +2615,18 @@ private struct AgentHub: View {
         }
     }
 
+    private var villageVisible: Bool { isVisible && hubPhase == .active }
+    private var villageMotionEnabled: Bool { villageVisible && !reduceMotion && !calmMotion }
+
     private var village: some View {
-        TimelineView(.periodic(from: .now, by: reduceMotion ? 60 : 0.25)) { timeline in
-            let hour = Calendar.current.component(.hour, from: timeline.date)
-            let night = hour < 7 || hour >= 20
-            GeometryReader { geometry in
-                let size = geometry.size
-                let time = timeline.date.timeIntervalSinceReferenceDate
-                ZStack {
-                    RoundedRectangle(cornerRadius: 20)
-                        .fill(night ? Color(red: 0.03, green: 0.06, blue: 0.14) :
-                            Color(red: 0.10, green: 0.19, blue: 0.29))
-                    Canvas { context, canvas in
-                        let pixelRect: (CGRect) -> Path = { frame in Path { $0.addRect(frame) } }
-                        context.fill(pixelRect(CGRect(origin: .zero, size: canvas)), with: .color(villageGround(night: night)))
-                        let tile: CGFloat = 12
-                        for row in 0..<Int(canvas.height / tile) {
-                            for column in 0..<Int(canvas.width / tile) where (row * 7 + column * 11) % 13 == 0 {
-                                context.fill(pixelRect(CGRect(x: CGFloat(column) * tile, y: CGFloat(row) * tile,
-                                                         width: 4, height: 4)),
-                                             with: .color(.green.opacity(night ? 0.18 : 0.38)))
-                            }
-                        }
-                        context.fill(pixelRect(CGRect(x: canvas.width * 0.46, y: 0, width: 26, height: canvas.height)),
-                                     with: .color(Color(red: 0.70, green: 0.59, blue: 0.40).opacity(0.78)))
-                        context.fill(pixelRect(CGRect(x: 0, y: canvas.height * 0.48, width: canvas.width, height: 26)),
-                                     with: .color(Color(red: 0.70, green: 0.59, blue: 0.40).opacity(0.78)))
-                        for tree in 0..<12 {
-                            let x = canvas.width * (0.08 + Double((tree * 31) % 83) / 100)
-                            let y = canvas.height * (0.11 + Double((tree * 47) % 75) / 100)
-                            context.fill(pixelRect(CGRect(x: x + 4, y: y + 6, width: 4, height: 9)), with: .color(.brown))
-                            context.fill(pixelRect(CGRect(x: x, y: y, width: 13, height: 10)),
-                                         with: .color(Color(red: 0.08, green: 0.52, blue: 0.30)))
-                        }
-                    }.accessibilityHidden(true).allowsHitTesting(false)
-                    ForEach(villagePieces(hour: hour, time: time, size: size)) { piece in
-                        villagePiece(piece, night: night)
-                            .zIndex(Double(piece.depth))
-                            .animation(reduceMotion ? nil : .easeInOut(duration: 0.75), value: piece.zone)
-                    }
+        Group {
+            if villageVisible {
+                TimelineView(.periodic(from: .now, by: villageMotionEnabled ? 0.25 : 60)) { timeline in
+                    villageScene(at: timeline.date)
                 }
-                .overlay { if offline { villageRain(at: timeline.date) } }
-                .scaleEffect(villageZoom)
-                .offset(villageOffset)
-                .gesture(MagnifyGesture().onChanged { villageZoom = min(2, max(1, $0.magnification)) })
-                .simultaneousGesture(DragGesture().onChanged { villageOffset = $0.translation })
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 20))
-            }.frame(height: 420)
+            } else {
+                villageScene(at: .now)
+            }
         }
         .overlay(alignment: .topTrailing) {
             Button(cinematic ? "Vis menu" : "Filmtilstand", systemImage: cinematic ? "eye" : "video") {
@@ -2052,7 +2636,87 @@ private struct AgentHub: View {
             .accessibilityLabel(cinematic ? "Afslut filmtilstand" : "Start filmtilstand")
             .frame(minWidth: 48, minHeight: 48)
             .foregroundStyle(.white)
+            .background(.black.opacity(0.74), in: Circle())
+            .padding(8)
         }
+    }
+
+    private func villageScene(at date: Date) -> some View {
+        let hour = Calendar.current.component(.hour, from: date)
+        let night = hour < 7 || hour >= 20
+        let shape = RoundedRectangle(cornerRadius: FadedRadius.media)
+        return GeometryReader { geometry in
+            ZStack {
+                LinearGradient(colors: [night ? FadedColors.sunset : villageGround(night: false), FadedColors.deep],
+                               startPoint: .top, endPoint: .bottom)
+                villageTerrain(night: night)
+                ForEach(villagePieces(hour: hour, time: date.timeIntervalSinceReferenceDate, size: geometry.size)) { piece in
+                    villagePiece(piece, night: night)
+                        .zIndex(Double(piece.depth))
+                        .animation(villageMotionEnabled ? .easeInOut(duration: 0.75) : nil, value: piece.zone)
+                }
+            }
+            .overlay { if offline { villageRain(at: date) } }
+            .scaleEffect(villageZoom)
+            .offset(villageOffset)
+            .gesture(MagnifyGesture().onChanged { villageZoom = min(2, max(1, $0.magnification)) })
+            .simultaneousGesture(DragGesture().onChanged { villageOffset = $0.translation })
+            .foregroundStyle(FadedColors.text)
+            .clipShape(shape)
+        }
+        .frame(height: 420)
+        .overlay { shape.strokeBorder(palette.border, lineWidth: 1).allowsHitTesting(false) }
+        .overlay(alignment: .topLeading) {
+            if !cinematic {
+                Label(night ? "Nat" : "Dag", systemImage: night ? "moon.stars.fill" : "sun.max.fill")
+                    .font(.caption.weight(.semibold)).foregroundStyle(FadedColors.text)
+                    .padding(8).background(.black.opacity(0.74), in: Capsule()).padding(8)
+            }
+        }
+    }
+
+    private func villageTerrain(night: Bool) -> some View {
+        Canvas { context, size in
+            var tiles = Path()
+            let step: CGFloat = 16
+            for row in 0..<Int(size.height / step) {
+                for column in 0..<Int(size.width / (2 * step)) where (row * 7 + column * 11) % 5 == 0 {
+                    let x = CGFloat(column) * 2 * step + (row.isMultiple(of: 2) ? 0 : step)
+                    let y = CGFloat(row) * step
+                    tiles.move(to: CGPoint(x: x, y: y - step / 2))
+                    tiles.addLine(to: CGPoint(x: x + step, y: y))
+                    tiles.addLine(to: CGPoint(x: x, y: y + step / 2))
+                    tiles.addLine(to: CGPoint(x: x - step, y: y))
+                    tiles.closeSubpath()
+                }
+            }
+            context.fill(tiles, with: .color(FadedColors.daylightWindow.opacity(night ? 0.07 : 0.12)))
+
+            let plaza = CGPoint(x: size.width / 2, y: size.height * 0.57)
+            let trails = Path { path in
+                for zone in 0..<4 {
+                    let room = villagePoint(zone, size: size)
+                    path.move(to: CGPoint(x: room.x, y: room.y + 44))
+                    path.addLine(to: CGPoint(x: (room.x + plaza.x) / 2, y: (room.y + plaza.y) / 2 + 24))
+                    path.addLine(to: plaza)
+                }
+            }
+            context.stroke(trails, with: .color(.black.opacity(0.25)), style: StrokeStyle(lineWidth: 19, lineCap: .round, lineJoin: .round))
+            context.stroke(trails, with: .color(FadedColors.daylightWindow.opacity(night ? 0.22 : 0.38)),
+                           style: StrokeStyle(lineWidth: 15, lineCap: .round, lineJoin: .round))
+
+            var trunks = Path()
+            var leaves = Path()
+            for tree in 0..<12 {
+                let x = size.width * (0.08 + Double((tree * 31) % 83) / 100)
+                let y = size.height * (0.11 + Double((tree * 47) % 75) / 100)
+                trunks.addRect(CGRect(x: x + 4, y: y + 6, width: 4, height: 9))
+                leaves.addRect(CGRect(x: x, y: y + 2, width: 13, height: 8))
+                leaves.addRect(CGRect(x: x + 2, y: y, width: 9, height: 2))
+            }
+            context.fill(trunks, with: .color(FadedColors.daylightWindow.opacity(0.46)))
+            context.fill(leaves, with: .color(palette.green.opacity(night ? 0.32 : 0.50)))
+        }.accessibilityHidden(true).allowsHitTesting(false)
     }
 
     private var localVillageBots: [VillageBot] {
@@ -2060,12 +2724,12 @@ private struct AgentHub: View {
     }
 
     private func villageGround(night: Bool) -> Color {
-        night ? Color(red: 0.04, green: 0.14, blue: 0.15) : Color(red: 0.10, green: 0.34, blue: 0.22)
+        night ? FadedColors.sunset : Color(red: 0.28, green: 0.18, blue: 0.12)
     }
 
     private func villageRain(at date: Date) -> some View {
         Canvas { context, size in
-            let phase = reduceMotion ? 0 : Int(date.timeIntervalSince1970 * 24) % 100
+            let phase = villageMotionEnabled ? Int(date.timeIntervalSince1970 * 24) % 100 : 0
             for drop in 0..<30 {
                 let x = size.width * Double((drop * 37) % 100) / 100
                 let y = size.height * Double((drop * 61 + phase) % 100) / 100
@@ -2081,7 +2745,7 @@ private struct AgentHub: View {
     private func villageBuilding(_ zone: Int, center: CGPoint, night: Bool) -> some View {
         let names = ["Research Lab", "Video Studio", "Kaffeområde", "Sovekrog"]
         let symbols = ["books.vertical.fill", "film.fill", "cup.and.saucer.fill", "moon.stars.fill"]
-        let colors: [Color] = [.indigo, .blue, .orange, .purple]
+        let colors = [palette.coral, palette.lime, palette.coral, palette.lime]
         let color = colors[zone]
         return ZStack {
             Canvas { context, _ in
@@ -2103,20 +2767,25 @@ private struct AgentHub: View {
                 let east = quad(point(0, 1), point(57, -28), point(57, 18), point(0, 47))
                 let roof = diamond(0, -29, width: 132, height: 66)
                 context.fill(diamond(10, 41, width: 154, height: 86), with: .color(.black.opacity(0.34)))
-                context.fill(diamond(0, 22, width: 148, height: 80), with: .color(Color(red: 0.36, green: 0.48, blue: 0.39)))
+                context.fill(diamond(0, 22, width: 148, height: 80),
+                             with: .color(night ? Color(red: 0.22, green: 0.16, blue: 0.12) : Color(red: 0.39, green: 0.28, blue: 0.19)))
                 // Back the tinted faces with opaque color so a sprite behind a wall cannot show through it.
                 for face in [west, east, roof] { context.fill(face, with: .color(villageGround(night: night))) }
-                context.fill(west, with: .color(color.opacity(0.72)))
-                context.fill(east, with: .color(color.opacity(0.48)))
-                context.fill(roof, with: .color(color.opacity(0.96)))
-                context.stroke(roof, with: .color(.white.opacity(0.38)), lineWidth: 2)
+                context.fill(west, with: .color(color.opacity(night ? 0.28 : 0.46)))
+                context.fill(east, with: .color(color.opacity(night ? 0.18 : 0.28)))
+                context.fill(roof, with: .color(color.opacity(night ? 0.64 : 0.82)))
+                context.stroke(roof, with: .color(FadedColors.text.opacity(0.36)), lineWidth: 1.5)
                 context.fill(quad(point(-13, 13), point(0, 20), point(0, 45), point(-13, 38)),
                              with: .color(.black.opacity(0.56)))
-                context.fill(quad(point(17, 17), point(34, 8), point(34, 22), point(17, 31)),
-                             with: .color(night ? .yellow.opacity(0.84) : .cyan.opacity(0.82)))
+                let window = quad(point(17, 17), point(34, 8), point(34, 22), point(17, 31))
+                if night { context.stroke(window, with: .color(FadedColors.daylightWindow.opacity(0.22)), lineWidth: 5) }
+                context.fill(window, with: .color(FadedColors.daylightWindow.opacity(night ? 0.95 : 0.53)))
             }.accessibilityHidden(true)
             Label(names[zone], systemImage: symbols[zone])
                 .font(.caption2.bold()).labelStyle(.titleAndIcon)
+                .lineLimit(1).minimumScaleFactor(0.75)
+                .padding(.horizontal, 6).padding(.vertical, 4)
+                .background(.black.opacity(0.72), in: Capsule())
                 .position(x: center.x, y: center.y + 25)
         }.allowsHitTesting(false)
     }
@@ -2131,18 +2800,18 @@ private struct AgentHub: View {
         for (index, agent) in (snapshot?.agents ?? []).enumerated() {
             let sleeping = offline || agent.status == .offline
             let zone = sleeping ? 3 : agent.status == .ready ? 2 : agent.room_id.lowercased().contains("video") ? 1 : 0
-            let phase = reduceMotion || sleeping ? nil : time * 0.55 + Double(index)
+            let phase = villageMotionEnabled && !sleeping ? time * 0.55 + Double(index) : nil
             let foot = villageFoot(zone, slot: agentSlots[zone], local: false, phase: phase, size: size)
             pieces.append(VillagePiece(id: "agent-\(agent.id)", kind: .agent(agent), zone: zone, point: foot,
                                        depth: foot.y))
             agentSlots[zone] += 1
         }
         var botSlots = [0, 0, 0, 0]
-        let sleeping = offline || villagePause || hour < 7 || hour >= 22
+        let sleeping = villageBotsSleep(hour: hour)
         for (index, bot) in localVillageBots.enumerated() {
             let routine = (hour + index) % 3
             let zone = sleeping ? 3 : routine
-            let phase = reduceMotion || sleeping ? nil : time * 0.7 + Double(index)
+            let phase = villageMotionEnabled && !sleeping ? time * 0.7 + Double(index) : nil
             let foot = villageFoot(zone, slot: botSlots[zone], local: true, phase: phase, size: size)
             pieces.append(VillagePiece(id: "bot-\(bot.id)", kind: .bot(bot, routine: routine, sleeping: sleeping),
                                        zone: zone, point: foot, depth: foot.y))
@@ -2163,16 +2832,22 @@ private struct AgentHub: View {
         }
     }
 
-    private func localVillageAvatar(_ bot: VillageBot, routine: Int, sleeping: Bool) -> some View {
-        let personality = bot.personality ?? "Nysgerrig"
-        let routines: [String] = switch personality {
+    private func villageBotsSleep(hour: Int) -> Bool { offline || villagePause || hour < 7 || hour >= 22 }
+
+    private func botActivity(_ bot: VillageBot, routine: Int, sleeping: Bool) -> String {
+        guard !sleeping else { return "Sover" }
+        let routines: [String] = switch bot.personality ?? "Nysgerrig" {
         case "Rolig": ["Læser i biblioteket", "Ordner studiet", "Drikker te"]
         case "Sjov": ["Finder på historier", "Øver en scene", "Fortæller jokes"]
         case "Omsorgsfuld": ["Hjælper i laboratoriet", "Hjælper med video", "Laver kaffe til holdet"]
         default: ["Undersøger nye idéer", "Øver sig i studiet", "Holder kaffepause"]
         }
-        let activity = sleeping ? "Sover" : routines[routine]
-        let color: Color = bot.color == "Grøn" ? .green : bot.color == "Lilla" ? .purple : .cyan
+        return routines[routine]
+    }
+
+    private func localVillageAvatar(_ bot: VillageBot, routine: Int, sleeping: Bool) -> some View {
+        let activity = botActivity(bot, routine: routine, sleeping: sleeping)
+        let color = bot.color == "Grøn" ? palette.green : bot.color == "Lilla" ? palette.purple : palette.cyan
         return Button {
             if !cinematic { localBot = bot }
         } label: {
@@ -2237,7 +2912,7 @@ private struct AgentHub: View {
             }
             .frame(width: 42, height: 42, alignment: .bottom)
             .opacity(sleeping ? 0.55 : 1)
-            .modifier(AgentPulse(active: !sleeping && !resting))
+            .modifier(AgentPulse(active: villageMotionEnabled && !sleeping && !resting))
         }
         .buttonStyle(.plain)
         .accessibilityLabel(agent.name + ", " + (sleeping ? "Hviler" : status(agent.status)))
@@ -2249,35 +2924,50 @@ private struct AgentHub: View {
     }
 
     private func missionHUD(_ summary: V2Hub.Summary) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Mission HUD").font(.headline).accessibilityAddTraits(.isHeader)
-            Label("Aktive agenter · \(summary.active_agents)", systemImage: "person.2")
-            Label("Aktive jobs · \(summary.active_jobs)", systemImage: "film")
-            Label("XP i alt · \(summary.total_xp)", systemImage: "bolt")
-            Label("Streak · \(summary.streak_days) dage", systemImage: "flame")
-        }.frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16).background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
+        FadedCard {
+            VStack(alignment: .leading, spacing: 8) {
+                FadedSectionLabel("Status på PC’en")
+                Label("Aktive agenter · \(summary.active_agents)", systemImage: "person.2")
+                Label("Aktive jobs · \(summary.active_jobs)", systemImage: "film")
+                Label("XP i alt · \(summary.total_xp)", systemImage: "bolt")
+                Label("Streak · \(summary.streak_days) dage", systemImage: "flame")
+            }
+        }
     }
 
     private func agentCard(_ agent: V2Hub.Agent) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Button { details = agent } label: {
-                Label(agent.name, systemImage: icon(agent.icon)).font(.headline)
-                    .frame(minHeight: 48)
-            }.buttonStyle(.bordered)
-            Text(status(agent.status)).font(.subheadline)
-            ProgressView(value: Double(agent.xp_in_level), total: Double(max(1, agent.xp_for_next_level))) {
+        let state = offline ? V2Hub.Agent.Status.offline : agent.status
+        let accent = agentAccent(state)
+        let ratio = Double(agent.xp_in_level) / Double(max(1, agent.xp_for_next_level))
+        let quests = agent.recent_quests.sorted { $0.updated_at > $1.updated_at }
+        return FadedCard(accent: accent) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(agent.name, systemImage: icon(agent.icon)).font(FadedTypography.section)
+                    .accessibilityAddTraits(.isHeader)
+                Text(status(state)).font(.subheadline.weight(.semibold))
+                    .foregroundStyle(palette.isDark ? accent : palette.text)
                 Text("Niveau \(agent.level) · \(agent.xp_in_level) / \(agent.xp_for_next_level) XP")
+                    .font(.caption.monospacedDigit()).foregroundStyle(palette.secondary)
+                FadedProgress(value: ratio).accessibilityLabel("XP til næste niveau")
+                if !quests.isEmpty {
+                    FadedSectionLabel("Seneste opgaver")
+                    ForEach(quests.prefix(3)) { quest in
+                        Text(quest.title + " · " + questStatus(quest.state)).font(.subheadline)
+                    }
+                }
+                FadedSecondaryButton("Historik og hukommelse", icon: "clock.arrow.circlepath") { details = agent }
+                    .accessibilityLabel("Historik og hukommelse for \(agent.name)")
             }
-            Text("Quest Log").font(.headline)
-            let quests = agent.recent_quests.sorted { $0.updated_at > $1.updated_at }
-            if quests.isEmpty { Text("Ingen opgaver endnu.") }
-            ForEach(quests.prefix(3)) { quest in
-                Text(quest.title + " · " + questStatus(quest.state))
-            }
-        }.frame(maxWidth: .infinity, alignment: .leading)
-            .padding(16).background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 20))
-            .modifier(AgentPulse(active: agent.status == .working || agent.status == .thinking))
+        }
+    }
+
+    private func agentAccent(_ state: V2Hub.Agent.Status) -> Color {
+        switch state {
+        case .working: palette.cyan
+        case .thinking: palette.purple
+        case .ready: palette.green
+        case .offline: palette.muted
+        }
     }
 
     private func agentDetails(_ agent: V2Hub.Agent) -> some View {
@@ -2511,17 +3201,22 @@ private struct ChatTurn: Identifiable, Codable {
 
 private struct LoadingSkeleton: View {
     let label: String
+    @Environment(\.fadedPalette) private var palette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var phase
+    @AppStorage("qol.reduceMotion") private var calmMotion = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(label).font(.subheadline)
-            TimelineView(.animation(minimumInterval: 1.0 / 15, paused: reduceMotion)) { context in
-                let opacity = reduceMotion ? 0.22 : 0.22 + 0.07 * sin(context.date.timeIntervalSinceReferenceDate * 4)
+            let paused = reduceMotion || phase != .active
+            TimelineView(.animation(minimumInterval: 1.0 / 15, paused: paused)) { context in
+                let speed: Double = calmMotion ? 2 : 4
+                let opacity = paused ? 0.22 : 0.22 + 0.07 * sin(context.date.timeIntervalSinceReferenceDate * speed)
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach([1.0, 0.72, 0.48], id: \.self) { width in
                         RoundedRectangle(cornerRadius: 6)
-                            .fill(.secondary.opacity(opacity))
+                            .fill(palette.secondary.opacity(opacity))
                             .frame(height: 12)
                             .scaleEffect(x: width, y: 1, anchor: .leading)
                     }
@@ -2538,8 +3233,7 @@ private struct RetryNotice: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(message)
-            Button(action: retry) { Text("Prøv igen").frame(minHeight: 48) }
-                .buttonStyle(.bordered)
+            FadedSecondaryButton("Prøv igen", icon: "arrow.clockwise", action: retry)
         }
     }
 }
@@ -2547,6 +3241,7 @@ private struct RetryNotice: View {
 private struct AgentPulse: ViewModifier {
     let active: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.fadedPalette) private var palette
 
     func body(content: Content) -> some View {
         TimelineView(.animation(minimumInterval: 1.0 / 15, paused: !active || reduceMotion)) { context in
@@ -2554,7 +3249,7 @@ private struct AgentPulse: ViewModifier {
                 ? 0.18 + 0.12 * sin(context.date.timeIntervalSinceReferenceDate * 2)
                 : 0.0
             content.overlay {
-                RoundedRectangle(cornerRadius: 20).strokeBorder(.blue.opacity(intensity), lineWidth: 2)
+                RoundedRectangle(cornerRadius: FadedRadius.media).strokeBorder(palette.cyan.opacity(intensity), lineWidth: 2)
                     .allowsHitTesting(false).accessibilityHidden(true)
             }
         }
@@ -2736,14 +3431,18 @@ private enum ChatArchive {
 
 private struct AgentToolWave: View {
     let status: String
+    @Environment(\.fadedPalette) private var palette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @AppStorage("qol.reduceMotion") private var calmMotion = false
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 15, paused: reduceMotion)) { context in
-            let time = reduceMotion ? 0 : context.date.timeIntervalSinceReferenceDate * 6
+        let paused = reduceMotion || calmMotion || scenePhase != .active
+        TimelineView(.animation(minimumInterval: 1.0 / 15, paused: paused)) { context in
+            let time = paused ? 0 : context.date.timeIntervalSinceReferenceDate * 6
             HStack(spacing: 3) {
                 ForEach(0..<7, id: \.self) { index in
-                    Capsule().fill(.cyan).frame(width: 3, height: 6 + CGFloat(abs(sin(time + Double(index) * 0.8))) * 12)
+                    Capsule().fill(palette.lime).frame(width: 3, height: 6 + CGFloat(abs(sin(time + Double(index) * 0.8))) * 12)
                 }
             }.frame(height: 20)
         }
@@ -2755,6 +3454,7 @@ private struct AgentToolWave: View {
 private struct ModuleTabView: View {
     let tab: ModuleTab
     let api: LiveAPI
+    let onBack: () -> Void
     @State private var cards: [ModuleCards.Card] = []
     @State private var information: String?
     @State private var importing = false
@@ -2787,7 +3487,14 @@ private struct ModuleTabView: View {
                     Button("Prøv igen") { Task { await load() } }.frame(minHeight: 44).disabled(busy)
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(FadedBackground())
             .navigationTitle(tab.title)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Tilbage", systemImage: "chevron.left", action: onBack)
+                }
+            }
             .task { await load() }
             .refreshable { await load() }
             .confirmationDialog("Erstat samlingen på PC’en?", isPresented: $confirmImport) {
@@ -2843,8 +3550,11 @@ private struct BatchReviewView: View {
                 TextField("Hvad skal ændres?", text: $goal, axis: .vertical)
                 TextField("Op til fem filstier, én pr. linje", text: $paths, axis: .vertical)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
-                Button("Sæt i kø") { Task { await enqueue() } }
+                FadedPrimaryButton("Sæt i kø", icon: "terminal") { Task { await enqueue() } }
                     .disabled(busy || repo.isEmpty || goal.isEmpty || paths.isEmpty)
+                if busy || repo.isEmpty || goal.isEmpty || paths.isEmpty {
+                    Text(busy ? "Vent på PC’en." : "Udfyld repo, opgave og filstier.").font(.caption).foregroundStyle(.secondary)
+                }
             }
             Section("Kodejob") {
                 if let failure { Text(failure) }
@@ -2861,6 +3571,8 @@ private struct BatchReviewView: View {
                 }
             }
         }
+        .scrollContentBackground(.hidden)
+        .background(FadedBackground(variant: .terminal))
         .navigationTitle("Forslag til flere filer")
         .task { await reload() }
         .refreshable { await reload() }
@@ -2918,7 +3630,7 @@ private struct BatchProposalView: View {
             if let reason = detail?.result?.reason { Text(verbatim: reason) }
             if let diff = detail?.result?.diff {
                 Section("Ændringer") {
-                    ScrollView(.horizontal) { Text(verbatim: diff).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
+                    FadedDiff(diff: diff)
                 }
             }
             if let tests = detail?.result?.tests {
@@ -2933,10 +3645,13 @@ private struct BatchProposalView: View {
             }
             if let branch = detail?.result?.branch { Text(verbatim: branch).textSelection(.enabled) }
             if detail?.status == "review" {
-                Button("Godkend og gem på lokal gren") { confirm = true }.disabled(busy)
+                FadedPrimaryButton("Godkend ændringer", icon: "checkmark") { confirm = true }.disabled(busy)
+                if busy { Text("Vent på PC’en.").font(.caption).foregroundStyle(.secondary) }
             }
             Button("Opdatér") { Task { await reload() } }.disabled(busy)
         }
+        .scrollContentBackground(.hidden)
+        .background(FadedBackground(variant: .terminal))
         .navigationTitle("Gennemgå forslag")
         .task { await reload() }
         .confirmationDialog("Godkend ændringerne?", isPresented: $confirm) {
@@ -2961,7 +3676,7 @@ private struct BatchProposalView: View {
 }
 
 private struct CodeWorkspaceView: View {
-    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.fadedPalette) private var palette
 
     private struct FeatureDraft: Decodable {
         let feasible: Bool
@@ -3020,129 +3735,164 @@ private struct CodeWorkspaceView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    Text("Code Bot").font(.largeTitle.bold()).accessibilityAddTraits(.isHeader)
-                    Text("Filer bliver kun læst og skrevet i den sikre Agent Workspace-mappe på PC’en.")
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Autonomi").font(.title2.bold())
-                        Picker("Code Bot-autonomi", selection: $autonomy) {
-                            ForEach(Autonomy.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) }
-                        }.pickerStyle(.segmented)
-                        Text(Autonomy(rawValue: autonomy)?.explanation ?? Autonomy.strict.explanation)
-                            .font(.callout).foregroundStyle(.secondary)
+            codeContent
+                .background(FadedBackground(variant: .terminal))
+                .navigationTitle("Code Bot")
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Tilbage", systemImage: "chevron.left", action: onBack)
                     }
+                }
+                .refreshable { await load() }
+                .task { restoreContext(); await load() }
+                .confirmationDialog("Godkend filændringen?", isPresented: $approval, presenting: proposal) { item in
+                    Button("Skriv filen", role: .destructive) { Task { await apply(item) } }
+                } message: { item in
+                    Text("Kun \(item.path) i Agent Workspace bliver ændret.")
+                }
+        }
+    }
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            Text("Aktive filer og kontekst").font(.title2.bold())
-                            Spacer()
-                            if loading { ProgressView().accessibilityLabel("Henter Agent Workspace") }
-                        }
-                        if files.isEmpty && !loading { Text("Ingen tekstfiler i Agent Workspace endnu.") }
-                        ForEach(files) { file in
-                            Button {
-                                guard !loading else { return }
-                                if selected.contains(file.path) { selected.remove(file.path) }
-                                else { selected.insert(file.path) }
-                                persistContext()
-                                Task { await open(file.path) }
-                            } label: {
-                                HStack {
-                                    Image(systemName: selected.contains(file.path) ? "checkmark.circle.fill" : "circle")
-                                    VStack(alignment: .leading) {
-                                        Text(file.path).lineLimit(2)
-                                        Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                }.frame(minHeight: 52)
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(loading)
-                            .accessibilityLabel("\(file.path), \(selected.contains(file.path) ? "valgt som kontekst" : "ikke valgt")")
-                        }
-                    }
+    private var codeContent: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
+                Text("Din makker på PC’en. Se ændringen, før den skrives.")
+                    .font(FadedTypography.body).foregroundStyle(palette.secondary)
+                autonomyCard
+                fileCards
+                featureCard
+                manualCard
+                if let proposal { proposalCard(proposal) }
+                if let message {
+                    FadedCard(accent: palette.cyan) { Text(message).font(FadedTypography.body) }
+                }
+            }.padding(FadedSpacing.edge).frame(maxWidth: 680).frame(maxWidth: .infinity)
+        }
+    }
 
-                    VStack(alignment: .leading, spacing: 10) {
-                        if let api {
-                            NavigationLink("Forslag til flere filer") { BatchReviewView(api: api) }
-                                .buttonStyle(.bordered).frame(minHeight: 44)
-                        }
-                        Text("Byg en lille funktion med PC-modellen").font(.title2.bold())
-                        Text("Vælg en fil og beskriv én afgrænset ændring. I en lang fil kan du vælge en startlinje tæt på ændringen.")
-                            .font(.callout).foregroundStyle(.secondary)
-                        TextField("Beskriv funktionen", text: $featureRequest, axis: .vertical)
-                            .lineLimit(2...6).textFieldStyle(.roundedBorder)
-                            .disabled(loading)
-                        LabeledContent("Startlinje i filen") {
-                            TextField("Startlinje", text: $firstEditLine).keyboardType(.numberPad)
-                                .multilineTextAlignment(.trailing).frame(minHeight: 44).disabled(loading)
-                        }
-                        Button("Lad Code Bot forberede ændringen") { Task { await generateFeature() } }
-                            .buttonStyle(.borderedProminent).controlSize(.large)
-                            .disabled(api == nil || loading || path.isEmpty || featureRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        if !codeStatus.isEmpty { Text(codeStatus).font(.caption).foregroundStyle(.cyan) }
-                    }.padding().background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Forbered filændring").font(.title2.bold())
-                        TextField("Relativ filsti", text: $path).textInputAutocapitalization(.never)
-                            .autocorrectionDisabled().textFieldStyle(.roundedBorder)
-                            .accessibilityLabel("Filsti i Agent Workspace")
-                            .disabled(loading)
-                        TextEditor(text: $content).frame(minHeight: 180)
-                            .overlay(RoundedRectangle(cornerRadius: 10).stroke(.secondary.opacity(0.35)))
-                            .accessibilityLabel("Nyt filindhold")
-                            .disabled(loading)
-                        Button("Forbered ændring") { Task { await prepare() } }
-                            .buttonStyle(.borderedProminent).controlSize(.large)
-                            .disabled(api == nil || loading || path.isEmpty)
-                    }
-
-                    if let proposal {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Label("Kræver din godkendelse", systemImage: "lock.shield")
-                                .font(.headline).foregroundStyle(.orange)
-                            ScrollView(.horizontal) {
-                                Text(proposal.diff).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                            }.frame(maxHeight: 260)
-                            if !testPlan.isEmpty {
-                                Text("Testplan").font(.headline)
-                                ForEach(Array(testPlan.enumerated()), id: \.offset) { item in
-                                    Text("\(item.offset + 1). \(item.element)")
-                                }
-                            }
-                            HStack {
-                                Button("Afvis", role: .destructive) { Task { await reject(proposal) } }
-                                    .buttonStyle(.bordered).controlSize(.large)
-                                Button("Godkend ændring") { approval = true }
-                                    .buttonStyle(.borderedProminent).controlSize(.large)
-                            }.disabled(loading)
-                        }.padding().background(.thinMaterial, in: RoundedRectangle(cornerRadius: 18))
-                    }
-
-                    if let message {
-                        Text(message).padding().frame(maxWidth: .infinity, alignment: .leading)
-                            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 14))
-                            .accessibilityLabel(message)
-                    }
-                }.padding(20).frame(maxWidth: 680).frame(maxWidth: .infinity)
+    private var autonomyCard: some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 8) {
+                FadedSectionLabel("Autonomi")
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 4) { autonomyChoices }
+                    VStack(alignment: .leading, spacing: 4) { autonomyChoices }
+                }
+                Text(Autonomy(rawValue: autonomy)?.explanation ?? Autonomy.strict.explanation)
+                    .font(.callout).foregroundStyle(palette.secondary)
             }
-            .background((colorScheme == .dark ? Color.black : Color(uiColor: .systemBackground)).ignoresSafeArea())
-            .navigationTitle("Agent Workspace")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Tilbage", systemImage: "chevron.left", action: onBack)
+        }
+    }
+
+    @ViewBuilder private var autonomyChoices: some View {
+        ForEach(Autonomy.allCases, id: \.rawValue) { choice in
+            FadedChip(choice.rawValue, accent: palette.lime, selected: autonomy == choice.rawValue) {
+                autonomy = choice.rawValue
+            }
+        }
+    }
+
+    @ViewBuilder private var fileCards: some View {
+        FadedSectionLabel("Aktive filer")
+        if loading { ProgressView("Henter fra PC’en…") }
+        if files.isEmpty && !loading {
+            FadedEmptyState(icon: "folder", title: "Ingen filer her endnu", detail: "Tilføj en tekstfil i Agent Workspace på PC’en.")
+        }
+        ForEach(files) { file in
+            let isSelected = selected.contains(file.path)
+            Button {
+                guard !loading else { return }
+                if isSelected { selected.remove(file.path) }
+                else { selected.insert(file.path) }
+                persistContext()
+                Task { await open(file.path) }
+            } label: {
+                FadedCard(accent: isSelected ? palette.lime : nil) {
+                    HStack(spacing: 10) {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .foregroundStyle(isSelected && palette.isDark ? palette.lime : palette.secondary)
+                        VStack(alignment: .leading) {
+                            Text(file.path).font(FadedTypography.code).lineLimit(2)
+                            Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))
+                                .font(.caption.monospacedDigit()).foregroundStyle(palette.secondary)
+                        }
+                        Spacer(minLength: 0)
+                    }.frame(minHeight: 44)
+                }
+                .overlay {
+                    if isSelected { RoundedRectangle(cornerRadius: FadedRadius.card).strokeBorder(palette.lime, lineWidth: 2).allowsHitTesting(false) }
                 }
             }
-            .refreshable { await load() }
-            .task { restoreContext(); await load() }
-            .confirmationDialog("Godkend filændringen?", isPresented: $approval, presenting: proposal) { item in
-                Button("Skriv filen", role: .destructive) { Task { await apply(item) } }
-            } message: { item in
-                Text("Kun \(item.path) i Agent Workspace bliver ændret.")
+            .buttonStyle(.plain)
+            .disabled(loading)
+            .accessibilityLabel(file.path)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
+        }
+    }
+
+    private var featureBlocker: String? {
+        if api == nil { return "Forbind til PC’en først." }
+        if loading { return "Vent på PC’en." }
+        if path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Vælg en fil." }
+        if featureRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Beskriv ændringen først." }
+        return nil
+    }
+
+    private var featureCard: some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 10) {
+                if let api {
+                    NavigationLink("Forslag til flere filer") { BatchReviewView(api: api) }
+                        .buttonStyle(FadedButtonStyle(kind: .secondary))
+                }
+                FadedSectionLabel("Byg en funktion")
+                Text("Vælg en fil og beskriv én ændring. Brug startlinjen, hvis filen er lang.")
+                    .font(.callout).foregroundStyle(palette.secondary)
+                TextField("Hvad skal ændres?", text: $featureRequest, axis: .vertical)
+                    .lineLimit(2...6).textFieldStyle(.roundedBorder).disabled(loading)
+                LabeledContent("Startlinje i filen") {
+                    TextField("Startlinje", text: $firstEditLine).keyboardType(.numberPad)
+                        .font(FadedTypography.number).multilineTextAlignment(.trailing).frame(minHeight: 44).disabled(loading)
+                }
+                Button { Task { await generateFeature() } } label: {
+                    Label("Forbered forslag", systemImage: "terminal").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(FadedButtonStyle(kind: proposal == nil ? .primary : .secondary))
+                .disabled(featureBlocker != nil)
+                if let featureBlocker { Text(featureBlocker).font(.caption).foregroundStyle(palette.secondary) }
+                if !codeStatus.isEmpty { Text(codeStatus).font(.caption).foregroundStyle(palette.secondary) }
+            }
+        }
+    }
+
+    private var manualCard: some View {
+        FadedCard {
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField("Relativ filsti", text: $path).textInputAutocapitalization(.never)
+                        .autocorrectionDisabled().textFieldStyle(.roundedBorder).disabled(loading)
+                    TextEditor(text: $content).font(FadedTypography.code).frame(minHeight: 180)
+                        .overlay { RoundedRectangle(cornerRadius: FadedRadius.small).strokeBorder(palette.border) }
+                        .accessibilityLabel("Nyt filindhold").disabled(loading)
+                    FadedSecondaryButton("Forbered manuel ændring") { Task { await prepare() } }
+                        .disabled(api == nil || loading || path.isEmpty)
+                }.padding(.top, 10)
+            } label: { FadedSectionLabel("Ret fil manuelt") }
+        }
+    }
+
+    private func proposalCard(_ proposal: V2CodeProposal) -> some View {
+        FadedCard(accent: palette.cyan) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("Dit tjek. Din godkendelse.", systemImage: "lock.shield").font(FadedTypography.action)
+                FadedDiff(diff: proposal.diff)
+                if !testPlan.isEmpty {
+                    FadedSectionLabel("Testplan")
+                    ForEach(Array(testPlan.enumerated()), id: \.offset) { item in Text("\(item.offset + 1). \(item.element)") }
+                }
+                FadedPrimaryButton("Godkend ændring", icon: "checkmark") { approval = true }.disabled(loading)
+                if loading { Text("Vent på PC’en.").font(.caption).foregroundStyle(palette.secondary) }
+                FadedSecondaryButton("Afvis") { Task { await reject(proposal) } }.disabled(loading)
             }
         }
     }
@@ -3340,16 +4090,18 @@ private struct ChatView: View {
         case pc = "PC"
         case grok = "Grok"
 
-        var sendTitle: String {
+        var icon: String {
             switch self {
-            case .phone: "Send på telefonen"
-            case .pc: "Send til PC"
-            case .grok: "Send til Grok"
+            case .phone: "iphone"
+            case .pc: "desktopcomputer"
+            case .grok: "cloud"
             }
         }
     }
 
+    @Environment(\.fadedPalette) private var palette
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let api: (any ChatAPI)?
     let demo: Bool
     let initialDraft: String
@@ -3390,6 +4142,11 @@ private struct ChatView: View {
     @State private var archivedTurns: [ChatTurn] = []
     @State private var favoritesOnly = false
     @State private var scrollRequest = 0
+    @State private var showComposerTools = false
+    @State private var choosingNote = false
+    @State private var newNote = ""
+    @State private var attachedNote: String?
+    @State private var imageHandoff: String?
     @AppStorage("ai.tone") private var aiTone = "Naturlig"
     @AppStorage("ai.length") private var aiLength = "Kort"
     @AppStorage("ai.language") private var aiLanguage = "Dansk"
@@ -3420,6 +4177,7 @@ private struct ChatView: View {
     @AppStorage("ai.timestamps") private var aiTimestamps = false
     @AppStorage("ai.wordCount") private var aiWordCount = false
     @AppStorage("ai.showTools") private var aiShowTools = true
+    @AppStorage("qol.reduceMotion") private var calmMotion = false
 
     init(api: (any ChatAPI)?, demo: Bool, initialDraft: String, connection: String, storageKey: String,
          onBack: (() -> Void)? = nil, openImageStudio: ((String) -> Void)? = nil) {
@@ -3477,20 +4235,21 @@ private struct ChatView: View {
 
     var body: some View {
         NavigationStack {
+            GeometryReader { geometry in
+                chatContent(userBubbleWidth: max(1, (geometry.size.width - 32) * 0.8))
+            }
+            .background { FadedBackground(variant: aiPrivateSession ? .privateChat : .standard) }
+            .navigationBarTitleDisplayMode(.inline)
+        }
+        .tint(palette.isDark ? palette.lime : palette.text)
+    }
+
+    private func chatContent(userBubbleWidth: CGFloat) -> some View {
+        VStack(spacing: 0) {
+            chatHeading
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 14) {
-                        HStack(spacing: 12) {
-                            RoundedRectangle(cornerRadius: 16)
-                                .fill(.cyan.gradient).frame(width: 58, height: 58)
-                                .overlay(Image(systemName: "sparkles").font(.title2).foregroundStyle(.black))
-                            VStack(alignment: .leading) {
-                                Text("Tal med din AI").font(.title.bold()).accessibilityAddTraits(.isHeader)
-                                Text(connection).font(.subheadline).foregroundStyle(.secondary)
-                            }
-                            Spacer(minLength: 0)
-                            quickModelPicker
-                        }
                         TextField(aiPrivateSession ? "Søg i privat samtale" : "Søg i alle samtaler", text: $chatSearch)
                             .textFieldStyle(.roundedBorder)
                             .onChange(of: chatSearch) { old, new in
@@ -3514,8 +4273,12 @@ private struct ChatView: View {
                                 }.disabled(turns.isEmpty)
                             }.padding(.top, 8)
                         }
-                        if chatSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { transcriptRows }
-                        else { globalSearchRows }
+                        if chatSearch.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                            if turns.isEmpty && task == nil {
+                                FadedEmptyState(icon: "bubble.left", title: "Start en samtale", detail: "Vælg en kilde, og skriv din besked.")
+                            }
+                            transcriptRows(userBubbleWidth: userBubbleWidth)
+                        } else { globalSearchRows }
                         if aiShowTools && !searchSteps.isEmpty {
                             DisclosureGroup("Agentaktivitet · \(searchSteps.count) trin") {
                                 ForEach(searchSteps.indices, id: \.self) { index in
@@ -3541,6 +4304,7 @@ private struct ChatView: View {
                 .onChange(of: turns.count) { scrollChat(proxy) }
                 .onChange(of: streamedText) { scrollChat(proxy) }
                 .onChange(of: scrollRequest) { scrollChat(proxy) }
+                .onChange(of: replySource) { attachedNote = nil }
                 .onChange(of: draft) { _, value in
                     if loaded && !aiPrivateSession { savedDraft = value }
                 }
@@ -3550,6 +4314,7 @@ private struct ChatView: View {
                     turns = []
                     searchSteps = []
                     sourceExcerpt = nil
+                    attachedNote = nil
                     sessionID = UUID()
                     archivedTurns = []
                     chatSearch = ""
@@ -3557,16 +4322,6 @@ private struct ChatView: View {
                     if !isPrivate { loadHistory() }
                 }
                 .safeAreaInset(edge: .bottom) { composer }
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("Tilbage", systemImage: "chevron.left", action: goBack)
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Ny samtale", systemImage: "square.and.pencil") { newConversation() }
-                            .disabled(task != nil)
-                    }
-                }
-                .navigationBarTitleDisplayMode(.inline)
                 .onAppear {
                     phoneBatteryLevel = UIDevice.current.batteryLevel
                     cloudKeyAvailable = CloudModelKey.exists()
@@ -3590,6 +4345,35 @@ private struct ChatView: View {
                 .sensoryFeedback(.success, trigger: completedReplies)
             }
         }
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Tilbage", systemImage: "chevron.left", action: goBack)
+            }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Ny samtale", systemImage: "square.and.pencil") { newConversation() }
+                    .disabled(task != nil)
+            }
+        }
+        .sheet(isPresented: $showComposerTools, onDismiss: finishComposerTools) { composerToolsSheet }
+    }
+
+    private var chatHeading: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("AI-chat").font(.title2.bold()).accessibilityAddTraits(.isHeader)
+                Spacer(minLength: 8)
+                quickModelPicker
+            }
+            Text(connection).font(.subheadline).foregroundStyle(palette.secondary)
+            if !demo { sourcePicker }
+            if aiPrivateSession {
+                Label("Privat samtale · Ingen lokal historik", systemImage: "lock.fill")
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(palette.isDark ? palette.purple : palette.text)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16).padding(.bottom, 8)
+        .foregroundStyle(palette.text)
     }
 
     @ViewBuilder private var quickModelPicker: some View {
@@ -3615,13 +4399,29 @@ private struct ChatView: View {
     }
 
     private var sourcePicker: some View {
-        Picker("Svar fra", selection: $replySource) {
-            ForEach(ReplySource.allCases.filter { !aiPrivateSession || $0 != .grok }, id: \.self) { source in
-                Text(source.rawValue).tag(source)
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) { sourceChips }
+            VStack(alignment: .leading, spacing: 6) { sourceChips }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Svar fra")
+        .disabled(task != nil)
+    }
+
+    private var sourceChips: some View {
+        ForEach(ReplySource.allCases.filter { !aiPrivateSession || $0 != .grok }, id: \.self) { source in
+            FadedChip(source.rawValue, accent: sourceColor(source), selected: replySource == source, icon: source.icon) {
+                replySource = source
             }
         }
-        .pickerStyle(.segmented)
-        .disabled(task != nil)
+    }
+
+    private func sourceColor(_ source: ReplySource) -> Color {
+        switch source {
+        case .phone: palette.green
+        case .pc: palette.cyan
+        case .grok: palette.purple
+        }
     }
 
     private var sourceNote: String? {
@@ -3647,77 +4447,177 @@ private struct ChatView: View {
     private func scrollChat(_ proxy: ScrollViewProxy) {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(80))
-            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("chat-bottom", anchor: .bottom) }
+            withAnimation(reduceMotion || calmMotion ? nil : .easeOut(duration: 0.2)) {
+                proxy.scrollTo("chat-bottom", anchor: .bottom)
+            }
         }
     }
 
     private var composer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if !demo { sourcePicker }
-            if let sourceNote { Text(sourceNote).font(.caption).foregroundStyle(.secondary) }
-            if replySource == .phone, phoneBatteryLevel >= 0, phoneBatteryLevel < 0.20, PhoneModels.liteModeActive(for: phoneModel) {
-                Label("Lite Mode · LFM2.5", systemImage: "battery.25percent")
-                    .font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 6) {
+                if let attachedNote {
+                    HStack {
+                        Label("Note: \(String(attachedNote.prefix(80)))", systemImage: "note.text")
+                            .lineLimit(1)
+                            .font(.caption.weight(.semibold)).foregroundStyle(palette.secondary)
+                        Spacer()
+                        Button("Fjern note", systemImage: "xmark") { self.attachedNote = nil }
+                            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                    }
+                }
+                HStack(alignment: .bottom, spacing: 4) {
+                    Button("Flere handlinger", systemImage: "plus") {
+                        composerFocused = false
+                        choosingNote = false
+                        newNote = ""
+                        showComposerTools = true
+                    }
+                    .labelStyle(.iconOnly).frame(width: 44, height: 44).disabled(task != nil)
+                    TextField("Skriv en besked…", text: $draft, axis: .vertical)
+                        .lineLimit(1...4).frame(minHeight: 44).focused($composerFocused)
+                    dictationAction.disabled(task != nil)
+                    sendControl
+                }
+                if let problem = dictation.problem { Text(problem).font(.caption).foregroundStyle(palette.secondary) }
             }
-            if task == nil {
-                composerActions
-                if let problem = dictation.problem { Text(problem).font(.caption) }
+            .padding(.horizontal, 8).padding(.vertical, 5)
+            .background(palette.card, in: RoundedRectangle(cornerRadius: 22))
+            .overlay { RoundedRectangle(cornerRadius: 22).strokeBorder(aiPrivateSession ? palette.purple : palette.border) }
+
+            HStack(alignment: .firstTextBaseline) {
+                Label("Sendes til: \(demo ? "Demo" : replySource.rawValue)", systemImage: demo ? "testtube.2" : replySource.icon)
+                    .font(.caption.weight(.semibold)).foregroundStyle(demo || !palette.isDark ? palette.secondary : sourceColor(replySource))
+                if replySource == .phone, phoneBatteryLevel >= 0, phoneBatteryLevel < 0.20, PhoneModels.liteModeActive(for: phoneModel) {
+                    Label("Lite Mode", systemImage: "battery.25percent").font(.caption).foregroundStyle(palette.secondary)
+                }
+                Spacer(minLength: 4)
+                Text("\(transportMessage.unicodeScalars.count) / 2.000").font(.caption.monospacedDigit())
+                    .foregroundStyle(transportMessage.unicodeScalars.count > 2000 ? palette.coralText : palette.secondary)
             }
-            TextField("Din besked", text: $draft, axis: .vertical)
-                .textFieldStyle(.roundedBorder).lineLimit(2...5).frame(minHeight: 48)
-                .focused($composerFocused)
-            HStack {
-                Text("\(draft.count) / 2.000").font(.caption.monospacedDigit())
-                    .foregroundStyle(draft.count > 2000 ? Color.red : Color.secondary)
-                Spacer()
-                Button("Ryd") { draft = "" }.disabled(draft.isEmpty || task != nil)
-                Button("Nyeste", systemImage: "arrow.down") { composerFocused = false; scrollRequest += 1 }
-                    .accessibilityHint("Flytter fokus væk fra tastaturet og viser den nyeste besked")
-            }.frame(minHeight: 36)
-            if task != nil {
-                Button { stop() } label: { Text("Stop modtagelse").frame(minHeight: 48) }
-                    .buttonStyle(.bordered)
-            } else {
-                Button { send() } label: { Text(demo ? "Send testbesked" : replySource.sendTitle).frame(minHeight: 48) }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 2000 || !canSendToSource)
-            }
-        }.padding(12).background(.regularMaterial)
+            if let sourceNote { Text(sourceNote).font(.caption).foregroundStyle(palette.secondary) }
+        }.padding(.horizontal, 12).padding(.vertical, 6)
     }
 
-    private var composerActions: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack {
-                promptTemplates.fixedSize(horizontal: true, vertical: false)
-                Spacer(minLength: 4)
-                imageStudioAction.fixedSize(horizontal: true, vertical: false)
-                dictationAction
+    private var sendControl: some View {
+        let sending = task != nil
+        let allowed = sending || (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && transportMessage.unicodeScalars.count <= 2000 && canSendToSource)
+        return Button {
+            if sending { stop() }
+            else { send() }
+        } label: {
+            Image(systemName: sending ? "stop.fill" : "arrow.up")
+                .font(.body.weight(.bold)).foregroundStyle(Color.black)
+                .frame(width: 40, height: 40).background(palette.lime.opacity(allowed ? 1 : 0.45), in: Circle())
+                .frame(width: 44, height: 44).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(sending ? "Stop modtagelse" : (demo ? "Send testbesked" : "Send til \(replySource.rawValue)"))
+        .disabled(!allowed)
+    }
+
+    private var composerToolsSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if choosingNote {
+                        noteChoices
+                    } else {
+                        if openImageStudio != nil && !aiPrivateSession {
+                            FadedSecondaryButton("Lav billede", icon: "photo") {
+                                imageHandoff = draft
+                                showComposerTools = false
+                            }
+                        }
+                        FadedSecondaryButton(aiPrivateSession ? "Slå privat fra" : "Slå privat til", icon: "lock") {
+                            aiPrivateSession.toggle()
+                            showComposerTools = false
+                        }
+                        FadedSecondaryButton("Vedhæft note", icon: "note.text") { choosingNote = true }
+                            .disabled(demo)
+                        DisclosureGroup("Flere chatværktøjer") {
+                            promptTemplates
+                            Button("Vis nyeste besked", systemImage: "arrow.down") {
+                                scrollRequest += 1
+                                showComposerTools = false
+                            }.frame(minHeight: 44)
+                            Button("Ryd kladde", role: .destructive) {
+                                draft = ""
+                                attachedNote = nil
+                                showComposerTools = false
+                            }.frame(minHeight: 44).disabled(draft.isEmpty && attachedNote == nil)
+                        }
+                    }
+                }.padding(20)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                HStack { promptTemplates; Spacer(); dictationAction }
-                imageStudioAction
+            .background { FadedBackground(variant: aiPrivateSession ? .privateChat : .standard) }
+            .navigationTitle(choosingNote ? "Vedhæft note" : "Chatværktøjer")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("Luk") { showComposerTools = false } }
+        }
+        .presentationDetents(choosingNote ? [.large] : [.medium, .large])
+    }
+
+    private var noteChoices: some View {
+        let excerpts = notes.split(whereSeparator: \.isNewline).map {
+            String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Vælg et uddrag. Det følger næste besked til \(replySource.rawValue).").foregroundStyle(palette.secondary)
+            if excerpts.isEmpty {
+                FadedEmptyState(icon: "note.text", title: "Ingen noter", detail: "Tilføj en note i appen, og prøv igen.")
+            } else {
+                ForEach(Array(excerpts.prefix(30).enumerated()), id: \.offset) { item in
+                    let excerpt = String(item.element.prefix(600))
+                    Button {
+                        attachedNote = excerpt
+                        showComposerTools = false
+                    } label: {
+                        Text(verbatim: excerpt).multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }.buttonStyle(FadedButtonStyle(kind: .secondary))
+                }
+            }
+            if !aiPrivateSession {
+                DisclosureGroup("Tilføj en lokal note") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        TextField("Skriv en kort note…", text: $newNote, axis: .vertical)
+                            .lineLimit(2...5).textFieldStyle(.roundedBorder)
+                        Button("Gem note på telefonen", action: saveNote)
+                            .frame(minHeight: 44)
+                            .disabled(newNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || newNote.count > 600)
+                    }.padding(.top, 6)
+                }
             }
         }
+    }
+
+    private func saveNote() {
+        let clean = newNote.split(whereSeparator: \.isNewline).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !aiPrivateSession, !clean.isEmpty, clean.count <= 600 else { return }
+        notes = notes.isEmpty ? clean : clean + "\n" + notes
+        newNote = ""
+    }
+
+    private func finishComposerTools() {
+        newNote = ""
+        guard let imageHandoff else { return }
+        self.imageHandoff = nil
+        dictation.stop()
+        openImageStudio?(imageHandoff)
     }
 
     private var promptTemplates: some View {
         Menu("Skabeloner") {
             ForEach(PromptExample.examples) { example in
-                Button(example.text) { draft = example.text }
+                Button(example.text) {
+                    draft = example.text
+                    showComposerTools = false
+                }
             }
         }.frame(minHeight: 44)
-    }
-
-    @ViewBuilder private var imageStudioAction: some View {
-        if let openImageStudio, !aiPrivateSession {
-            Button("Lav billede", systemImage: "photo") {
-                dictation.stop()
-                composerFocused = false
-                openImageStudio(draft)
-            }
-            .frame(minHeight: 44)
-            .accessibilityHint("Åbner Billeder i Offline Studio")
-        }
     }
 
     private var dictationAction: some View {
@@ -3729,7 +4629,7 @@ private struct ChatView: View {
             }
         } label: {
             Image(systemName: dictation.active ? "stop.circle" : "mic")
-                .frame(minWidth: 48, minHeight: 48)
+                .frame(minWidth: 44, minHeight: 44)
         }.accessibilityLabel(dictation.active ? "Stop diktering" : "Dikter chatbesked")
     }
 
@@ -3819,43 +4719,39 @@ private struct ChatView: View {
         }
     }
 
-    private var transcriptRows: some View {
+    private func transcriptRows(userBubbleWidth: CGFloat) -> some View {
         ForEach(filteredTurns) { turn in
-            VStack(alignment: .leading, spacing: 8) {
+            let accent = replyColor(turn.source)
+            VStack(alignment: .leading, spacing: 12) {
                 HStack {
-                    Spacer(minLength: 44)
+                    Spacer(minLength: 0)
                     Text(turn.prompt)
-                        .padding(12)
-                        .background(.cyan.opacity(0.20), in: RoundedRectangle(cornerRadius: 17))
+                        .foregroundStyle(Color.black)
+                        .padding(.horizontal, 14).padding(.vertical, 10)
+                        .background(palette.lime, in: RoundedRectangle(cornerRadius: 18))
+                        .frame(maxWidth: userBubbleWidth, alignment: .trailing)
                 }
                 if !turn.reply.isEmpty {
                     VStack(alignment: .leading, spacing: 8) {
                         Label(turn.source ?? "AI", systemImage: sourceIcon(turn.source))
-                            .font(.caption.bold()).foregroundStyle(.cyan)
+                            .font(.caption.bold()).foregroundStyle(palette.isDark ? accent : palette.text)
                         if aiTimestamps, let date = turn.createdAt {
-                            Text(date, format: .dateTime.hour().minute()).font(.caption2).foregroundStyle(.secondary)
+                            Text(date, format: .dateTime.hour().minute()).font(.caption).foregroundStyle(palette.secondary)
                         }
                         ChatTranscriptView(reply: turn.reply)
                         if aiWordCount {
                             Text("\(turn.reply.split(whereSeparator: \.isWhitespace).count) ord")
-                                .font(.caption2).foregroundStyle(.secondary)
+                                .font(.caption).foregroundStyle(palette.secondary)
                         }
-                        Button("Læs svaret op", systemImage: "speaker.wave.2") { speak(turn.reply) }
-                            .frame(minHeight: 44)
-                        HStack {
-                            Button(turn.favorite == true ? "Fjern favorit" : "Favorit",
-                                   systemImage: turn.favorite == true ? "star.fill" : "star") { toggleFavorite(turn.id) }
-                            Button("Slet", systemImage: "trash", role: .destructive) { deleteTurn(turn.id) }
-                            Button("Godt svar", systemImage: turn.feedback == 1 ? "hand.thumbsup.fill" : "hand.thumbsup") {
-                                setFeedback(turn.id, value: 1)
-                            }.labelStyle(.iconOnly).accessibilityLabel("Markér som godt svar")
-                            Button("Dårligt svar", systemImage: turn.feedback == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown") {
-                                setFeedback(turn.id, value: -1)
-                            }.labelStyle(.iconOnly).accessibilityLabel("Markér som dårligt svar")
-                        }.frame(minHeight: 44)
+                        replyActions(turn)
                     }
-                    .padding(14)
-                    .background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
+                    .padding(.horizontal, 16).padding(.vertical, 12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .foregroundStyle(palette.text)
+                    .background(palette.card, in: RoundedRectangle(cornerRadius: 18))
+                    .overlay(alignment: .leading) {
+                        Capsule().fill(accent).frame(width: 4).padding(.vertical, 8).accessibilityHidden(true)
+                    }
                 }
                 if let notice = turn.notice {
                     RetryNotice(message: notice) { draft = turn.prompt }.disabled(task != nil)
@@ -3876,6 +4772,35 @@ private struct ChatView: View {
                 Button("Ny gren") { newConversation(); draft = turn.prompt }.disabled(task != nil)
             }
             .id(turn.id)
+        }
+    }
+
+    private func replyColor(_ source: String?) -> Color {
+        switch source ?? "" {
+        case "Telefon": palette.green
+        case "PC": palette.cyan
+        case GrokAPI.sourceLabel: palette.purple
+        default: palette.lime
+        }
+    }
+
+    private func replyActions(_ turn: ChatTurn) -> some View {
+        HStack(spacing: 4) {
+            Button("Læs svaret op", systemImage: "speaker.wave.2") { speak(turn.reply) }
+                .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+            Menu {
+                Button(turn.favorite == true ? "Fjern favorit" : "Favorit",
+                       systemImage: turn.favorite == true ? "star.fill" : "star") { toggleFavorite(turn.id) }
+                Button("Godt svar", systemImage: turn.feedback == 1 ? "hand.thumbsup.fill" : "hand.thumbsup") {
+                    setFeedback(turn.id, value: 1)
+                }
+                Button("Dårligt svar", systemImage: turn.feedback == -1 ? "hand.thumbsdown.fill" : "hand.thumbsdown") {
+                    setFeedback(turn.id, value: -1)
+                }
+                Button("Slet", systemImage: "trash", role: .destructive) { deleteTurn(turn.id) }
+            } label: {
+                Image(systemName: "ellipsis.circle").frame(minWidth: 44, minHeight: 44)
+            }.accessibilityLabel("Flere handlinger for svar")
         }
     }
 
@@ -3947,22 +4872,31 @@ private struct ChatView: View {
         rules.append(contentsOf: flags.filter { $0.0 }.map { $0.1 })
         let prefix = "\n\n[Svarpræferencer: "
         let suffix = "]"
-        let available = max(0, 2000 - message.count - prefix.count - suffix.count)
-        guard available > 0 else { return String(message.prefix(2000)) }
-        return message + prefix + String(rules.joined(separator: "; ").prefix(available)) + suffix
+        let available = 2000 - message.unicodeScalars.count - prefix.unicodeScalars.count - suffix.unicodeScalars.count
+        guard available > 0 else { return message }
+        let preferences = rules.joined(separator: "; ").unicodeScalars.prefix(available)
+        return message + prefix + String(preferences) + suffix
+    }
+
+    private var transportMessage: String {
+        let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let attachedNote else { return message }
+        return message + "\n\nVedhæftet note til kontekst:\n" + attachedNote
     }
 
     private func send() {
         dictation.stop()
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard task == nil, !message.isEmpty, message.count <= 2000, canSendToSource else { return }
+        let outgoing = transportMessage
+        guard task == nil, !message.isEmpty, outgoing.unicodeScalars.count <= 2000, canSendToSource else { return }
         let source = replySource
         let routeGrok = source == .grok && !demo
-        let cloudMessages = routeGrok ? grokMessages(endingWith: message) : []
+        let cloudMessages = routeGrok ? grokMessages(endingWith: outgoing) : []
+        sourceExcerpt = routeGrok || attachedNote != nil ? nil : localReference(for: message)
+        attachedNote = nil
         draft = ""
         if !aiPrivateSession { savedDraft = "" }
         searchSteps = []
-        sourceExcerpt = routeGrok ? nil : localReference(for: message)
         streamedText = ""
         turns.append(ChatTurn(prompt: message, createdAt: .now))
         let index = turns.count - 1
@@ -3970,7 +4904,7 @@ private struct ChatView: View {
         let history = turns.dropLast().suffix(6).filter { !$0.reply.isEmpty }
             .map { "Bruger: \($0.prompt)\nSvar: \($0.reply)" }.joined(separator: "\n")
         let collectionQuestion = message.lowercased().hasPrefix("kortsamling:")
-        let modelMessage = routeGrok || collectionQuestion ? message : enhancedPrompt(message)
+        let modelMessage = routeGrok || collectionQuestion ? outgoing : enhancedPrompt(outgoing)
         let context = String(history.suffix(max(0, 3000 - modelMessage.count)))
         status = "Venter på svar…"
         let input = ChatRequest(message: modelMessage, session_id: aiPrivateSession ? nil : sessionID)
@@ -4156,6 +5090,7 @@ private struct ChatView: View {
         if !aiPrivateSession { savedDraft = "" }
         searchSteps = []
         sourceExcerpt = nil
+        attachedNote = nil
         sessionID = UUID()
         save()
     }

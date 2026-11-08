@@ -1,0 +1,147 @@
+import SwiftUI
+
+enum FadedTheme: String, CaseIterable, Identifiable {
+    case faded = "Faded"
+    case oled = "OLED Sort"
+    case day = "Dag"
+
+    var id: Self { self }
+    var colorScheme: ColorScheme { self == .day ? .light : .dark }
+
+    static func migrateIfNeeded(_ defaults: UserDefaults = .standard) {
+        guard let domain = Bundle.main.bundleIdentifier,
+              let saved = defaults.persistentDomain(forName: domain), saved["appearance.theme"] == nil else { return }
+        if saved["app.followSystemAppearance"] as? Bool == false,
+           saved["app.manualDarkMode"] as? Bool == false {
+            defaults.set(day.rawValue, forKey: "appearance.theme")
+        } else if saved["spaces.theme"] as? String == oled.rawValue {
+            defaults.set(oled.rawValue, forKey: "appearance.theme")
+        }
+    }
+}
+
+enum FadedColors {
+    static let deep = Color(red: 13 / 255, green: 14 / 255, blue: 18 / 255)
+    static let gradientEnd = Color(red: 18 / 255, green: 19 / 255, blue: 26 / 255)
+    static let card = Color(red: 23 / 255, green: 24 / 255, blue: 31 / 255)
+    static let raised = Color(red: 30 / 255, green: 31 / 255, blue: 41 / 255)
+    static let border = Color(red: 42 / 255, green: 44 / 255, blue: 58 / 255)
+    static let text = Color(red: 242 / 255, green: 242 / 255, blue: 237 / 255)
+    static let secondary = Color(red: 168 / 255, green: 171 / 255, blue: 184 / 255)
+    static let muted = Color(red: 107 / 255, green: 110 / 255, blue: 125 / 255)
+    static let lime = Color(red: 212 / 255, green: 255 / 255, blue: 63 / 255)
+    static let cyan = Color(red: 63 / 255, green: 232 / 255, blue: 255 / 255)
+    static let purple = Color(red: 183 / 255, green: 140 / 255, blue: 255 / 255)
+    static let green = Color(red: 74 / 255, green: 222 / 255, blue: 128 / 255)
+    static let coral = Color(red: 255 / 255, green: 107 / 255, blue: 74 / 255)
+    static let dayCard = Color.white
+    static let dayRaised = Color(red: 232 / 255, green: 233 / 255, blue: 226 / 255)
+    static let dayBorder = Color(red: 217 / 255, green: 217 / 255, blue: 210 / 255)
+    static let daySecondary = Color(red: 70 / 255, green: 72 / 255, blue: 84 / 255)
+    static let dayCoralText = Color(red: 154 / 255, green: 44 / 255, blue: 23 / 255)
+    static let privateGlow = Color(red: 23 / 255, green: 18 / 255, blue: 31 / 255)
+    static let sunset = Color(red: 26 / 255, green: 20 / 255, blue: 16 / 255)
+    static let terminal = Color(red: 10 / 255, green: 10 / 255, blue: 14 / 255)
+    static let daylightWindow = Color(red: 242 / 255, green: 195 / 255, blue: 95 / 255)
+}
+
+struct FadedPalette {
+    var theme: FadedTheme = .faded
+    var isDark: Bool { theme != .day }
+    var background: Color { theme == .oled ? .black : isDark ? FadedColors.deep : FadedColors.text }
+    var card: Color { isDark ? FadedColors.card : FadedColors.dayCard }
+    var raised: Color { isDark ? FadedColors.raised : FadedColors.dayRaised }
+    var border: Color { isDark ? FadedColors.border : FadedColors.dayBorder }
+    var text: Color { isDark ? FadedColors.text : FadedColors.deep }
+    var secondary: Color { isDark ? FadedColors.secondary : FadedColors.daySecondary }
+    var muted: Color { FadedColors.muted }
+    var lime: Color { FadedColors.lime }
+    var cyan: Color { FadedColors.cyan }
+    var purple: Color { FadedColors.purple }
+    var green: Color { FadedColors.green }
+    var coral: Color { FadedColors.coral }
+    var coralText: Color { isDark ? coral : FadedColors.dayCoralText }
+}
+
+private struct FadedPaletteKey: EnvironmentKey {
+    static let defaultValue = FadedPalette()
+}
+
+extension EnvironmentValues {
+    var fadedPalette: FadedPalette {
+        get { self[FadedPaletteKey.self] }
+        set { self[FadedPaletteKey.self] = newValue }
+    }
+}
+
+enum FadedSpacing {
+    static let edge: CGFloat = 16
+    static let section: CGFloat = 12
+    static let action: CGFloat = 20
+}
+
+enum FadedRadius {
+    static let card: CGFloat = 16
+    static let small: CGFloat = 12
+    static let media: CGFloat = 20
+    static let primary: CGFloat = 14
+}
+
+enum FadedTypography {
+    static let title = Font.system(.title2, design: .rounded).bold()
+    static let section = Font.system(.headline, design: .rounded).weight(.semibold)
+    static let action = Font.system(.headline, design: .rounded).weight(.semibold)
+    static let body = Font.system(.body, design: .default)
+    static let code = Font.system(.footnote, design: .monospaced)
+    static let number = Font.system(.body, design: .monospaced).monospacedDigit()
+}
+
+struct FadedBackground: View {
+    enum Variant: Equatable { case standard, privateChat, village, terminal }
+
+    var variant: Variant = .standard
+    @Environment(\.fadedPalette) private var palette
+
+    private var colors: [Color] {
+        if !palette.isDark {
+            return [palette.background, variant == .privateChat ? palette.purple.opacity(0.12) : palette.raised]
+        }
+        if palette.theme == .oled { return [palette.background, palette.background] }
+        switch variant {
+        case .standard: return [FadedColors.deep, FadedColors.gradientEnd]
+        case .privateChat: return [FadedColors.deep, FadedColors.privateGlow]
+        case .village: return [FadedColors.sunset, FadedColors.deep]
+        case .terminal: return [FadedColors.deep, FadedColors.terminal]
+        }
+    }
+
+    var body: some View {
+        LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
+            .overlay { if palette.theme != .oled { texture } }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    private var texture: some View {
+        Canvas { context, size in
+            var path = Path()
+            let step: CGFloat = variant == .terminal ? 24 : 12
+            let columns = Int(size.width / step)
+            let rows = Int(size.height / step)
+            for row in 0...rows {
+                for column in 0...columns {
+                    let offset = CGFloat((row * 7 + column * 13) % 9)
+                    let x = CGFloat(column) * step
+                    let y = CGFloat(row) * step
+                    if variant == .terminal {
+                        path.addRect(CGRect(x: x, y: y, width: 1, height: 1))
+                    } else {
+                        path.addRect(CGRect(x: x + offset, y: y + offset, width: 1, height: 1))
+                    }
+                }
+            }
+            context.fill(path, with: .color(palette.text.opacity(variant == .terminal ? 0.12 : 0.07)))
+        }
+    }
+}

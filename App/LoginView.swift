@@ -71,12 +71,13 @@ struct LoginView: View {
                         Text("Lad tokenfeltet stå tomt for at bruge den gemte adgang.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    Button(connecting ? "Tester forbindelsen…" : "Test og Forbind") {
+                    FadedPrimaryButton(connecting ? "Tester forbindelsen…" : "Test og forbind", icon: "network") {
                         Task { await connect() }
                     }
-                    .buttonStyle(.borderedProminent).controlSize(.large)
-                    .frame(maxWidth: .infinity, minHeight: 48)
                     .disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    if address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("Indtast PC’ens IP, eller scan QR-koden.").font(.caption).foregroundStyle(.secondary)
+                    }
                     Button("Scan QR fra PC’en", systemImage: "qrcode.viewfinder") {
                         Task {
                             if await AVCaptureDevice.requestAccess(for: .video) { scanning = true }
@@ -100,6 +101,8 @@ struct LoginView: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(FadedBackground())
             .navigationTitle("Forbind til PC")
             .sheet(isPresented: $scanning) {
                 NavigationStack {

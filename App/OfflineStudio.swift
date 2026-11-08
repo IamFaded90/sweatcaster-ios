@@ -185,6 +185,7 @@ struct OfflineStudio: View {
     let api: LiveAPI?
     @Binding var sessionUnlocked: Bool
     let onPrivateSessionEnded: () -> Void
+    let ephemeralOnly: Bool
     @State private var studioPage: Page
     @State private var imagePrompt: String
     @State private var pendingBotID: UUID?
@@ -203,9 +204,12 @@ struct OfflineStudio: View {
     @AppStorage("offline.studio.voice.en") private var englishVoiceID = ""
     @AppStorage("offline.studio.chatBackdrop") private var backdropData = Data()
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.fadedPalette) private var palette
     @Environment(\.scenePhase) private var studioPhase
     @Environment(\.dynamicTypeSize) private var studioTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage("qol.haptics") private var studioHaptics = true
+    @AppStorage("qol.reduceMotion") private var calmMotion = false
     @State private var reloadNotice = false
     @AppStorage("offline.studio.enabled") private var enabled = false
     @AppStorage(PhoneModels.selectionKey) private var textModel = "apple"
@@ -236,6 +240,7 @@ struct OfflineStudio: View {
     @State private var confirmGalleryDelete = false
     @State private var galleryDetails: [URL: StudioImageDetails] = [:]
     @State private var transientDetails: [URL: StudioImageDetails] = [:]
+    @State private var photosSaving: Set<URL> = []
     @State private var imageDetailsSheet: StudioImageSheet?
     @State private var imageViewer: StudioImageSheet?
     @State private var studioShareSheet: StudioMultiShare?
@@ -260,7 +265,7 @@ struct OfflineStudio: View {
     @State private var downloadProgress: Double?
     @State private var turns: [PrivateChatTurn] = []
     @State private var loaded = false
-    @State private var privateSession = false
+    @State private var manualPrivateSession = false
     @State private var chatWorkID: UUID?
     @State private var textContextLimit = 2048
     @State private var privateBatteryLevel: Float = -1
@@ -270,19 +275,23 @@ struct OfflineStudio: View {
     @FocusState private var promptFocused: Bool
 
     enum Page: String, CaseIterable, Identifiable {
-        case chat = "Chat", images = "Billeder", gallery = "Galleri & Indstillinger"
+        case chat = "Chat", images = "Billeder", gallery = "Indstillinger"
         var id: Self { self }
     }
 
     init(api: LiveAPI?, sessionUnlocked: Binding<Bool>, onPrivateSessionEnded: @escaping () -> Void = {},
-         initialPage: Page = .chat, initialImagePrompt: String = "", initialBotID: UUID? = nil) {
-        self.api = api
+         initialPage: Page = .chat, initialImagePrompt: String = "", initialBotID: UUID? = nil,
+         ephemeralOnly: Bool = false) {
+        self.api = ephemeralOnly ? nil : api
         _sessionUnlocked = sessionUnlocked
         self.onPrivateSessionEnded = onPrivateSessionEnded
-        _studioPage = State(initialValue: initialPage)
+        self.ephemeralOnly = ephemeralOnly
+        _studioPage = State(initialValue: ephemeralOnly && initialPage == .gallery ? .chat : initialPage)
         _imagePrompt = State(initialValue: String(initialImagePrompt.prefix(2_000)))
         _pendingBotID = State(initialValue: initialBotID)
     }
+
+    private var privateSession: Bool { ephemeralOnly || manualPrivateSession }
 
     private var historyFolder: URL { URL.applicationSupportDirectory.appending(path: "StudioImages", directoryHint: .isDirectory) }
     private var temporaryImagesFolder: URL {
@@ -311,12 +320,14 @@ struct OfflineStudio: View {
 
     private var studioChrome: some View {
         studioContent
-            .navigationTitle(sessionUnlocked ? "Privat bot" : "Privat område")
+            .background { FadedBackground(variant: privateSession ? .privateChat : .standard) }
+            .navigationTitle(ephemeralOnly ? "NSFW" : (sessionUnlocked ? studioPage.rawValue : "Privat område"))
             .overlay(alignment: .top) {
                 if reloadNotice && sessionUnlocked {
                     Text("Lokal model genindlæst for at spare hukommelse")
                         .font(.callout).padding(12)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                            .foregroundStyle(palette.text)
+                            .background(palette.card, in: RoundedRectangle(cornerRadius: 14))
                         .padding(.top, 8)
                 }
             }
@@ -346,9 +357,18 @@ struct OfflineStudio: View {
                 if sessionUnlocked && studioPage == .chat {
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu("Samtale", systemImage: "ellipsis.circle") {
-                            Button("Ny chat", systemImage: "square.and.pencil") { newPrivateConversation() }
-                            Button(privateSession ? "Afslut privat session" : "Start privat session",
-                                   systemImage: privateSession ? "eye" : "eye.slash") { togglePrivateSession() }
+                            Button("Ny samtale", systemImage: "square.and.pencil") { newPrivateConversation() }
+                            if !ephemeralOnly {
+                                Button(privateSession ? "Afslut privat session" : "Start privat session",
+                                       systemImage: privateSession ? "eye" : "eye.slash") { togglePrivateSession() }
+                            } else {
+                                Button("Lokale modeller", systemImage: "iphone") { showModels = true }
+                                if privateBots.count > 1 {
+                                    Picker("Vælg bot", selection: $privateBotID) {
+                                        ForEach(privateBots) { bot in Text(bot.name).tag(bot.id.uuidString) }
+                                    }
+                                }
+                            }
                         }
                             .disabled(task != nil)
                     }
@@ -439,7 +459,8 @@ struct OfflineStudio: View {
                 privateBatteryLevel = UIDevice.current.batteryLevel
             }
             .onDisappear {
-                guard !showPromptEditor, imageViewer == nil else { return }
+                guard !showModels, !showBotBuilder, !showPromptEditor, imageViewer == nil,
+                      imageDetailsSheet == nil, studioShareSheet == nil else { return }
                 stopStudioImageQueue()
                 closeChatSession()
             }
@@ -447,9 +468,16 @@ struct OfflineStudio: View {
 
     @ViewBuilder private var studioContent: some View {
         if studioPhase != .active {
-            Color(uiColor: .systemBackground).ignoresSafeArea()
+            palette.background.ignoresSafeArea()
         } else if canShowStudio {
             VStack(spacing: 0) {
+                if privateSession {
+                    Label("Privat. Gemmes ikke på telefonen eller PC’en.", systemImage: "lock.fill")
+                        .font(.subheadline.weight(.semibold)).foregroundStyle(palette.isDark ? palette.purple : palette.text)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16).padding(.vertical, 8)
+                        .accessibilityHint("Midlertidige billeder slettes, når du lukker sessionen.")
+                }
                 Group {
                     if studioTypeSize.isAccessibilitySize { studioPicker.pickerStyle(.menu) }
                     else { studioPicker.pickerStyle(.segmented) }
@@ -464,29 +492,31 @@ struct OfflineStudio: View {
             }
         } else {
             VStack(spacing: 18) {
-                Image(systemName: "faceid").font(.system(size: 56)).foregroundStyle(.pink)
+                Image(systemName: "faceid").font(.system(size: 56)).foregroundStyle(palette.purple)
                     .accessibilityHidden(true)
-                Text("Privat bot").font(.largeTitle.bold())
-                Text("Lås op én gang pr. session.")
-                    .multilineTextAlignment(.center).foregroundStyle(.secondary)
-                Button("Lås op med Face ID") { authenticate() }
-                    .buttonStyle(.borderedProminent).tint(.pink)
-                    .frame(minHeight: 52).disabled(authenticating || studioPhase != .active)
-                if !status.isEmpty && !sessionUnlocked { Text(status).font(.callout).foregroundStyle(.secondary) }
+                Text(ephemeralOnly ? "NSFW · Privat chat" : "Privat Studio").font(.largeTitle.bold())
+                    .foregroundStyle(palette.text)
+                Text(ephemeralOnly ? "Kun på din telefon. Lås op med Face ID eller Touch ID." : "Lås op én gang pr. session.")
+                    .multilineTextAlignment(.center).foregroundStyle(palette.secondary)
+                FadedPrimaryButton("Lås op", icon: "faceid") { authenticate() }
+                    .disabled(authenticating || studioPhase != .active)
+                if !status.isEmpty && !sessionUnlocked { Text(status).font(.callout).foregroundStyle(palette.secondary) }
             }.padding(24)
         }
     }
 
     private var studioPicker: some View {
         Picker("Visning i Privat Studio", selection: $studioPage) {
-            ForEach(Page.allCases) { page in Text(page.rawValue).tag(page) }
+            ForEach(Page.allCases.filter { !privateSession || $0 != .gallery }) { page in
+                Text(page.rawValue).tag(page)
+            }
         }
     }
 
     @ViewBuilder private var studioOperationStatus: some View {
         VStack(alignment: .leading, spacing: 4) {
             if loadingModel && task != nil { ProgressView("Indlæser model i hukommelsen…") }
-            if !status.isEmpty { Text(status).font(.callout).foregroundStyle(.pink) }
+            if !status.isEmpty { Text(status).font(.callout).foregroundStyle(palette.secondary) }
             if let downloadProgress {
                 ProgressView(value: downloadProgress) { Text(downloadProgress.formatted(.percent)) }
             }
@@ -499,19 +529,15 @@ struct OfflineStudio: View {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     privateHeader
                     if currentBotTurns.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Din private bot er klar").font(.title2.bold())
-                            Text(privateSession
-                                 ? "Samtalen slettes, når du lukker studiet."
-                                 : "Skriv en besked. Chatten kører på telefonen.")
-                                .foregroundStyle(.secondary)
-                        }.padding(16).background(.pink.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
+                        FadedEmptyState(icon: "bubble.left", title: "Klar til en samtale",
+                                        detail: privateSession ? "Skriv en besked til din bot. Samtalen slettes, når du lukker studiet."
+                                                               : "Skriv en besked. Chatten kører på telefonen.")
                     }
                     ForEach(currentBotTurns) { turn in privateTurn(turn) }
                     Color.clear.frame(height: 1).id("private-bottom")
                 }.padding(16)
             }
-            .background(chatBackdrop.opacity(0.22))
+            .background(privateSession ? Color.clear : chatBackdrop.opacity(0.22))
             .scrollDismissesKeyboard(.interactively)
             .defaultScrollAnchor(.bottom)
             .safeAreaInset(edge: .bottom) { privateComposer }
@@ -525,8 +551,9 @@ struct OfflineStudio: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 imageThermalWarning
+                if generatingImages { imageShimmer }
                 if idleAsleep {
-                    Button("Vis resultat igen") { resetIdleTimer() }.frame(minHeight: 44)
+                    FadedSecondaryButton("Vis resultat igen", icon: "photo") { resetIdleTimer() }
                 } else {
                     imageResults
                 }
@@ -535,6 +562,11 @@ struct OfflineStudio: View {
                         .frame(minHeight: 44)
                 }
                 DisclosureGroup("Billedindstillinger") { imageInlineOptions }
+                if privateSession {
+                    DisclosureGroup("Billedmodeller og LoRA") { privateImageSettings.padding(.top, 10) }
+                } else {
+                    studioImageHistory
+                }
             }.padding(16)
         }
         .scrollDismissesKeyboard(.interactively)
@@ -561,7 +593,7 @@ struct OfflineStudio: View {
             }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Beskriv dit billede…", text: $imagePrompt, axis: .vertical)
-                    .textFieldStyle(.roundedBorder).lineLimit(1...5).focused($imagePromptFocused)
+                    .lineLimit(1...5).frame(minHeight: 44).focused($imagePromptFocused)
                     .dropDestination(for: StudioPhotoInput.self) { items, _ in
                         acceptStudioImageDrop(items.map(\.data))
                     }
@@ -569,10 +601,12 @@ struct OfflineStudio: View {
             }
             imageGenerationButton
             if task != nil {
-                Button("Stop billedkø", systemImage: "stop.fill") { stopStudioImageQueue() }
-                    .buttonStyle(.bordered).frame(minHeight: 44)
+                FadedSecondaryButton("Stop billedkø", icon: "stop.fill") { stopStudioImageQueue() }
             }
-        }.padding(12).background(.ultraThinMaterial)
+        }
+        .padding(12).background(palette.card, in: RoundedRectangle(cornerRadius: 22))
+        .overlay { RoundedRectangle(cornerRadius: 22).strokeBorder(privateSession ? palette.purple : palette.border) }
+        .padding(.horizontal, 12).padding(.vertical, 6)
     }
 
     private var studioGalleryPage: some View {
@@ -580,7 +614,6 @@ struct OfflineStudio: View {
             VStack(alignment: .leading, spacing: 14) {
                 DisclosureGroup("Chat og stemme") { privateSettings.padding(.top, 10) }
                 DisclosureGroup("Billedmodel og LoRA") { privateImageSettings.padding(.top, 10) }
-                studioImageHistory
                 StudioRAMStatus()
                 NukeLocalDataButton().disabled(task != nil)
             }.padding(16)
@@ -690,26 +723,23 @@ struct OfflineStudio: View {
     }
 
     private var privateHeader: some View {
-        HStack(spacing: 14) {
-            Group {
-                if let data = selectedPrivateBot?.sprite, let image = UIImage(data: data) {
-                    Image(uiImage: image).resizable().interpolation(.none).scaledToFill()
-                } else {
-                    Circle().fill(.pink.gradient)
-                        .overlay(Image(systemName: "heart.fill").font(.title).foregroundStyle(.white))
+        FadedCard(accent: palette.purple) {
+            HStack(spacing: 12) {
+                Group {
+                    if let data = selectedPrivateBot?.sprite, let image = UIImage(data: data) {
+                        Image(uiImage: image).resizable().interpolation(.none).scaledToFill()
+                    } else {
+                        Circle().fill(palette.purple.opacity(0.2))
+                            .overlay(Image(systemName: "heart.fill").font(.title2).foregroundStyle(palette.purple))
+                    }
+                }.frame(width: 48, height: 48).clipShape(Circle()).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(selectedPrivateBot?.name ?? "Din private bot").font(.headline).foregroundStyle(palette.text)
+                    Label("Kører lokalt på telefonen", systemImage: "iphone")
+                        .font(.caption).foregroundStyle(palette.secondary)
                 }
-            }.frame(width: 64, height: 64).clipShape(Circle())
-            VStack(alignment: .leading, spacing: 3) {
-                Text(selectedPrivateBot?.name ?? "Din private companion").font(.title2.bold())
-                Label("Kører lokalt på telefonen", systemImage: "iphone")
-                    .font(.caption).foregroundStyle(.secondary)
-                if privateSession {
-                    Label("Privat", systemImage: "eye.slash.fill")
-                        .font(.caption.bold()).foregroundStyle(.red)
-                }
-            }
+            }.accessibilityElement(children: .combine)
         }
-        .accessibilityElement(children: .combine)
     }
 
     private var privateSettings: some View {
@@ -818,11 +848,12 @@ struct OfflineStudio: View {
             HStack {
                 Spacer(minLength: 46)
                 Text(turn.prompt)
-                    .padding(12).background(.pink.opacity(0.22), in: RoundedRectangle(cornerRadius: 16))
+                    .foregroundStyle(FadedColors.deep)
+                    .padding(12).background(palette.purple, in: RoundedRectangle(cornerRadius: 16))
             }
             VStack(alignment: .leading, spacing: 8) {
                 Label(turn.source ?? "Privat bot", systemImage: turn.imageName == nil ? "heart.fill" : "photo")
-                    .font(.caption.bold()).foregroundStyle(.pink)
+                    .font(.caption.bold()).foregroundStyle(palette.isDark ? palette.purple : palette.text)
                 if !turn.reply.isEmpty {
                     Text(turn.reply).textSelection(.enabled)
                     if turn.imageName == nil {
@@ -853,7 +884,12 @@ struct OfflineStudio: View {
                     deleteTurn(turn.id)
                 }.frame(minHeight: 44).disabled(task != nil)
             }
-            .padding(14).background(.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18))
+            .padding(14).frame(maxWidth: .infinity, alignment: .leading)
+            .foregroundStyle(palette.text)
+            .background(palette.card, in: RoundedRectangle(cornerRadius: 18))
+            .overlay(alignment: .leading) {
+                Capsule().fill(palette.purple).frame(width: 4).padding(.vertical, 8).accessibilityHidden(true)
+            }
         }.id(turn.id)
     }
 
@@ -864,18 +900,31 @@ struct OfflineStudio: View {
                     .buttonStyle(.bordered).frame(minHeight: 44)
             }
             ViewThatFits(in: .horizontal) {
-                HStack { privateSummarizeButton; privateImageButton; Spacer(); privateHistoryMenu }
-                VStack(alignment: .leading, spacing: 0) { privateSummarizeButton; privateImageButton; privateHistoryMenu }
+                HStack {
+                    privateSummarizeButton
+                    privateImageButton
+                    Spacer()
+                    if !privateSession { privateHistoryMenu }
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    privateSummarizeButton
+                    privateImageButton
+                    if !privateSession { privateHistoryMenu }
+                }
             }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Skriv til din private bot…", text: $prompt, axis: .vertical)
-                    .textFieldStyle(.roundedBorder).lineLimit(1...5).focused($promptFocused)
+                    .lineLimit(1...5).frame(minHeight: 44).focused($promptFocused)
                 studioEditorButton(forImage: false)
                 Button { sendPrivateMessage() } label: {
-                    Image(systemName: "arrow.up").frame(width: 48, height: 48)
+                    Image(systemName: "arrow.up")
+                        .foregroundStyle(FadedColors.deep)
+                        .frame(width: 40, height: 40).background(palette.lime, in: Circle())
+                        .frame(width: 44, height: 44).contentShape(Rectangle())
                 }
-                .buttonStyle(.borderedProminent).tint(.pink)
+                .buttonStyle(.plain)
                 .accessibilityLabel("Send besked")
+                .opacity(textReady && hasPrompt && messageFitsContext && task == nil ? 1 : 0.5)
                 .disabled(!textReady || !hasPrompt || !messageFitsContext || task != nil)
             }
             HStack {
@@ -889,7 +938,10 @@ struct OfflineStudio: View {
                 Spacer()
                 Button("Ryd") { prompt = "" }.disabled(prompt.isEmpty || task != nil)
             }
-        }.padding(12).background(.ultraThinMaterial)
+        }
+        .padding(10).background(palette.card, in: RoundedRectangle(cornerRadius: 22))
+        .overlay { RoundedRectangle(cornerRadius: 22).strokeBorder(privateSession ? palette.purple : palette.border) }
+        .padding(.horizontal, 12).padding(.vertical, 6)
     }
 
     private var privateImageButton: some View {
@@ -1088,7 +1140,9 @@ struct OfflineStudio: View {
     private func scrollPrivate(_ proxy: ScrollViewProxy) {
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(80))
-            withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("private-bottom", anchor: .bottom) }
+            withAnimation(reduceMotion || calmMotion ? nil : .easeOut(duration: 0.2)) {
+                proxy.scrollTo("private-bottom", anchor: .bottom)
+            }
         }
     }
 
@@ -1134,7 +1188,7 @@ struct OfflineStudio: View {
     }
 
     private func togglePrivateSession() {
-        guard task == nil else { return }
+        guard !ephemeralOnly, task == nil else { return }
         speech.stopSpeaking(at: .immediate)
         imagePrompt = ""
         negativeImagePrompt = ""
@@ -1146,13 +1200,13 @@ struct OfflineStudio: View {
             imagePrompt = ""
             negativeImagePrompt = ""
             answer = ""
-            privateSession = false
+            manualPrivateSession = false
             loadPrivateConversation()
             status = "Privat session afsluttet og slettet."
         } else {
             savePrivateConversation()
             UserDefaults.standard.set(String(prompt.prefix(12_000)), forKey: "private.chat.draft")
-            privateSession = true
+            manualPrivateSession = true
             turns = []
             prompt = ""
             imagePrompt = ""
@@ -1169,15 +1223,15 @@ struct OfflineStudio: View {
             chatWorkID = nil
             task = nil
         }
-        let wasPrivate = privateSession
-        if wasPrivate {
+        let wasPrivate = privateSession && loaded
+        if privateSession {
             removeTemporaryStudioImages()
         } else if loaded {
             savePrivateConversation()
             UserDefaults.standard.set(String(prompt.prefix(12_000)), forKey: "private.chat.draft")
         }
         loaded = false
-        privateSession = false
+        manualPrivateSession = false
         turns = []
         prompt = ""
         imagePrompt = ""
@@ -1299,7 +1353,7 @@ struct OfflineStudio: View {
         let files = filteredImageHistory
         let tags = Array(Set(galleryDetails.values.flatMap(\.tags))).sorted()
         return LazyVStack(alignment: .leading, spacing: 10) {
-            Text("Billedhistorik").font(.headline)
+            FadedSectionLabel("Billedgalleri")
             Picker("Filter", selection: $galleryFilter) {
                 ForEach(StudioGalleryFilter.allCases) { filter in Text(filter.rawValue).tag(filter) }
             }.pickerStyle(.segmented)
@@ -1322,37 +1376,13 @@ struct OfflineStudio: View {
                 }
             }
             if files.isEmpty {
-                Text("Ingen billeder i dette filter.").foregroundStyle(.secondary)
+                FadedEmptyState(icon: "photo.on.rectangle", title: "Ingen billeder endnu",
+                                detail: galleryFilter == .all && galleryTag.isEmpty
+                                    ? "Skriv en prompt, og tryk Lav billede." : "Prøv at vælge et andet filter.")
             }
-            ForEach(files, id: \.self) { file in
-                VStack(alignment: .leading, spacing: 8) {
-                    Button {
-                        if selectingGalleryImages {
-                            if selectedGalleryImages.remove(file) == nil { selectedGalleryImages.insert(file) }
-                        } else {
-                            imageViewer = StudioImageSheet(url: file)
-                        }
-                    } label: {
-                        HStack(spacing: 10) {
-                            if let image = studioThumbnail(file, maxPixelSize: 256) {
-                                Image(uiImage: image).resizable().scaledToFill().frame(width: 68, height: 56)
-                                    .clipShape(RoundedRectangle(cornerRadius: 10))
-                            }
-                            VStack(alignment: .leading) {
-                                Text(imageDetails(file).prompt.map { String($0.prefix(72)) } ?? "Gemt billede").lineLimit(2)
-                                if !imageDetails(file).tags.isEmpty {
-                                    Text(imageDetails(file).tags.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer()
-                            if selectingGalleryImages {
-                                Image(systemName: selectedGalleryImages.contains(file) ? "checkmark.circle.fill" : "circle")
-                            }
-                        }.frame(minHeight: 44)
-                    }.buttonStyle(.plain)
-                        .accessibilityAddTraits(selectedGalleryImages.contains(file) ? .isSelected : [])
-                    if !selectingGalleryImages { imageActionMenu(file) }
-                }
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: studioTypeSize.isAccessibilitySize ? 1 : 2),
+                      alignment: .leading, spacing: 12) {
+                ForEach(files, id: \.self) { file in galleryImageCard(file) }
             }
         }
         .task(id: history) {
@@ -1373,6 +1403,64 @@ struct OfflineStudio: View {
         }
         .onChange(of: galleryFilter) { _, _ in selectedGalleryImages.removeAll() }
         .onChange(of: galleryTag) { _, _ in selectedGalleryImages.removeAll() }
+    }
+
+    private func galleryImageCard(_ file: URL) -> some View {
+        let details = imageDetails(file)
+        let selected = selectedGalleryImages.contains(file)
+        let shape = RoundedRectangle(cornerRadius: 14)
+        return VStack(alignment: .leading, spacing: 6) {
+            Button {
+                if selectingGalleryImages {
+                    if selectedGalleryImages.remove(file) == nil { selectedGalleryImages.insert(file) }
+                } else {
+                    imageViewer = StudioImageSheet(url: file)
+                }
+            } label: {
+                Rectangle().fill(palette.raised).aspectRatio(1, contentMode: .fit)
+                    .overlay {
+                        if let image = studioThumbnail(file, maxPixelSize: 384) {
+                            Image(uiImage: image).resizable().scaledToFill()
+                        } else {
+                            Image(systemName: "photo").foregroundStyle(palette.secondary)
+                        }
+                    }
+                    .clipShape(shape)
+                    .overlay(alignment: .topTrailing) {
+                        if selectingGalleryImages {
+                            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                .foregroundStyle(palette.lime).padding(8)
+                        }
+                    }
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(details.prompt.map { String($0.prefix(100)) } ?? "Gemt billede")
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            Text(details.prompt.map { String($0.prefix(72)) } ?? "Gemt billede")
+                .font(.caption).foregroundStyle(palette.text).lineLimit(2)
+            if !details.tags.isEmpty {
+                Text(details.tags.joined(separator: " · ")).font(.caption).foregroundStyle(palette.secondary).lineLimit(1)
+            }
+            if !selectingGalleryImages {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) { publicImageActions(file) }
+                    VStack(alignment: .leading, spacing: 2) { publicImageActions(file) }
+                }
+                imageActionMenu(file)
+            }
+        }
+        .padding(8).background(palette.card, in: shape)
+        .overlay { shape.strokeBorder(selected ? palette.lime : palette.border).allowsHitTesting(false) }
+    }
+
+    @ViewBuilder private func publicImageActions(_ file: URL) -> some View {
+        Button(photosSaving.contains(file) ? "Gemmer…" : "Gem", systemImage: "square.and.arrow.down") {
+            saveImageToPhotos(file)
+        }
+        .frame(minHeight: 44)
+        .accessibilityLabel("Gem billede i Fotos")
+        .disabled(photosSaving.contains(file))
+        ShareLink(item: file) { Label("Del", systemImage: "square.and.arrow.up").frame(minHeight: 44) }
     }
 
     @ViewBuilder private var gallerySelectionActions: some View {
@@ -1590,12 +1678,34 @@ struct OfflineStudio: View {
     }
 
     private var imageGenerationButton: some View {
-        let label = pendingImages.isEmpty ? "Generér" : "Generér · I kø (\(pendingImages.count))"
-        return Button(label, systemImage: "photo.badge.plus") { generateImage() }
-            .buttonStyle(.borderedProminent).tint(.pink).frame(minHeight: 44)
+        let label = pendingImages.isEmpty ? "Lav billede" : "Lav billede · I kø (\(pendingImages.count))"
+        return FadedPrimaryButton(label, icon: "photo.badge.plus") { generateImage() }
             .disabled(!canEnqueueImage || loadingBaseImage || pendingImages.count >= 5
                 || imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || imagePrompt.count > 2_000 || negativeImagePrompt.count > 1_000)
+    }
+
+    private var imageShimmer: some View {
+        let paused = reduceMotion || calmMotion || studioPhase != .active
+        return TimelineView(.animation(minimumInterval: 1.0 / 15, paused: paused)) { context in
+            let phase = paused ? 0.5 : context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.6) / 1.6
+            FadedCard(accent: palette.lime) {
+                VStack(alignment: .leading, spacing: 10) {
+                    RoundedRectangle(cornerRadius: 12)
+                        .fill(palette.raised)
+                        .overlay {
+                            GeometryReader { geometry in
+                                LinearGradient(colors: [.clear, palette.lime.opacity(0.16), .clear], startPoint: .leading, endPoint: .trailing)
+                                    .frame(width: geometry.size.width * 0.55)
+                                    .offset(x: geometry.size.width * (CGFloat(phase) * 1.55 - 0.55))
+                            }
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                        .frame(height: 90).accessibilityHidden(true)
+                    Text("Maleren sveder…").font(.subheadline.weight(.semibold)).foregroundStyle(palette.text)
+                }
+            }
+        }
     }
 
     private var canEnqueueImage: Bool {
@@ -1639,7 +1749,7 @@ struct OfflineStudio: View {
                                     .overlay(alignment: .topTrailing) {
                                         if imageURL == file {
                                             Image(systemName: "checkmark.circle.fill").padding(6)
-                                                .foregroundStyle(.white, .pink)
+                                                .foregroundStyle(FadedColors.deep, palette.lime)
                                         }
                                     }
                             }
@@ -1653,14 +1763,19 @@ struct OfflineStudio: View {
             Button { imageViewer = StudioImageSheet(url: imageURL) } label: {
                 Image(uiImage: thumbnail).resizable().scaledToFit().accessibilityLabel("Valgt billede")
             }.buttonStyle(.plain)
-            HStack {
-                if imageURL.deletingLastPathComponent() == historyFolder {
-                    ShareLink(item: imageURL) { Label("Del", systemImage: "square.and.arrow.up") }
-                    Button("Kopiér billede", systemImage: "doc.on.doc") { copyStudioImage(imageURL) }
-                }
-                imageTurnActions(imageURL)
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) { resultImageActions(imageURL) }
+                VStack(alignment: .leading, spacing: 4) { resultImageActions(imageURL) }
             }.frame(minHeight: 44)
         }
+    }
+
+    @ViewBuilder private func resultImageActions(_ file: URL) -> some View {
+        if file.deletingLastPathComponent() == historyFolder && !privateSession {
+            publicImageActions(file)
+            Button("Kopiér billede", systemImage: "doc.on.doc") { copyStudioImage(file) }.frame(minHeight: 44)
+        }
+        imageTurnActions(file)
     }
 
     private func imageTurnActions(_ file: URL) -> some View {
@@ -1787,6 +1902,7 @@ struct OfflineStudio: View {
     private func generateQueuedImages(_ request: StudioImageRequest) async throws {
         let folder = request.isPrivate ? temporaryImagesFolder : historyFolder
         let ready = (try? await MediaGenerationEnvironment.default.inspectModel(request.model, offline: true))?.isDownloaded == true
+        try Task.checkCancellation()
         let localOnly = !request.allowPCFallback || request.isPrivate || request.sourceImage != nil || request.seed != nil || request.prompt.count > 1_000
             || request.count > 1 || !request.negative.isEmpty || !request.lora.isEmpty
         if !ready && localOnly {
@@ -1846,7 +1962,16 @@ struct OfflineStudio: View {
         offlineSuccessHaptic()
     }
 
-    private func saveStudioPhoto(_ file: URL) async -> Bool {
+    private func saveImageToPhotos(_ file: URL) {
+        guard !privateSession, file.deletingLastPathComponent() == historyFolder, photosSaving.insert(file).inserted else { return }
+        Task {
+            defer { photosSaving.remove(file) }
+            let saved = await saveStudioPhoto(file, requiresAutoSave: false)
+            status = saved ? "Billedet er gemt i Fotos." : "Kunne ikke gemme. Tjek FadedAI’s adgang til Fotos."
+        }
+    }
+
+    private func saveStudioPhoto(_ file: URL, requiresAutoSave: Bool = true) async -> Bool {
         let existing = PHPhotoLibrary.authorizationStatus(for: .addOnly)
         let access: PHAuthorizationStatus
         if existing == .notDetermined {
@@ -1855,7 +1980,7 @@ struct OfflineStudio: View {
             access = existing
         }
         guard (access == .authorized || access == .limited), !Task.isCancelled,
-              sessionUnlocked, autoSaveStudioPhotos, !privateSession else { return false }
+              sessionUnlocked, !privateSession, !requiresAutoSave || autoSaveStudioPhotos else { return false }
         do {
             try await PHPhotoLibrary.shared().performChanges {
                 PHAssetCreationRequest.forAsset().addResource(with: .photo, fileURL: file, options: nil)
