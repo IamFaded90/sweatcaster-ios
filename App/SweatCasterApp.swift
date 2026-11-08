@@ -95,6 +95,7 @@ struct Home: View {
     @Environment(\.scenePhase) private var phase
     @State private var model = Model()
     @State private var showLogin = false
+    @State private var showSettings = false
     @State private var settingsCategory = SettingsCategory.connection
     @State private var pingResult: String?
     @State private var pinging = false
@@ -115,10 +116,13 @@ struct Home: View {
     @State private var moduleAddress: String?
     @State private var selectedModuleTab: String?
     @State private var showHelp = false
-    @State private var showAgentHub = false
     @State private var showCodeWorkspace = false
     @State private var showPhoneModels = false
     @State private var showOfflineStudio = false
+    @State private var showBots = false
+    @State private var studioPage: OfflineStudio.Page = .chat
+    @State private var studioImagePrompt = ""
+    @State private var imagePromptAfterChat: String?
     @State private var studioToast: StudioToast?
     @State private var nsfwSessionUnlocked = false
     @State private var showSavedVideos = false
@@ -133,10 +137,16 @@ struct Home: View {
     @State private var shortClips = false
     @State private var recentJobsFirst = false
     @State private var clipDateRange = 0
-    @State private var selectedGameFolder = "Alle"
+    @State private var selectedGameFolder: String?
     @State private var clipRoots: [V2ClipRoots.Root] = []
-    @State private var folderClips: [Clip] = []
+    @State private var folderPages: [String: [Clip]] = [:]
+    @State private var folderPageNotices: [String: String] = [:]
     @State private var folderNotice: String?
+    @State private var videoFolderServer: String?
+    @State private var legacyClipCatalog = false
+    @State private var catalogLoading: UUID?
+    @State private var pageLoading: UUID?
+    @State private var videoStartNotice: String?
     @State private var saveVideoNotice: String?
     @State private var confirmClear = false
     @State private var hiddenJobs = Set<String>()
@@ -180,26 +190,16 @@ struct Home: View {
                 selectedModuleTab = value
             }
         })) {
-            NavigationStack {
-                tabPage("Hjem") {
-                    header
-                    loadingStatus
-                    NavigationLink { settingsPage } label: {
-                        Label("Indstillinger", systemImage: "gearshape").frame(minHeight: 48)
-                    }
-                }
-            }
+            homeTab
                 .tabItem { Label("Hjem", systemImage: "house.fill") }.tag(Space.brain.rawValue)
-            ChatView(api: model.api as? any ChatAPI, demo: model.isDemo, initialDraft: "",
-                     connection: model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
-                     storageKey: "spaces.chat." + (model.isDemo ? "demo" : model.address))
-                .id(model.isDemo ? "demo" : model.address)
+            chatTab
                 .tabItem { Label("Chat", systemImage: "bubble.left.fill") }.tag(Space.notes.rawValue)
-            NavigationStack { tabPage("Video Studio") { videoStudioHeader; clipSection; moodSection; advanced(Binding(get: { model.options }, set: { model.options = $0 })); jobSection } }
+            videoStudio
                 .tabItem { Label("Video", systemImage: "film.fill") }.tag(Space.gallery.rawValue)
-            AgentHub(api: model.api as? LiveAPI)
+            AgentHub(api: model.api as? LiveAPI, studioUnlocked: $nsfwSessionUnlocked,
+                     onPrivateSessionEnded: showPrivateSessionNotice, onBack: { selectSpace(.brain) })
                 .tabItem { Label("Landsby", systemImage: "house.lodge.fill") }.tag(Space.tasks.rawValue)
-            CodeWorkspaceView(api: model.api as? LiveAPI)
+            CodeWorkspaceView(api: model.api as? LiveAPI, onBack: { selectSpace(.brain) })
                 .tabItem { Label("Code Bot", systemImage: "chevron.left.forwardslash.chevron.right") }.tag(Space.library.rawValue)
             if moduleAddress == model.address, let api = model.api as? LiveAPI {
                 ForEach(moduleTabs) { tab in
@@ -214,9 +214,6 @@ struct Home: View {
         .onChange(of: showClips) { selectedModuleTab = nil; space = .gallery }
         .task(id: "\(model.isDemo):\(model.address):\(phase == .active)") {
             if phase == .active { await loadModuleTabs() }
-        }
-        .task(id: space) {
-            if space == .gallery && !model.isDemo { await loadGameFolders() }
         }
         .onChange(of: space) { _, value in
             selectedModuleTab = nil
@@ -261,27 +258,61 @@ struct Home: View {
         .refreshable { await model.refresh(); await loadModuleTabs() }
     }
 
+    private var homeTab: some View {
+        NavigationStack {
+            tabPage("Hjem") {
+                header
+                loadingStatus
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button("Indstillinger", systemImage: "gearshape") { showSettings = true }
+                        Button("Hvad kan jeg?", systemImage: "questionmark.circle") { showHelp = true }
+                    } label: {
+                        Image(systemName: "ellipsis.circle").frame(minWidth: 44, minHeight: 44)
+                    }.accessibilityLabel("Flere muligheder")
+                }
+            }
+            .navigationDestination(isPresented: $showSettings) { settingsPage }
+        }
+    }
+
     private var chatTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Samtal med dit AI-hold").font(.title2.bold())
-            action("Åbn chat") { showChat = true }
-            action("Privat bot og billeder") { showOfflineStudio = true }
-            action("Lokale modeller") { showPhoneModels = true }
+        NavigationStack {
+            List {
+                chatEntry("AI-chat", detail: "Vælg telefon, PC eller Grok.", icon: "bubble.left") { showChat = true }
+                chatEntry("Privat chat (NSFW)", detail: "Lokal botchat · Face ID", icon: "lock.shield") { openStudio(.chat) }
+                chatEntry("Billeder", detail: "Generér billeder, eller åbn dit galleri.", icon: "photo") { openStudio(.images) }
+                chatEntry("Mine bots", detail: "Åbn en bot, og prøv dens personlighed og stemme.", icon: "person.2") { showBots = true }
+            }
+            .navigationTitle("Chat")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Tilbage", systemImage: "chevron.left") { selectSpace(.brain) }
+                }
+            }
         }
     }
 
-    private var villageTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Følg dine agenter og deres hverdag").font(.title2.bold())
-            action("Åbn landsbyen") { showAgentHub = true }
+    private func chatEntry(_ title: String, detail: String, icon: String, work: @escaping () -> Void) -> some View {
+        Button(action: work) {
+            HStack(spacing: 12) {
+                Image(systemName: icon).frame(width: 24).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title).font(.headline)
+                    Text(detail).font(.subheadline).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "chevron.right").foregroundStyle(.secondary).accessibilityHidden(true)
+            }.frame(minHeight: 52)
         }
     }
 
-    private var codeTab: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Beskriv en forbedring, og godkend ændringen").font(.title2.bold())
-            action("Åbn Code Bot") { showCodeWorkspace = true }
-        }
+    private func selectSpace(_ destination: Space) {
+        selectedModuleTab = nil
+        if destination == .brain { showSettings = false }
+        space = destination
     }
 
     private var spacesBar: some View {
@@ -384,7 +415,8 @@ struct Home: View {
                 homeFeedback
             } else {
                 LoginView(model: model, openLocalChat: { showChat = true },
-                          openLocalStudio: { showOfflineStudio = true }, exportDiagnostics: exportDiagnostics)
+                          openLocalStudio: { openStudio(.chat) }, openLocalBots: { showBots = true },
+                          exportDiagnostics: exportDiagnostics)
             }
         }
         .preferredColorScheme(scheme)
@@ -479,17 +511,18 @@ struct Home: View {
 
     private var homeSheets: some View {
         homeVideoDialogs
-        .sheet(isPresented: $showAgentHub) {
-            AgentHub(api: model.api as? LiveAPI)
-        }
         .sheet(isPresented: $showCodeWorkspace) {
-            CodeWorkspaceView(api: model.api as? LiveAPI)
+            CodeWorkspaceView(api: model.api as? LiveAPI, onBack: { showCodeWorkspace = false })
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
         .sheet(isPresented: $showOfflineStudio) {
-            OfflineStudio(api: model.isDemo || !model.connected ? nil : model.api as? LiveAPI,
-                          sessionUnlocked: $nsfwSessionUnlocked,
-                          onPrivateSessionEnded: { studioToast = StudioToast(text: "Privat session afsluttet og slettet.") })
+            OfflineStudio(api: studioAPI, sessionUnlocked: $nsfwSessionUnlocked,
+                          onPrivateSessionEnded: showPrivateSessionNotice,
+                          initialPage: studioPage, initialImagePrompt: studioImagePrompt)
+        }
+        .sheet(isPresented: $showBots) {
+            VillageBotLibrary(api: studioAPI, studioUnlocked: $nsfwSessionUnlocked,
+                              onPrivateSessionEnded: showPrivateSessionNotice, onBack: { showBots = false })
         }
         .sheet(isPresented: $showSavedVideos) { savedVideoLibrary }
         .sheet(isPresented: $showHelp) {
@@ -534,6 +567,11 @@ struct Home: View {
     }
 
     private func refreshAfterChat() {
+        if let prompt = imagePromptAfterChat {
+            imagePromptAfterChat = nil
+            openStudio(.images, prompt: prompt)
+            return
+        }
         guard !model.isDemo else { return }
         Task { await model.refresh() }
     }
@@ -544,8 +582,28 @@ struct Home: View {
         let status = model.connected ? "Forbundet" : "Ikke forbundet"
         let connection = model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(status)"
         return ChatView(api: api, demo: model.isDemo, initialDraft: "", connection: connection,
-                        storageKey: "spaces.chat." + session)
+                        storageKey: "spaces.chat." + session, onBack: { showChat = false },
+                        openImageStudio: openImagesFromChat)
             .id(session)
+    }
+
+    private var studioAPI: LiveAPI? {
+        model.isDemo || !model.connected ? nil : model.api as? LiveAPI
+    }
+
+    private func openStudio(_ page: OfflineStudio.Page, prompt: String = "") {
+        studioPage = page
+        studioImagePrompt = prompt
+        showOfflineStudio = true
+    }
+
+    private func openImagesFromChat(_ prompt: String) {
+        imagePromptAfterChat = prompt
+        showChat = false
+    }
+
+    private func showPrivateSessionNotice() {
+        studioToast = StudioToast(text: "Privat session afsluttet og slettet.")
     }
 
     @ViewBuilder private var header: some View {
@@ -554,15 +612,13 @@ struct Home: View {
             connectionIndicator
         }
         action("Skift forbindelse") { showLogin = true }.disabled(switchDisabled)
-        action("Chat med AI-holdet") { showChat = true }
+        action("Chat") { selectSpace(.notes) }
             .disabled(model.busy)
         if model.isDemo {
             Text("Demotilstand · Kun testdata").font(.headline)
         }
-        action(pendingJobs == 0 ? "Video Studio" : "Video Studio · \(pendingJobs) aktive") { space = .gallery }
-        action("Hvad kan jeg?") { showHelp = true }
-        action("Landsbyen og Agent-Hub") { showAgentHub = true }
-        action("Start video · Vælg klip") { space = .brain; showClips += 1 }
+        action(pendingJobs == 0 ? "Video Studio" : "Video Studio · \(pendingJobs) aktive") { selectSpace(.gallery) }
+        action("Landsbyen") { selectSpace(.tasks) }
         action("Gemte videoer") { reloadSavedVideos(); showSavedVideos = true }
         if !onboarded {
             VStack(alignment: .leading, spacing: 8) {
@@ -621,7 +677,8 @@ struct Home: View {
                 Toggle("Opdatér ved faneskift", isOn: $autoRefreshTabs)
             case .models:
                 Button("Lokale modeller") { showPhoneModels = true }
-                Button("Privat studie") { showOfflineStudio = true }
+                Button("Privat chat (NSFW)") { openStudio(.chat) }
+                Button("Mine bots") { showBots = true }
                 Button("Code Bot og Agent Workspace") { showCodeWorkspace = true }
                 CloudModelSettings()
             case .appearance:
@@ -696,7 +753,7 @@ struct Home: View {
         switch destination {
         case "private-chat":
             nsfwSessionUnlocked = false
-            showOfflineStudio = true
+            openStudio(.chat)
         case "chat": showChat = true
         case "video": space = .gallery; showClips += 1
         default: break
@@ -720,6 +777,76 @@ struct Home: View {
         }
     }
 
+    private var videoStudio: some View {
+        NavigationStack {
+            ScrollViewReader { scroll in videoScroll(scroll) }
+        }
+        .task(id: videoFolderScope) {
+            guard let server = videoFolderScope, videoFolderServer != server else { return }
+            await loadGameFolders(for: server)
+        }
+        .task(id: "\(videoFolderScope ?? ""):\(selectedGameFolder ?? "")") {
+            guard let id = selectedGameFolder, let server = videoFolderScope else { return }
+            await loadFolderPage(id, for: server)
+        }
+    }
+
+    private func videoScroll(_ scroll: ScrollViewProxy) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                videoStudioHeader
+                videoFeedback
+                clipSection { closeVideoFolder(andShow: "recipe", scroll: scroll) }
+                moodSection.id("recipe")
+                jobSection.id("jobs")
+            }
+            .padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
+        }
+        .navigationTitle("Video Studio")
+        .toolbar { videoToolbar(scroll) }
+        .safeAreaInset(edge: .bottom) { videoBottomBar(scroll) }
+        .refreshable { await refreshVideoStudio() }
+        .onChange(of: showJobs) { scroll.scrollTo("jobs", anchor: .top) }
+        .onChange(of: showClips) { scroll.scrollTo("clips", anchor: .top) }
+    }
+
+    @ToolbarContentBuilder private func videoToolbar(_ scroll: ScrollViewProxy) -> some ToolbarContent {
+        ToolbarItem(placement: .topBarLeading) {
+            Button("Tilbage", systemImage: "chevron.left") { selectSpace(.brain) }
+        }
+        ToolbarItemGroup(placement: .topBarTrailing) {
+            if selectedGameFolder != nil {
+                Button("Luk mappe", systemImage: "folder") {
+                    closeVideoFolder(andShow: "clips", scroll: scroll)
+                }.labelStyle(.iconOnly)
+            }
+            Button("Videoindstillinger", systemImage: "slider.horizontal.3") {
+                closeVideoFolder(andShow: "recipe", scroll: scroll)
+            }.labelStyle(.iconOnly)
+        }
+    }
+
+    @ViewBuilder private func videoBottomBar(_ scroll: ScrollViewProxy) -> some View {
+        if !model.selected.isEmpty {
+            VStack(spacing: 4) {
+                if selectedGameFolder != nil {
+                    Button("Luk mappe", systemImage: "chevron.up") {
+                        closeVideoFolder(andShow: "recipe", scroll: scroll)
+                    }.frame(minHeight: 44)
+                }
+                videoStartControls
+            }
+            .padding(.horizontal, 20).padding(.vertical, 8)
+            .frame(maxWidth: .infinity)
+            .background(.regularMaterial)
+        }
+    }
+
+    private func closeVideoFolder(andShow target: String, scroll: ScrollViewProxy) {
+        selectedGameFolder = nil
+        scroll.scrollTo(target, anchor: .top)
+    }
+
     private var videoStudioHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
             Label("VIDEO AGENT", systemImage: "circle.fill")
@@ -728,38 +855,91 @@ struct Home: View {
                 .font(.largeTitle.weight(.light)).accessibilityAddTraits(.isHeader)
             Text("Vælg dine klip. Din agent klarer resten.")
                 .font(.title3).foregroundStyle(.secondary)
-            action("Hent klip fra PC") { Task { await model.refresh() } }
-                .disabled(switchDisabled)
+            action(model.isDemo ? "Opdatér testklip" : "Opdatér spilmapper") {
+                Task { await refreshVideoStudio() }
+            }.disabled(switchDisabled || catalogLoading != nil || pageLoading != nil)
         }
     }
 
-    private var clipSection: some View {
+    @ViewBuilder private var videoFeedback: some View {
+        if model.selected.isEmpty, let message = videoStartNotice ?? model.errorTitle {
+            Text(message).font(.headline).accessibilityFocused($errorFocus)
+        }
+    }
+
+    private func clipSection(onDone: @escaping () -> Void) -> some View {
         VStack(alignment: .leading, spacing: 14) {
-            Picker("Spilmappe", selection: $selectedGameFolder) {
-                Text("Alle").tag("Alle")
-                ForEach(clipRoots) { root in Text(root.label).tag(root.label) }
-            }.pickerStyle(.segmented)
-            if let folderNotice { Text(folderNotice).font(.caption).foregroundStyle(.secondary) }
-            HStack {
-                VStack(alignment: .leading, spacing: 3) {
-                    heading("Seneste klip")
-                    Text("\(model.selected.count) valgt af maks. \(model.capabilities?.limit ?? 10)")
-                        .font(.subheadline).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Menu {
-                    Toggle("Under ét minut", isOn: $shortClips)
-                    Toggle("Seneste jobdato først", isOn: $recentJobsFirst)
-                    Picker("Jobdato", selection: $clipDateRange) {
-                        Text("Alle datoer").tag(0)
-                        Text("Seneste 7 dage").tag(7)
-                        Text("Seneste 30 dage").tag(30)
+            heading("Vælg klip")
+            Text("\(model.selected.count) valgt af maks. \(model.capabilities?.limit ?? 10)")
+                .font(.subheadline).foregroundStyle(.secondary)
+            if !model.selected.isEmpty {
+                let seconds = model.clips.filter { model.selected.contains($0.id) }.reduce(0) { $0 + $1.duration_seconds }
+                Text("Valgt spilletid · \(durationLabel(seconds))").font(.caption.bold()).foregroundStyle(.cyan)
+                Button("Ryd klipvalg") { model.clearSelection() }
+                    .frame(minHeight: 44).disabled(model.busy)
+            }
+            if model.isDemo {
+                clipFolder(id: "demo", title: "Testklip", subtitle: nil, onDone: onDone)
+            } else if catalogLoading != nil || (videoFolderServer != model.address && folderNotice == nil) {
+                LoadingSkeleton(label: "Henter spilmapper…")
+            } else if videoFolderServer == model.address {
+                if legacyClipCatalog {
+                    clipFolder(id: "legacy", title: "PC’ens V1-klipliste", subtitle: "Ældre server uden spilmapper", onDone: onDone)
+                } else {
+                    ForEach(clipRoots) { root in
+                        let subtitle = root.indexing || !root.ready ? "PC’en indekserer klip" : "\(root.file_count) filer på PC’en"
+                        clipFolder(id: root.id, title: root.label, subtitle: subtitle, onDone: onDone)
                     }
-                } label: {
-                    Label("Filtrér", systemImage: "magnifyingglass")
-                        .frame(minHeight: 44)
                 }
             }
+            if let folderNotice { Text(folderNotice).font(.caption).foregroundStyle(.secondary) }
+        }
+        .id("clips")
+        .padding(16)
+        .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 22))
+        .overlay(RoundedRectangle(cornerRadius: 22).stroke(.cyan.opacity(0.18)))
+    }
+
+    private func clipFolder(id: String, title: String, subtitle: String?, onDone: @escaping () -> Void) -> some View {
+        let expanded = selectedGameFolder == id
+        return VStack(alignment: .leading, spacing: 8) {
+            Button {
+                selectedGameFolder = expanded ? nil : id
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label(title, systemImage: expanded ? "folder.fill" : "folder")
+                            .font(.headline)
+                        if let subtitle { Text(subtitle).font(.caption).foregroundStyle(.secondary) }
+                    }
+                    Spacer()
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down").accessibilityHidden(true)
+                }.frame(minHeight: 48).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(expanded ? "Åben" : "Lukket")
+            if expanded {
+                if id == "demo" {
+                    clipList(model.clips, onDone: onDone)
+                } else if pageLoading != nil {
+                    LoadingSkeleton(label: "Henter klip i mappen…")
+                } else if let clips = folderPages[id] {
+                    clipList(clips, onDone: onDone)
+                }
+                if let notice = folderPageNotices[id] {
+                    Text(notice).font(.caption).foregroundStyle(.secondary)
+                    Button("Opdatér mappen") {
+                        guard let server = videoFolderScope else { return }
+                        Task { await loadFolderPage(id, for: server, force: true) }
+                    }.frame(minHeight: 44)
+                }
+            }
+        }
+    }
+
+    private func clipList(_ clips: [Clip], onDone: @escaping () -> Void) -> some View {
+        let filtered = filteredClips(clips)
+        return VStack(alignment: .leading, spacing: 14) {
             DisclosureGroup("Filtrér klip") {
                 TextField("Søg i filnavn", text: $clipGame).textFieldStyle(.roundedBorder)
                 Toggle("Under ét minut", isOn: $shortClips)
@@ -773,21 +953,15 @@ struct Home: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             HStack {
-                Button("Vælg synlige") { model.select(filteredClips) }
-                    .disabled(model.busy || filteredClips.isEmpty)
+                Button("Vælg synlige") { model.select(filtered) }
+                    .disabled(model.busy || filtered.isEmpty)
                 Spacer()
-                Button("Ryd valg") { model.clearSelection() }
-                    .disabled(model.busy || model.selected.isEmpty)
+                Button("Færdig med klipvalg", action: onDone)
             }.frame(minHeight: 44)
-            if !model.selected.isEmpty {
-                let seconds = model.clips.filter { model.selected.contains($0.id) }.reduce(0) { $0 + $1.duration_seconds }
-                Text("Valgt spilletid · \(durationLabel(seconds))")
-                    .font(.caption.bold()).foregroundStyle(.cyan)
-            }
-            if model.clips.isEmpty { Text("Ingen klip at vise.") }
-            if !model.clips.isEmpty && filteredClips.isEmpty { Text("Ingen klip matcher filteret.") }
+            if clips.isEmpty { Text("Ingen klip at vise i denne mappe.") }
+            if !clips.isEmpty && filtered.isEmpty { Text("Ingen klip matcher filteret.") }
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible())], spacing: 14) {
-                ForEach(filteredClips) { clip in
+                ForEach(filtered) { clip in
                     let selected = model.selected.contains(clip.id)
                     Button { model.toggle(clip) } label: {
                         VStack(alignment: .leading, spacing: 8) {
@@ -818,10 +992,7 @@ struct Home: View {
                     .disabled(model.busy || (!selected && model.selected.count >= (model.capabilities?.limit ?? 0)))
                 }
             }
-        }.id("clips")
-            .padding(16)
-            .background(.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 22))
-            .overlay(RoundedRectangle(cornerRadius: 22).stroke(.cyan.opacity(0.18)))
+        }
     }
 
     private func durationLabel(_ seconds: Double) -> String {
@@ -830,32 +1001,33 @@ struct Home: View {
     }
 
     private func startVideo(_ mood: Mood) {
+        videoStartNotice = nil
         Task {
-            await model.submit(mood)
-            if model.error == nil || model.uncertain { showJobs += 1 }
+            let accepted = await model.submit(mood)
+            if accepted || model.uncertain {
+                selectedGameFolder = nil
+                showJobs += 1
+            } else if model.error == nil {
+                videoStartNotice = videoStartBlocker ?? "Videojobbet blev ikke sendt. Kontrollér klipvalget, og prøv igen."
+            }
         }
     }
 
     private func clipColor(_ clip: Clip) -> Color {
         let colors: [Color] = [.green, .purple, .blue, .orange, .pink, .teal]
-        return colors[abs(clip.id.hashValue) % colors.count]
+        return colors[Int(clip.id.hashValue.magnitude % UInt(colors.count))]
     }
 
     @State private var showClips = 0
 
-    private var filteredClips: [Clip] {
+    private func filteredClips(_ source: [Clip]) -> [Clip] {
         let query = clipGame.trimmingCharacters(in: .whitespacesAndNewlines)
         let dates = Dictionary(model.jobs.map { ($0.clip_id, $0.created_at) }, uniquingKeysWith: max)
         let cutoff = Calendar.current.date(byAdding: .day, value: -clipDateRange, to: .now) ?? .distantPast
-        let source = selectedGameFolder == "Alle" ? model.clips : folderClips
         let clips = source.filter {
-            (selectedGameFolder == "Alle" || $0.folderName?.localizedCaseInsensitiveCompare(selectedGameFolder) == .orderedSame) &&
             (!shortClips || $0.duration_seconds < 60) &&
                 (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) &&
                 (clipDateRange == 0 || (dates[$0.id] ?? .distantPast) >= cutoff)
-        }
-        if selectedGameFolder != "Alle" {
-            return Array(clips.prefix(100))
         }
         guard recentJobsFirst else { return clips }
         return clips.sorted {
@@ -865,26 +1037,127 @@ struct Home: View {
         }
     }
 
-    private func loadGameFolders() async {
+    private var videoFolderScope: String? {
+        guard phase == .active, space == .gallery, selectedModuleTab == nil, model.connected else { return nil }
+        return model.isDemo ? "demo" : model.address
+    }
+
+    private func refreshVideoStudio() async {
+        guard catalogLoading == nil, pageLoading == nil else { return }
+        videoStartNotice = nil
+        await model.refresh()
+        guard let server = videoFolderScope else { return }
+        await loadGameFolders(for: server)
+        if let id = selectedGameFolder { await loadFolderPage(id, for: server, force: true) }
+    }
+
+    private func loadGameFolders(for server: String) async {
+        guard videoFolderScope == server else { return }
+        if videoFolderServer != server {
+            clipRoots = []
+            folderPages = [:]
+            folderPageNotices = [:]
+            folderNotice = nil
+            selectedGameFolder = nil
+            legacyClipCatalog = false
+        }
+        if model.isDemo { videoFolderServer = server; return }
         guard let api = model.api as? LiveAPI else { return }
+        let ticket = UUID()
+        catalogLoading = ticket
+        defer { if catalogLoading == ticket { catalogLoading = nil } }
         do {
             let roots = try await api.v2ClipRoots().roots
-            clipRoots = roots.filter { $0.label.localizedCaseInsensitiveContains("fortnite") ||
-                $0.label.localizedCaseInsensitiveContains("finals") }
-            folderClips = []
-            for root in clipRoots {
-                let page = try await api.v2ClipPage(rootID: root.id, limit: 100)
-                folderClips += page.clips.map {
-                    Clip(id: $0.id, name: $0.name, duration_seconds: $0.duration_seconds,
-                         width: $0.width, height: $0.height, folderName: root.label)
-                }
+            guard !Task.isCancelled, videoFolderScope == server, catalogLoading == ticket else { return }
+            videoFolderServer = server
+            legacyClipCatalog = false
+            var seen = Set<String>()
+            clipRoots = roots.filter { root in
+                (root.label.localizedCaseInsensitiveContains("fortnite") || root.label.localizedCaseInsensitiveContains("finals")) &&
+                    seen.insert(root.id).inserted
             }
-            model.includeFolderClips(folderClips)
+            if let id = selectedGameFolder, !clipRoots.contains(where: { $0.id == id }) { selectedGameFolder = nil }
             folderNotice = clipRoots.isEmpty ? "Ingen Fortnite- eller The Finals-mapper er sat op på PC’en." : nil
+        } catch V2Failure.http(let status, _, _) where [404, 405, 501].contains(status) {
+            guard !Task.isCancelled, videoFolderScope == server, catalogLoading == ticket else { return }
+            videoFolderServer = server
+            clipRoots = []
+            legacyClipCatalog = true
+            if selectedGameFolder != "legacy" { selectedGameFolder = nil }
+            folderNotice = nil
         } catch {
-            clipRoots = []; folderClips = []
-            folderNotice = "Spilmapper kunne ikke hentes. V1-kliplisten vises stadig under Alle."
+            guard !Task.isCancelled, videoFolderScope == server, catalogLoading == ticket else { return }
+            folderNotice = "Spilmapperne kunne ikke hentes. Tryk på Opdatér spilmapper for at prøve igen."
         }
+    }
+
+    private func loadFolderPage(_ id: String, for server: String, force: Bool = false) async {
+        guard videoFolderScope == server, videoFolderServer == server, !model.isDemo,
+              let api = model.api as? LiveAPI,
+              force || folderPages[id] == nil || folderPageNotices[id] != nil else { return }
+        let ticket = UUID()
+        pageLoading = ticket
+        defer { if pageLoading == ticket { pageLoading = nil } }
+        do {
+            let clips: [Clip]
+            let limit: Int
+            let notice: String?
+            if legacyClipCatalog && id == "legacy" {
+                clips = try await api.clips().clips
+                limit = 200
+                notice = nil
+            } else {
+                guard clipRoots.contains(where: { $0.id == id }) else { return }
+                let page = try await api.v2ClipPage(rootID: id, limit: 100)
+                guard page.root_id == id else { throw V2Failure.invalidResponse }
+                clips = page.clips
+                limit = 100
+                notice = page.ready && !page.indexing ? nil : "PC’en indekserer stadig klip. Opdatér mappen om lidt."
+            }
+            guard !Task.isCancelled, videoFolderScope == server, selectedGameFolder == id, pageLoading == ticket else { return }
+            var seen = Set<String>()
+            let pageClips = Array(clips.lazy.filter { validWireID($0.id) && seen.insert($0.id).inserted }.prefix(limit))
+            folderPages[id] = pageClips
+            folderPageNotices[id] = notice
+            model.includeFolderClips(pageClips)
+        } catch {
+            guard !Task.isCancelled, videoFolderScope == server, selectedGameFolder == id, pageLoading == ticket else { return }
+            folderPageNotices[id] = "Klip i denne mappe kunne ikke hentes."
+        }
+    }
+
+    private var availableVideoMood: Mood? {
+        guard let moods = model.capabilities?.moods else { return nil }
+        return moods.contains(selectedVideoMood) ? selectedVideoMood : moods.first
+    }
+
+    private var videoStartBlocker: String? {
+        if model.uncertain { return "Tjek joblisten, før du starter et nyt job." }
+        if model.blocked { return "PC’en mangler en tjeneste. Se Status på PC’en under videoindstillinger." }
+        if !model.options.roi.valid { return "Ret området til tekstlæsning i videoindstillinger." }
+        if availableVideoMood == nil { return "PC’en har ingen tilgængelige stilarter." }
+        if !model.cancelling.isEmpty { return "Venter på, at PC’en stopper videojobbet." }
+        if !model.connected { return "Forbind til PC’en for at starte." }
+        return nil
+    }
+
+    private var videoStartControls: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let message = videoStartNotice ?? model.errorTitle ?? videoStartBlocker {
+                Text(message).font(.caption).foregroundStyle(.secondary)
+            }
+            Button {
+                guard let mood = availableVideoMood else { return }
+                if confirmVideoStart { pendingVideoMood = mood }
+                else { startVideo(mood) }
+            } label: {
+                Label(model.busy ? "Sender videojob…" : "Start videomagi · \(model.selected.count) klip", systemImage: "sparkles")
+                    .font(.headline).frame(maxWidth: .infinity, minHeight: 52)
+            }
+            .buttonStyle(.borderedProminent).tint(.cyan)
+            .disabled(!model.canSubmit || videoStartBlocker != nil)
+        }
+        .frame(maxWidth: 640)
     }
 
     private var moodSection: some View {
@@ -902,8 +1175,9 @@ struct Home: View {
                                     .frame(maxWidth: .infinity, minHeight: 56)
                             }
                             .buttonStyle(.borderedProminent)
-                            .tint(selectedVideoMood == mood ? .cyan : Color.white.opacity(0.08))
-                            .accessibilityAddTraits(selectedVideoMood == mood ? .isSelected : [])
+                            .tint(availableVideoMood == mood ? .cyan : Color.white.opacity(0.08))
+                            .accessibilityAddTraits(availableVideoMood == mood ? .isSelected : [])
+                            .disabled(model.busy)
                         }
                     }
                 }
@@ -927,25 +1201,18 @@ struct Home: View {
                     }
                 }
                 if caps.moods.isEmpty { Text("PC’en tilbyder ingen stilarter lige nu.") }
+                advanced(Binding(get: { model.options }, set: { model.options = $0 }))
+                    .disabled(model.busy)
                 ZStack {
                     LinearGradient(colors: [.green.opacity(0.18), .blue.opacity(0.12), .black],
                                    startPoint: .top, endPoint: .bottom)
                     VStack(spacing: 10) {
                         Image(systemName: "play.circle").font(.system(size: 52, weight: .light))
-                        Text("9:16 · Auto crop").font(.caption.monospaced())
+                        Text(model.options.crop_mode == .auto ? "9:16 · Auto crop" : "9:16 · Midten")
+                            .font(.caption.monospaced())
                     }
                 }
                 .frame(height: 170).clipShape(RoundedRectangle(cornerRadius: 18))
-                Button {
-                    if confirmVideoStart { pendingVideoMood = selectedVideoMood }
-                    else { startVideo(selectedVideoMood) }
-                } label: {
-                    Label("Start videomagi", systemImage: "sparkles")
-                        .font(.headline).frame(maxWidth: .infinity, minHeight: 62)
-                }
-                .buttonStyle(.borderedProminent).tint(.cyan)
-                .disabled(!model.canSubmit || !model.cancelling.isEmpty)
-                .accessibilityHint("Starter de valgte klip med \(selectedVideoMood.title)")
             }
         }
         .padding(16)
@@ -1182,6 +1449,24 @@ struct VillageBot: Codable, Identifiable {
     var notifications: Bool? = true
     var voiceRate: Double? = 1.0
     var language: String? = "da-DK"
+
+    private var playbackVoice: AVSpeechSynthesisVoice? {
+        let locale = ["da-DK", "en-US", "en-GB"].contains(voice) ? voice : language ?? "da-DK"
+        return LocalSpeechVoice.resolve(identifier: voice, language: locale == "auto" ? "da-DK" : locale)
+    }
+
+    var previewSentence: String {
+        playbackVoice?.language.hasPrefix("en") == true
+            ? "Hi, I'm \(name.isEmpty ? "your bot" : name). How can I help you today?"
+            : "Hej, jeg er \(name.isEmpty ? "din bot" : name). Hvad kan jeg hjælpe dig med i dag?"
+    }
+
+    func utterance(_ text: String) -> AVSpeechUtterance {
+        let result = AVSpeechUtterance(string: text)
+        result.voice = playbackVoice
+        result.rate = AVSpeechUtteranceDefaultSpeechRate * Float(min(1.3, max(0.7, voiceRate ?? 1)))
+        return result
+    }
 }
 
 private struct VillageBotFile: FileDocument {
@@ -1201,45 +1486,72 @@ private struct VillageBotFile: FileDocument {
 }
 
 struct VillageBotBuilder: View {
-    var api: LiveAPI? = nil
+    private enum Page: String, CaseIterable {
+        case profile = "Profil", voice = "Stemme", test = "Prøv bot"
+    }
+
+    let api: LiveAPI?
+    private let onBack: (() -> Void)?
+    private let fixedProfile: Bool
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.dynamicTypeSize) private var typeSize
     @AppStorage("village.bots") private var savedBots = Data()
-    @State private var draft = VillageBot()
+    @AppStorage(PhoneModels.selectionKey) private var phoneModel = "apple"
+    @State private var draft: VillageBot
+    @State private var voicePreview = AVSpeechSynthesizer()
     @State private var importing = false
     @State private var selectedSprite: PhotosPickerItem?
     @State private var exporting = false
     @State private var exportFile: VillageBotFile?
     @State private var notice: String?
     @State private var improving = false
-    @State private var testing = false
+    @State private var testTask: Task<Void, Never>?
     @State private var testQuestion = ""
     @State private var testReply = ""
     @State private var generatingSprite = false
+    @State private var page = Page.profile
 
     private var bots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: savedBots)) ?? [] }
+    private var testing: Bool { testTask != nil }
+    private var testModel: String { PhoneModels.effectiveModelID(phoneModel) }
+    private var canTest: Bool { testModel == "apple" ? PhoneModels.appleAvailable : PhoneModels.installedDirectory(testModel) != nil }
+
+    init(api: LiveAPI? = nil, bot: VillageBot? = nil, onBack: (() -> Void)? = nil) {
+        self.api = api
+        self.onBack = onBack
+        fixedProfile = bot != nil
+        _draft = State(initialValue: bot ?? VillageBot())
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Mine bots · \(bots.count) af 10") {
-                    ForEach(bots) { bot in Button(bot.name) { draft = bot } }
-                    Button("Ny bot") { draft = VillageBot() }.disabled(bots.count >= 10)
-                    Button("Importér JSON") { importing = true }.disabled(bots.count >= 10)
+                if !fixedProfile {
+                    DisclosureGroup("Gemte bots · \(bots.count) af 10") {
+                        ForEach(bots) { bot in Button(bot.name) { selectDraft(bot) } }
+                        Button("Ny bot") { selectDraft(VillageBot()) }.disabled(bots.count >= 10)
+                        Button("Importér JSON") { importing = true }.disabled(bots.count >= 10 || testing)
+                    }
                 }
-                editor
-                localTest
+                if typeSize.isAccessibilitySize { pagePicker.pickerStyle(.menu) }
+                else { pagePicker.pickerStyle(.segmented) }
+                switch page {
+                case .profile: editor.disabled(testing)
+                case .voice: voiceSettings.disabled(testing)
+                case .test: localTest
+                }
                 if let notice { Text(notice) }
             }
             .navigationTitle("Botbygger")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button("Tilbage", systemImage: "chevron.left") { dismiss() }
+                    Button("Tilbage", systemImage: "chevron.left", action: close)
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Færdig") {
                         if !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { save(draft) }
-                        dismiss()
+                        close()
                     }.buttonStyle(.borderedProminent)
                 }
             }
@@ -1248,6 +1560,13 @@ struct VillageBotBuilder: View {
                           defaultFilename: "FadedAI-bot") { result in
                 if case .failure = result { notice = "Botten kunne ikke eksporteres." }
             }
+            .onDisappear { stopPreview() }
+        }
+    }
+
+    private var pagePicker: some View {
+        Picker("Sektion", selection: $page) {
+            ForEach(Page.allCases, id: \.self) { Text($0.rawValue).tag($0) }
         }
     }
 
@@ -1283,26 +1602,12 @@ struct VillageBotBuilder: View {
             )) {
                 ForEach(["Nysgerrig", "Rolig", "Sjov", "Omsorgsfuld"], id: \.self) { Text($0) }
             }
-            Picker("Stemme", selection: $draft.voice) {
-                Text("Dansk").tag("da-DK")
-                Text("Engelsk").tag("en-US")
-                ForEach(AVSpeechSynthesisVoice.speechVoices().filter {
-                    $0.language == "da-DK" || $0.language == "en-US" || $0.language == "en-GB"
-                }, id: \.identifier) { voice in
-                    Text(voice.name + " · " + voice.language).tag(voice.identifier)
-                }
-            }
             Picker("Sprog", selection: Binding(
                 get: { draft.language ?? "da-DK" }, set: { draft.language = $0 }
             )) {
                 Text("Dansk").tag("da-DK")
                 Text("Engelsk").tag("en-US")
                 Text("Automatisk").tag("auto")
-            }
-            VStack(alignment: .leading) {
-                Text("Talehastighed · \((draft.voiceRate ?? 1).formatted(.number.precision(.fractionLength(1))))x")
-                Slider(value: Binding(get: { draft.voiceRate ?? 1 }, set: { draft.voiceRate = $0 }),
-                       in: 0.7...1.3, step: 0.1)
             }
             Toggle("Notifikationer fra botten", isOn: Binding(
                 get: { draft.notifications ?? true }, set: { draft.notifications = $0 }
@@ -1317,6 +1622,26 @@ struct VillageBotBuilder: View {
                     draft = VillageBot()
                 }
             }
+        }
+    }
+
+    private var voiceSettings: some View {
+        Section("Oplæsning på telefonen") {
+            Picker("Stemme", selection: $draft.voice) {
+                Text("Bedste danske stemme").tag("da-DK")
+                Text("Bedste engelske stemme").tag("en-US")
+                ForEach(LocalSpeechVoice.options(language: "da-DK") + LocalSpeechVoice.options(language: "en-US"),
+                        id: \.identifier) { voice in
+                    Text(LocalSpeechVoice.label(voice)).tag(voice.identifier)
+                }
+            }
+            VStack(alignment: .leading) {
+                Text("Talehastighed · \((draft.voiceRate ?? 1).formatted(.number.precision(.fractionLength(1))))x")
+                Slider(value: Binding(get: { draft.voiceRate ?? 1 }, set: { draft.voiceRate = $0 }),
+                       in: 0.7...1.3, step: 0.1)
+            }
+            Button("Prøv stemme", systemImage: "speaker.wave.2") { speakPreview(draft.previewSentence) }
+                .frame(minHeight: 44)
         }
     }
 
@@ -1358,32 +1683,60 @@ struct VillageBotBuilder: View {
 
     private var localTest: some View {
         Section("Prøv AI på denne iPhone") {
-            Text(PhoneModels.appleAvailable ? "Apple Intelligence er klar." : "Apple Intelligence er ikke tilgængelig lige nu.")
+            Text(canTest ? "Din valgte telefonmodel er klar." : "Vælg en klar model under Lokale modeller.")
             TextField("Besked til botten", text: $testQuestion, axis: .vertical)
+                .disabled(testing)
             Button(testing ? "Svarer på telefonen…" : "Prøv på telefonen") {
-                Task { await testBot() }
+                testTask = Task { await testBot() }
             }
             .frame(minHeight: 44)
-            .disabled(testing || !PhoneModels.appleAvailable || testQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            .disabled(testing || !canTest || testQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             if !testReply.isEmpty {
                 Label("Telefon", systemImage: "iphone")
                 Text(testReply).textSelection(.enabled)
+                Button("Læs testsvar op", systemImage: "speaker.wave.2") { speakPreview(testReply) }
+                    .frame(minHeight: 44).disabled(testing)
             }
         }
     }
 
     private func testBot() async {
-        guard !testing else { return }
-        testing = true
+        let modelID = testModel
+        let instructions = OfflineStudio.companionInstructions(for: draft)
+        let question = testQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         testReply = ""
         notice = nil
-        defer { testing = false }
+        defer { testTask = nil }
         do {
-            try await PhoneModels.reply(modelID: "apple", prompt: testQuestion,
-                                        instructions: draft.prompt) { testReply = $0 }
+            try await PhoneModels.reply(modelID: modelID, prompt: question, instructions: instructions) {
+                if !Task.isCancelled { testReply = $0 }
+            }
+        } catch is CancellationError {
         } catch {
-            notice = "Telefonen kunne ikke svare. Tjek Apple Intelligence, og prøv igen."
+            notice = "Telefonen kunne ikke svare. Tjek din valgte lokale model, og prøv igen."
         }
+    }
+
+    private func speakPreview(_ text: String) {
+        voicePreview.stopSpeaking(at: .immediate)
+        voicePreview.speak(draft.utterance(text))
+    }
+
+    private func stopPreview() {
+        testTask?.cancel()
+        voicePreview.stopSpeaking(at: .immediate)
+    }
+
+    private func selectDraft(_ bot: VillageBot) {
+        stopPreview()
+        draft = bot
+        page = .profile
+        testReply = ""
+    }
+
+    private func close() {
+        stopPreview()
+        if let onBack { onBack() } else { dismiss() }
     }
 
     private func save(_ bot: VillageBot) {
@@ -1432,10 +1785,108 @@ struct VillageBotBuilder: View {
     }
 }
 
+private struct VillageBotLibrary: View {
+    let api: LiveAPI?
+    @Binding var studioUnlocked: Bool
+    let onPrivateSessionEnded: () -> Void
+    let onBack: () -> Void
+    @AppStorage("village.bots") private var savedBots = Data()
+    @State private var showBuilder = false
+
+    private var bots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: savedBots)) ?? [] }
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if bots.isEmpty {
+                    Text("Du har ingen bots endnu. Tryk Opret bot for at begynde.")
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(bots) { bot in
+                    NavigationLink {
+                        VillageBotProfile(botID: bot.id, api: api, studioUnlocked: $studioUnlocked,
+                                          onPrivateSessionEnded: onPrivateSessionEnded)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(bot.name).font(.headline)
+                            if let personality = bot.personality { Text(personality).font(.subheadline).foregroundStyle(.secondary) }
+                        }.frame(minHeight: 44)
+                    }
+                }
+                Button("Opret bot", systemImage: "person.crop.circle.badge.plus") { showBuilder = true }
+                    .frame(minHeight: 44)
+            }
+            .navigationTitle("Mine bots")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Tilbage", systemImage: "chevron.left", action: onBack)
+                }
+            }
+            .sheet(isPresented: $showBuilder) { VillageBotBuilder(api: api, onBack: { showBuilder = false }) }
+        }
+    }
+}
+
+private struct VillageBotProfile: View {
+    let botID: UUID
+    let api: LiveAPI?
+    @Binding var studioUnlocked: Bool
+    let onPrivateSessionEnded: () -> Void
+    @AppStorage("village.bots") private var savedBots = Data()
+    @State private var showBuilder = false
+    @State private var showPrivateChat = false
+    @State private var speech = AVSpeechSynthesizer()
+
+    private var bot: VillageBot? {
+        (try? JSONDecoder().decode([VillageBot].self, from: savedBots))?.first { $0.id == botID }
+    }
+
+    var body: some View {
+        List {
+            if let bot {
+                Section("Profil") {
+                    if let data = bot.sprite, let image = UIImage(data: data) {
+                        Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
+                            .frame(width: 80, height: 80).accessibilityLabel("Bottens figur")
+                    }
+                    LabeledContent("Personlighed", value: bot.personality ?? "Nysgerrig")
+                }
+                Section {
+                    Button("Chat med botten", systemImage: "lock.shield") {
+                        speech.stopSpeaking(at: .immediate)
+                        showPrivateChat = true
+                    }.frame(minHeight: 44)
+                    Button("Prøv stemme", systemImage: "speaker.wave.2") {
+                        speech.stopSpeaking(at: .immediate)
+                        speech.speak(bot.utterance(bot.previewSentence))
+                    }.frame(minHeight: 44)
+                    Button("Redigér eller prøv personlighed", systemImage: "pencil") {
+                        speech.stopSpeaking(at: .immediate)
+                        showBuilder = true
+                    }.frame(minHeight: 44)
+                }
+            } else {
+                Text("Botprofilen findes ikke længere.")
+            }
+        }
+        .navigationTitle(bot?.name ?? "Botprofil")
+        .onDisappear { speech.stopSpeaking(at: .immediate) }
+        .sheet(isPresented: $showBuilder) {
+            if let bot { VillageBotBuilder(api: api, bot: bot, onBack: { showBuilder = false }) }
+        }
+        .sheet(isPresented: $showPrivateChat) {
+            OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
+                          initialPage: .chat, initialBotID: botID)
+        }
+    }
+}
+
 private struct AgentHub: View {
-    @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var hubPhase
     let api: LiveAPI?
+    @Binding var studioUnlocked: Bool
+    let onPrivateSessionEnded: () -> Void
+    let onBack: () -> Void
     @State private var selectedRoom = "research"
     @AppStorage("village.bots") private var localBotsData = Data()
     @State private var localBot: VillageBot?
@@ -1487,7 +1938,7 @@ private struct AgentHub: View {
                     }
                     if offline { Text("PC’en er offline. Botsene hviler.") }
                     if !cinematic {
-                    Button("Botbygger", systemImage: "person.crop.circle.badge.plus") { showBuilder = true }
+                    Button("Mine bots", systemImage: "person.2") { showBuilder = true }
                         .frame(minHeight: 48)
                     if let failure {
                         RetryNotice(message: failure) { attempt += 1 }
@@ -1511,28 +1962,36 @@ private struct AgentHub: View {
             .navigationTitle("Landsbyen")
             .toolbarVisibility(cinematic ? .hidden : .visible, for: .navigationBar)
             .sensoryFeedback(.success, trigger: completions)
-            .sheet(isPresented: $showBuilder) { VillageBotBuilder(api: api) }
-            .sheet(item: $localBot) { bot in
-                NavigationStack {
-                    List {
-                        Text("Lokal bot")
-                        if !bot.prompt.isEmpty { Text(bot.prompt) }
-                        Button("Åbn Botbygger") {
-                            localBot = nil
-                            showBuilder = true
-                        }
-                    }
-                    .navigationTitle(bot.name)
-                    .toolbar { Button("Luk") { localBot = nil } }
-                }
-            }
+            .sheet(isPresented: $showBuilder) { botLibrary }
+            .sheet(item: $localBot, content: botProfile)
             .task(id: "\(attempt):\(hubPhase == .active):\(api?.server.origin.absoluteString ?? "offline")") {
                 if hubPhase == .active { await followHub() }
             }
             .refreshable { attempt += 1 }
-            .toolbar { Button("Luk") { dismiss() } }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Tilbage", systemImage: "chevron.left", action: onBack)
+                }
+            }
             .sheet(item: $details) { agent in agentDetails(agent) }
             .sheet(isPresented: $achievements) { achievementPage }
+        }
+    }
+
+    private var botLibrary: some View {
+        VillageBotLibrary(api: api, studioUnlocked: $studioUnlocked,
+                          onPrivateSessionEnded: onPrivateSessionEnded, onBack: { showBuilder = false })
+    }
+
+    private func botProfile(_ bot: VillageBot) -> some View {
+        NavigationStack {
+            VillageBotProfile(botID: bot.id, api: api, studioUnlocked: $studioUnlocked,
+                              onPrivateSessionEnded: onPrivateSessionEnded)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Tilbage", systemImage: "chevron.left") { localBot = nil }
+                    }
+                }
         }
     }
 
@@ -2543,7 +3002,7 @@ private struct CodeWorkspaceView: View {
     }
 
     let api: LiveAPI?
-    @Environment(\.dismiss) private var dismiss
+    let onBack: () -> Void
     @AppStorage("code.autonomy") private var autonomy = Autonomy.strict.rawValue
     @State private var files: [V2CodeWorkspace.File] = []
     @State private var selected = Set<String>()
@@ -2673,7 +3132,11 @@ private struct CodeWorkspaceView: View {
             }
             .background((colorScheme == .dark ? Color.black : Color(uiColor: .systemBackground)).ignoresSafeArea())
             .navigationTitle("Agent Workspace")
-            .toolbar { Button("Luk") { dismiss() }.accessibilityLabel("Luk Agent Workspace") }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Tilbage", systemImage: "chevron.left", action: onBack)
+                }
+            }
             .refreshable { await load() }
             .task { restoreContext(); await load() }
             .confirmationDialog("Godkend filændringen?", isPresented: $approval, presenting: proposal) { item in
@@ -2872,12 +3335,28 @@ private struct CloudModelSettings: View {
 }
 
 private struct ChatView: View {
+    private enum ReplySource: String, CaseIterable {
+        case phone = "Telefon"
+        case pc = "PC"
+        case grok = "Grok"
+
+        var sendTitle: String {
+            switch self {
+            case .phone: "Send på telefonen"
+            case .pc: "Send til PC"
+            case .grok: "Send til Grok"
+            }
+        }
+    }
+
     @Environment(\.dismiss) private var dismiss
     let api: (any ChatAPI)?
     let demo: Bool
     let initialDraft: String
     let connection: String
     let storageKey: String
+    let onBack: (() -> Void)?
+    let openImageStudio: ((String) -> Void)?
     @State private var sessionID = UUID()
     @State private var draft = ""
     @AppStorage private var savedDraft: String
@@ -2892,18 +3371,19 @@ private struct ChatView: View {
     @State private var models: [V2Models.Entry] = []
     @State private var selectedModel = ""
     @State private var cloudKeyAvailable = CloudModelKey.exists()
-    @State private var cloudSelected = false
+    @State private var replySource = ReplySource.phone
     @State private var modelsLoading = true
     @State private var modelsError: String?
     @State private var legacyChat = false
     @State private var completedReplies = 0
-    @AppStorage("phone.model") private var phoneModel = "apple"
+    @AppStorage(PhoneModels.selectionKey) private var phoneModel = "apple"
     @State private var phoneBatteryLevel = UIDevice.current.batteryLevel
-    @State private var usePC = false
     @State private var dictation = ChatDictation()
     @State private var speech = AVSpeechSynthesizer()
     @AppStorage("chat.voiceMode") private var voiceMode = false
     @AppStorage("chat.voiceBot") private var voiceBotID = ""
+    @AppStorage("chat.voice.language") private var preferredVoiceLanguage = "da-DK"
+    @AppStorage("chat.voice.identifier") private var preferredVoiceID = ""
     @AppStorage("village.bots") private var voiceBotData = Data()
     @FocusState private var composerFocused: Bool
     @State private var chatSearch = ""
@@ -2941,12 +3421,15 @@ private struct ChatView: View {
     @AppStorage("ai.wordCount") private var aiWordCount = false
     @AppStorage("ai.showTools") private var aiShowTools = true
 
-    init(api: (any ChatAPI)?, demo: Bool, initialDraft: String, connection: String, storageKey: String) {
+    init(api: (any ChatAPI)?, demo: Bool, initialDraft: String, connection: String, storageKey: String,
+         onBack: (() -> Void)? = nil, openImageStudio: ((String) -> Void)? = nil) {
         self.api = api
         self.demo = demo
         self.initialDraft = initialDraft
         self.connection = connection
         self.storageKey = storageKey
+        self.onBack = onBack
+        self.openImageStudio = openImageStudio
         _savedDraft = AppStorage(wrappedValue: "", storageKey + ".draft")
     }
 
@@ -2959,8 +3442,22 @@ private struct ChatView: View {
             Toggle("Læs færdige svar op", isOn: $voiceMode)
             if !voiceBots.isEmpty {
                 Picker("Botstemme", selection: $voiceBotID) {
-                    Text("Dansk standard").tag("")
+                    Text("Valgt telefonstemme").tag("")
                     ForEach(voiceBots) { bot in Text(bot.name).tag(bot.id.uuidString) }
+                }
+            }
+            if voiceBots.first(where: { $0.id.uuidString == voiceBotID }) == nil {
+                Picker("Oplæsningssprog", selection: $preferredVoiceLanguage) {
+                    Text("Dansk").tag("da-DK")
+                    Text("Engelsk").tag("en-US")
+                }
+                .onChange(of: preferredVoiceLanguage) { preferredVoiceID = "" }
+                let voices = LocalSpeechVoice.options(language: preferredVoiceLanguage)
+                Picker("Telefonstemme", selection: $preferredVoiceID) {
+                    Text("Bedste tilgængelige").tag("")
+                    ForEach(voices, id: \.identifier) { voice in
+                        Text(LocalSpeechVoice.label(voice)).tag(voice.identifier)
+                    }
                 }
             }
             Button("Stop oplæsning") { speech.stopSpeaking(at: .immediate) }
@@ -2972,9 +3469,8 @@ private struct ChatView: View {
         speech.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: text)
         let bot = voiceBots.first { $0.id.uuidString == voiceBotID }
-        let choice = bot?.voice ?? bot?.language ?? "da-DK"
-        utterance.voice = AVSpeechSynthesisVoice(identifier: choice) ??
-            AVSpeechSynthesisVoice(language: choice) ?? AVSpeechSynthesisVoice(language: "da-DK")
+        utterance.voice = LocalSpeechVoice.resolve(identifier: bot?.voice ?? preferredVoiceID,
+                                                   language: bot?.language ?? preferredVoiceLanguage)
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(bot?.voiceRate ?? 1)
         speech.speak(utterance)
     }
@@ -3004,13 +3500,8 @@ private struct ChatView: View {
                         DisclosureGroup("Chatindstillinger") {
                             VStack(alignment: .leading, spacing: 12) {
                                 StatsBar(turns: turns.count, streaming: task != nil)
-                                if !cloudSelected {
-                                    Toggle("Brug PC til næste svar", isOn: $usePC).disabled(task != nil)
-                                    Text("Korte svar forsøges på telefonen. PC-opgaver sendes til din PC.")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                    modelControls
-                                }
-                                if api == nil && !demo && !aiPrivateSession { CloudModelSettings() }
+                                if replySource == .pc { modelControls }
+                                if replySource == .grok && !demo && !aiPrivateSession { CloudModelSettings() }
                                 voiceControls
                                 aiBoostControls
                                 if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
@@ -3054,7 +3545,8 @@ private struct ChatView: View {
                     if loaded && !aiPrivateSession { savedDraft = value }
                 }
                 .onChange(of: aiPrivateSession) { _, isPrivate in
-                    if isPrivate { cloudSelected = false }
+                    stop()
+                    if isPrivate && replySource == .grok { replySource = .phone }
                     turns = []
                     searchSteps = []
                     sourceExcerpt = nil
@@ -3067,7 +3559,7 @@ private struct ChatView: View {
                 .safeAreaInset(edge: .bottom) { composer }
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button("Tilbage", systemImage: "chevron.left") { stop(); dismiss() }
+                        Button("Tilbage", systemImage: "chevron.left", action: goBack)
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         Button("Ny samtale", systemImage: "square.and.pencil") { newConversation() }
@@ -3080,6 +3572,9 @@ private struct ChatView: View {
                     cloudKeyAvailable = CloudModelKey.exists()
                     guard !loaded else { return }
                     loaded = true
+                    let localModelID = PhoneModels.effectiveModelID(phoneModel)
+                    let localReady = localModelID == "apple" ? PhoneModels.appleAvailable : PhoneModels.installedDirectory(localModelID) != nil
+                    if api != nil && !localReady && !demo { replySource = .pc }
                     loadHistory()
                     draft = initialDraft.isEmpty && !aiPrivateSession ? savedDraft : initialDraft
                     scrollChat(proxy)
@@ -3098,26 +3593,54 @@ private struct ChatView: View {
     }
 
     @ViewBuilder private var quickModelPicker: some View {
-        let offersCloud = !demo && !aiPrivateSession && cloudKeyAvailable
-        if !models.isEmpty || offersCloud || cloudSelected {
+        if replySource == .pc && !models.isEmpty {
             Menu {
-                if offersCloud || cloudSelected {
-                    Button("Telefon / PC") { cloudSelected = false }
-                }
                 ForEach(models) { entry in
-                    Button(entry.label) { selectedModel = entry.id; cloudSelected = false }
-                }
-                if offersCloud {
-                    Button("Grok 4.7 · Cloud", systemImage: "cloud") { cloudSelected = true }
+                    Button(entry.label) { selectedModel = entry.id }
                 }
             } label: {
-                let name = cloudSelected ? GrokAPI.sourceLabel : models.first(where: { $0.id == selectedModel })?.label ?? "Model"
-                Label(name, systemImage: "chevron.down")
+                Label(models.first(where: { $0.id == selectedModel })?.label ?? "Model", systemImage: "chevron.down")
                     .font(.caption.bold()).lineLimit(1)
             }
             .disabled(task != nil)
-            .accessibilityLabel("Skift AI-model")
-            .accessibilityValue(cloudSelected ? GrokAPI.sourceLabel : models.first(where: { $0.id == selectedModel })?.label ?? "Telefon / PC")
+            .accessibilityLabel("Skift PC-model")
+        }
+    }
+
+    private func goBack() {
+        composerFocused = false
+        stop()
+        if let onBack { onBack() }
+        else { dismiss() }
+    }
+
+    private var sourcePicker: some View {
+        Picker("Svar fra", selection: $replySource) {
+            ForEach(ReplySource.allCases.filter { !aiPrivateSession || $0 != .grok }, id: \.self) { source in
+                Text(source.rawValue).tag(source)
+            }
+        }
+        .pickerStyle(.segmented)
+        .disabled(task != nil)
+    }
+
+    private var sourceNote: String? {
+        guard !demo else { return nil }
+        return switch replySource {
+        case .phone: nil
+        case .pc: api == nil ? "Forbind til PC’en for at sende." : nil
+        case .grok: cloudKeyAvailable
+            ? "Beskeden og de seneste Grok-udvekslinger sendes til xAI. Forbrug kan koste penge."
+            : "Gem en xAI-nøgle under Chatindstillinger for at sende til Grok."
+        }
+    }
+
+    private var canSendToSource: Bool {
+        if demo { return true }
+        return switch replySource {
+        case .phone: true
+        case .pc: api != nil && !modelsLoading
+        case .grok: cloudKeyAvailable && !aiPrivateSession
         }
     }
 
@@ -3130,33 +3653,14 @@ private struct ChatView: View {
 
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if cloudSelected {
-                Text("Beskeden og de seneste Grok-udvekslinger sendes til xAI. Forbrug kan koste penge.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            if phoneBatteryLevel >= 0, phoneBatteryLevel < 0.20, PhoneModels.liteModeActive(for: phoneModel) {
+            if !demo { sourcePicker }
+            if let sourceNote { Text(sourceNote).font(.caption).foregroundStyle(.secondary) }
+            if replySource == .phone, phoneBatteryLevel >= 0, phoneBatteryLevel < 0.20, PhoneModels.liteModeActive(for: phoneModel) {
                 Label("Lite Mode · LFM2.5", systemImage: "battery.25percent")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if task == nil {
-                HStack {
-                    Menu("Skabeloner") {
-                        ForEach(PromptExample.examples) { example in
-                            Button(example.text) { draft = example.text }
-                        }
-                    }.frame(minHeight: 44)
-                    Spacer()
-                    Button {
-                        if dictation.active { dictation.stop() }
-                        else {
-                            let prefix = draft.isEmpty ? "" : draft + " "
-                            Task { await dictation.start { draft = prefix + $0 } }
-                        }
-                    } label: {
-                        Image(systemName: dictation.active ? "stop.circle" : "mic")
-                            .frame(minWidth: 48, minHeight: 48)
-                    }.accessibilityLabel(dictation.active ? "Stop diktering" : "Dikter chatbesked")
-                }
+                composerActions
                 if let problem = dictation.problem { Text(problem).font(.caption) }
             }
             TextField("Din besked", text: $draft, axis: .vertical)
@@ -3174,11 +3678,59 @@ private struct ChatView: View {
                 Button { stop() } label: { Text("Stop modtagelse").frame(minHeight: 48) }
                     .buttonStyle(.bordered)
             } else {
-                Button { send() } label: { Text(cloudSelected ? "Send til Grok" : "Send besked").frame(minHeight: 48) }
+                Button { send() } label: { Text(demo ? "Send testbesked" : replySource.sendTitle).frame(minHeight: 48) }
                     .buttonStyle(.borderedProminent)
-                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 2000 || (cloudSelected && !cloudKeyAvailable))
+                    .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.count > 2000 || !canSendToSource)
             }
         }.padding(12).background(.regularMaterial)
+    }
+
+    private var composerActions: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack {
+                promptTemplates.fixedSize(horizontal: true, vertical: false)
+                Spacer(minLength: 4)
+                imageStudioAction.fixedSize(horizontal: true, vertical: false)
+                dictationAction
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                HStack { promptTemplates; Spacer(); dictationAction }
+                imageStudioAction
+            }
+        }
+    }
+
+    private var promptTemplates: some View {
+        Menu("Skabeloner") {
+            ForEach(PromptExample.examples) { example in
+                Button(example.text) { draft = example.text }
+            }
+        }.frame(minHeight: 44)
+    }
+
+    @ViewBuilder private var imageStudioAction: some View {
+        if let openImageStudio, !aiPrivateSession {
+            Button("Lav billede", systemImage: "photo") {
+                dictation.stop()
+                composerFocused = false
+                openImageStudio(draft)
+            }
+            .frame(minHeight: 44)
+            .accessibilityHint("Åbner Billeder i Offline Studio")
+        }
+    }
+
+    private var dictationAction: some View {
+        Button {
+            if dictation.active { dictation.stop() }
+            else {
+                let prefix = draft.isEmpty ? "" : draft + " "
+                Task { await dictation.start { draft = prefix + $0 } }
+            }
+        } label: {
+            Image(systemName: dictation.active ? "stop.circle" : "mic")
+                .frame(minWidth: 48, minHeight: 48)
+        }.accessibilityLabel(dictation.active ? "Stop diktering" : "Dikter chatbesked")
     }
 
     @ViewBuilder private var modelControls: some View {
@@ -3403,8 +3955,9 @@ private struct ChatView: View {
     private func send() {
         dictation.stop()
         let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard task == nil, !message.isEmpty else { return }
-        let routeGrok = cloudSelected && !demo && !aiPrivateSession
+        guard task == nil, !message.isEmpty, message.count <= 2000, canSendToSource else { return }
+        let source = replySource
+        let routeGrok = source == .grok && !demo
         let cloudMessages = routeGrok ? grokMessages(endingWith: message) : []
         draft = ""
         if !aiPrivateSession { savedDraft = "" }
@@ -3414,12 +3967,11 @@ private struct ChatView: View {
         turns.append(ChatTurn(prompt: message, createdAt: .now))
         let index = turns.count - 1
         let turnID = turns[index].id
-        let context = turns.dropLast().suffix(6).filter { !$0.reply.isEmpty }
+        let history = turns.dropLast().suffix(6).filter { !$0.reply.isEmpty }
             .map { "Bruger: \($0.prompt)\nSvar: \($0.reply)" }.joined(separator: "\n")
         let collectionQuestion = message.lowercased().hasPrefix("kortsamling:")
         let modelMessage = routeGrok || collectionQuestion ? message : enhancedPrompt(message)
-        let requiresPC = usePC || collectionQuestion ||
-            PhoneModels.prefersPC(modelMessage, previousCharacters: context.count)
+        let context = String(history.suffix(max(0, 3000 - modelMessage.count)))
         status = "Venter på svar…"
         let input = ChatRequest(message: modelMessage, session_id: aiPrivateSession ? nil : sessionID)
         save(pending: true)
@@ -3432,14 +3984,12 @@ private struct ChatView: View {
                     turns[index].reply = "Jeg fandt et testklip. "
                     try await Task.sleep(for: .milliseconds(600))
                     turns[index].reply += "Demoen starter ikke et video-job."
-                } else if routeGrok {
-                    try await answerOnGrok(cloudMessages, index: index, turnID: turnID)
                 } else {
-                    var answered = false
-                    if !requiresPC {
-                        answered = try await answerOnPhone(modelMessage, context: context, index: index)
+                    switch source {
+                    case .phone: try await answerOnPhone(modelMessage, context: context, index: index, turnID: turnID)
+                    case .pc: try await answerOnPC(input, index: index, turnID: turnID)
+                    case .grok: try await answerOnGrok(cloudMessages, index: index, turnID: turnID)
                     }
-                    if !answered { try await answerOnPC(input, index: index) }
                 }
                 if turns.indices.contains(index), turns[index].id == turnID, turns[index].notice == nil {
                     completedReplies += 1
@@ -3453,9 +4003,13 @@ private struct ChatView: View {
                 }
             } catch {
                 if turns.indices.contains(index), turns[index].id == turnID {
-                    turns[index].notice = (error as? GrokFailure)?.message ?? pcBusyMessage(error)
-                        ?? (error is V2Failure ? v2Message(error)
-                            : (error as? APIError)?.title ?? (error as? ChatFailure ?? .interrupted).message)
+                    if source == .phone && !demo {
+                        turns[index].notice = phoneError(error, hasPartial: !turns[index].reply.isEmpty)
+                    } else {
+                        turns[index].notice = (error as? GrokFailure)?.message ?? pcBusyMessage(error)
+                            ?? (error is V2Failure ? v2Message(error)
+                                : (error as? APIError)?.title ?? (error as? ChatFailure ?? .interrupted).message)
+                    }
                 }
             }
         }
@@ -3492,36 +4046,31 @@ private struct ChatView: View {
         }
     }
 
-    private func answerOnPhone(_ message: String, context: String, index: Int) async throws -> Bool {
+    private func answerOnPhone(_ message: String, context: String, index: Int, turnID: UUID) async throws {
+        turns[index].source = "Telefon"
         status = "Telefon · Forbereder svar…"
         let prompt = context.isEmpty ? message : "\(context)\nBruger: \(message)"
-        do {
-            try await PhoneModels.reply(modelID: PhoneModels.effectiveModelID(phoneModel), prompt: prompt) { answer in
-                turns[index].source = "Telefon"
-                turns[index].reply = safeText(answer)
-                streamedText = answer
-            }
+        try await PhoneModels.reply(modelID: PhoneModels.effectiveModelID(phoneModel), prompt: prompt,
+                                    instructions: "Svar på brugerens sprog. Du kan bruge teksten i chatten og udfører ingen opgaver på PC’en.") { answer in
+            guard !Task.isCancelled, turns.indices.contains(index), turns[index].id == turnID else { return }
+            turns[index].reply = safeText(answer)
+            streamedText = answer
+        }
+        try Task.checkCancellation()
+        if turns.indices.contains(index), turns[index].id == turnID {
             turns[index].reply = safeText(streamedText, complete: true)
-            return true
-        } catch {
-            try Task.checkCancellation()
-            if case .busy? = error as? LocalComputeError {
-                turns[index].notice = "Telefonen kører allerede en lokal AI-opgave. Prøv igen om lidt."
-                return true
-            }
-            if case .lowMemory? = error as? LocalComputeError, api == nil {
-                turns[index].notice = "Telefonen har for lidt ledig hukommelse til denne model lige nu."
-                return true
-            }
-            if !turns[index].reply.isEmpty {
-                turns[index].notice = "Telefonsvaret blev afbrudt."
-                return true
-            }
-            return false
         }
     }
 
-    private func answerOnPC(_ input: ChatRequest, index: Int) async throws {
+    private func phoneError(_ error: Error, hasPartial: Bool) -> String {
+        if hasPartial { return "Telefonsvaret blev afbrudt." }
+        if case .busy? = error as? LocalComputeError { return "Telefonen arbejder allerede. Prøv igen om lidt." }
+        if case .lowMemory? = error as? LocalComputeError { return "Telefonen har for lidt ledig hukommelse til modellen." }
+        if case .unavailable? = error as? PhoneModelError { return "Vælg en klar model under Lokale modeller, eller skift til PC." }
+        return "Telefonmodellen kunne ikke svare. Prøv igen, eller vælg en anden kilde."
+    }
+
+    private func answerOnPC(_ input: ChatRequest, index: Int, turnID: UUID) async throws {
         guard let api else {
             turns[index].notice = "Denne besked kræver en model, der er klar. Forbind til PC’en, eller vælg en lokal model i Indstillinger."
             return
@@ -3533,26 +4082,27 @@ private struct ChatView: View {
                                             modelID: selectedModel.isEmpty ? nil : selectedModel)
             try await live.v2Chat(request) { event in
                 await MainActor.run {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, turns.indices.contains(index), turns[index].id == turnID else { return }
                     receive(type: event.type.rawValue, content: event.content, index: index)
                 }
             }
             try Task.checkCancellation()
         } else {
-            await run(api, input: input, index: index)
+            await run(api, input: input, index: index, turnID: turnID)
         }
     }
 
-    private func run(_ api: any ChatAPI, input: ChatRequest, index: Int) async {
+    private func run(_ api: any ChatAPI, input: ChatRequest, index: Int, turnID: UUID) async {
         do {
             try await api.chat(input) { event in
                 await MainActor.run {
-                    guard !Task.isCancelled else { return }
+                    guard !Task.isCancelled, turns.indices.contains(index), turns[index].id == turnID else { return }
                     receive(type: event.type, content: event.content, index: index)
                 }
             }
             try Task.checkCancellation()
         } catch {
+            guard turns.indices.contains(index), turns[index].id == turnID else { return }
             turns[index].notice = Task.isCancelled ? "Modtagelsen er stoppet. Et job kan stadig køre."
                 : pcBusyMessage(error) ?? (error as? APIError)?.title ?? (error as? ChatFailure ?? .interrupted).message
         }

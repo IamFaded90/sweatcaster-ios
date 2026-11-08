@@ -23,6 +23,7 @@ struct LoginView: View {
     let close: (() -> Void)?
     let openLocalChat: () -> Void
     let openLocalStudio: () -> Void
+    let openLocalBots: () -> Void
     let exportDiagnostics: () -> Void
 
     @State private var profile: ConnectionProfile
@@ -34,11 +35,13 @@ struct LoginView: View {
 
     init(model: Model, close: (() -> Void)? = nil,
          openLocalChat: @escaping () -> Void = {}, openLocalStudio: @escaping () -> Void = {},
+         openLocalBots: @escaping () -> Void = {},
          exportDiagnostics: @escaping () -> Void = {}) {
         self.model = model
         self.close = close
         self.openLocalChat = openLocalChat
         self.openLocalStudio = openLocalStudio
+        self.openLocalBots = openLocalBots
         self.exportDiagnostics = exportDiagnostics
         _profile = State(initialValue: model.activeProfile)
         _address = State(initialValue: model.savedAddresses[model.activeProfile] ?? "")
@@ -86,7 +89,8 @@ struct LoginView: View {
                 if close == nil {
                     Section("På telefonen") {
                         Button("Åbn lokal chat", action: openLocalChat).frame(minHeight: 44)
-                        Button("Åbn privat studie", action: openLocalStudio).frame(minHeight: 44)
+                        Button("Privat chat (NSFW)", action: openLocalStudio).frame(minHeight: 44)
+                        Button("Mine bots", action: openLocalBots).frame(minHeight: 44)
                         Button("Prøv demo") { Task { await model.useDemo() } }.frame(minHeight: 44)
                             .disabled(connecting || model.busy || model.refreshing)
                     }

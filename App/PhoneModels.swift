@@ -14,7 +14,9 @@ enum PhoneModelError: Error {
 }
 
 enum PhoneModels {
+    static let selectionKey = "phone.model"
     static let liteBatteryKey = "phone.model.liteBattery"
+    static let downloadedRoot = URL.documentsDirectory.appending(path: "Models", directoryHint: .isDirectory)
 
     struct Entry: Identifiable {
         let model: ModelDownloader.ModelInfo
@@ -56,8 +58,32 @@ enum PhoneModels {
             return FileManager.default.fileExists(atPath: config.path) ? importedFolder : nil
         }
         guard let entry = catalog.first(where: { $0.id == id }) else { return nil }
-        guard ModelDownloader.shared.isDownloaded(entry.model) else { return nil }
-        return ModelDownloader.shared.localModelURL(for: entry.model)?.deletingLastPathComponent()
+        let downloader = ModelDownloader.shared
+        guard !downloader.isDownloading || downloader.downloadingModelId != id else { return nil }
+        let folder = downloadedRoot.appending(path: entry.model.folderName, directoryHint: .isDirectory)
+
+        // Checking availability must not call the package's cache invalidation code.
+        // The downloader and the loader both use this persistent Documents directory.
+        func hasFile(_ path: String) -> Bool {
+            guard let info = try? folder.appending(path: path).resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]) else {
+                return false
+            }
+            return info.isRegularFile == true && (info.fileSize ?? 0) > 0
+        }
+        func hasModel(_ name: String) -> Bool {
+            let compiled = hasFile("\(name).mlmodelc/coremldata.bin") && hasFile("\(name).mlmodelc/weights/weight.bin")
+            let package = hasFile("\(name).mlpackage/Manifest.json")
+                && hasFile("\(name).mlpackage/Data/com.apple.CoreML/model.mlmodel")
+                && hasFile("\(name).mlpackage/Data/com.apple.CoreML/weights/weight.bin")
+            return compiled || package
+        }
+        guard hasFile("model_config.json"), hasFile("hf_model/tokenizer.json"), hasFile("hf_model/tokenizer_config.json") else {
+            return nil
+        }
+        if id == ModelDownloader.ModelInfo.lfm2_5_350m.id { return hasModel("model") ? folder : nil }
+        let fourChunks = ["chunk2", "chunk3", "chunk4"].allSatisfy(hasModel)
+        let threeChunks = ["chunk2_3way", "chunk3_3way"].allSatisfy(hasModel)
+        return hasModel("chunk1") && (fourChunks || threeChunks) ? folder : nil
     }
 
     @MainActor static func effectiveModelID(_ selected: String) -> String {
@@ -183,6 +209,7 @@ enum PhoneModels {
     static let shared = PhoneModelDownloads()
     static let backgroundIdentifier = "com.coreml-llm.model-download"
     private let key = "phone.model.pending-download"
+    private let previousSelectionKey = "phone.model.selection-before-download"
     private var observing = false
 
     func activate() {
@@ -202,16 +229,24 @@ enum PhoneModels {
     func download(_ model: ModelDownloader.ModelInfo) async throws {
         let downloader = ModelDownloader.shared
         guard PhoneModels.supportsLocalInference(model.id) else { throw PhoneModelError.unavailable }
+        let defaults = UserDefaults.standard
+        if PhoneModels.installedDirectory(model.id) != nil {
+            defaults.set(model.id, forKey: PhoneModels.selectionKey)
+            return
+        }
         guard !downloader.isDownloading || (downloader.isPaused && downloader.downloadingModelId == model.id) else {
             throw PhoneModelError.downloadBusy
         }
-        UserDefaults.standard.set(model.id, forKey: key)
+        defaults.set(model.id, forKey: key)
+        defaults.set(defaults.string(forKey: PhoneModels.selectionKey) ?? "apple", forKey: previousSelectionKey)
         do {
-            _ = try await downloader.download(model)
+            _ = try await downloader.download(model, repair: true)
+            guard PhoneModels.installedDirectory(model.id) != nil else { throw PhoneModelError.invalidBundle }
             await publishCompletionIfReady()
         } catch {
-            if UserDefaults.standard.string(forKey: key) == model.id && !downloader.isDownloading {
-                UserDefaults.standard.removeObject(forKey: key)
+            if defaults.string(forKey: key) == model.id && !downloader.isDownloading {
+                defaults.removeObject(forKey: key)
+                defaults.removeObject(forKey: previousSelectionKey)
             }
             throw error
         }
@@ -219,6 +254,7 @@ enum PhoneModels {
 
     func cancel() {
         UserDefaults.standard.removeObject(forKey: key)
+        UserDefaults.standard.removeObject(forKey: previousSelectionKey)
         ModelDownloader.shared.cancelDownload()
     }
 
@@ -247,11 +283,17 @@ enum PhoneModels {
 
     private func publishCompletionIfReady() async {
         let downloader = ModelDownloader.shared
+        let defaults = UserDefaults.standard
         guard !downloader.isDownloading,
-              let id = UserDefaults.standard.string(forKey: key),
+              let id = defaults.string(forKey: key),
               let entry = PhoneModels.catalog.first(where: { $0.id == id }),
-              downloader.isDownloaded(entry.model) else { return }
-        UserDefaults.standard.removeObject(forKey: key)
+              PhoneModels.installedDirectory(id) != nil else { return }
+        let previousSelection = defaults.string(forKey: previousSelectionKey)
+        if previousSelection == (defaults.string(forKey: PhoneModels.selectionKey) ?? "apple") {
+            defaults.set(id, forKey: PhoneModels.selectionKey)
+        }
+        defaults.removeObject(forKey: key)
+        defaults.removeObject(forKey: previousSelectionKey)
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else { return }
@@ -294,7 +336,7 @@ private enum ModelDiskStorage {
         var capacity: Int64?
     }
 
-    static let textRoot = URL.documentsDirectory.appendingPathComponent("Models", isDirectory: true)
+    static let textRoot = PhoneModels.downloadedRoot
 
     static func allowedImageRoots(_ configured: [URL]) -> [URL] {
         let allowed = [URL.documentsDirectory, URL.applicationSupportDirectory].map { $0.resolvingSymlinksInPath().path + "/" }
@@ -368,7 +410,7 @@ private enum ModelDiskStorage {
 
 struct PhoneModelsView: View {
     @Environment(\.dismiss) private var dismiss
-    @AppStorage("phone.model") private var selected = "apple"
+    @AppStorage(PhoneModels.selectionKey) private var selected = "apple"
     @AppStorage(PhoneModels.liteBatteryKey) private var liteBattery = false
     @AppStorage("phone.model.favorites") private var favoriteModels = ""
     @State private var requestingDownload = false
@@ -530,7 +572,7 @@ struct PhoneModelsView: View {
                     } else if PhoneModels.installedDirectory(entry.id) != nil {
                         Button { selected = entry.id; benchmarkResult = nil } label: { modelLabel("Brug modellen", id: entry.id) }
                     } else {
-                        Button("Download") { download(entry) }
+                        Button("Hent og vælg") { download(entry) }
                             .disabled(mutationBusy)
                     }
                     if let bytes = storage?.text[entry.id] {
@@ -625,7 +667,7 @@ struct PhoneModelsView: View {
             defer { requestingDownload = false; storageRevision += 1 }
             do {
                 try await PhoneModelDownloads.shared.download(entry.model)
-                notice = "Modellen er hentet. Tryk Brug modellen for at vælge den."
+                notice = selected == entry.id ? "Modellen er hentet og valgt." : "Modellen er hentet og klar."
             } catch is CancellationError { notice = "Download annulleret." }
             catch { notice = "Modellen kunne ikke hentes. Tjek internet og ledig plads, og prøv igen." }
         }

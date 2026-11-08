@@ -82,6 +82,8 @@ private struct StudioImageRequest {
     let sourceImage: Data?
     let isPrivate: Bool
     let autoSave: Bool
+    let botID: UUID?
+    let allowPCFallback: Bool
 }
 
 private enum StudioGalleryFilter: String, CaseIterable, Identifiable {
@@ -148,12 +150,44 @@ private struct StudioImageViewer: View {
     }
 }
 
+enum LocalSpeechVoice {
+    static func options(language: String) -> [AVSpeechSynthesisVoice] {
+        let base = language.split(separator: "-").first
+        return AVSpeechSynthesisVoice.speechVoices().filter { $0.language.split(separator: "-").first == base }
+            .sorted { lhs, rhs in
+                let leftMatch = lhs.language == language
+                let rightMatch = rhs.language == language
+                if leftMatch != rightMatch { return leftMatch }
+                if lhs.quality != rhs.quality { return lhs.quality.rawValue > rhs.quality.rawValue }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+    }
+
+    static func preferred(language: String) -> AVSpeechSynthesisVoice? {
+        options(language: language).first ?? AVSpeechSynthesisVoice(language: language)
+    }
+
+    static func resolve(identifier: String?, language: String) -> AVSpeechSynthesisVoice? {
+        identifier.flatMap { AVSpeechSynthesisVoice(identifier: $0) } ?? preferred(language: language)
+    }
+
+    static func label(_ voice: AVSpeechSynthesisVoice) -> String {
+        let quality = switch voice.quality {
+        case .premium: "Premium"
+        case .enhanced: "Forbedret"
+        default: "Standard"
+        }
+        return "\(voice.name) · \(quality) · \(voice.language)"
+    }
+}
+
 struct OfflineStudio: View {
     let api: LiveAPI?
     @Binding var sessionUnlocked: Bool
-    var onPrivateSessionEnded: () -> Void = {}
-    @State private var studioPage: StudioPage = .chat
-    @State private var imagePrompt = ""
+    let onPrivateSessionEnded: () -> Void
+    @State private var studioPage: Page
+    @State private var imagePrompt: String
+    @State private var pendingBotID: UUID?
     @FocusState private var imagePromptFocused: Bool
     @State private var loadingModel = false
     @State private var showPromptEditor = false
@@ -165,6 +199,8 @@ struct OfflineStudio: View {
     @AppStorage("offline.studio.autoSleepMinutes") private var autoSleepMinutes = 5.0
     @AppStorage("offline.studio.personalityPreset") private var personalityPreset = "bot"
     @AppStorage("offline.studio.voicePreview") private var previewLanguage = "da-DK"
+    @AppStorage("offline.studio.voice.da") private var danishVoiceID = ""
+    @AppStorage("offline.studio.voice.en") private var englishVoiceID = ""
     @AppStorage("offline.studio.chatBackdrop") private var backdropData = Data()
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var studioPhase
@@ -172,7 +208,7 @@ struct OfflineStudio: View {
     @AppStorage("qol.haptics") private var studioHaptics = true
     @State private var reloadNotice = false
     @AppStorage("offline.studio.enabled") private var enabled = false
-    @AppStorage("phone.model") private var textModel = "apple"
+    @AppStorage(PhoneModels.selectionKey) private var textModel = "apple"
     @AppStorage("offline.studio.lora") private var loraName = ""
     @AppStorage("village.bots") private var botData = Data()
     @AppStorage("private.bot.id") private var privateBotID = ""
@@ -186,8 +222,9 @@ struct OfflineStudio: View {
     @State private var status = ""
     @State private var imageURL: URL?
     @State private var task: Task<Void, Never>?
-    @State private var imageModel = "sd_v1.5_f16.ckpt"
+    @AppStorage("offline.studio.imageModel") private var imageModel = "sd_v1.5_f16.ckpt"
     @AppStorage("studio.images.autoSavePhotos") private var autoSaveStudioPhotos = false
+    @AppStorage("studio.images.allowPCFallback") private var allowPCFallback = true
     @AppStorage("studio.images.loraLabels") private var loraLabelsData = Data()
     @State private var negativeImagePrompt = ""
     @State private var pendingImages: [StudioImageRequest] = []
@@ -232,9 +269,19 @@ struct OfflineStudio: View {
     @State private var pendingImageDeletion: URL?
     @FocusState private var promptFocused: Bool
 
-    private enum StudioPage: String, CaseIterable, Identifiable {
+    enum Page: String, CaseIterable, Identifiable {
         case chat = "Chat", images = "Billeder", gallery = "Galleri & Indstillinger"
         var id: Self { self }
+    }
+
+    init(api: LiveAPI?, sessionUnlocked: Binding<Bool>, onPrivateSessionEnded: @escaping () -> Void = {},
+         initialPage: Page = .chat, initialImagePrompt: String = "", initialBotID: UUID? = nil) {
+        self.api = api
+        _sessionUnlocked = sessionUnlocked
+        self.onPrivateSessionEnded = onPrivateSessionEnded
+        _studioPage = State(initialValue: initialPage)
+        _imagePrompt = State(initialValue: String(initialImagePrompt.prefix(2_000)))
+        _pendingBotID = State(initialValue: initialBotID)
     }
 
     private var historyFolder: URL { URL.applicationSupportDirectory.appending(path: "StudioImages", directoryHint: .isDirectory) }
@@ -244,6 +291,14 @@ struct OfflineStudio: View {
     private var privateBots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: botData)) ?? [] }
     private var selectedPrivateBot: VillageBot? {
         privateBots.first { $0.id.uuidString == privateBotID } ?? privateBots.first
+    }
+
+    private var currentBotTurns: [PrivateChatTurn] { turns.filter(belongsToCurrentBot) }
+
+    private func belongsToCurrentBot(_ turn: PrivateChatTurn) -> Bool {
+        let botID = selectedPrivateBot?.id
+        if let owner = turn.botID { return owner == botID }
+        return botID == privateBots.first?.id
     }
     private var history: [URL] {
         let items = (try? FileManager.default.contentsOfDirectory(at: historyFolder, includingPropertiesForKeys: nil)) ?? []
@@ -306,7 +361,10 @@ struct OfflineStudio: View {
             .sheet(isPresented: $showModels, onDismiss: {
                 textContextLimit = contextWindow(for: effectiveTextModel)
             }) { PhoneModelsView() }
-            .sheet(isPresented: $showBotBuilder) { VillageBotBuilder() }
+            .sheet(isPresented: $showBotBuilder) {
+                VillageBotBuilder(api: privateSession ? nil : api, bot: selectedPrivateBot,
+                                  onBack: { showBotBuilder = false })
+            }
             .fullScreenCover(isPresented: $showPromptEditor) { studioPromptEditor }
             .sheet(item: $imageDetailsSheet) { item in
                 if canShowStudio { imageDetailsView(item.url) }
@@ -421,7 +479,7 @@ struct OfflineStudio: View {
 
     private var studioPicker: some View {
         Picker("Visning i Privat Studio", selection: $studioPage) {
-            ForEach(StudioPage.allCases) { page in Text(page.rawValue).tag(page) }
+            ForEach(Page.allCases) { page in Text(page.rawValue).tag(page) }
         }
     }
 
@@ -440,7 +498,7 @@ struct OfflineStudio: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
                     privateHeader
-                    if turns.isEmpty {
+                    if currentBotTurns.isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Din private bot er klar").font(.title2.bold())
                             Text(privateSession
@@ -449,7 +507,7 @@ struct OfflineStudio: View {
                                 .foregroundStyle(.secondary)
                         }.padding(16).background(.pink.opacity(0.10), in: RoundedRectangle(cornerRadius: 18))
                     }
-                    ForEach(turns.filter { $0.imageName == nil }) { turn in privateTurn(turn) }
+                    ForEach(currentBotTurns) { turn in privateTurn(turn) }
                     Color.clear.frame(height: 1).id("private-bottom")
                 }.padding(16)
             }
@@ -457,7 +515,8 @@ struct OfflineStudio: View {
             .scrollDismissesKeyboard(.interactively)
             .defaultScrollAnchor(.bottom)
             .safeAreaInset(edge: .bottom) { privateComposer }
-            .onChange(of: turns.count) { scrollPrivate(proxy) }
+            .onChange(of: currentBotTurns.last?.id) { scrollPrivate(proxy) }
+            .onChange(of: privateBotID) { scrollPrivate(proxy) }
             .onChange(of: answer) { scrollPrivate(proxy) }
         }
     }
@@ -471,6 +530,10 @@ struct OfflineStudio: View {
                 } else {
                     imageResults
                 }
+                if batchTurnID != nil {
+                    Button("Se billedet i chatten", systemImage: "bubble.left") { studioPage = .chat }
+                        .frame(minHeight: 44)
+                }
                 DisclosureGroup("Billedindstillinger") { imageInlineOptions }
             }.padding(16)
         }
@@ -480,6 +543,8 @@ struct OfflineStudio: View {
 
     private var studioImageComposer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            Label(privateSession || api == nil || !allowPCFallback ? "Kun telefon" : "Telefon først · PC ved behov",
+                  systemImage: "iphone").font(.caption).foregroundStyle(.secondary)
             if imagePromptFocused {
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {
@@ -670,6 +735,7 @@ struct OfflineStudio: View {
                 Text("Dansk").tag("da-DK")
                 Text("Engelsk (US)").tag("en-US")
             }
+            studioVoicePicker
             Button("Afspil prøvesætning", systemImage: "play.circle") { previewStudioVoice() }
                 .frame(minHeight: 44).disabled(task != nil)
             ColorPicker("Chatbaggrund", selection: Binding(get: { chatBackdrop }, set: { setChatBackdrop($0) }),
@@ -713,7 +779,7 @@ struct OfflineStudio: View {
     }
 
     private func previewStudioVoice() {
-        guard let voice = AVSpeechSynthesisVoice(language: previewLanguage) else {
+        guard let voice = studioVoice(language: previewLanguage, bot: selectedPrivateBot) else {
             status = "Stemmen er ikke tilgængelig på telefonen."
             return
         }
@@ -723,6 +789,28 @@ struct OfflineStudio: View {
         utterance.voice = voice
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(selectedPrivateBot?.voiceRate ?? 1)
         speech.speak(utterance)
+    }
+
+    private var studioVoicePicker: some View {
+        let available = LocalSpeechVoice.options(language: previewLanguage)
+        let saved = previewLanguage == "da-DK" ? $danishVoiceID : $englishVoiceID
+        let selection = Binding(get: { available.contains { $0.identifier == saved.wrappedValue } ? saved.wrappedValue : "" },
+                                set: { saved.wrappedValue = $0 })
+        return Picker("Installeret stemme", selection: selection) {
+            Text("Automatisk").tag("")
+            ForEach(available, id: \.identifier) { voice in
+                Text(LocalSpeechVoice.label(voice)).tag(voice.identifier)
+            }
+        }
+    }
+
+    private func studioVoice(language: String, bot: VillageBot?) -> AVSpeechSynthesisVoice? {
+        let options = LocalSpeechVoice.options(language: language)
+        let saved = language == "da-DK" ? danishVoiceID : englishVoiceID
+        return options.first { $0.identifier == saved }
+            ?? options.first { $0.identifier == bot?.voice }
+            ?? options.first
+            ?? AVSpeechSynthesisVoice(language: language)
     }
 
     private func privateTurn(_ turn: PrivateChatTurn) -> some View {
@@ -776,8 +864,8 @@ struct OfflineStudio: View {
                     .buttonStyle(.bordered).frame(minHeight: 44)
             }
             ViewThatFits(in: .horizontal) {
-                HStack { privateSummarizeButton; Spacer(); privateHistoryMenu }
-                VStack(alignment: .leading, spacing: 0) { privateSummarizeButton; privateHistoryMenu }
+                HStack { privateSummarizeButton; privateImageButton; Spacer(); privateHistoryMenu }
+                VStack(alignment: .leading, spacing: 0) { privateSummarizeButton; privateImageButton; privateHistoryMenu }
             }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Skriv til din private bot…", text: $prompt, axis: .vertical)
@@ -802,6 +890,15 @@ struct OfflineStudio: View {
                 Button("Ryd") { prompt = "" }.disabled(prompt.isEmpty || task != nil)
             }
         }.padding(12).background(.ultraThinMaterial)
+    }
+
+    private var privateImageButton: some View {
+        Button("Lav billede", systemImage: "photo.badge.plus") {
+            if hasPrompt { imagePrompt = String(prompt.prefix(2_000)) }
+            studioPage = .images
+        }
+        .frame(minHeight: 44)
+        .disabled(task != nil)
     }
 
     private var privateSummarizeButton: some View {
@@ -834,7 +931,7 @@ struct OfflineStudio: View {
         let instructions = companionInstructions
         var remaining = chatInputBudget - estimateTokens(message) - 8
         var context: [String] = []
-        for turn in turns.suffix(8).reversed() where turn.imageName == nil && !turn.reply.isEmpty {
+        for turn in currentBotTurns.suffix(8).reversed() where turn.imageName == nil && !turn.reply.isEmpty {
             let block = "Bruger: \(turn.prompt)\nBot: \(turn.reply)"
             let cost = estimateTokens(block) + 4
             guard cost <= remaining else { break }
@@ -929,10 +1026,13 @@ struct OfflineStudio: View {
     }
 
     private var companionInstructions: String {
-        let profile = selectedPrivateBot
+        Self.companionInstructions(for: selectedPrivateBot, preset: personalityPreset)
+    }
+
+    static func companionInstructions(for profile: VillageBot?, preset choice: String = "bot") -> String {
         let custom = profile?.prompt.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let base = "Du er \(profile?.name ?? "brugerens private AI-companion"). Du er varm, flirtende og taler naturligt med en voksen bruger. Bevar din personlighed og respekter brugerens grænser."
-        let preset: String = switch personalityPreset {
+        let preset: String = switch choice {
         case "calm": "Svar kort, roligt og med enkle sætninger."
         case "creative": "Brug fantasi og en let, legende tone."
         case "direct": "Svar direkte, konkret og uden fyld."
@@ -998,6 +1098,8 @@ struct OfflineStudio: View {
         enabled = true
         UIDevice.current.isBatteryMonitoringEnabled = true
         privateBatteryLevel = UIDevice.current.batteryLevel
+        if let id = pendingBotID, privateBots.contains(where: { $0.id == id }) { privateBotID = id.uuidString }
+        pendingBotID = nil
         loadPrivateConversation()
         if privateBotID.isEmpty { privateBotID = privateBots.first?.id.uuidString ?? "" }
     }
@@ -1019,12 +1121,16 @@ struct OfflineStudio: View {
 
     private func newPrivateConversation() {
         speech.stopSpeaking(at: .immediate)
-        if privateSession { removeTemporaryStudioImages() }
-        turns = []; prompt = ""; answer = ""; status = ""
-        if !privateSession {
-            UserDefaults.standard.removeObject(forKey: "private.chat.turns")
+        if privateSession {
+            removeTemporaryStudioImages()
+            turns = []
+        } else {
+            let remaining = turns.filter { !belongsToCurrentBot($0) }
+            turns = remaining
+            savePrivateConversation()
             UserDefaults.standard.removeObject(forKey: "private.chat.draft")
         }
+        prompt = ""; answer = ""; status = ""
     }
 
     private func togglePrivateSession() {
@@ -1097,7 +1203,7 @@ struct OfflineStudio: View {
         let baseLanguage = bot?.language?.hasPrefix("en") == true ? "en-US" : "da-DK"
         let language = (voiceLanguages[id] ?? baseLanguage) == "da-DK" ? "en-US" : "da-DK"
         let label = language == "da-DK" ? "Dansk" : "Engelsk (US)"
-        guard let voice = AVSpeechSynthesisVoice(language: language) else {
+        guard let voice = studioVoice(language: language, bot: bot) else {
             status = "Stemme til \(label) er ikke tilgængelig på telefonen."
             return
         }
@@ -1435,6 +1541,7 @@ struct OfflineStudio: View {
 
     private var imageInlineOptions: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if api != nil && !privateSession { Toggle("Tillad PC som reserve", isOn: $allowPCFallback) }
             TextField("Negativ prompt", text: $negativeImagePrompt, axis: .vertical)
                 .textFieldStyle(.roundedBorder).lineLimit(1...3)
                 .accessibilityHint("Motiver og detaljer, der skal undgås")
@@ -1646,7 +1753,8 @@ struct OfflineStudio: View {
         let request = StudioImageRequest(model: imageModel, prompt: message, negative: negative,
                                          lora: useLoRA ? installedLoRA ?? "" : "", count: makeFourImages ? 4 : 1,
                                          seed: studioSeed, sourceImage: baseImage, isPrivate: privateSession,
-                                         autoSave: autoSaveStudioPhotos && !privateSession)
+                                         autoSave: autoSaveStudioPhotos && !privateSession,
+                                         botID: selectedPrivateBot?.id, allowPCFallback: allowPCFallback)
         pendingImages.append(request)
         guard !generatingImages else { return }
         generatingImages = true
@@ -1679,7 +1787,7 @@ struct OfflineStudio: View {
     private func generateQueuedImages(_ request: StudioImageRequest) async throws {
         let folder = request.isPrivate ? temporaryImagesFolder : historyFolder
         let ready = (try? await MediaGenerationEnvironment.default.inspectModel(request.model, offline: true))?.isDownloaded == true
-        let localOnly = request.isPrivate || request.sourceImage != nil || request.seed != nil || request.prompt.count > 1_000
+        let localOnly = !request.allowPCFallback || request.isPrivate || request.sourceImage != nil || request.seed != nil || request.prompt.count > 1_000
             || request.count > 1 || !request.negative.isEmpty || !request.lora.isEmpty
         if !ready && localOnly {
             status = "Hent billedmodellen på telefonen for at bruge de valgte indstillinger."
@@ -1722,7 +1830,7 @@ struct OfflineStudio: View {
             created.append(destination)
             if index == 0 {
                 let turn = PrivateChatTurn(prompt: request.prompt, reply: "Billede klar.",
-                                           imageName: destination.lastPathComponent, source: source)
+                                           imageName: destination.lastPathComponent, source: source, botID: request.botID)
                 batchTurnID = turn.id
                 turns.append(turn)
                 imageURL = destination

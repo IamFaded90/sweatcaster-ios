@@ -166,20 +166,22 @@ import Observation
         return max(1, Int(duration.seconds * 1_000 + duration.attoseconds / 1_000_000_000_000_000))
     }
 
-    private func initial(_ api: any SweatAPI) async throws -> (Capabilities, [Clip], [Job], Int?) {
+    private func initial(_ api: any SweatAPI) async throws -> (Capabilities, [Clip]?, [Job], Int?) {
         let start = ContinuousClock.now
         let health = try await api.health()
         let latency = api is LiveAPI ? Self.milliseconds(since: start) : nil
         guard health.api_version == "1" else { throw APIError.version }
         guard health.status == "ok" else { throw APIError.unhealthy }
         async let capabilities = api.capabilities()
-        async let clips = api.clips()
         async let jobs = api.jobs()
-        return try await (capabilities, clips.clips, jobs.jobs, latency)
+        // A live server's V1 list can probe hundreds of clips and omits later folders.
+        // Only load a live clip list when the user opens a source in Video Studio.
+        let initialClips: [Clip]? = if api is LiveAPI { nil } else { try await api.clips().clips }
+        return try await (capabilities, initialClips, jobs.jobs, latency)
     }
-    private func apply(_ data: (Capabilities, [Clip], [Job], Int?)) {
+    private func apply(_ data: (Capabilities, [Clip]?, [Job], Int?)) {
         capabilities = data.0
-        clips = data.1
+        if let refreshedClips = data.1 { clips = refreshedClips }
         selected = Set(clips.filter { selected.contains($0.id) }.prefix(data.0.limit).map(\.id))
         replaceJobs(data.2)
         connected = true
@@ -214,13 +216,18 @@ import Observation
         guard !busy else { return }
         if selected.remove(clip.id) != nil { return }
         guard selected.count < (capabilities?.limit ?? 0) else { return }
+        includeFolderClips([clip])
         selected.insert(clip.id)
     }
 
     func select(_ clips: [Clip]) {
         guard !busy else { return }
         let limit = capabilities?.limit ?? 0
-        for clip in clips where selected.count < limit { selected.insert(clip.id) }
+        var added: [Clip] = []
+        for clip in clips where selected.count < limit {
+            if selected.insert(clip.id).inserted { added.append(clip) }
+        }
+        includeFolderClips(added)
     }
 
     func clearSelection() {
@@ -229,29 +236,29 @@ import Observation
     }
 
     func includeFolderClips(_ additional: [Clip]) {
-        let known = Set(clips.map(\.id))
-        clips.append(contentsOf: additional.filter { !known.contains($0.id) })
+        var known = Set(clips.map(\.id))
+        clips.append(contentsOf: additional.filter { known.insert($0.id).inserted })
     }
 
-    func submit(_ mood: Mood) async {
-        guard canSubmit, let capabilities, capabilities.moods.contains(mood), cancelling.isEmpty else { return }
+    @discardableResult func submit(_ mood: Mood) async -> Bool {
+        guard canSubmit, let capabilities, capabilities.moods.contains(mood), cancelling.isEmpty else { return false }
         let batch = Batch(clip_ids: clips.filter { selected.contains($0.id) }.map(\.id), mood: mood, options: options)
-        await submit(batch, clearSelection: true, limit: capabilities.limit)
+        return await submit(batch, clearSelection: true, limit: capabilities.limit)
     }
 
     func canRetry(_ job: Job) -> Bool {
         job.status == .failed && connected && !busy && !refreshing && !uncertain && !blocked &&
-            cancelling.isEmpty && options.roi.valid && clips.contains(where: { $0.id == job.clip_id }) &&
+            cancelling.isEmpty && options.roi.valid && validWireID(job.clip_id) &&
             capabilities?.moods.contains(job.mood) == true
     }
 
     func retry(_ job: Job) async {
         guard canRetry(job), let capabilities else { return }
-        await submit(Batch(clip_ids: [job.clip_id], mood: job.mood, options: options),
-                     clearSelection: false, limit: capabilities.limit)
+        _ = await submit(Batch(clip_ids: [job.clip_id], mood: job.mood, options: options),
+                         clearSelection: false, limit: capabilities.limit)
     }
 
-    private func submit(_ batch: Batch, clearSelection: Bool, limit: Int) async {
+    private func submit(_ batch: Batch, clearSelection: Bool, limit: Int) async -> Bool {
         busy = true
         revision += 1
         error = nil
@@ -267,6 +274,7 @@ import Observation
             merge(received)
             if clearSelection { selected = [] }
             clearPending()
+            return true
         } catch {
             if (error as? APIError)?.ambiguous ?? true {
                 uncertain = true
@@ -274,6 +282,7 @@ import Observation
                 do { replaceJobs(try await api.jobs().jobs) } catch { report(error) }
             } else { clearPending() }
             report(error)
+            return false
         }
     }
 

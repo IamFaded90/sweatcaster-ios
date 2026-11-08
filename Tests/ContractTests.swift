@@ -349,6 +349,29 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(model.selected.isEmpty)
     }
 
+    @MainActor func testV2FolderSelectionSurvivesLiveRefreshAndStartsV1Batch() async throws {
+        let api = try stubAPI()
+        let suite = "Tests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = Model(api: api, defaults: defaults)
+        await model.refresh()
+        XCTAssertTrue(model.connected, "The stub V1 clip listing returns malformed JSON and must not run on refresh")
+        XCTAssertTrue(model.clips.isEmpty)
+
+        let folder = try await api.v2ClipPage(rootID: "2")
+        model.select(folder.clips)
+        await model.refresh()
+        XCTAssertEqual(model.selected, Set(["clip-one", "clip-two"]))
+
+        let unsupported = await model.submit(.roast)
+        XCTAssertFalse(unsupported)
+        let accepted = await model.submit(.hype)
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(model.jobs.map(\.clip_id), ["clip-one", "clip-two"])
+        XCTAssertTrue(model.selected.isEmpty)
+    }
+
     @MainActor func testIncompatibleVersionPreventsSubmission() async {
         let model = Model(api: UncertainAPI(version: "2"))
         await model.refresh()
@@ -399,6 +422,12 @@ private final class Stub: URLProtocol {
             status = 200; body = #"{"cards":[]}"#
         } else if url.path == "/api/modules/v1/tabs/a", request.httpMethod == "GET" {
             status = 200; body = #"{"text":"Lokal information"}"#
+        } else if url.path == "/api/v1/capabilities" {
+            status = 200
+            body = #"{"moods":["hype"],"max_batch_size":10,"features":{"upload":false,"cancel":true,"range_preview":false},"dependencies":[]}"#
+        } else if url.path == "/api/v2/clips", url.query == "root_id=2&limit=100" {
+            status = 200
+            body = #"{"root_id":"2","label":"Fortnite","clips":[{"id":"clip-one","name":"one.mp4","duration_seconds":10,"width":1920,"height":1080},{"id":"clip-two","name":"two.mp4","duration_seconds":20,"width":1920,"height":1080}],"next_cursor":null,"ready":true,"indexing":false}"#
         } else if url.path == "/api/v1/clips" {
             status = 200; body = "bad JSON"
         } else if url.path == "/api/v1/jobs", request.httpMethod == "GET" {
