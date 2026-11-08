@@ -54,6 +54,16 @@ struct Clip: Codable, Identifiable, Sendable {
     let id, name: String
     let duration_seconds: Double
     let width, height: Int
+    // Optional until the PC includes these fields in its clip response.
+    let folderName: String?
+    let timestamp: String?
+
+    init(id: String, name: String, duration_seconds: Double, width: Int, height: Int,
+         folderName: String? = nil, timestamp: String? = nil) {
+        self.id = id; self.name = name; self.duration_seconds = duration_seconds
+        self.width = width; self.height = height
+        self.folderName = folderName; self.timestamp = timestamp
+    }
 }
 struct Clips: Codable, Sendable { let clips: [Clip] }
 struct Jobs: Codable, Sendable { let jobs: [Job] }

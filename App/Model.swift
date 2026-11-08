@@ -180,6 +180,11 @@ import Observation
         selected.removeAll()
     }
 
+    func includeFolderClips(_ additional: [Clip]) {
+        let known = Set(clips.map(\.id))
+        clips.append(contentsOf: additional.filter { !known.contains($0.id) })
+    }
+
     func submit(_ mood: Mood) async {
         guard canSubmit, let capabilities, capabilities.moods.contains(mood), cancelling.isEmpty else { return }
         let batch = Batch(clip_ids: clips.filter { selected.contains($0.id) }.map(\.id), mood: mood, options: options)

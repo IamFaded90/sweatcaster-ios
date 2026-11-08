@@ -233,6 +233,14 @@ struct LiveAPI: SweatAPI, ChatAPI {
     func cancel(_ id: String) async throws -> Job {
         try await json("jobs/\(Server.segment(id))/cancel", post: true)
     }
+    func deleteFailedJob(_ id: String) async throws {
+        guard validWireID(id) else { throw APIError.input }
+        var req = request(server.endpoint("jobs/\(Server.segment(id))"), method: "DELETE")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(["confirm_job_id": id])
+        let (data, response) = try await session.data(for: req)
+        try checked(response, expected: 200, data: data)
+    }
     func chat(_ input: ChatRequest, receive: @Sendable (ChatEvent) async -> Void) async throws {
         var req = request(server.endpoint("chat"), method: "POST")
         req.httpBody = try JSONEncoder().encode(input)
@@ -484,7 +492,32 @@ struct V2CodeApplied: Decodable, Sendable {
     let applied: Bool
 }
 
+struct V2ClipRoots: Decodable, Sendable {
+    let roots: [Root]
+    struct Root: Decodable, Identifiable, Sendable {
+        let id, label: String
+        let file_count: Int
+        let ready, indexing: Bool
+    }
+}
+
+struct V2ClipPage: Decodable, Sendable {
+    let root_id, label: String
+    let clips: [Clip]
+    let next_cursor: String?
+    let ready, indexing: Bool
+}
+
 extension LiveAPI {
+    func v2ClipRoots() async throws -> V2ClipRoots { try await v2JSON("clip-roots") }
+
+    func v2ClipPage(rootID: String, cursor: String? = nil, limit: Int = 100) async throws -> V2ClipPage {
+        guard Int(rootID) != nil, (1...100).contains(limit) else { throw V2Failure.invalidInput }
+        var query = [URLQueryItem(name: "root_id", value: rootID),
+                     URLQueryItem(name: "limit", value: String(limit))]
+        if let cursor { query.append(URLQueryItem(name: "cursor", value: cursor)) }
+        return try await v2JSON("clips", query: query)
+    }
     func v2GenerateImage(prompt: String) async throws -> Data {
         let message = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...1000).contains(message.count) else { throw V2Failure.invalidInput }
@@ -684,4 +717,31 @@ enum Pairing {
         add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         guard SecItemAdd(add as CFDictionary, nil) == errSecSuccess else { throw APIError.storage }
     }
+}
+
+enum CloudModelKey {
+    private static var query: [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: "FadedAI optional cloud models",
+         kSecAttrAccount as String: "xai"]
+    }
+
+    static func exists() -> Bool {
+        SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
+    static func save(_ value: String) throws {
+        let key = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw APIError.input }
+        let data = Data(key.utf8)
+        let updated = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
+        if updated == errSecSuccess { return }
+        guard updated == errSecItemNotFound else { throw APIError.storage }
+        var item = query
+        item[kSecValueData as String] = data
+        item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw APIError.storage }
+    }
+
+    static func remove() { SecItemDelete(query as CFDictionary) }
 }

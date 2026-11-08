@@ -2,6 +2,20 @@ import XCTest
 @testable import SweatCaster
 
 final class ContractTests: XCTestCase {
+    func testClipKeepsV1ShapeAndAcceptsFutureFolderMetadata() throws {
+        let old = try JSONDecoder().decode(Clip.self, from: Data(#"{"id":"clip-one","name":"game.mp4","duration_seconds":12,"width":1920,"height":1080}"#.utf8))
+        XCTAssertNil(old.folderName)
+        XCTAssertNil(old.timestamp)
+        let newer = try JSONDecoder().decode(Clip.self, from: Data(#"{"id":"clip-two","name":"match.mp4","duration_seconds":15,"width":1920,"height":1080,"folderName":"Fortnite","timestamp":"2026-11-08T12:00:00Z"}"#.utf8))
+        XCTAssertEqual(newer.folderName, "Fortnite")
+    }
+    func testV2GameFoldersDecodeWithoutChangingClipIDs() throws {
+        let roots = try JSONDecoder().decode(V2ClipRoots.self, from: Data(#"{"roots":[{"id":"0","label":"Fortnite","file_count":101,"ready":true,"indexing":false}]}"#.utf8))
+        XCTAssertEqual(roots.roots.first?.label, "Fortnite")
+        let page = try JSONDecoder().decode(V2ClipPage.self, from: Data(#"{"root_id":"0","label":"Fortnite","clips":[{"id":"opaque123","name":"fight.mp4","duration_seconds":25,"width":1920,"height":1080}],"next_cursor":null,"ready":true,"indexing":false}"#.utf8))
+        XCTAssertEqual(page.clips.first?.id, "opaque123")
+        XCTAssertNil(page.clips.first?.folderName)
+    }
     func testOldBotProfilesRemainReadableAfterProfileUpgrade() throws {
         let data = Data(#"{"id":"7C9E6679-7425-40DE-944B-E07FC1F90AE7","name":"Nova","color":"Blå","prompt":"Vær varm","voice":"da-DK","sprite":null,"personality":"Omsorgsfuld"}"#.utf8)
         let bot = try JSONDecoder().decode(VillageBot.self, from: data)

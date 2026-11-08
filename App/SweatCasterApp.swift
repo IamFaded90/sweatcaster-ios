@@ -95,12 +95,17 @@ struct Home: View {
     @State private var pendingLocalDeletion: URL?
     @State private var localDeletionError = false
     @State private var pcDeletion: (id: String, api: LiveAPI)?
+    @State private var failedJobDeletion: (id: String, api: LiveAPI)?
     @State private var deletingPCVideo = false
     @AppStorage("app.text.scale") private var textScale = 0.0
     @State private var clipGame = ""
     @State private var shortClips = false
     @State private var recentJobsFirst = false
     @State private var clipDateRange = 0
+    @State private var selectedGameFolder = "Alle"
+    @State private var clipRoots: [V2ClipRoots.Root] = []
+    @State private var folderClips: [Clip] = []
+    @State private var folderNotice: String?
     @State private var saveVideoNotice: String?
     @State private var confirmClear = false
     @State private var hiddenJobs = Set<String>()
@@ -126,6 +131,9 @@ struct Home: View {
     @AppStorage("qol.connectionBanner") private var showConnectionBanner = true
     @AppStorage("qol.lastSpace") private var lastSpace = Space.brain.rawValue
     @State private var pendingVideoMood: Mood?
+    @State private var cloudKeyDraft = ""
+    @State private var cloudKeySaved = CloudModelKey.exists()
+    @State private var cloudKeyNotice: String?
 
     private var visibleJobs: [Job] {
         model.jobs.filter { job in
@@ -137,23 +145,25 @@ struct Home: View {
     private var pendingJobs: Int { model.jobs.filter { $0.status.active }.count }
 
     private var homeContent: some View {
-        ScrollViewReader { proxy in
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                header
-                connectionSettings
-                loadingStatus
-                spaceContent
-                appearanceSettings
-            }.padding(20).frame(maxWidth: 620).frame(maxWidth: .infinity)
-        }.refreshable { await model.refresh() }
-        .safeAreaInset(edge: .bottom) { spacesBar }
-        .onChange(of: showJobs) {
-            space = .gallery
-            proxy.scrollTo("jobs", anchor: .top)
-            jobsFocus = true
+        TabView(selection: $space) {
+            NavigationStack { tabPage("Hjem") { header; connectionSettings; loadingStatus; appearanceSettings } }
+                .tabItem { Label("Hjem", systemImage: "house.fill") }.tag(Space.brain)
+            ChatView(api: model.api as? any ChatAPI, demo: model.isDemo, initialDraft: "",
+                     connection: model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(model.connected ? "Forbundet" : "Ikke forbundet")",
+                     storageKey: "spaces.chat." + (model.isDemo ? "demo" : model.address))
+                .tabItem { Label("Chat", systemImage: "bubble.left.fill") }.tag(Space.notes)
+            NavigationStack { tabPage("Video Studio") { videoStudioHeader; clipSection; moodSection; advanced(Binding(get: { model.options }, set: { model.options = $0 })); jobSection } }
+                .tabItem { Label("Video", systemImage: "film.fill") }.tag(Space.gallery)
+            AgentHub(api: model.api as? LiveAPI)
+                .tabItem { Label("Landsby", systemImage: "house.lodge.fill") }.tag(Space.tasks)
+            CodeWorkspaceView(api: model.api as? LiveAPI)
+                .tabItem { Label("Code Bot", systemImage: "chevron.left.forwardslash.chevron.right") }.tag(Space.library)
         }
-        .onChange(of: showClips) { proxy.scrollTo("clips", anchor: .top) }
+        .onChange(of: showJobs) { space = .gallery; jobsFocus = true }
+        .onChange(of: showClips) { space = .gallery }
+        .task(id: space) {
+            if space == .gallery && !model.isDemo { await loadGameFolders() }
+        }
         .onChange(of: space) { _, value in
             if rememberLastSpace { lastSpace = value.rawValue }
             if autoRefreshTabs && !model.isDemo { Task { await model.refresh() } }
@@ -164,6 +174,37 @@ struct Home: View {
             UIApplication.shared.isIdleTimerDisabled = keepScreenAwake
         }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+
+    private func tabPage<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20, content: content)
+                .padding(20).frame(maxWidth: 640).frame(maxWidth: .infinity)
+        }
+        .navigationTitle(title)
+        .refreshable { await model.refresh() }
+    }
+
+    private var chatTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Samtal med dit AI-hold").font(.title2.bold())
+            action("Åbn chat") { showChat = true }
+            action("Privat bot og billeder") { showOfflineStudio = true }
+            action("Lokale modeller") { showPhoneModels = true }
+        }
+    }
+
+    private var villageTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Følg dine agenter og deres hverdag").font(.title2.bold())
+            action("Åbn landsbyen") { showAgentHub = true }
+        }
+    }
+
+    private var codeTab: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Beskriv en forbedring, og godkend ændringen").font(.title2.bold())
+            action("Åbn Code Bot") { showCodeWorkspace = true }
         }
     }
 
@@ -281,6 +322,19 @@ struct Home: View {
         } message: { _ in
             Text("Originalklippet og eventuelle kopier på telefonen bevares.")
         }
+        .confirmationDialog("Slet fejlet job fra PC’en?", isPresented: Binding(
+            get: { failedJobDeletion != nil }, set: { if !$0 { failedJobDeletion = nil } }
+        ), presenting: failedJobDeletion) { target in
+            Button("Slet fejlet job", role: .destructive) {
+                Task {
+                    do {
+                        try await target.api.deleteFailedJob(target.id)
+                        await model.refresh()
+                    } catch { saveVideoNotice = "PC’en kunne ikke slette jobbet. Prøv at opdatere listen." }
+                    failedJobDeletion = nil
+                }
+            }
+        } message: { _ in Text("Kun den fejlede jobpost slettes. Originalklippet bevares.") }
         .confirmationDialog("Skjul afsluttede jobs på denne telefon?", isPresented: $confirmClear) {
             Button("Skjul afsluttede jobs", role: .destructive) {
                 hiddenJobs.formUnion(model.jobs.filter { !$0.status.active }.map(\.id))
@@ -523,6 +577,24 @@ struct Home: View {
             Button("Ryd afsluttede jobs på denne telefon", role: .destructive) { confirmClear = true }
                 .frame(minHeight: 48)
         }
+        DisclosureGroup("Valgfri xAI-nøgle") {
+            Text("Nøglen gemmes kun i iPhones Keychain. Cloud-chat er ikke aktiv, før en særskilt integration er godkendt.")
+                .font(.caption).foregroundStyle(.secondary)
+            SecureField("xAI API-nøgle", text: $cloudKeyDraft)
+                .textInputAutocapitalization(.never).autocorrectionDisabled()
+            Button("Gem nøgle") {
+                do {
+                    try CloudModelKey.save(cloudKeyDraft)
+                    cloudKeyDraft = ""; cloudKeySaved = true; cloudKeyNotice = "Nøglen er gemt på telefonen."
+                } catch { cloudKeyNotice = "Nøglen kunne ikke gemmes." }
+            }.disabled(cloudKeyDraft.isEmpty)
+            if cloudKeySaved {
+                Button("Fjern nøgle", role: .destructive) {
+                    CloudModelKey.remove(); cloudKeySaved = false; cloudKeyNotice = "Nøglen er fjernet."
+                }
+            }
+            if let cloudKeyNotice { Text(cloudKeyNotice).font(.caption) }
+        }
     }
 
     @State private var chatDraft = ""
@@ -573,6 +645,11 @@ struct Home: View {
 
     private var clipSection: some View {
         VStack(alignment: .leading, spacing: 14) {
+            Picker("Spilmappe", selection: $selectedGameFolder) {
+                Text("Alle").tag("Alle")
+                ForEach(clipRoots) { root in Text(root.label).tag(root.label) }
+            }.pickerStyle(.segmented)
+            if let folderNotice { Text(folderNotice).font(.caption).foregroundStyle(.secondary) }
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     heading("Seneste klip")
@@ -680,16 +757,43 @@ struct Home: View {
         let query = clipGame.trimmingCharacters(in: .whitespacesAndNewlines)
         let dates = Dictionary(model.jobs.map { ($0.clip_id, $0.created_at) }, uniquingKeysWith: max)
         let cutoff = Calendar.current.date(byAdding: .day, value: -clipDateRange, to: .now) ?? .distantPast
-        let clips = model.clips.filter {
+        let source = selectedGameFolder == "Alle" ? model.clips : folderClips
+        let clips = source.filter {
+            (selectedGameFolder == "Alle" || $0.folderName?.localizedCaseInsensitiveCompare(selectedGameFolder) == .orderedSame) &&
             (!shortClips || $0.duration_seconds < 60) &&
                 (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) &&
                 (clipDateRange == 0 || (dates[$0.id] ?? .distantPast) >= cutoff)
+        }
+        if selectedGameFolder != "Alle" {
+            return Array(clips.prefix(100))
         }
         guard recentJobsFirst else { return clips }
         return clips.sorted {
             let lhs = dates[$0.id] ?? .distantPast
             let rhs = dates[$1.id] ?? .distantPast
             return lhs == rhs ? $0.name < $1.name : lhs > rhs
+        }
+    }
+
+    private func loadGameFolders() async {
+        guard let api = model.api as? LiveAPI else { return }
+        do {
+            let roots = try await api.v2ClipRoots().roots
+            clipRoots = roots.filter { $0.label.localizedCaseInsensitiveContains("fortnite") ||
+                $0.label.localizedCaseInsensitiveContains("finals") }
+            folderClips = []
+            for root in clipRoots {
+                let page = try await api.v2ClipPage(rootID: root.id, limit: 100)
+                folderClips += page.clips.map {
+                    Clip(id: $0.id, name: $0.name, duration_seconds: $0.duration_seconds,
+                         width: $0.width, height: $0.height, folderName: root.label)
+                }
+            }
+            model.includeFolderClips(folderClips)
+            folderNotice = clipRoots.isEmpty ? "Ingen Fortnite- eller The Finals-mapper er sat op på PC’en." : nil
+        } catch {
+            clipRoots = []; folderClips = []
+            folderNotice = "Spilmapper kunne ikke hentes. V1-kliplisten vises stadig under Alle."
         }
     }
 
@@ -789,6 +893,14 @@ struct Home: View {
                     if job.status == .failed {
                         action("Prøv igen") { Task { await model.retry(job) } }
                             .disabled(!model.canRetry(job))
+                        Button("Skjul fejlet job på telefonen", role: .destructive) {
+                            hiddenJobs.insert(job.id)
+                        }.frame(minHeight: 44)
+                        if !model.isDemo, let api = model.api as? LiveAPI {
+                            Button("Slet fejlet job fra PC’en", role: .destructive) {
+                                failedJobDeletion = (job.id, api)
+                            }.frame(minHeight: 44)
+                        }
                     }
                     if job.status.active {
                         let progress = min(1, max(0, job.progress))
@@ -1208,6 +1320,8 @@ private struct AgentHub: View {
     @State private var localBot: VillageBot?
     @State private var villagePause = false
     @State private var cinematic = false
+    @State private var villageZoom: CGFloat = 1
+    @State private var villageOffset: CGSize = .zero
     @State private var showBuilder = false
     @State private var offline = false
     @State private var completions = 0
@@ -1297,6 +1411,21 @@ private struct AgentHub: View {
                             Color(red: 0.10, green: 0.19, blue: 0.29))
                     Canvas { context, canvas in
                         let pixelRect: (CGRect) -> Path = { frame in Path { $0.addRect(frame) } }
+                        let diamond: (CGPoint, CGFloat, CGFloat) -> Path = { center, width, height in
+                            Path { path in
+                                path.move(to: CGPoint(x: center.x, y: center.y - height / 2))
+                                path.addLine(to: CGPoint(x: center.x + width / 2, y: center.y))
+                                path.addLine(to: CGPoint(x: center.x, y: center.y + height / 2))
+                                path.addLine(to: CGPoint(x: center.x - width / 2, y: center.y))
+                                path.closeSubpath()
+                            }
+                        }
+                        let quad: (CGPoint, CGPoint, CGPoint, CGPoint) -> Path = { a, b, c, d in
+                            Path { path in
+                                path.move(to: a); path.addLine(to: b)
+                                path.addLine(to: c); path.addLine(to: d); path.closeSubpath()
+                            }
+                        }
                         context.fill(pixelRect(CGRect(origin: .zero, size: canvas)),
                                      with: .color(night ? Color(red: 0.04, green: 0.14, blue: 0.15) : Color(red: 0.10, green: 0.34, blue: 0.22)))
                         let tile: CGFloat = 12
@@ -1314,16 +1443,27 @@ private struct AgentHub: View {
                         for zone in 0..<4 {
                             let center = villagePoint(zone, size: canvas)
                             let colors: [Color] = [.indigo, .blue, .orange, .purple]
-                            context.fill(pixelRect(CGRect(x: center.x - 50, y: center.y - 35, width: 100, height: 64)),
-                                         with: .color(colors[zone].opacity(0.84)))
-                            context.fill(pixelRect(CGRect(x: center.x - 56, y: center.y - 44, width: 112, height: 14)),
-                                         with: .color(colors[zone].opacity(1)))
-                            context.fill(pixelRect(CGRect(x: center.x - 9, y: center.y + 1, width: 18, height: 28)),
-                                         with: .color(.black.opacity(0.48)))
-                            for window in [-32.0, 22.0] {
-                                context.fill(pixelRect(CGRect(x: center.x + window, y: center.y - 20, width: 15, height: 13)),
-                                             with: .color(night ? .yellow.opacity(0.86) : .cyan.opacity(0.72)))
-                            }
+                            let x = center.x, y = center.y
+                            context.fill(diamond(CGPoint(x: x + 10, y: y + 41), 154, 86),
+                                         with: .color(.black.opacity(0.34)))
+                            context.fill(diamond(CGPoint(x: x, y: y + 22), 148, 80),
+                                         with: .color(Color(red: 0.36, green: 0.48, blue: 0.39)))
+                            context.fill(quad(CGPoint(x: x - 57, y: y - 28), CGPoint(x: x, y: y + 1),
+                                              CGPoint(x: x, y: y + 47), CGPoint(x: x - 57, y: y + 18)),
+                                         with: .color(colors[zone].opacity(0.72)))
+                            context.fill(quad(CGPoint(x: x, y: y + 1), CGPoint(x: x + 57, y: y - 28),
+                                              CGPoint(x: x + 57, y: y + 18), CGPoint(x: x, y: y + 47)),
+                                         with: .color(colors[zone].opacity(0.48)))
+                            context.fill(diamond(CGPoint(x: x, y: y - 29), 132, 66),
+                                         with: .color(colors[zone].opacity(0.96)))
+                            context.stroke(diamond(CGPoint(x: x, y: y - 29), 132, 66),
+                                           with: .color(.white.opacity(0.38)), lineWidth: 2)
+                            context.fill(quad(CGPoint(x: x - 13, y: y + 13), CGPoint(x: x, y: y + 20),
+                                              CGPoint(x: x, y: y + 45), CGPoint(x: x - 13, y: y + 38)),
+                                         with: .color(.black.opacity(0.56)))
+                            context.fill(quad(CGPoint(x: x + 17, y: y + 17), CGPoint(x: x + 34, y: y + 8),
+                                              CGPoint(x: x + 34, y: y + 22), CGPoint(x: x + 17, y: y + 31)),
+                                         with: .color(night ? .yellow.opacity(0.84) : .cyan.opacity(0.82)))
                         }
                         for tree in 0..<12 {
                             let x = canvas.width * (0.08 + Double((tree * 31) % 83) / 100)
@@ -1359,6 +1499,10 @@ private struct AgentHub: View {
                                            time: timeline.date.timeIntervalSinceReferenceDate, size: size)
                     }
                 }
+                .scaleEffect(villageZoom)
+                .offset(villageOffset)
+                .gesture(MagnifyGesture().onChanged { villageZoom = min(2, max(1, $0.magnification)) })
+                .simultaneousGesture(DragGesture().onChanged { villageOffset = $0.translation })
                 .foregroundStyle(.white)
                 .clipShape(RoundedRectangle(cornerRadius: 20))
             }.frame(height: 420)
@@ -2235,6 +2379,20 @@ private struct ChatView: View {
                             VStack(alignment: .leading) {
                                 Text("Tal med din AI").font(.title.bold()).accessibilityAddTraits(.isHeader)
                                 Text(connection).font(.subheadline).foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                            if !models.isEmpty {
+                                Menu {
+                                    ForEach(models.filter(\.available), id: \.id) { entry in
+                                        Button(entry.label) { selectedModel = entry.id }
+                                    }
+                                } label: {
+                                    Label(models.first(where: { $0.id == selectedModel })?.label ?? "Model",
+                                          systemImage: "chevron.down")
+                                        .font(.caption.bold()).lineLimit(1)
+                                }
+                                .disabled(task != nil)
+                                .accessibilityLabel("Skift AI-model")
                             }
                         }
                         DisclosureGroup("Chatindstillinger") {
