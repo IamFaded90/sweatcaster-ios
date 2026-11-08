@@ -67,12 +67,13 @@ struct LocalFileStore: FileStore {
         guard count > 0, count <= 65_536 else { throw Failure.invalidPath }
         let handle = try openRegularFile(url, maximumBytes: maximumBytes)
         defer { try? handle.close() }
-        return try handle.read(upToCount: count) ?? Data()
+        guard maximumBytes > 0 else { return Data() }
+        return try handle.read(upToCount: min(count, maximumBytes)) ?? Data()
     }
 
     @discardableResult
     static func checkedFileSize(_ url: URL, maximumBytes: Int) throws -> Int {
-        guard url.isFileURL else { throw Failure.invalidPath }
+        guard url.isFileURL, maximumBytes >= 0 else { throw Failure.invalidPath }
         let info = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
         guard info.isRegularFile == true, info.isSymbolicLink != true,
               let size = info.fileSize, size >= 0 else { throw Failure.invalidFile }
@@ -112,7 +113,8 @@ struct LocalFileStore: FileStore {
         }
         let base = try canonicalDirectory(scope)
         let parent = try canonicalDirectory(original.deletingLastPathComponent())
-        guard parent.path == base.path || parent.path.hasPrefix(base.path + "/") else { throw Failure.invalidPath }
+        let prefix = base.path.hasSuffix("/") ? base.path : base.path + "/"
+        guard parent.path == base.path || parent.path.hasPrefix(prefix) else { throw Failure.invalidPath }
         let file = parent.appendingPathComponent(original.lastPathComponent, isDirectory: false)
         if let info = try metadata(file), (info.st_mode & mode_t(S_IFMT)) != mode_t(S_IFREG) { throw Failure.invalidFile }
         return file
@@ -123,19 +125,36 @@ struct LocalFileStore: FileStore {
     }
 
     static func copyProtectedFile(from source: URL, to url: URL, within root: URL, maximumBytes: Int) throws {
-        try checkedFileSize(source, maximumBytes: maximumBytes)
+        guard (0..<Int.max).contains(maximumBytes) else { throw Failure.invalidPath }
+        let input = try openRegularFile(source, maximumBytes: maximumBytes)
+        defer { try? input.close() }
         let file = try preparedDestination(url, within: root)
         let folder = file.deletingLastPathComponent()
         let staging = try safeWriteURL(folder.appendingPathComponent(".fadedai-\(UUID().uuidString).tmp"), within: root)
         let manager = FileManager.default
         defer { try? manager.removeItem(at: staging) }
-        try manager.copyItem(at: source, to: staging)
-        try checkedFileSize(staging, maximumBytes: maximumBytes)
-        try protectFile(staging)
+        guard manager.createFile(atPath: staging.path, contents: nil, attributes: [.protectionKey: FileProtectionType.complete]) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let output = try FileHandle(forWritingTo: staging)
+        do {
+            var remaining = maximumBytes
+            while let chunk = try input.read(upToCount: min(65_536, remaining + 1)), !chunk.isEmpty {
+                guard chunk.count <= remaining else { throw Failure.tooLarge }
+                try output.write(contentsOf: chunk)
+                remaining -= chunk.count
+            }
+            try output.close()
+        } catch {
+            try? output.close()
+            throw error
+        }
+        guard try safeWriteURL(url, within: root).path == file.path else { throw Failure.invalidPath }
         try manager.moveItem(at: staging, to: file)
     }
 
     static func protectFile(_ url: URL) throws {
+        try checkedFileSize(url, maximumBytes: Int.max)
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
     }
 

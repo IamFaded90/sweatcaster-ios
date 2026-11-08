@@ -30,7 +30,7 @@ struct FadedFieldLabel: View {
     init(_ title: String) { self.title = title }
 
     var body: some View {
-        Text(title).font(FadedTypography.section).foregroundStyle(palette.text)
+        Text(title.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(palette.text)
             .accessibilityHidden(true)
     }
 }
@@ -42,7 +42,7 @@ struct FadedDetailText: View {
     init(_ text: String) { self.text = text }
 
     var body: some View {
-        Text(text).font(.subheadline).foregroundStyle(palette.secondary)
+        Text(text).font(.footnote).foregroundStyle(palette.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 }

@@ -30,7 +30,7 @@
 		0000000000000000000000E7 = { isa = PBXBuildFile; fileRef = 0000000000000000000000E6; };
 		0000000000000000000000E8 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PickerConnectorTests.swift; sourceTree = "<group>"; };
 		0000000000000000000000E9 = { isa = PBXBuildFile; fileRef = 0000000000000000000000E8; };
-		0000000000000000000000C8 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDataMigration.swift; sourceTree = "<group>"; };
+		0000000000000000000000C8 = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MigratedAppData.swift; sourceTree = "<group>"; };
 		0000000000000000000000C9 = { isa = PBXBuildFile; fileRef = 0000000000000000000000C8; };
 		0000000000000000000000CA = { isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileStore.swift; sourceTree = "<group>"; };
 		0000000000000000000000CB = { isa = PBXBuildFile; fileRef = 0000000000000000000000CA; };

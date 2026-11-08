@@ -69,7 +69,8 @@ private struct VillageBotFile: FileDocument {
     init(bot: VillageBot) { self.bot = bot }
 
     init(configuration: ReadConfiguration) throws {
-        if let size = configuration.file.fileAttributes[.size] as? NSNumber, size.int64Value > Int64(Self.maximumBytes) {
+        let attributes = configuration.file.fileAttributes as NSDictionary
+        if let size = attributes[FileAttributeKey.size.rawValue] as? NSNumber, size.int64Value > Int64(Self.maximumBytes) {
             throw CocoaError(.fileReadTooLarge)
         }
         guard let data = configuration.file.regularFileContents, data.count <= Self.maximumBytes else {
