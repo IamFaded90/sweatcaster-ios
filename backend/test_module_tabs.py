@@ -27,3 +27,10 @@ def test_manifest_import_and_local_answers(tmp_path):
         assert "1 mulige dubletgrupper" in collection_answer(settings, "Kortsamling: dubletter")
         assert "1 kort" in collection_answer(settings, "Kortsamling: mangler pris")
         assert collection_answer(settings, "Hvad mangler?") is None
+        chat = {"message": "Kortsamling: dubletter", "request_id": str(uuid4())}
+        answer = client.post("/api/v2/chat", headers=headers, json=chat)
+        assert answer.status_code == 200
+        frames = [json.loads(line[6:]) for line in answer.text.splitlines() if line.startswith("data: ")]
+        assert [frame["type"] for frame in frames] == ["tool_status", "text", "done"]
+        assert "dubletgrupper" in frames[1]["content"]
+        assert client.post("/api/v2/chat", headers=headers, json=chat).status_code == 409

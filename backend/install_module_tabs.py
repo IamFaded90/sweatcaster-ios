@@ -15,20 +15,29 @@ def install(root: Path) -> None:
             "    register_modules(app, settings, _bearer)\n",
         ),
         "v2_api.py": (
-            '        yield sse("tool_status", "Preparing the selected model.")\n',
+            '        tag, lease = _admit_chat(settings, coord, body)\n',
             '        from sweatcaster.module_tabs import collection_answer\n'
             '        message = str(body.get("message") or "")\n'
             '        answer = collection_answer(settings, message)\n'
             '        if answer is not None:\n'
             '            if settings.token:\n'
             '                answer = answer.replace(settings.token, "[token]")\n'
-            '            yield sse("tool_status", "Læser Kortsamling på PC’en.")\n'
-            '            for offset in range(0, len(answer), 2000):\n'
-            '                yield sse("text", answer[offset:offset + 2000])\n'
-            '            yield sse_json({"type": "done", "content": "",\n'
-            '                            "message_id": str(uuid.uuid4()), "model_id": model_id})\n'
-            '            return\n'
-            '        yield sse("tool_status", "Preparing the selected model.")\n',
+            '            tag = _resolve_tag(settings, body.get("model_id"))\n'
+            '            try:\n'
+            '                lease = coord.admit(identity_hash(settings.token), str(body["request_id"]), tag)\n'
+            '            except RequestReused as exc:\n'
+            '                raise ApiError(409, "REQUEST_REUSED", "That request id was already used.") from exc\n'
+            '            except QueueFull as exc:\n'
+            '                raise ApiError(503, "NOT_READY", "The model queue is full.") from exc\n'
+            '            coord.release(lease)\n'
+            '            def stream_collection():\n'
+            '                yield sse("tool_status", "Læser Kortsamling på PC’en.")\n'
+            '                for offset in range(0, len(answer), 2000):\n'
+            '                    yield sse("text", answer[offset:offset + 2000])\n'
+            '                yield sse_json({"type": "done", "content": "", "message_id": str(uuid.uuid4()),\n'
+            '                                "model_id": id_for(tag) or "qwen25-7b"})\n'
+            '            return StreamingResponse(stream_collection(), media_type="text/event-stream")\n'
+            '        tag, lease = _admit_chat(settings, coord, body)\n',
         ),
     }
     staged = {}
@@ -37,9 +46,17 @@ def install(root: Path) -> None:
         original = path.read_text(encoding="utf-8")
         if replacement in original:
             continue
-        if original.count(anchor) != 1:
+        base = original
+        if name == "v2_api.py":
+            old_start = '        from sweatcaster.module_tabs import collection_answer\n'
+            old_end = '        yield sse("tool_status", "Preparing the selected model.")\n'
+            if old_start in base:
+                start = base.index(old_start)
+                end = base.index(old_end, start)
+                base = base[:start] + base[end:]
+        if base.count(anchor) != 1:
             raise ValueError(f"Checkpoint has an unexpected {name}; no files were written.")
-        updated = original.replace(anchor, replacement)
+        updated = base.replace(anchor, replacement)
         compile(updated, str(path), "exec")
         staged[path] = (original, updated)
     module = source.read_text(encoding="utf-8")
