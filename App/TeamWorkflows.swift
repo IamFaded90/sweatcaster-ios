@@ -215,6 +215,9 @@ private struct TeamWorkflowTurn: Identifiable {
             VStack(alignment: .leading, spacing: 0) {
                 handoffPicker("Afsender", slot: 0)
                 handoffPicker("Modtager", slot: 1)
+                FadedSecondaryButton("Byt afsender og modtager", icon: "arrow.up.arrow.down") {
+                    if members.count == 2 { members.swapAt(0, 1) }
+                }.disabled(members.count != 2)
             }
             .disabled(work != nil)
         }

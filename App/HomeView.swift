@@ -90,6 +90,7 @@ struct Home: View {
     @State var diagnosticsError = false
     @State var media: Media?
     @State var showChat = false
+    @State var preferPhoneInChat = false
     @State var errorDetails = false
     @AccessibilityFocusState var errorFocus: Bool
     @AccessibilityFocusState var jobsFocus: Bool
@@ -136,7 +137,6 @@ struct Home: View {
     @State var videoStartNotice: String?
     @State var handledVideoJobRequest: Int?
     @State var saveVideoNotice: String?
-    @State var confirmClear = false
     @State var hiddenJobs = Set<String>()
     @AppStorage(AppStorageKeys.spacesOnboarded) var onboarded = false
     @AppStorage(AppStorageKeys.spacesFont) var font = "Standard"
@@ -287,6 +287,7 @@ struct Home: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button("Søg", systemImage: "magnifyingglass", action: openSearch)
+                        Button("Noter", systemImage: "note.text") { showNotes = true }
                         if horizontalSizeClass != .regular {
                             Button("Holdet", systemImage: "person.2") { showTeam = true }
                         }

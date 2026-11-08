@@ -29,7 +29,13 @@ struct AgentHub: View {
     @State var details: V2Hub.Agent?
     @State private var achievements = false
 
-    @State var snapshot: V2Hub?
+    @State private var remoteTarget: String?
+    @State private var storedSnapshot: V2Hub?
+    var snapshot: V2Hub? { hasCurrentRemote ? storedSnapshot : nil }
+    private var hasCurrentRemote: Bool {
+        guard let api else { return false }
+        return api.queueTargetID == remoteTarget
+    }
     @State private var failure: String?
     @State private var attempt = 0
     @State private var history: [V2History] = []
@@ -39,6 +45,9 @@ struct AgentHub: View {
     @State private var badgeError: String?
     @State private var detailsLoading = false
     @State private var badgesLoading = false
+    @State private var detailAgentID: String?
+    @State private var detailRequest: UUID?
+    @State private var badgeRequest: UUID?
 
     var body: some View {
         NavigationStack {
@@ -56,7 +65,8 @@ struct AgentHub: View {
                 OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
                               initialPage: .chat, initialBotID: bot.id)
             }
-            .task(id: "\(attempt):\(hubPhase == .active):\(api?.server.origin.absoluteString ?? "offline")") {
+            .task(id: "\(attempt):\(hubPhase == .active):\(api?.queueTargetID ?? "offline")") {
+                resetRemoteIfNeeded()
                 if hubPhase == .active { await followHub() }
             }
             .refreshable { attempt += 1 }
@@ -65,8 +75,12 @@ struct AgentHub: View {
                     Button("Tilbage", systemImage: "chevron.left", action: onBack)
                 }
             }
-            .sheet(item: $details) { agent in agentDetails(agent) }
-            .sheet(isPresented: $achievements) { achievementPage }
+            .sheet(item: $details) { agent in
+                if hasCurrentRemote { agentDetails(agent) }
+            }
+            .sheet(isPresented: $achievements) {
+                if hasCurrentRemote { achievementPage }
+            }
         }
     }
 
@@ -157,7 +171,7 @@ struct AgentHub: View {
             FadedEmptyState(icon: "desktopcomputer", title: "Ingen PC-forbindelse",
                             detail: "Åbn Forbindelser på Hjem for at se PC’ens agenter.",
                             actionTitle: "Gå til Hjem", action: onBack)
-        } else if let failure, snapshot == nil {
+        } else if hasCurrentRemote, let failure, snapshot == nil {
             RetryNotice(message: failure) { attempt += 1 }
         } else if let snapshot {
             if let failure { RetryNotice(message: failure) { attempt += 1 } }
@@ -247,13 +261,18 @@ struct AgentHub: View {
     }
 
     private func agentDetails(_ agent: V2Hub.Agent) -> some View {
-        NavigationStack {
+        let history = detailAgentID == agent.id ? self.history : []
+        let memory = detailAgentID == agent.id ? self.memory : []
+        let loading = detailAgentID != agent.id || detailsLoading
+        return NavigationStack {
             List {
-                if detailsLoading { LoadingSkeleton(label: "Henter agentdetaljer…") }
-                if let detailError { RetryNotice(message: detailError) { Task { await loadDetails(agent.id) } } }
+                if loading { LoadingSkeleton(label: "Henter agentdetaljer…") }
+                if detailAgentID == agent.id, let detailError {
+                    RetryNotice(message: detailError) { Task { await loadDetails(agent.id) } }
+                }
                 Section("Status") { Text("\(status(agent.status)) · \(agent.xp) XP") }
                 Section("Historik") {
-                    if history.isEmpty && !detailsLoading { Text("Ingen historik at vise.") }
+                    if history.isEmpty && !loading { Text("Ingen historik at vise.") }
                     ForEach(history) { item in
                         VStack(alignment: .leading) {
                             Text(item.title)
@@ -264,11 +283,11 @@ struct AgentHub: View {
                 }
                 Section("Værktøjskald") {
                     let tools = history.filter { $0.kind == "tool_call" }
-                    if tools.isEmpty && !detailsLoading { Text("Ingen værktøjskald at vise.") }
+                    if tools.isEmpty && !loading { Text("Ingen værktøjskald at vise.") }
                     ForEach(tools) { item in Text(item.tool_name ?? item.title) }
                 }
                 Section("Hukommelse") {
-                    if memory.isEmpty && !detailsLoading { Text("Ingen hukommelse at vise.") }
+                    if memory.isEmpty && !loading { Text("Ingen hukommelse at vise.") }
                     ForEach(memory) { item in
                         VStack(alignment: .leading) {
                             Text(item.title).font(.headline)
@@ -310,25 +329,28 @@ struct AgentHub: View {
     private func followHub() async {
         failure = nil
         guard let api else { failure = "Forbind til din PC i Indstillinger."; return }
+        let target = api.queueTargetID
         var delay = 2
-        while !Task.isCancelled {
+        while !Task.isCancelled && remoteTarget == target {
             do {
                 let initial = try await api.v2Hub()
                 try Task.checkCancellation()
+                guard remoteTarget == target else { return }
                 apply(initial)
                 failure = nil
                 delay = 2
                 try await api.v2HubEvents(after: initial.revision) { event in
                     guard let updated = try? await api.v2Hub() else { return }
                     await MainActor.run {
-                        if !Task.isCancelled, event.type == .resync_required || updated.revision >= (snapshot?.revision ?? 0) {
+                        if !Task.isCancelled, remoteTarget == target,
+                           event.type == .resync_required || updated.revision >= (snapshot?.revision ?? 0) {
                             apply(updated)
                         }
                     }
                 }
             } catch {
                 AppDiagnostics.record(error)
-                guard !Task.isCancelled else { return }
+                guard !Task.isCancelled, remoteTarget == target else { return }
                 if let networkError = error as? URLError {
                     offline = [.notConnectedToInternet, .cannotConnectToHost, .networkConnectionLost,
                                .timedOut, .cannotFindHost].contains(networkError.code)
@@ -341,6 +363,27 @@ struct AgentHub: View {
         }
     }
 
+    private func resetRemoteIfNeeded() {
+        let target = api?.queueTargetID
+        guard remoteTarget != target else { return }
+        remoteTarget = target
+        storedSnapshot = nil
+        if target != nil { offline = false }
+        failure = nil
+        details = nil
+        achievements = false
+        detailAgentID = nil
+        detailRequest = nil
+        badgeRequest = nil
+        history = []
+        memory = []
+        badges = []
+        detailError = nil
+        badgeError = nil
+        detailsLoading = false
+        badgesLoading = false
+    }
+
     private func apply(_ value: V2Hub) {
         if let snapshot {
             let previous = Set(snapshot.agents.flatMap(\.recent_quests).filter { $0.state == .completed }.map(\.id))
@@ -348,34 +391,53 @@ struct AgentHub: View {
             if !next.subtracting(previous).isEmpty { completions += 1 }
         }
         offline = false
-        snapshot = value
+        storedSnapshot = value
         if !value.rooms.contains(where: { $0.id == selectedRoom }) {
             selectedRoom = value.rooms.first?.id ?? ""
         }
     }
 
     private func loadDetails(_ id: String) async {
-        guard let api else { return }
+        guard let api, hasCurrentRemote, details?.id == id else { return }
+        let target = api.queueTargetID
+        let request = UUID()
+        detailAgentID = id
+        detailRequest = request
         history = []; memory = []; detailError = nil; detailsLoading = true
-        defer { detailsLoading = false }
+        defer { if detailRequest == request { detailsLoading = false } }
         do {
             async let historyPage = api.v2History(agentID: id)
             async let memoryPage = api.v2Memory(agentID: id)
             let (h, m) = try await (historyPage, memoryPage)
             try Task.checkCancellation()
+            guard remoteTarget == target, detailRequest == request, details?.id == id else { return }
             history = h.items; memory = m.items
         } catch {
             AppDiagnostics.record(error)
-            if !Task.isCancelled { detailError = "Kunne ikke hente agentens detaljer." }
+            if !Task.isCancelled, remoteTarget == target, detailRequest == request, details?.id == id {
+                detailError = "Kunne ikke hente agentens detaljer."
+            }
         }
     }
 
     private func loadBadges() async {
-        guard let api else { return }
+        guard let api, hasCurrentRemote else { return }
+        let target = api.queueTargetID
+        let request = UUID()
+        badgeRequest = request
         badgeError = nil; badgesLoading = true
-        defer { badgesLoading = false }
-        do { badges = try await api.v2Achievements().items }
-        catch { AppDiagnostics.record(error); if !Task.isCancelled { badgeError = "Kunne ikke hente achievements." } }
+        defer { if badgeRequest == request { badgesLoading = false } }
+        do {
+            let items = try await api.v2Achievements().items
+            try Task.checkCancellation()
+            guard remoteTarget == target, badgeRequest == request, achievements else { return }
+            badges = items
+        } catch {
+            AppDiagnostics.record(error)
+            if !Task.isCancelled, remoteTarget == target, badgeRequest == request, achievements {
+                badgeError = "Kunne ikke hente achievements."
+            }
+        }
     }
 
     func icon(_ value: String) -> String {

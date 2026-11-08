@@ -38,11 +38,18 @@ extension ChatView {
 
     func send() {
         dictation.stop()
-        let message = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let originalDraft = draft
+        let message = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let route = resolvedRoute
         let outgoing = transportMessage(for: route.source)
+        if !demo, route.source == .phone, !PhoneModels.isReady(route.modelID ?? phoneModel) {
+            chatNotice = "Telefonmodellen er ikke klar. Din kladde bliver gemt."
+            return
+        }
         guard task == nil, !message.isEmpty, outgoing.unicodeScalars.count <= 2000, canSend(to: route) else { return }
         let source = route.source
+        let phoneNote = source == .phone && noteDestination == .phone ? attachedNote : nil
+        let phoneQuote = source == .phone && quoteDestination == .phone ? attachedQuote : nil
         let routeGrok = source == .grok && !demo
         let collectionQuestion = message.lowercased().hasPrefix("kortsamling:")
         let modelMessage = routeGrok || collectionQuestion ? outgoing : enhancedPrompt(outgoing)
@@ -108,7 +115,14 @@ extension ChatView {
                 AppDiagnostics.record(error)
                 if let index = turnIndex(turnID) {
                     if source == .phone && !demo {
-                        turns[index].notice = phoneError(error, hasPartial: !turns[index].reply.isEmpty)
+                        let hasPartial = !turns[index].reply.isEmpty
+                        turns[index].notice = phoneError(error, hasPartial: hasPartial)
+                        if !hasPartial, draft.isEmpty, attachedNote == nil, attachedQuote == nil {
+                            draft = originalDraft
+                            savedDraft = originalDraft
+                            if let phoneNote { attachedNote = phoneNote; noteDestination = .phone }
+                            if let phoneQuote { attachedQuote = phoneQuote; quoteDestination = .phone }
+                        }
                     } else {
                         if source == .pc, pcBusyMessage(error) != nil { busyPCTurn = turnID }
                         turns[index].notice = pcBusyMessage(error) ?? AppErrorPresentation(error).title

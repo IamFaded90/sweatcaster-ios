@@ -324,7 +324,7 @@ extension OfflineStudio {
         VStack(alignment: .leading, spacing: 12) {
             sessionModelPicker
             Picker("Systemprompt", selection: $sessionPreferences.personality) {
-                Text("Bottens egen").tag("bot")
+                Text("Standard").tag("bot")
                 Text("Kort og rolig").tag("calm")
                 Text("Kreativ og legende").tag("creative")
                 Text("Direkte og konkret").tag("direct")

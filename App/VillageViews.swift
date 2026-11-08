@@ -194,8 +194,7 @@ struct VillageBotBuilder: View {
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Færdig") {
-                        if !draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { save(draft) }
-                        close()
+                        if save(draft) { close() }
                     }.fontWeight(.semibold)
                 }
             }
@@ -206,7 +205,7 @@ struct VillageBotBuilder: View {
             }
             .confirmationDialog("Slet botprofil?", isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Slet bot", role: .destructive) {
-                    persist(bots.filter { $0.id != draft.id })
+                    guard persist(bots.filter { $0.id != draft.id }) else { return }
                     if fixedProfile { close() } else { selectDraft(VillageBot()) }
                 }
             } message: {
@@ -286,7 +285,7 @@ struct VillageBotBuilder: View {
             ))
             Button("Forbedr prompt på telefonen") { Task { await improvePrompt() } }
                 .disabled(improving || draft.prompt.isEmpty || !PhoneModels.appleAvailable)
-            Button("Gem bot") { save(draft) }.disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button("Gem bot") { _ = save(draft) }.disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             if bots.contains(where: { $0.id == draft.id }) {
                 Button("Eksportér bot") { exportFile = VillageBotFile(bot: draft); exporting = true }
                 FadedSecondaryButton("Slet bot", icon: "trash", role: .destructive) { confirmDelete = true }
@@ -406,15 +405,21 @@ struct VillageBotBuilder: View {
         if let onBack { onBack() } else { dismiss() }
     }
 
-    private func save(_ bot: VillageBot) {
+    private func save(_ bot: VillageBot) -> Bool {
+        guard !bot.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            notice = "Skriv et navn til botten, før du gemmer."
+            page = .profile
+            return false
+        }
         var updated = bots
         if let index = updated.firstIndex(where: { $0.id == bot.id }) { updated[index] = bot }
         else {
-            guard updated.count < 10 else { notice = "Du kan gemme op til 10 bots."; return }
+            guard updated.count < 10 else { notice = "Du kan gemme op til 10 bots."; return false }
             updated.append(bot)
         }
-        persist(updated)
-        if bots.contains(where: { $0 == bot }) { savedEditorDraft = Data() }
+        guard persist(updated) else { return false }
+        savedEditorDraft = Data()
+        return true
     }
 
     private func updateDraftCache(_ bot: VillageBot) {
@@ -431,9 +436,16 @@ struct VillageBotBuilder: View {
         }
     }
 
-    private func persist(_ value: [VillageBot]) {
-        do { try MigratedAppData.shared.saveVillageBots(JSONEncoder().encode(value)); notice = nil }
-        catch { AppDiagnostics.record(error); notice = "Botten kunne ikke gemmes." }
+    private func persist(_ value: [VillageBot]) -> Bool {
+        do {
+            try MigratedAppData.shared.saveVillageBots(JSONEncoder().encode(value))
+            notice = nil
+            return true
+        } catch {
+            AppDiagnostics.record(error)
+            notice = "Botten kunne ikke gemmes."
+            return false
+        }
     }
 
     private func importBot(_ result: Result<URL, Error>) {
@@ -451,8 +463,7 @@ struct VillageBotBuilder: View {
                 bot.sprite = sprite
             }
             bot.id = UUID()
-            save(bot)
-            draft = bot
+            if save(bot) { draft = bot }
         } catch { AppDiagnostics.record(error); notice = "Filen kunne ikke læses som en FadedAI-bot." }
     }
 

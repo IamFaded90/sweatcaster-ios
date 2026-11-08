@@ -15,16 +15,38 @@ extension Home {
         }
     }
 
-    func prunePreviews() {
-        let files = try? FileManager.default.contentsOfDirectory(
-            at: FileManager.default.temporaryDirectory,
-            includingPropertiesForKeys: [.contentModificationDateKey])
-        for file in files ?? [] where file.pathExtension == "mp4" &&
+    @discardableResult func prunePreviews() -> String {
+        let manager = FileManager.default
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey]
+        let files: [URL]
+        do {
+            files = try manager.contentsOfDirectory(at: manager.temporaryDirectory, includingPropertiesForKeys: Array(keys))
+        } catch {
+            AppDiagnostics.record(error)
+            return "Mappen med midlertidige previews kunne ikke læses."
+        }
+        let cutoff = Date.now.addingTimeInterval(-86_400)
+        var removed = 0
+        var failed = 0
+        for file in files where file.pathExtension == "mp4" &&
             (file.lastPathComponent.hasPrefix("Demo-") || file.lastPathComponent.hasPrefix("Sweat-")) {
-            if let values = try? file.resourceValues(forKeys: [.contentModificationDateKey]),
-               let date = values.contentModificationDate, Date().timeIntervalSince(date) > 86400 {
-                try? FileManager.default.removeItem(at: file)
+            do {
+                let values = try file.resourceValues(forKeys: keys)
+                guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
+                guard let date = values.contentModificationDate else { failed += 1; continue }
+                guard date < cutoff else { continue }
+                try manager.removeItem(at: file)
+                removed += 1
+            } catch {
+                AppDiagnostics.record(error)
+                failed += 1
             }
+        }
+        if failed > 0 { return "Slettede \(removed) previews. \(failed) filer kunne ikke behandles." }
+        return switch removed {
+        case 0: "Ingen previews over 24 timer at rydde."
+        case 1: "Ét preview over 24 timer blev slettet."
+        default: "\(removed) previews over 24 timer blev slettet."
         }
     }
 
@@ -257,11 +279,21 @@ extension Home {
                     }.listRowBackground(Color.clear)
                 }
                 ForEach(savedVideos, id: \.self) { file in
-                    NavigationLink {
-                        Preview(media: Media(url: file, demo: false))
-                    } label: {
-                        Label(file.deletingPathExtension().lastPathComponent, systemImage: "film")
-                            .frame(minHeight: 44)
+                    HStack(spacing: 8) {
+                        NavigationLink {
+                            Preview(media: Media(url: file, demo: false))
+                        } label: {
+                            Label(file.deletingPathExtension().lastPathComponent, systemImage: "film")
+                                .frame(minHeight: 44)
+                        }
+                        Button(role: .destructive) {
+                            pendingLocalDeletion = file
+                        } label: {
+                            Image(systemName: "trash").frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Slet \(file.deletingPathExtension().lastPathComponent) fra telefonen")
                     }
                     .swipeActions(allowsFullSwipe: false) {
                         Button("Slet fra telefonen", role: .destructive) { pendingLocalDeletion = file }

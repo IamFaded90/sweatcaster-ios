@@ -134,7 +134,7 @@ extension ChatView {
         if demo { return true }
         if usesAutomaticRouting && route.automatic == nil { return false }
         return switch route.source {
-        case .phone: true
+        case .phone: PhoneModels.isReady(route.modelID ?? phoneModel)
         case .pc: (api != nil && !modelsLoading) || canQueuePC
         case .grok: cloudKeyAvailable
         }
@@ -289,6 +289,11 @@ extension ChatView {
                     .foregroundStyle(transportMessage.unicodeScalars.count > 2000 ? palette.coralText : palette.secondary)
             }
             if automaticRoutingAvailable { automaticRouteMenu }
+            if !demo, effectiveReplySource == .phone, !PhoneModels.isReady(resolvedRoute.modelID ?? phoneModel) {
+                FadedDetailText("Telefonmodellen er ikke klar. Din kladde bliver gemt.")
+                FadedSecondaryButton("Åbn lokale modeller", icon: "iphone") { showPhoneModelSetup = true }
+                    .disabled(task != nil)
+            }
             if let sourceNote { Text(sourceNote).font(.caption).foregroundStyle(palette.secondary) }
         }.padding(.horizontal, 12).padding(.vertical, 6)
     }

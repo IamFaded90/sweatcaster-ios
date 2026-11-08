@@ -537,12 +537,29 @@ struct CodeWorkspaceView: View {
     private func reject(_ item: V2CodeProposal) async {
         guard let api, !loading else { return }
         loading = true; defer { loading = false }
-        do { _ = try await api.v2ApplyCodeProposal(item.change_id, approved: false) }
-        catch { AppDiagnostics.record(error); /* A rejection is confirmed by the server's NOT_READY response. */ }
+        do {
+            let result = try await api.v2ApplyCodeProposal(item.change_id, approved: false)
+            guard result.change_id == item.change_id, result.path == item.path else { throw V2Failure.invalidResponse }
+            guard !result.applied else {
+                message = "PC’en melder, at ændringen allerede er anvendt. Genindlæs filen."
+                return
+            }
+            confirmRejection()
+        } catch let V2Failure.http(status, code, explanation) where
+            status == 409 && code == "NOT_READY" && explanation == "Ændringen blev ikke godkendt. Intet blev skrevet." {
+            confirmRejection()
+        } catch {
+            AppDiagnostics.record(error)
+            message = "PC’en bekræftede ikke afvisningen. Forslaget vises stadig."
+        }
+    }
+
+    private func confirmRejection() {
         proposal = nil
         generatedProposal = nil
+        testPlan = []
         codeStatus = ""
-        message = "Ændringen blev afvist. Intet blev skrevet."
+        message = "PC’en bekræftede, at forslaget er afvist."
     }
 
     private func apply(_ item: V2CodeProposal) async {

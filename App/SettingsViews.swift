@@ -29,6 +29,30 @@ struct FadedNotesSheet: View {
     }
 }
 
+private struct VideoCleanupSettings: View {
+    let prunePreviews: () -> String
+    let hideFinishedJobs: () -> Int
+    @State private var previewNotice: String?
+    @State private var jobsNotice: String?
+    @State private var confirmHideJobs = false
+
+    var body: some View {
+        Button("Ryd previews over 24 timer") { previewNotice = prunePreviews() }
+        if let previewNotice { FadedDetailText(previewNotice) }
+        Button("Skjul afsluttede jobs på denne telefon", role: .destructive) { confirmHideJobs = true }
+            .confirmationDialog("Skjul afsluttede jobs på denne telefon?", isPresented: $confirmHideJobs) {
+                Button("Skjul afsluttede jobs", role: .destructive) {
+                    let count = hideFinishedJobs()
+                    jobsNotice = count == 0 ? "Der er ingen afsluttede jobs at skjule."
+                        : count == 1 ? "Ét afsluttet job er skjult." : "\(count) afsluttede jobs er skjult."
+                }
+            } message: {
+                Text("Videoer og jobhistorik bliver liggende på PC’en.")
+            }
+        if let jobsNotice { FadedDetailText(jobsNotice) }
+    }
+}
+
 extension Home {
     private var connectionIndicator: some View {
         let latency = model.latencyMs
@@ -124,10 +148,11 @@ extension Home {
                 Button("Eksportér fejllog", systemImage: "square.and.arrow.up") { closeSettings(for: .export) }
                 Toggle("Gem genererede billeder i Fotos", isOn: $saveImagesToPhotos)
                 Toggle("Bekræft før video startes", isOn: $confirmVideoStart)
-                Button("Ryd midlertidige previews") {
-                    prunePreviews(); saveVideoNotice = "Midlertidige previews er ryddet."
+                VideoCleanupSettings(prunePreviews: prunePreviews) {
+                    let previousCount = hiddenJobs.count
+                    hiddenJobs.formUnion(model.jobs.filter { !$0.status.active }.map(\.id))
+                    return hiddenJobs.count - previousCount
                 }
-                Button("Skjul afsluttede jobs på denne telefon", role: .destructive) { confirmClear = true }
                 NukeLocalDataButton()
             }
         }

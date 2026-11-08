@@ -312,6 +312,8 @@ extension AgentHub {
             }.frame(width: 92, height: 66, alignment: .top)
         }
         .buttonStyle(.plain)
+        .allowsHitTesting(!cinematic)
+        .accessibilityHidden(cinematic)
         .accessibilityLabel(bot.name + ", " + (bot.personality ?? "Nysgerrig") + ", " + activity)
     }
 
@@ -369,6 +371,8 @@ extension AgentHub {
                 Button("Vis historik og hukommelse") { details = agent }
             }
         }
+        .allowsHitTesting(!cinematic)
+        .accessibilityHidden(cinematic)
     }
 }
 

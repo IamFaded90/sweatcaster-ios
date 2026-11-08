@@ -54,6 +54,7 @@ struct ChatView: View {
     let pcConnectionError: APIError?
     let reconnectPC: (() -> Void)?
     let initialSearch: String
+    private let preferPhone: Bool
     @State var sessionID = UUID()
     @State var draft = ""
     @AppStorage var savedDraft: String
@@ -95,6 +96,7 @@ struct ChatView: View {
     @State var favoritesOnly = false
     @State var scrollRequest = 0
     @State var showComposerTools = false
+    @State var showPhoneModelSetup = false
     @State var choosingNote = false
     @State var newNote = ""
     @State var attachedNote: String?
@@ -142,7 +144,7 @@ struct ChatView: View {
          onBack: (() -> Void)? = nil, openImageStudio: ((String) -> Void)? = nil,
          pcTargetAddress: String? = nil, pcQueueTargetID: String? = nil,
          pcConnectionError: APIError? = nil, reconnectPC: (() -> Void)? = nil,
-         initialSearch: String = "", openPrivateStudio: (() -> Void)? = nil) {
+         initialSearch: String = "", openPrivateStudio: (() -> Void)? = nil, preferPhone: Bool = false) {
         self.api = api
         self.demo = demo
         self.initialDraft = initialDraft
@@ -156,6 +158,7 @@ struct ChatView: View {
         self.pcConnectionError = pcConnectionError
         self.reconnectPC = reconnectPC
         self.initialSearch = initialSearch
+        self.preferPhone = preferPhone
         _savedDraft = AppStorage(wrappedValue: "", AppStorageKeys.chatDraft(storageKey))
     }
 
@@ -210,6 +213,7 @@ struct ChatView: View {
             .navigationBarTitleDisplayMode(.inline)
         }
         .tint(palette.isDark ? palette.lime : palette.text)
+        .sheet(isPresented: $showPhoneModelSetup) { PhoneModelsView() }
     }
 
     private func chatContent(userBubbleWidth: CGFloat) -> some View {
@@ -294,7 +298,8 @@ struct ChatView: View {
                     UserDefaults.standard.removeObject(forKey: AppStorageKeys.aiPrivate)
                     let localModelID = PhoneModels.effectiveModelID(phoneModel)
                     let localReady = localModelID == "apple" ? PhoneModels.appleAvailable : PhoneModels.installedDirectory(localModelID) != nil
-                    if api != nil && !localReady && !demo { replySource = .pc }
+                    if preferPhone { chooseSource(.phone) }
+                    else if api != nil && !localReady && !demo { replySource = .pc }
                     loadHistory()
                     draft = initialDraft.isEmpty ? savedDraft : initialDraft
                     chatSearch = initialSearch

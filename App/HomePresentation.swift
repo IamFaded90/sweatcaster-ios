@@ -59,7 +59,7 @@ extension Home {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
-                LoginView(model: model, openLocalChat: { showChat = true },
+                LoginView(model: model, openLocalChat: openPhoneChat,
                           openLocalStudio: { openStudio(.chat) }, openLocalBots: { showBots = true },
                           exportDiagnostics: exportDiagnostics)
             }
@@ -155,13 +155,6 @@ extension Home {
                 }
             }
         } message: { _ in Text("Kun den fejlede jobpost slettes. Originalklippet bevares.") }
-        .confirmationDialog("Skjul afsluttede jobs på denne telefon?", isPresented: $confirmClear) {
-            Button("Skjul afsluttede jobs", role: .destructive) {
-                hiddenJobs.formUnion(model.jobs.filter { !$0.status.active }.map(\.id))
-            }
-        } message: {
-            Text("Videoerne og jobhistorikken bliver liggende på PC’en.")
-        }
         .confirmationDialog("Start videomagi?", isPresented: Binding(
             get: { pendingVideoMood != nil }, set: { if !$0 { pendingVideoMood = nil } }
         ), presenting: pendingVideoMood) { mood in
@@ -195,10 +188,11 @@ extension Home {
         .sheet(isPresented: $showHelp) {
             NavigationStack {
                 List {
-                    Text("Brain: Vælg klip, vælg en stil, eller chat med din PC.")
-                    Text("Gallery: Følg dine jobs, og afspil eller del videoer.")
-                    Text("Tasks: Se videojobs, der stadig kører.")
-                    Text("Notes og Library: Skriv noter, og find forslag til chatten.")
+                    Text("Hjem · Find genveje, seneste aktivitet og indstillinger.")
+                    Text("Chat · Skriv til Telefon, PC eller Grok. Åbn Privat Studio eller Billeder.")
+                    Text("Video · Vælg klip og opskrift. Følg, afspil eller del dine videoer under Jobs.")
+                    Text("Landsby · Se dine bots, Kontoret og PC’ens agenter.")
+                    Text("Code Bot · Gennemgå kodeforslag og testplaner før godkendelse.")
                 }.navigationTitle("Hvad kan jeg?")
                     .toolbar { Button("Luk") { showHelp = false } }
             }
@@ -224,6 +218,7 @@ extension Home {
     }
 
     func refreshAfterChat() {
+        preferPhoneInChat = false
         searchChatQuery = ""
         refreshDashboard()
         if privateStudioAfterChat {
@@ -240,6 +235,19 @@ extension Home {
         Task { await model.refresh() }
     }
 
+    func openPhoneChat() {
+        preferPhoneInChat = true
+        showChat = true
+    }
+
+    private func reconnectFromChat() {
+        if model.needsPairing {
+            showChat = false
+        } else {
+            Task { await model.refresh() }
+        }
+    }
+
     var chatSheet: some View {
         let session = model.isDemo ? "demo" : (model.address.isEmpty ? "offline" : model.address)
         let api: (any ChatAPI)? = model.connected || model.isDemo ? model.api as? any ChatAPI : nil
@@ -250,11 +258,11 @@ extension Home {
                         storageKey: AppStorageKeys.chatSession(session), onBack: { showChat = false },
                         openImageStudio: openImagesFromChat, pcTargetAddress: target?.server.address,
                         pcQueueTargetID: target?.queueTargetID,
-                        pcConnectionError: model.error, reconnectPC: { Task { await model.refresh() } },
+                        pcConnectionError: model.error, reconnectPC: reconnectFromChat,
                         initialSearch: searchChatQuery, openPrivateStudio: {
                             privateStudioAfterChat = true
                             showChat = false
-                        })
+                        }, preferPhone: preferPhoneInChat)
             .id(session)
     }
 

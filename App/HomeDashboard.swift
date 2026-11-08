@@ -93,7 +93,7 @@ extension Home {
                     Text(model.refreshing ? "Opdaterer forbindelsen…" : (model.errorTitle ?? "Tjekker PC’en…"))
                         .font(FadedTypography.action)
                     if !model.refreshing, let error = model.errorPresentation {
-                        FadedSecondaryButton("Brug Telefon", icon: "iphone") { showChat = true }
+                        FadedSecondaryButton("Brug Telefon", icon: "iphone", action: openPhoneChat)
                         FadedSecondaryButton(error.fixAction.title, icon: "arrow.clockwise") { fixDashboardError(error.fixAction) }
                         FadedSecondaryButton("Kopiér fejl", icon: "doc.on.doc") { UIPasteboard.general.string = error.title }
                     }
@@ -105,11 +105,13 @@ extension Home {
     private func fixDashboardError(_ action: AppErrorPresentation.FixAction) {
         switch action {
         case .connect: showLogin = true
-        case .reviseInput: selectSpace(.gallery)
+        case .reviseInput:
+            videoPage = .recipe
+            selectSpace(.gallery)
         case .review:
             selectSpace(.gallery)
             showJobs += 1
-        case .usePhone: showChat = true
+        case .usePhone: openPhoneChat()
         case .retry: Task { await model.refresh() }
         }
     }

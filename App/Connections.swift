@@ -134,10 +134,16 @@ private struct ConnectorPhoto: Transferable {
     }
 
     func pickFile(_ result: Result<URL, Error>) {
-        guard case .success(let url) = result else { return }
-        startRead {
-            let data = try await Task.detached(priority: .userInitiated) { try Self.readFile(url) }.value
-            return [Self.record(name: url.lastPathComponent, data: data)]
+        switch result {
+        case .success(let url):
+            startRead {
+                let data = try await Task.detached(priority: .userInitiated) { try Self.readFile(url) }.value
+                return [Self.record(name: url.lastPathComponent, data: data)]
+            }
+        case .failure(let error):
+            guard (error as? CocoaError)?.code != .userCancelled else { return }
+            AppDiagnostics.record(error)
+            notice = "Filer kunne ikke åbne dit valg. Tryk på Vælg fil for at prøve igen."
         }
     }
 
