@@ -1,6 +1,7 @@
 // On-device text inference and background model downloads.
 import CoreML
 import CoreMLLLM
+import CoreGraphics
 import Foundation
 import FoundationModels
 import Observation
@@ -8,7 +9,7 @@ import UIKit
 import UserNotifications
 
 enum PhoneModelError: Error {
-    case unavailable, invalidBundle, emptyResponse, downloadBusy
+    case unavailable, invalidBundle, emptyResponse, downloadBusy, contextLimit
 }
 
 enum PhoneModels {
@@ -19,9 +20,13 @@ enum PhoneModels {
 
     struct Entry: Identifiable {
         let id, name, description: String
+        let bestFor: String
         let model: ModelDownloader.ModelInfo?
-        let memory: String?
+        let estimatedDownloadBytes: Int64
+        let minimumFreeBytes: Int64
         let unavailableReason: String?
+
+        var recommendsPC: Bool { estimatedDownloadBytes > 3_000_000_000 }
     }
 
     static func hasDownloadSpace(bytes: Int64) -> Bool {
@@ -31,16 +36,27 @@ enum PhoneModels {
 
     static var catalog: [Entry] {
         [
-            .init(id: "minicpm5-1b", name: "MiniCPM5 1B", description: "Kompakt tekstmodel",
-                  model: nil, memory: nil, unavailableReason: "Kræver en Core AI-modelmotor, som appen ikke har."),
-            .init(id: ModelDownloader.ModelInfo.gemma4e2b.id, name: "Gemma 4 E2B", description: "Tekstchat · større model",
-                  model: .gemma4e2b, memory: "Højt hukommelsesforbrug", unavailableReason: nil),
-            .init(id: ModelDownloader.ModelInfo.qwen35_08b.id, name: "Qwen3.5 0.8B", description: "Kompakt tekstmodel",
-                  model: .qwen35_08b, memory: nil, unavailableReason: "Kræver en særskilt Qwen-modelmotor i appen."),
-            .init(id: ModelDownloader.ModelInfo.qwen3vl_2b.id, name: "Qwen3-VL 2B", description: "Modelpakke til tekst og billeder",
-                  model: .qwen3vl_2b, memory: nil, unavailableReason: "Kræver en særskilt Qwen-VL-modelmotor i appen."),
-            .init(id: ModelDownloader.ModelInfo.lfm2_5_350m.id, name: "LFM2.5 350M", description: "Korte, hurtige tekstsvar",
-                  model: .lfm2_5_350m, memory: "Lavere hukommelsesforbrug", unavailableReason: nil)
+            .init(id: ModelDownloader.ModelInfo.lfm2_5_350m.id, name: "LFM2.5 350M",
+                  description: "Den letteste tekstmodel i kataloget.", bestFor: "Korte svar og automatisk skift ved lavt batteri.",
+                  model: .lfm2_5_350m, estimatedDownloadBytes: 850_000_000, minimumFreeBytes: 1_200_000_000,
+                  unavailableReason: nil),
+            .init(id: ModelDownloader.ModelInfo.qwen35_08b.id, name: "Qwen3.5 0.8B",
+                  description: "Kompakt tekstmodel til almindelig chat.", bestFor: "Korte spørgsmål, enkle opgaver og kodeforklaringer.",
+                  model: .qwen35_08b, estimatedDownloadBytes: 1_261_991_992 + QwenPhoneRuntime.Variant.compact.tokenizerBytes,
+                  minimumFreeBytes: 2_200_000_000,
+                  unavailableReason: nil),
+            .init(id: "minicpm5-1b", name: "MiniCPM5 1B",
+                  description: "Kompakt tekstmodel med særskilt tilstand til ræsonnement.", bestFor: "Korte spørgsmål og logiske opgaver.",
+                  model: nil, estimatedDownloadBytes: 1_300_000_000, minimumFreeBytes: 0,
+                  unavailableReason: "iPhone-pakken kræver iOS 27 og en Core AI-motor. FadedAI har endnu ikke denne motor."),
+            .init(id: ModelDownloader.ModelInfo.qwen3vl_2b.id, name: "Qwen3-VL 2B",
+                  description: "Denne pakke kan læse tekst og analysere ét billede ad gangen.", bestFor: "At beskrive billeder og svare på spørgsmål om dem.",
+                  model: .qwen3vl_2b, estimatedDownloadBytes: QwenPhoneRuntime.visionWeightsBytes + QwenPhoneRuntime.Variant.vision.tokenizerBytes,
+                  minimumFreeBytes: 7_000_000_000, unavailableReason: nil),
+            .init(id: ModelDownloader.ModelInfo.gemma4e2b.id, name: "Gemma 4 E2B",
+                  description: "Større model til tekst og billedanalyse, når billedfilerne er installeret.", bestFor: "Komplekse spørgsmål og længere svar.",
+                  model: .gemma4e2b, estimatedDownloadBytes: 5_400_000_000, minimumFreeBytes: 7_000_000_000,
+                  unavailableReason: nil)
         ]
     }
 
@@ -72,27 +88,45 @@ enum PhoneModels {
         guard !downloader.isDownloading || downloader.downloadingModelId != id else { return nil }
         let folder = downloadedRoot.appending(path: model.folderName, directoryHint: .isDirectory)
         let chunked = id == ModelDownloader.ModelInfo.gemma4e2b.id
-        return compatibleBundle(folder, expectsChunked: chunked) ? folder : nil
+        return compatibleBundle(folder, expectsChunked: chunked, qwen: .init(modelID: id)) ? folder : nil
     }
 
-    private static func compatibleBundle(_ folder: URL, expectsChunked: Bool? = nil) -> Bool {
+    private static func compatibleBundle(_ folder: URL, expectsChunked: Bool? = nil,
+                                         qwen: QwenPhoneRuntime.Variant? = nil,
+                                         requireTokenizer: Bool = true) -> Bool {
         // Checking availability must not call the package's cache invalidation code.
         guard let values = try? folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
               values.isDirectory == true, values.isSymbolicLink != true else { return false }
         let root = folder.resolvingSymlinksInPath()
-        func hasFile(_ path: String) -> Bool {
+        func hasFile(_ path: String, exactSize: Int? = nil) -> Bool {
             let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
             let file = root.appending(path: path)
             guard file.path == file.resolvingSymlinksInPath().path,
                   let info = try? file.resourceValues(forKeys: keys) else { return false }
-            return info.isRegularFile == true && info.isSymbolicLink != true && (info.fileSize ?? 0) > 0
+            guard info.isRegularFile == true, info.isSymbolicLink != true, let size = info.fileSize, size > 0 else { return false }
+            return exactSize.map { size == $0 } ?? true
+        }
+        func hasCompiledModel(_ name: String) -> Bool {
+            hasFile("\(name).mlmodelc/coremldata.bin") && hasFile("\(name).mlmodelc/weights/weight.bin")
         }
         func hasModel(_ name: String) -> Bool {
-            let compiled = hasFile("\(name).mlmodelc/coremldata.bin") && hasFile("\(name).mlmodelc/weights/weight.bin")
             let package = hasFile("\(name).mlpackage/Manifest.json")
                 && hasFile("\(name).mlpackage/Data/com.apple.CoreML/model.mlmodel")
                 && hasFile("\(name).mlpackage/Data/com.apple.CoreML/weights/weight.bin")
-            return compiled || package
+            return hasCompiledModel(name) || package
+        }
+        if let qwen {
+            let weightsAreComplete: Bool
+            switch qwen {
+            case .compact: weightsAreComplete = qwen.requiredModels.allSatisfy(hasModel)
+            case .vision:
+                weightsAreComplete = qwen.requiredModels.allSatisfy(hasCompiledModel) || (QwenPhoneRuntime.visionAssets?.allSatisfy {
+                    hasFile($0.path, exactSize: Int($0.bytes))
+                } ?? false)
+            }
+            return (!requireTokenizer || qwen.tokenizerFiles.allSatisfy { hasFile("hf_model/\($0.name)", exactSize: $0.bytes) })
+                && hasFile("\(qwen.chunks)/embed_weight.bin", exactSize: qwen.embeddingBytes)
+                && weightsAreComplete
         }
         guard hasFile("model_config.json"), hasFile("hf_model/tokenizer.json"), hasFile("hf_model/tokenizer_config.json") else {
             return false
@@ -107,7 +141,13 @@ enum PhoneModels {
         let sidecars = ["embed_tokens_q8.bin", "embed_tokens_scales.bin", "embed_tokens_per_layer_q8.bin",
                         "embed_tokens_per_layer_scales.bin", "per_layer_projection.bin", "per_layer_norm_weight.bin",
                         "cos_sliding.npy", "sin_sliding.npy", "cos_full.npy", "sin_full.npy"]
-        return hasModel("chunk1") && (fourChunks || threeChunks) && sidecars.allSatisfy(hasFile)
+        return hasModel("chunk1") && (fourChunks || threeChunks) && sidecars.allSatisfy { hasFile($0) }
+    }
+
+    static var compactQwenWeightsFolder: URL? {
+        let model = ModelDownloader.ModelInfo.qwen35_08b
+        let folder = downloadedRoot.appending(path: model.folderName, directoryHint: .isDirectory)
+        return compatibleBundle(folder, qwen: .compact, requireTokenizer: false) ? folder : nil
     }
 
     @MainActor static func effectiveModelID(_ selected: String) -> String {
@@ -115,11 +155,14 @@ enum PhoneModels {
     }
 
     @MainActor static func liteModeActive(for selected: String) -> Bool {
-        let device = UIDevice.current
-        let liteID = ModelDownloader.ModelInfo.lfm2_5_350m.id
+        selected != ModelDownloader.ModelInfo.lfm2_5_350m.id && shouldUseLiteModel
+    }
+
+    @MainActor static var shouldUseLiteModel: Bool {
+        let level = UIDevice.current.batteryLevel
         return UserDefaults.standard.bool(forKey: liteBatteryKey)
-            && device.batteryLevel >= 0 && device.batteryLevel < 0.20
-            && selected != liteID && installedDirectory(liteID) != nil
+            && level >= 0 && level < 0.20
+            && installedDirectory(ModelDownloader.ModelInfo.lfm2_5_350m.id) != nil
     }
 
     static func prefersPC(_ message: String, previousCharacters: Int) -> Bool {
@@ -133,7 +176,8 @@ enum PhoneModels {
         switch modelID {
         case "apple": 256
         case ModelDownloader.ModelInfo.lfm2_5_350m.id: 512
-        case ModelDownloader.ModelInfo.qwen35_08b.id: 1_024
+        case ModelDownloader.ModelInfo.qwen35_08b.id: 1_536
+        case ModelDownloader.ModelInfo.qwen3vl_2b.id: 2_560
         default: 2_048
         }
     }
@@ -145,7 +189,7 @@ enum PhoneModels {
     }
 
     @MainActor private static func streamReply(modelID: String, prompt: String, instructions: String,
-                                              update: (String) -> Void) async throws {
+                                              update: @escaping (String) -> Void) async throws {
         var answer = ""
         if modelID == "apple" {
             guard #available(iOS 26.0, *), appleAvailable else { throw PhoneModelError.unavailable }
@@ -159,6 +203,11 @@ enum PhoneModels {
             }
         } else {
             guard let folder = installedDirectory(modelID) else { throw PhoneModelError.unavailable }
+            if let variant = QwenPhoneRuntime.Variant(modelID: modelID) {
+                _ = try await QwenPhoneRuntime.generate(variant, folder: folder, prompt: prompt, instructions: instructions,
+                                                       maxTokens: 384, update: update)
+                return
+            }
             LocalCompute.beginModelLoad()
             let model = try await CoreMLLLM.load(from: folder, computeUnits: .cpuAndNeuralEngine)
             try Task.checkCancellation()
@@ -176,6 +225,49 @@ enum PhoneModels {
         }
     }
 
+    static var readyVisionModelIDs: [String] {
+        let qwen = ModelDownloader.ModelInfo.qwen3vl_2b.id
+        let gemma = ModelDownloader.ModelInfo.gemma4e2b.id
+        var ready: [String] = []
+        if installedDirectory(qwen) != nil { ready.append(qwen) }
+        if let folder = installedDirectory(gemma), ["vision.mlmodelc", "vision.mlpackage"].contains(where: { name in
+            let url = folder.appending(path: name)
+            let flags = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            return flags?.isDirectory == true && flags?.isSymbolicLink != true
+        }) { ready.append(gemma) }
+        return ready
+    }
+
+    static func routingCapabilities(for id: String) -> [String] {
+        switch id {
+        case ModelDownloader.ModelInfo.qwen35_08b.id: ["code"]
+        case ModelDownloader.ModelInfo.gemma4e2b.id: ["vision", "long_context"]
+        case ModelDownloader.ModelInfo.qwen3vl_2b.id: ["vision"]
+        case "minicpm5-1b": ["long_context"]
+        default: []
+        }
+    }
+
+    @MainActor static func analyzeImage(modelID: String, image: CGImage, prompt: String) async throws -> String {
+        guard readyVisionModelIDs.contains(modelID) else { throw PhoneModelError.unavailable }
+        return try await LocalCompute.run(minimumMiB: minimumMemory(for: modelID)) {
+            guard let folder = installedDirectory(modelID) else { throw PhoneModelError.unavailable }
+            if let variant = QwenPhoneRuntime.Variant(modelID: modelID) {
+                return try await QwenPhoneRuntime.generate(variant, folder: folder, prompt: prompt, instructions: "",
+                                                           image: image, maxTokens: 256, update: { _ in }).text
+            }
+            LocalCompute.beginModelLoad()
+            let model = try await CoreMLLLM.load(from: folder, computeUnits: .cpuAndNeuralEngine)
+            try Task.checkCancellation()
+            guard model.supportsVision else { throw PhoneModelError.invalidBundle }
+            LocalCompute.didLoadModel()
+            let result = try await model.generate(prompt, image: image, maxTokens: 256)
+            try Task.checkCancellation()
+            guard !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PhoneModelError.emptyResponse }
+            return result
+        }
+    }
+
     @MainActor static func benchmark(modelID: String) async throws -> String {
         let prompt = "Skriv to korte sætninger om, hvordan regn dannes."
         return try await LocalCompute.run(minimumMiB: minimumMemory(for: modelID)) {
@@ -190,6 +282,12 @@ enum PhoneModels {
                 return "Apple Foundation Models: \(seconds) sek. pr. svar."
             }
             guard let folder = installedDirectory(modelID) else { throw PhoneModelError.unavailable }
+            if let variant = QwenPhoneRuntime.Variant(modelID: modelID) {
+                let result = try await QwenPhoneRuntime.generate(variant, folder: folder, prompt: prompt, instructions: "",
+                                                                maxTokens: 64, update: { _ in })
+                let name = catalog.first(where: { $0.id == modelID })?.name ?? "Qwen"
+                return "\(name): \(result.rate.formatted(.number.precision(.fractionLength(1)))) tokens/sek. inkl. promptbehandling."
+            }
             LocalCompute.beginModelLoad()
             let model = try await CoreMLLLM.load(from: folder, computeUnits: .cpuAndNeuralEngine)
             try Task.checkCancellation()
@@ -265,12 +363,16 @@ enum PhoneModels {
     }
 }
 
-@MainActor final class PhoneModelDownloads {
+@MainActor @Observable final class PhoneModelDownloads {
     static let shared = PhoneModelDownloads()
     static let backgroundIdentifier = "com.coreml-llm.model-download"
     private let key = AppStorageKeys.phoneModelPendingDownload
     private let previousSelectionKey = AppStorageKeys.phoneModelSelectionBeforeDownload
     private var observing = false
+    private var tokenizerPreparation: Task<Void, Error>?
+    private(set) var preparingModelID: String?
+    private(set) var directModelID: String?
+    private(set) var directProgress = 0.0
 
     func activate() {
         let downloader = ModelDownloader.shared
@@ -283,7 +385,7 @@ enum PhoneModels {
             if PhoneModels.supportsLocalInference(pending) { downloader.resumeDownload() }
             else { cancel() }
         }
-        Task { await publishCompletionIfReady() }
+        Task { await finishPendingDownload() }
     }
 
     func download(_ model: ModelDownloader.ModelInfo) async throws {
@@ -294,13 +396,27 @@ enum PhoneModels {
             defaults.set(model.id, forKey: PhoneModels.selectionKey)
             return
         }
-        guard !downloader.isDownloading || (downloader.isPaused && downloader.downloadingModelId == model.id) else {
+        guard tokenizerPreparation == nil,
+              !downloader.isDownloading || (downloader.isPaused && downloader.downloadingModelId == model.id) else {
             throw PhoneModelError.downloadBusy
         }
         defaults.set(model.id, forKey: key)
         defaults.set(defaults.string(forKey: PhoneModels.selectionKey) ?? "apple", forKey: previousSelectionKey)
         do {
-            _ = try await downloader.download(model, repair: true)
+            switch QwenPhoneRuntime.Variant(modelID: model.id) {
+            case .compact?:
+                if PhoneModels.compactQwenWeightsFolder == nil || downloader.isDownloading {
+                    _ = try await downloader.download(model, repair: true)
+                }
+                guard let folder = PhoneModels.compactQwenWeightsFolder else { throw PhoneModelError.invalidBundle }
+                try await prepareQwen(.compact, modelID: model.id, folder: folder)
+            case .vision?:
+                let folder = PhoneModels.downloadedRoot.appending(path: model.folderName, directoryHint: .isDirectory)
+                try await prepareQwen(.vision, modelID: model.id, folder: folder)
+            case nil:
+                _ = try await downloader.download(model, repair: true)
+            }
+            try Task.checkCancellation()
             guard PhoneModels.installedDirectory(model.id) != nil else { throw PhoneModelError.invalidBundle }
             await publishCompletionIfReady()
         } catch {
@@ -313,7 +429,44 @@ enum PhoneModels {
         }
     }
 
+    private func prepareQwen(_ variant: QwenPhoneRuntime.Variant, modelID: String, folder: URL) async throws {
+        try Task.checkCancellation()
+        if let work = tokenizerPreparation, preparingModelID == modelID {
+            try await work.value
+            return
+        }
+        if UserDefaults.standard.string(forKey: key) != modelID {
+            guard PhoneModels.installedDirectory(modelID) != nil else { throw CancellationError() }
+            return
+        }
+        guard tokenizerPreparation == nil else { throw PhoneModelError.downloadBusy }
+        preparingModelID = modelID
+        let work = Task {
+            try await QwenPhoneRuntime.prepareTokenizer(for: variant, folder: folder)
+            if case .vision = variant {
+                self.directModelID = modelID
+                self.directProgress = 0
+                try await QwenPhoneRuntime.installVisionWeights(in: folder) { self.directProgress = $0 }
+            }
+        }
+        tokenizerPreparation = work
+        defer { tokenizerPreparation = nil; preparingModelID = nil; directModelID = nil }
+        try await work.value
+    }
+
+    private func finishPendingDownload() async {
+        let modelID = ModelDownloader.ModelInfo.qwen35_08b.id
+        if !ModelDownloader.shared.isDownloading, UserDefaults.standard.string(forKey: key) == modelID,
+           PhoneModels.installedDirectory(modelID) == nil, let folder = PhoneModels.compactQwenWeightsFolder {
+            do { try await prepareQwen(.compact, modelID: modelID, folder: folder) }
+            catch is CancellationError { return }
+            catch { AppDiagnostics.record(error); return }
+        }
+        await publishCompletionIfReady()
+    }
+
     func cancel() {
+        tokenizerPreparation?.cancel()
         UserDefaults.standard.removeObject(forKey: key)
         UserDefaults.standard.removeObject(forKey: previousSelectionKey)
         ModelDownloader.shared.cancelDownload()
@@ -322,7 +475,7 @@ enum PhoneModels {
     func handleBackgroundEvents(completion: @escaping () -> Void) {
         ModelDownloader.shared.backgroundCompletionHandler = {
             Task { @MainActor in
-                await self.publishCompletionIfReady()
+                await self.finishPendingDownload()
                 completion()
             }
         }
@@ -337,7 +490,7 @@ enum PhoneModels {
             Task { @MainActor in
                 guard let self else { return }
                 self.observeChanges()
-                await self.publishCompletionIfReady()
+                await self.finishPendingDownload()
             }
         }
     }

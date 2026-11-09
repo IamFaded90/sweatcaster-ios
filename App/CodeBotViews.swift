@@ -1,153 +1,10 @@
-// Code Bot workspace, batch proposals and human approval.
-
+// Agent Workspace file selection, single-file proposals and human approval.
 import Foundation
 import SwiftUI
 
-struct BatchReviewView: View {
-    let api: LiveAPI
-    @State private var jobs: [CodeBatchList.Job] = []
-    @State private var repo = ""
-    @State private var goal = ""
-    @State private var paths = ""
-    @State private var failure: String?
-    @State private var busy = false
-
-    var body: some View {
-        Form {
-            Section("Ny opgave") {
-                TextField("Repo (ejer/projekt)", text: $repo).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Button("Klon GitHub-repo til PC’en") { Task { await clone() } }
-                    .disabled(busy || repo.trimmingCharacters(in: .whitespaces).isEmpty)
-                TextField("Hvad skal ændres?", text: $goal, axis: .vertical)
-                TextField("Op til fem filstier, én pr. linje", text: $paths, axis: .vertical)
-                    .textInputAutocapitalization(.never).autocorrectionDisabled()
-                FadedPrimaryButton("Sæt i kø", icon: "terminal") { Task { await enqueue() } }
-                    .disabled(busy || repo.isEmpty || goal.isEmpty || paths.isEmpty)
-                if busy || repo.isEmpty || goal.isEmpty || paths.isEmpty {
-                    Text(busy ? "Vent på PC’en." : "Udfyld repo, opgave og filstier.").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            Section("Kodejob") {
-                if let failure { Text(failure) }
-                Button("Opdatér liste") { Task { await reload() } }
-                ForEach(jobs) { job in
-                    NavigationLink {
-                        BatchProposalView(api: api, id: job.id)
-                    } label: {
-                        VStack(alignment: .leading) {
-                            Text(job.goal)
-                            Text(batchStatus(job.status)).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-            }
-        }
-        .scrollContentBackground(.hidden)
-        .background(FadedBackground(variant: .terminal))
-        .navigationTitle("Forslag til flere filer")
-        .task { await reload() }
-        .refreshable { await reload() }
-    }
-
-    private func reload() async {
-        do { jobs = try await api.codeBatches().jobs; failure = nil }
-        catch { AppDiagnostics.record(error); failure = pcBusyMessage(error) ?? "Kodekøen kunne ikke hentes. Kontrollér forbindelsen til PC’en." }
-    }
-
-    private func enqueue() async {
-        busy = true
-        defer { busy = false }
-        let files = paths.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        do {
-            try await api.enqueueCodeBatch(repo: repo.trimmingCharacters(in: .whitespaces), goal: goal, files: files)
-            goal = ""
-            await reload()
-        } catch { AppDiagnostics.record(error); failure = pcBusyMessage(error) ?? "Opgaven kunne ikke sættes i kø. Tjek repo og filstier." }
-    }
-
-    private func clone() async {
-        busy = true
-        defer { busy = false }
-        do {
-            try await api.cloneCodeRepository(repo.trimmingCharacters(in: .whitespaces))
-            failure = nil
-        } catch { AppDiagnostics.record(error); failure = pcBusyMessage(error) ?? "Repoet kunne ikke klones. Tjek navnet og PC’ens adgang til GitHub." }
-    }
-}
-
-private func batchStatus(_ status: String) -> String {
-    switch status {
-    case "queued": "I kø"
-    case "running": "Arbejder"
-    case "review": "Afventer godkendelse"
-    case "applied": "Gemt på lokal gren"
-    case "declined": "Intet forslag"
-    default: "Jobbet stoppede"
-    }
-}
-
-struct BatchProposalView: View {
-    let api: LiveAPI
-    let id: String
-    @State private var detail: CodeBatchDetail?
-    @State private var confirm = false
-    @State private var busy = false
-    @State private var notice: String?
-
-    var body: some View {
-        List {
-            if let detail { Text(batchStatus(detail.status)) }
-            if let notice { Text(notice) }
-            if let reason = detail?.result?.reason { Text(verbatim: reason) }
-            if let diff = detail?.result?.diff {
-                Section("Ændringer") {
-                    FadedDiff(diff: diff)
-                }
-            }
-            if let tests = detail?.result?.tests {
-                Section("Testplan") {
-                    ForEach(Array(tests.enumerated()), id: \.offset) { entry in Text(verbatim: entry.element) }
-                }
-            }
-            if let checks = detail?.result?.checks, !checks.isEmpty {
-                Section("Kontroller kørt på PC’en") {
-                    ForEach(Array(checks.enumerated()), id: \.offset) { entry in Text(verbatim: entry.element) }
-                }
-            }
-            if let branch = detail?.result?.branch { Text(verbatim: branch).textSelection(.enabled) }
-            if detail?.status == "review" {
-                FadedPrimaryButton("Godkend ændringer", icon: "checkmark") { confirm = true }.disabled(busy)
-                if busy { Text("Vent på PC’en.").font(.caption).foregroundStyle(.secondary) }
-            }
-            Button("Opdatér") { Task { await reload() } }.disabled(busy)
-        }
-        .scrollContentBackground(.hidden)
-        .background(FadedBackground(variant: .terminal))
-        .navigationTitle("Gennemgå forslag")
-        .task { await reload() }
-        .confirmationDialog("Godkend ændringerne?", isPresented: $confirm) {
-            Button("Opret lokal Git-gren") { Task { await approve() } }
-        } message: { Text("Forslaget gemmes på en separat gren i Agent Workspace på PC’en.") }
-    }
-
-    private func reload() async {
-        do { detail = try await api.codeBatch(id); notice = nil }
-        catch { AppDiagnostics.record(error); notice = "Forslaget kunne ikke hentes." }
-    }
-
-    private func approve() async {
-        busy = true
-        defer { busy = false }
-        do {
-            let applied = try await api.approveCodeBatch(id)
-            await reload()
-            if let branch = applied.branch { notice = "Ændringerne er gemt på \(branch)." }
-        } catch { AppDiagnostics.record(error); notice = "PC’en kunne ikke bekræfte godkendelsen. Opdatér for at se den aktuelle status." }
-    }
-}
-
 struct CodeWorkspaceView: View {
     @Environment(\.fadedPalette) private var palette
+    @Environment(\.horizontalSizeClass) private var sizeClass
 
     private struct FeatureDraft: Decodable {
         let feasible: Bool
@@ -196,9 +53,12 @@ struct CodeWorkspaceView: View {
     @State private var path = "notes/plan.md"
     @State private var content = ""
     @State private var proposal: V2CodeProposal?
+    @State private var proposalTargetID: String?
+    @State private var unverifiedApprovalID: String?
     @State private var loading = false
     @State private var workspaceLoaded = false
     @State private var workspaceError: String?
+    @State private var contextError: String?
     @State private var workspaceRequest: UUID?
     @State private var workspaceScope: String?
     @State private var message: String?
@@ -208,67 +68,142 @@ struct CodeWorkspaceView: View {
     @State private var generatedProposal: GeneratedProposal?
     @State private var codeStatus = ""
     @State private var testPlan: [String] = []
+    @State private var showFileDetails = false
+    @State private var showBatchReview = false
+    @State private var openedFile: String?
 
     var body: some View {
-        NavigationStack {
-            codeContent
-                .background(FadedBackground(variant: .terminal))
-                .navigationTitle("Code Bot")
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button("Tilbage", systemImage: "chevron.left", action: onBack)
-                    }
+        GeometryReader { geometry in
+            if sizeClass == .regular && geometry.size.width >= 740 {
+                NavigationSplitView {
+                    fileNavigation(useSplit: true)
+                        .navigationSplitViewColumnWidth(min: 280, ideal: 330, max: 400)
+                } detail: {
+                    workspaceDetail.navigationTitle("Arbejdsområde")
                 }
-                .refreshable { await load() }
-                .task(id: api?.queueTargetID) {
-                    let scope = api?.queueTargetID
-                    if workspaceScope != scope {
-                        workspaceScope = scope
-                        files = []
-                        workspaceLoaded = false
-                        workspaceError = nil
-                        proposal = nil
-                        generatedProposal = nil
-                        testPlan = []
-                        approval = false
-                        content = ""
-                        message = nil
+                .navigationSplitViewStyle(.balanced)
+            } else {
+                NavigationStack { fileNavigation(useSplit: false) }
+                    .sheet(isPresented: $showFileDetails) {
+                        NavigationStack {
+                            workspaceDetail.navigationTitle("Filændring")
+                                .navigationBarTitleDisplayMode(.inline)
+                                .toolbar {
+                                    ToolbarItem(placement: .cancellationAction) {
+                                        Button("Tilbage til filer") { showFileDetails = false }.disabled(loading)
+                                    }
+                                }
+                        }
+                        .interactiveDismissDisabled(loading)
                     }
-                    restoreContext()
-                    await load()
-                    if !Task.isCancelled, let initialPath {
-                        path = initialPath
-                        await open(initialPath)
-                    }
-                }
-                .confirmationDialog("Godkend filændringen?", isPresented: $approval, presenting: proposal) { item in
-                    Button("Skriv filen", role: .destructive) { Task { await apply(item) } }
-                } message: { item in
-                    Text("Kun \(item.path) i Agent Workspace bliver ændret.")
-                }
+            }
+        }
+        .task(id: api?.queueTargetID) {
+            let scope = api?.queueTargetID
+            if workspaceScope != scope {
+                workspaceScope = scope
+                files = []
+                workspaceLoaded = false
+                workspaceRequest = nil
+                loading = false
+                proposal = nil
+                proposalTargetID = nil
+                generatedProposal = nil
+                testPlan = []
+                approval = false
+                content = ""
+                path = "notes/plan.md"
+                firstEditLine = "1"
+                codeStatus = ""
+                message = nil
+                openedFile = nil
+                showFileDetails = false
+                showBatchReview = false
+            }
+            restoreContext()
+            await load()
+            if !Task.isCancelled, api != nil, let initialPath {
+                path = initialPath
+                showFileDetails = true
+                await open(initialPath)
+            }
         }
     }
 
-    private var codeContent: some View {
+    private func fileNavigation(useSplit: Bool) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
-                if api == nil {
-                    FadedEmptyState(icon: "desktopcomputer", title: "Forbind til din PC",
-                                    detail: "Åbn Forbindelser på Hjem for at bruge Code Bot og se dine filer.",
-                                    actionTitle: "Gå til Hjem", action: onBack)
+                if let api {
+                    FadedDetailText("Åbn en fil, eller markér den til din arbejdskontekst.")
+                    if !useSplit {
+                        if currentProposal != nil {
+                            FadedSecondaryButton("Gennemgå åbent forslag", icon: "checklist") { showFileDetails = true }
+                        }
+                        FadedSecondaryButton("Ny eller manuel ændring", icon: "square.and.pencil") { showFileDetails = true }
+                    }
+                    FadedSecondaryButton("Forslag til flere filer", icon: "square.stack") { showBatchReview = true }
+                        .sheet(isPresented: $showBatchReview) { BatchReviewSheet(api: api).id(api.queueTargetID) }
+                    if let contextError { FadedDetailText(contextError) }
+                    fileCards(useSplit: useSplit)
                 } else {
-                    FadedDetailText("Din makker på PC’en. Se ændringen, før den skrives.")
-                    autonomyCard
-                    fileCards
-                    featureCard
-                    manualCard
-                    if let proposal { proposalCard(proposal) }
+                    FadedEmptyState(icon: "desktopcomputer", title: "Forbind til din PC",
+                                    detail: "Åbn Forbindelser på Hjem for at se filerne i Agent Workspace.",
+                                    actionTitle: "Gå til Hjem", action: onBack)
                 }
-                if let message {
-                    FadedCard(accent: palette.cyan) { Text(message).font(FadedTypography.body) }
-                }
-            }.padding(FadedSpacing.edge).frame(maxWidth: 680).frame(maxWidth: .infinity)
+            }
+            .padding(FadedSpacing.edge).frame(maxWidth: .infinity, alignment: .leading)
         }
+        .background(FadedBackground(variant: .terminal))
+        .navigationTitle("Code Bot")
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Tilbage", systemImage: "chevron.left", action: onBack)
+            }
+        }
+        .refreshable { await load() }
+    }
+
+    private var workspaceDetail: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
+                    if api == nil {
+                        FadedEmptyState(icon: "desktopcomputer", title: "PC-forbindelse mangler",
+                                        detail: "Gå til Hjem for at forbinde til din PC.",
+                                        actionTitle: "Gå til Hjem", action: onBack)
+                    } else {
+                        if let proposal = currentProposal { proposalCard(proposal).id(proposal.change_id) }
+                        if let message {
+                            FadedCard(accent: palette.cyan) { Text(message).font(FadedTypography.body) }
+                        }
+                        FadedSectionHeader("Agent Workspace", detail: openedFile ?? "Vælg en fil, eller angiv en ny filsti i Ret fil manuelt.")
+                        autonomyCard
+                        featureCard
+                        manualCard
+                    }
+                }
+                .padding(FadedSpacing.edge).frame(maxWidth: 680).frame(maxWidth: .infinity)
+            }
+            .onChange(of: currentProposal?.change_id, initial: true) { _, id in
+                if let id { proxy.scrollTo(id, anchor: .top) }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if let proposal = currentProposal {
+                    workspaceApprovalBar(proposal)
+                }
+            }
+        }
+        .background(FadedBackground(variant: .terminal))
+        .confirmationDialog("Godkend filændringen?", isPresented: $approval, presenting: currentProposal) { item in
+            Button("Skriv filen", role: .destructive) { Task { await apply(item) } }
+        } message: { item in
+            Text("Kun \(item.path) i Agent Workspace bliver ændret.")
+        }
+    }
+
+    private var currentProposal: V2CodeProposal? {
+        guard let api, proposalTargetID == api.queueTargetID else { return nil }
+        return proposal
     }
 
     private var autonomyCard: some View {
@@ -293,7 +228,7 @@ struct CodeWorkspaceView: View {
         }
     }
 
-    @ViewBuilder private var fileCards: some View {
+    @ViewBuilder private func fileCards(useSplit: Bool) -> some View {
         FadedSectionHeader("Aktive filer")
         if let workspaceError {
             RetryNotice(message: workspaceError) { Task { await load() } }
@@ -306,33 +241,42 @@ struct CodeWorkspaceView: View {
         }
         ForEach(files) { file in
             let isSelected = selected.contains(file.path)
-            Button {
-                guard !loading else { return }
-                if isSelected { selected.remove(file.path) }
-                else { selected.insert(file.path) }
-                persistContext()
-                Task { await open(file.path) }
-            } label: {
-                FadedCard(accent: isSelected ? palette.lime : nil) {
-                    HStack(spacing: 10) {
+            FadedCard(accent: openedFile == file.path ? palette.cyan : nil) {
+                HStack(spacing: FadedSpacing.s) {
+                    Button {
+                        if isSelected { selected.remove(file.path) }
+                        else { selected.insert(file.path) }
+                        persistContext()
+                    } label: {
                         Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
                             .foregroundStyle(isSelected && palette.isDark ? palette.lime : palette.secondary)
-                        VStack(alignment: .leading) {
-                            Text(file.path).font(FadedTypography.code).lineLimit(2)
-                            Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))
-                                .font(.caption.monospacedDigit()).foregroundStyle(palette.secondary)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(isSelected ? "Fjern \(file.path) fra kontekst" : "Tilføj \(file.path) til kontekst")
+                    .accessibilityAddTraits(isSelected ? .isSelected : [])
+                    Button {
+                        if !useSplit { showFileDetails = true }
+                        Task { await open(file.path) }
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading) {
+                                Text(file.path).font(FadedTypography.code)
+                                Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))
+                                    .font(.caption.monospacedDigit()).foregroundStyle(palette.secondary)
+                            }
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right").foregroundStyle(palette.secondary)
+                                .accessibilityHidden(true)
                         }
-                        Spacer(minLength: 0)
-                    }.frame(minHeight: 44)
-                }
-                .overlay {
-                    if isSelected { RoundedRectangle(cornerRadius: FadedRadius.card).strokeBorder(palette.lime, lineWidth: 2).allowsHitTesting(false) }
+                        .frame(minHeight: 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Åbn \(file.path)")
                 }
             }
-            .buttonStyle(.plain)
             .disabled(loading)
-            .accessibilityLabel(file.path)
-            .accessibilityAddTraits(isSelected ? .isSelected : [])
         }
     }
 
@@ -347,10 +291,6 @@ struct CodeWorkspaceView: View {
     private var featureCard: some View {
         FadedCard {
             VStack(alignment: .leading, spacing: 10) {
-                if let api {
-                    NavigationLink("Forslag til flere filer") { BatchReviewView(api: api) }
-                        .buttonStyle(FadedButtonStyle(kind: .secondary))
-                }
                 FadedSectionHeader("Byg en funktion", detail: "Vælg en fil og beskriv én ændring. Brug startlinjen, hvis filen er lang.")
                 FadedFieldLabel("Hvad skal ændres?")
                 TextField("Hvad skal ændres?", text: $featureRequest, axis: .vertical)
@@ -362,7 +302,7 @@ struct CodeWorkspaceView: View {
                 Button { Task { await generateFeature() } } label: {
                     Label("Forbered forslag", systemImage: "terminal").frame(maxWidth: .infinity)
                 }
-                .buttonStyle(FadedButtonStyle(kind: proposal == nil ? .primary : .secondary))
+                .buttonStyle(FadedButtonStyle(kind: currentProposal == nil ? .primary : .secondary))
                 .disabled(featureBlocker != nil)
                 if let featureBlocker { Text(featureBlocker).font(.caption).foregroundStyle(palette.secondary) }
                 if !codeStatus.isEmpty { Text(codeStatus).font(.caption).foregroundStyle(palette.secondary) }
@@ -390,16 +330,33 @@ struct CodeWorkspaceView: View {
         FadedCard(accent: palette.cyan) {
             VStack(alignment: .leading, spacing: 10) {
                 Label("Dit tjek. Din godkendelse.", systemImage: "lock.shield").font(FadedTypography.action)
+                Text(proposal.path).font(FadedTypography.code)
                 FadedDiff(diff: proposal.diff)
                 if !testPlan.isEmpty {
                     FadedSectionLabel("Testplan")
                     ForEach(Array(testPlan.enumerated()), id: \.offset) { item in Text("\(item.offset + 1). \(item.element)") }
                 }
-                FadedPrimaryButton("Godkend ændring", icon: "checkmark") { approval = true }.disabled(loading)
-                if loading { Text("Vent på PC’en.").font(.caption).foregroundStyle(palette.secondary) }
-                FadedSecondaryButton("Afvis") { Task { await reject(proposal) } }.disabled(loading)
             }
         }
+    }
+
+    private func workspaceApprovalBar(_ proposal: V2CodeProposal) -> some View {
+        VStack(spacing: FadedSpacing.s) {
+            if loading { FadedDetailText("Vent på PC’en.") }
+            else if unverifiedApprovalID == proposal.change_id { FadedDetailText("Åbn filen igen, og tjek den, før du opretter et nyt forslag.") }
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: FadedSpacing.s) { workspaceApprovalActions(proposal) }
+                VStack(spacing: FadedSpacing.s) { workspaceApprovalActions(proposal) }
+            }.disabled(loading)
+        }
+        .padding(.horizontal, FadedSpacing.edge).padding(.vertical, FadedSpacing.s)
+        .background(palette.background)
+    }
+
+    @ViewBuilder private func workspaceApprovalActions(_ proposal: V2CodeProposal) -> some View {
+        FadedSecondaryButton("Afvis", role: .destructive) { Task { await reject(proposal) } }
+        FadedPrimaryButton("Godkend ændring", icon: "checkmark") { approval = true }
+            .disabled(unverifiedApprovalID == proposal.change_id)
     }
 
     private func load() async {
@@ -428,34 +385,55 @@ struct CodeWorkspaceView: View {
     }
 
     private func reloadFiles(_ api: LiveAPI) async throws {
-        files = try await api.v2CodeWorkspace().files
+        let refreshed = try await api.v2CodeWorkspace().files
+        if workspaceScope == api.queueTargetID { files = refreshed }
     }
 
     private func open(_ file: String) async {
-        guard let api, !loading else { return }
-        loading = true; defer { loading = false }
+        guard let api, workspaceScope == api.queueTargetID, !loading else { return }
+        loading = true
+        message = nil
+        defer { if workspaceScope == api.queueTargetID { loading = false } }
         do {
             let found = try await api.v2CodeFile(path: file)
+            guard workspaceScope == api.queueTargetID else { return }
+            guard found.path == file else { throw V2Failure.invalidResponse }
+            openedFile = found.path
             path = found.path
             content = found.content
             firstEditLine = "1"
         }
-        catch { AppDiagnostics.record(error); message = "Filen kunne ikke åbnes sikkert." }
+        catch {
+            AppDiagnostics.record(error)
+            if workspaceScope == api.queueTargetID { message = "Filen kunne ikke åbnes sikkert. Vælg den igen i fillisten." }
+        }
     }
 
     private func prepare() async {
-        guard let api, !loading else { return }
+        guard let api, workspaceScope == api.queueTargetID, !loading else { return }
+        let target = path
         proposal = nil
+        proposalTargetID = nil
         generatedProposal = nil
         testPlan = []
         codeStatus = ""
-        loading = true; defer { loading = false }
-        do { proposal = try await api.v2CodeProposal(path: path, content: content); message = nil }
-        catch { AppDiagnostics.record(error); message = "Ændringen kunne ikke forberedes. Tjek filstien og prøv igen." }
+        loading = true
+        defer { if workspaceScope == api.queueTargetID { loading = false } }
+        do {
+            let prepared = try await api.v2CodeProposal(path: target, content: content)
+            guard workspaceScope == api.queueTargetID else { return }
+            guard prepared.requires_approval, prepared.path == target, !prepared.diff.isEmpty else { throw V2Failure.invalidResponse }
+            proposal = prepared
+            proposalTargetID = api.queueTargetID
+            message = nil
+        } catch {
+            AppDiagnostics.record(error)
+            if workspaceScope == api.queueTargetID { message = "Ændringen kunne ikke forberedes. Tjek filstien og prøv igen." }
+        }
     }
 
     private func generateFeature() async {
-        guard let api, !loading else { return }
+        guard let api, workspaceScope == api.queueTargetID, !loading else { return }
         let brief = featureRequest.trimmingCharacters(in: .whitespacesAndNewlines)
         let target = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !brief.isEmpty, !target.isEmpty else { return }
@@ -464,12 +442,14 @@ struct CodeWorkspaceView: View {
             return
         }
         proposal = nil
+        proposalTargetID = nil
         generatedProposal = nil
         testPlan = []
         loading = true; codeStatus = "Henter den aktuelle fil fra PC’en…"
-        defer { loading = false }
+        defer { if workspaceScope == api.queueTargetID { loading = false } }
         do {
             let original = try await workspaceSource(api, path: target)
+            guard workspaceScope == api.queueTargetID else { return }
             let source = original ?? ""
             let context = try WorkspacePatch.context(goal: brief, path: target, source: source, firstLine: firstLine)
             let request = try V2ChatRequest(message: context.prompt)
@@ -478,10 +458,12 @@ struct CodeWorkspaceView: View {
             let stream = DraftStream()
             try await api.v2Chat(request) { event in
                 await MainActor.run {
+                    guard workspaceScope == api.queueTargetID else { return }
                     if event.type == .text { stream.append(event.content) }
                     if event.type == .tool_status { codeStatus = codeStatusText(event.content, api: api) }
                 }
             }
+            guard workspaceScope == api.queueTargetID else { return }
             guard !stream.overflowed else { throw WorkspacePatch.Failure.invalidDiff }
             let result = try JSONDecoder().decode(FeatureDraft.self, from: ModelJSON.payload(stream.text))
             guard result.feasible else {
@@ -494,17 +476,21 @@ struct CodeWorkspaceView: View {
             else { throw WorkspacePatch.Failure.invalidDiff }
             let revised = try WorkspacePatch.applying(diff, to: source, path: target, within: context.lines)
             try await checkSource(api, path: target, original: original)
+            guard workspaceScope == api.queueTargetID else { return }
             let prepared = try await api.v2CodeProposal(path: target, content: revised)
             guard prepared.requires_approval, prepared.path == target, !prepared.diff.isEmpty else {
                 throw V2Failure.invalidResponse
             }
             try await checkSource(api, path: target, original: original)
+            guard workspaceScope == api.queueTargetID else { return }
             generatedProposal = GeneratedProposal(original: original, revised: revised)
             proposal = prepared
+            proposalTargetID = api.queueTargetID
             testPlan = plan.map { codeStatusText($0, api: api) }
             codeStatus = "Forslaget er klar. Gennemgå diff og testplan."
         } catch {
             AppDiagnostics.record(error)
+            guard workspaceScope == api.queueTargetID else { return }
             codeStatus = (error as? WorkspacePatch.Failure)?.message
                 ?? pcBusyMessage(error) ?? "Code Bot kunne ikke forberede ændringen. Ingen fil blev skrevet."
         }
@@ -535,10 +521,12 @@ struct CodeWorkspaceView: View {
     }
 
     private func reject(_ item: V2CodeProposal) async {
-        guard let api, !loading else { return }
-        loading = true; defer { loading = false }
+        guard let api, workspaceScope == api.queueTargetID, currentProposal?.change_id == item.change_id, !loading else { return }
+        loading = true
+        defer { if workspaceScope == api.queueTargetID { loading = false } }
         do {
             let result = try await api.v2ApplyCodeProposal(item.change_id, approved: false)
+            guard workspaceScope == api.queueTargetID else { return }
             guard result.change_id == item.change_id, result.path == item.path else { throw V2Failure.invalidResponse }
             guard !result.applied else {
                 message = "PC’en melder, at ændringen allerede er anvendt. Genindlæs filen."
@@ -547,15 +535,18 @@ struct CodeWorkspaceView: View {
             confirmRejection()
         } catch let V2Failure.http(status, code, explanation) where
             status == 409 && code == "NOT_READY" && explanation == "Ændringen blev ikke godkendt. Intet blev skrevet." {
+            guard workspaceScope == api.queueTargetID else { return }
             confirmRejection()
         } catch {
             AppDiagnostics.record(error)
+            guard workspaceScope == api.queueTargetID else { return }
             message = "PC’en bekræftede ikke afvisningen. Forslaget vises stadig."
         }
     }
 
     private func confirmRejection() {
         proposal = nil
+        proposalTargetID = nil
         generatedProposal = nil
         testPlan = []
         codeStatus = ""
@@ -563,14 +554,21 @@ struct CodeWorkspaceView: View {
     }
 
     private func apply(_ item: V2CodeProposal) async {
-        guard let api, !loading else { return }
-        loading = true; defer { loading = false }
+        guard let api, workspaceScope == api.queueTargetID, currentProposal?.change_id == item.change_id,
+              unverifiedApprovalID != item.change_id, !loading else { return }
+        loading = true
+        defer { if workspaceScope == api.queueTargetID { loading = false } }
         do {
             if let generatedProposal {
                 try await checkSource(api, path: item.path, original: generatedProposal.original)
             }
+            guard workspaceScope == api.queueTargetID else { return }
+            unverifiedApprovalID = item.change_id
             let result = try await api.v2ApplyCodeProposal(item.change_id, approved: true)
+            guard workspaceScope == api.queueTargetID else { return }
+            guard result.change_id == item.change_id, result.path == item.path else { throw V2Failure.invalidResponse }
             proposal = nil
+            proposalTargetID = nil
             if result.applied, item.path == path, let generatedProposal { content = generatedProposal.revised }
             generatedProposal = nil
             codeStatus = ""
@@ -578,15 +576,22 @@ struct CodeWorkspaceView: View {
             try? await reloadFiles(api)
         } catch let failure as WorkspacePatch.Failure {
             AppDiagnostics.record(failure)
+            guard workspaceScope == api.queueTargetID else { return }
             proposal = nil
+            proposalTargetID = nil
             generatedProposal = nil
-            codeStatus = failure.message
-        } catch { AppDiagnostics.record(error); message = "PC’en bekræftede ikke ændringen. Intet nyt forsøg blev sendt." }
+            message = failure.message
+        } catch {
+            AppDiagnostics.record(error)
+            if workspaceScope == api.queueTargetID { message = "PC’en bekræftede ikke ændringen. Intet nyt forsøg blev sendt." }
+        }
     }
 
     private func persistContext() {
-        do { try MigratedAppData.shared.saveCodeContext(Array(selected).sorted()) }
-        catch { AppDiagnostics.record(error); message = "Filvalget kunne ikke gemmes." }
+        do {
+            try MigratedAppData.shared.saveCodeContext(Array(selected).sorted())
+            contextError = nil
+        } catch { AppDiagnostics.record(error); contextError = "Filvalget kunne ikke gemmes." }
     }
 
     private func restoreContext() {

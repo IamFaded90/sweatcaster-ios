@@ -100,10 +100,12 @@ struct PhoneModelsView: View {
     @AppStorage(AppStorageKeys.phoneModel) private var selected = "apple"
     @AppStorage(AppStorageKeys.phoneModelLiteBattery) private var liteBattery = false
     @AppStorage(AppStorageKeys.phoneModelFavorites) private var favoriteModels = ""
-    @State private var requestingDownload = false
+    @State private var downloadConfirmation: PhoneModels.Entry?
+    @State private var requestedDownloadID: String?
     @State private var importing = false
     @State private var working = false
     @State private var notice: String?
+    @State private var downloadSuccess: String?
     @State private var storage: ModelDiskStorage.Snapshot?
     @State private var storageRevision = 0
     @State private var benchmarkRunning = false
@@ -131,7 +133,9 @@ struct PhoneModelsView: View {
     }
 
     private var downloader: ModelDownloader { .shared }
-    private var mutationBusy: Bool { working || benchmarkRunning || requestingDownload || downloader.isDownloading }
+    private var mutationBusy: Bool {
+        working || benchmarkRunning || requestedDownloadID != nil || downloader.isDownloading || PhoneModelDownloads.shared.preparingModelID != nil
+    }
     private var favorites: Set<String> { Set(favoriteModels.split(separator: "|").map(String.init)) }
     private var orderedCatalog: [PhoneModels.Entry] {
         PhoneModels.catalog.filter { favorites.contains($0.id) } + PhoneModels.catalog.filter { !favorites.contains($0.id) }
@@ -144,10 +148,7 @@ struct PhoneModelsView: View {
                     if typeSize.isAccessibilitySize { pagePicker.pickerStyle(.menu) }
                     else { pagePicker.pickerStyle(.segmented) }
                     modelPage
-                    if let notice {
-                        Text(notice).font(.footnote).foregroundStyle(palette.secondary)
-                            .accessibilityAddTraits(.updatesFrequently)
-                    }
+                    if let notice { FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently) }
                 }
                 .padding(16).frame(maxWidth: 640).frame(maxWidth: .infinity)
             }
@@ -161,6 +162,27 @@ struct PhoneModelsView: View {
             .task(id: storageRevision) { await refreshStorage() }
             .onChange(of: downloader.isDownloading) { _, isDownloading in
                 if !isDownloading { storageRevision += 1 }
+            }
+            .onChange(of: PhoneModelDownloads.shared.preparingModelID) { _, id in
+                if id == nil { storageRevision += 1 }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if let downloadSuccess {
+                    FadedToast(downloadSuccess, tone: .success).padding(.horizontal, FadedSpacing.edge)
+                }
+            }
+            .task(id: downloadSuccess) {
+                guard downloadSuccess != nil else { return }
+                do { try await Task.sleep(for: .seconds(4)) }
+                catch { return }
+                downloadSuccess = nil
+            }
+            .confirmationDialog("Hent stor model?", isPresented: Binding(
+                get: { downloadConfirmation != nil }, set: { if !$0 { downloadConfirmation = nil } }
+            ), presenting: downloadConfirmation) { entry in
+                Button("Hent modellen") { download(entry) }
+            } message: { entry in
+                Text("\(entry.name) fylder ca. \(ModelDiskStorage.gigabytes(entry.estimatedDownloadBytes)). PC anbefales ved lav hukommelse.")
             }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.folder]) { result in
                 if case .success(let url) = result { importModel(url) }
@@ -176,9 +198,9 @@ struct PhoneModelsView: View {
     @ViewBuilder private var modelPage: some View {
         switch page {
         case .models:
-            favoriteSection
-            appleCard
             catalogSection
+            appleCard
+            favoriteSection
             importSection
         case .storage:
             storageSection
@@ -254,36 +276,48 @@ struct PhoneModelsView: View {
 
     private var catalogSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            FadedSectionHeader("Core ML-modeller", detail: "Størrelser er cirka. RAM afhænger af telefonen og længden af chatten.")
+            FadedSectionHeader("Alle \(PhoneModels.catalog.count) iPhone-modeller",
+                               detail: "Hent en model for at bruge den uden internet. Pakkestørrelserne er omtrentlige.")
             ForEach(orderedCatalog, content: modelCard)
         }
     }
 
     private func modelCard(_ entry: PhoneModels.Entry) -> some View {
-        let downloading = downloader.downloadingModelId == entry.id && downloader.isDownloading
+        let direct = PhoneModelDownloads.shared.directModelID == entry.id
+        let downloading = direct || (downloader.downloadingModelId == entry.id && downloader.isDownloading)
+        let preparing = !downloading && (requestedDownloadID == entry.id || PhoneModelDownloads.shared.preparingModelID == entry.id)
         let supported = PhoneModels.supportsLocalInference(entry.id)
         let ready = PhoneModels.isReady(entry.id)
         let onDisk = storage?.text[entry.id]
-        let status = downloading ? "Henter" : ready ? "Klar" : supported ? (onDisk == nil ? "Ikke hentet" : "Ufuldstændig") : "Utilgængelig i appen"
-        let color = downloading ? palette.lime : ready ? palette.green : palette.secondary
+        let status = catalogStatus(downloading, preparing, ready, supported, onDisk != nil)
         return FadedCard(accent: selected == entry.id && ready ? palette.lime : nil) {
             VStack(alignment: .leading, spacing: 10) {
                 modelHeader(entry.name, icon: "cpu", id: entry.id, ready: ready)
-                modelStatus(status, color: color)
-                Text(entry.description).font(.subheadline).foregroundStyle(palette.secondary)
-                if let model = entry.model {
-                    let details = entry.memory.map { "\(model.size) · \($0)" } ?? model.size
-                    Text(details).font(.caption).foregroundStyle(palette.secondary)
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        status
+                        if entry.recommendsPC { FadedBadge("PC anbefales", tone: .warning) }
+                    }
+                    VStack(alignment: .leading) {
+                        status
+                        if entry.recommendsPC { FadedBadge("PC anbefales", tone: .warning) }
+                    }
                 }
+                FadedDetailText("Ca. \(ModelDiskStorage.gigabytes(entry.estimatedDownloadBytes)) · \(entry.description)")
+                Text("Bedst til: \(entry.bestFor)").font(.subheadline)
                 if downloading {
-                    downloadProgress
+                    downloadProgress(direct: direct)
+                } else if preparing {
+                    ProgressView("Klargør download…")
+                    FadedSecondaryButton("Annuller download", icon: "xmark", role: .destructive) { PhoneModelDownloads.shared.cancel() }
                 } else if let reason = entry.unavailableReason {
-                    Text(reason).font(.caption).foregroundStyle(palette.secondary)
+                    FadedDetailText(reason)
                 } else if ready && selected != entry.id {
                     FadedSecondaryButton("Brug modellen", icon: "checkmark") { select(entry.id) }
-                } else if !ready, let model = entry.model {
+                } else if !ready, supported {
                     FadedSecondaryButton(onDisk == nil ? "Hent og vælg" : "Reparér og vælg", icon: "arrow.down.circle") {
-                        download(model)
+                        if entry.recommendsPC { downloadConfirmation = entry }
+                        else { download(entry) }
                     }.disabled(mutationBusy)
                 }
                 if let bytes = onDisk {
@@ -293,13 +327,22 @@ struct PhoneModelsView: View {
         }
     }
 
-    private var downloadProgress: some View {
-        let progress = min(1, max(0, downloader.progress))
+    private func catalogStatus(_ downloading: Bool, _ preparing: Bool, _ ready: Bool, _ supported: Bool, _ partial: Bool) -> FadedBadge {
+        if downloading { return FadedBadge("Henter", tone: .info) }
+        if preparing { return FadedBadge("Klargør", tone: .info) }
+        if ready { return FadedBadge("Klar", tone: .success) }
+        if !supported { return FadedBadge("Utilgængelig", tone: .warning) }
+        if partial { return FadedBadge("Ufuldstændig", tone: .warning) }
+        return FadedBadge("Ikke hentet", tone: .info)
+    }
+
+    private func downloadProgress(direct: Bool) -> some View {
+        let progress = min(1, max(0, direct ? PhoneModelDownloads.shared.directProgress : downloader.progress))
         return VStack(alignment: .leading, spacing: 8) {
             FadedProgress(value: progress)
             Text("Henter modellen · \(progress.formatted(.percent.precision(.fractionLength(0))))")
                 .font(.caption.monospacedDigit()).foregroundStyle(palette.secondary)
-            Text("Download fortsætter normalt i baggrunden, når iOS tillader det.")
+            Text(direct ? "Hold appen åben. Færdige filer genbruges, hvis du afbryder." : "Download fortsætter normalt i baggrunden, når iOS tillader det.")
                 .font(.caption).foregroundStyle(palette.secondary)
             FadedSecondaryButton("Annuller download", icon: "xmark", role: .destructive) {
                 PhoneModelDownloads.shared.cancel()
@@ -448,21 +491,21 @@ struct PhoneModelsView: View {
          .accessibilityLabel(favorites.contains(id) ? "Fjern favoritmodel" : "Gør til favoritmodel")
     }
 
-    private func download(_ model: ModelDownloader.ModelInfo) {
-        let reserves: [String: Int64] = ["lfm2.5-350m": 1_200_000_000, "gemma4-e2b": 7_000_000_000]
-        guard PhoneModels.supportsLocalInference(model.id) else { return }
-        guard PhoneModels.hasDownloadSpace(bytes: reserves[model.id] ?? 2_000_000_000) else {
+    private func download(_ entry: PhoneModels.Entry) {
+        guard let model = entry.model, PhoneModels.supportsLocalInference(model.id), !mutationBusy else { return }
+        if PhoneModels.isReady(model.id) { select(model.id); return }
+        guard PhoneModels.hasDownloadSpace(bytes: entry.minimumFreeBytes) else {
             notice = "Der er ikke plads nok til modellen. Frigør plads, og prøv igen."
             return
         }
-        guard !mutationBusy else { return }
-        requestingDownload = true
+        requestedDownloadID = model.id
         notice = nil
+        downloadSuccess = nil
         Task {
-            defer { requestingDownload = false; storageRevision += 1 }
+            defer { requestedDownloadID = nil; storageRevision += 1 }
             do {
                 try await PhoneModelDownloads.shared.download(model)
-                notice = selected == model.id ? "Modellen er hentet og valgt." : "Modellen er hentet og klar."
+                downloadSuccess = "\(entry.name) er hentet og klar."
             } catch is CancellationError { AppDiagnostics.record(CancellationError()); notice = "Download annulleret." }
             catch { AppDiagnostics.record(error); notice = "Modellen kunne ikke hentes. Tjek internet og ledig plads, og prøv igen." }
         }
@@ -491,9 +534,14 @@ struct PhoneModelsView: View {
 
     private func refreshStorage() async {
         var textFolders: [String: URL] = [:]
+        let root = ModelDiskStorage.textRoot.resolvingSymlinksInPath().standardizedFileURL
         for entry in PhoneModels.catalog {
-            guard let model = entry.model, downloader.hasFiles(model) else { continue }
-            textFolders[entry.id] = ModelDiskStorage.textRoot.appendingPathComponent(model.folderName, isDirectory: true)
+            guard let model = entry.model else { continue }
+            let folder = root.appendingPathComponent(model.folderName, isDirectory: true)
+            guard folder.path == folder.resolvingSymlinksInPath().path,
+                  let flags = try? folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  flags.isDirectory == true, flags.isSymbolicLink != true else { continue }
+            textFolders[entry.id] = folder
         }
         if FileManager.default.fileExists(atPath: PhoneModels.importedFolder.path) { textFolders["imported"] = PhoneModels.importedFolder }
         let folders = textFolders

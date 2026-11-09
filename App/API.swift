@@ -24,10 +24,15 @@ struct Server: Sendable {
         } else { address = input }
         let parts = address.split(separator: ".", omittingEmptySubsequences: false)
         let n = parts.compactMap { UInt8($0) }
-        guard parts.count == 4, n.count == 4, n.map({ String($0) }).joined(separator: ".") == address,
+        guard parts.count == 4, n.count == 4,
               n[0] == 10 || (n[0] == 172 && (16...31).contains(n[1])) ||
-              (n[0] == 192 && n[1] == 168) || (n[0] == 100 && (64...127).contains(n[1])),
-              let origin = URL(string: "http://\(address):8765") else { throw APIError.address }
+              (n[0] == 192 && n[1] == 168) || (n[0] == 100 && (64...127).contains(n[1])) else { throw APIError.address }
+        let canonical = n.map { String($0) }.joined(separator: ".")
+        if parts.allSatisfy({ $0.utf8.allSatisfy { (48...57).contains($0) } }),
+           parts.contains(where: { $0.count > 1 && $0.first == "0" }) {
+            throw APIError.addressLeadingZeros(canonical)
+        }
+        guard canonical == address, let origin = URL(string: "http://\(address):8765") else { throw APIError.address }
         self.address = address
         self.origin = origin
         self.profile = n[0] == 100 ? .tailscale : .home
@@ -200,6 +205,11 @@ struct LiveAPI: SweatAPI, ChatAPI {
             safe.removeLast(length)
         }
         return safe
+    }
+
+    func reportedReplyModelID(for event: V2ChatEvent) -> String? {
+        guard event.type == .done, let id = ModelRouter.validReportedID(event.model_id), redact(id) == id else { return nil }
+        return id
     }
     private func json<T: Decodable>(_ path: String, status: Int = 200, post: Bool = false,
                                      body: Batch? = nil, auth: Bool = true, timeout: TimeInterval? = nil) async throws -> T {
@@ -430,9 +440,15 @@ extension LiveAPI {
             defer { bytes.task.cancel() }
             var data = Data()
             if http.mimeType == "application/json" {
-                for try await byte in bytes {
-                    guard data.count < 65_536 else { break }
-                    data.append(byte)
+                do {
+                    for try await byte in bytes {
+                        guard data.count < 65_536 else { break }
+                        data.append(byte)
+                    }
+                } catch let error as URLError {
+                    AppDiagnostics.record(error)
+                    try Task.checkCancellation()
+                    throw AppDiagnostics.record(V2Failure.interrupted)
                 }
             }
             throw v2HTTPError(http.statusCode, data: data)
@@ -444,11 +460,14 @@ extension LiveAPI {
         return bytes
     }
 
-    func v2Chat(_ input: V2ChatRequest, receive: @Sendable (V2ChatEvent) async -> Void) async throws {
+    func v2Chat(_ input: V2ChatRequest, willPost: (@Sendable () async -> Void)? = nil,
+                receive: @Sendable (V2ChatEvent) async -> Void) async throws {
         try await checkRenderBeforeChat()
         var req = try v2Request("chat", method: "POST")
         req.httpBody = try JSONEncoder().encode(input)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        try Task.checkCancellation()
+        await willPost?()
         let bytes = try await v2Stream(req)
         defer { bytes.task.cancel() }
         var parser = V2ChatParser()
@@ -468,6 +487,14 @@ extension LiveAPI {
         }
         do { try parser.end() }
         catch { throw AppDiagnostics.record(error) }
+    }
+
+    func v2DescribeImage(_ jpegData: Data, prompt: String, model: V2Models.Entry,
+                         receive: @Sendable (V2ChatEvent) async -> Void) async throws {
+        guard model.supportsImageChat else { throw V2Failure.invalidInput }
+        let image = try V2ChatRequest.Image(jpegData: jpegData)
+        let request = try V2ChatRequest(message: prompt, modelID: model.id, image: image)
+        try await v2Chat(request, receive: receive)
     }
 
     func v2HubEvents(after revision: Int, receive: @Sendable (V2HubEvent) async -> Void) async throws {

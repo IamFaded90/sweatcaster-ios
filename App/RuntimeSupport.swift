@@ -18,6 +18,7 @@ enum AppDiagnostics {
             switch api {
             case .http(let status, _): label = "APIError HTTP \(status)"
             case .transport(let code): label = "APIError transport \(code)"
+            case .addressLeadingZeros: label = "APIError: Ledende nuller i PC-adressen"
             default: label = "APIError: " + api.title
             }
         case let v2 as V2Failure:

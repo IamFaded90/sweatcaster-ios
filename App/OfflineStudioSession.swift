@@ -42,6 +42,10 @@ extension OfflineStudio {
         if phase == .background {
             dictation.stop()
             speech.synthesizer.stopSpeaking(at: .immediate)
+            if privateSession, loaded, sessionUnlocked {
+                let backgroundLimit = ContinuousClock.now.advanced(by: .seconds(300))
+                privateDeadline = min(privateDeadline ?? backgroundLimit, backgroundLimit)
+            }
         } else if phase == .active && privateSession {
             if sessionExpired { wipeExpiredPrivateSession(); return }
             if privateDeadline == nil { resetIdleTimer(); return }
@@ -61,26 +65,44 @@ extension OfflineStudio {
         status = "Privat session afsluttet og slettet."
     }
 
-    func clearStudioContent() {
-        if privateSession {
+    func clearStudioContent(includingModels: Bool) {
+        if !includingModels {
             wipeExpiredPrivateSession()
             return
         }
-        guard task == nil else { return }
-        do {
-            let manager = FileManager.default
-            if manager.fileExists(atPath: historyFolder.path) { try manager.removeItem(at: historyFolder) }
-            closeChatSession()
-            try MigratedAppData.shared.clearRegularStudio()
-            promptHistoryData = Data()
-            imageFavoritesData = Data()
-            resetPublicGallery()
-            imageURL = nil
-            batchImageURLs = []
-            batchTurnID = nil
-            sessionUnlocked = false
-            status = "Studiets samtaler og galleri er ryddet."
-        } catch { AppDiagnostics.record(error); status = "Studiets galleri kunne ikke ryddes. Samtaler og modeller er bevaret." }
+        guard task == nil, !LocalCompute.isRunning else {
+            status = "Vent til den lokale opgave er færdig, før du rydder studiet."
+            return
+        }
+        LocalCompute.suspend()
+        defer { LocalCompute.resume() }
+        PhoneModelDownloads.shared.cancel()
+        closeChatSession()
+        loraPreviewSelection = nil
+        removeTemporaryStudioImages()
+        var finished = true
+        do { try MigratedAppData.shared.clearRegularStudio() }
+        catch { AppDiagnostics.record(error); finished = false }
+
+        let previews = URL.applicationSupportDirectory.appending(path: "StudioLoRAPreviews", directoryHint: .isDirectory)
+        for directory in [historyFolder, previews, PhoneModels.importedFolder, PhoneModels.downloadedRoot] {
+            do { try FileManager.default.removeItem(at: directory) }
+            catch let error where LocalFileStore.isMissing(error) { continue }
+            catch { AppDiagnostics.record(error); finished = false }
+        }
+        promptHistoryData = Data()
+        imageFavoritesData = Data()
+        loraLabelsData = Data()
+        loraName = ""
+        useLoRA = false
+        textModel = "apple"
+        resetPublicGallery()
+        imageURL = nil
+        batchImageURLs = []
+        studioShareSheet = nil
+        sessionUnlocked = false
+        status = finished ? "Studiets samtaler, billeder og downloadede modeller er slettet."
+            : "Oprydningen blev ikke færdig. Lås op igen for at prøve på ny."
     }
 
     func monitorPrivateConnectivity() async {
@@ -344,8 +366,16 @@ extension OfflineStudio {
             }
             Stepper("Ryd efter \(Int(sessionPreferences.idleMinutes)) min uden aktivitet", value: $sessionPreferences.idleMinutes,
                     in: 1...15, step: 1)
-            Stepper("Modeldvale efter \(Int(sessionPreferences.modelTimeoutMinutes)) min", value: $sessionPreferences.modelTimeoutMinutes,
-                    in: 1...15, step: 1)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Modeldvale efter \(Int(sessionPreferences.modelTimeoutMinutes)) min")
+                Slider(value: $sessionPreferences.modelTimeoutMinutes, in: 1...15, step: 1)
+                    .accessibilityLabel("Minutter til studiets dvale")
+                    .onChange(of: sessionPreferences.modelTimeoutMinutes) { _, value in
+                        if studioHaptics && (value == 1 || value == 15) {
+                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                        }
+                    }
+            }
             Text("Modeller frigives efter hver opgave. Dvale stopper oplæsning og skjuler forhåndsvisningen.")
                 .font(.caption).foregroundStyle(palette.secondary)
         }

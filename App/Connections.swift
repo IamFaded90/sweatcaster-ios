@@ -52,20 +52,38 @@ private struct ConnectorPhoto: Transferable {
             let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
             guard values.isRegularFile == true, values.isSymbolicLink != true else { throw PickerConnectorError.invalidFile }
             guard let size = values.fileSize, (1...80_000_000).contains(size) else { throw PickerConnectorError.tooLarge }
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
-                  let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                    kCGImageSourceCreateThumbnailFromImageAlways: true,
-                    kCGImageSourceCreateThumbnailWithTransform: true,
-                    kCGImageSourceThumbnailMaxPixelSize: 640
-                  ] as CFDictionary) else { throw PickerConnectorError.invalidFile }
-            let bytes = NSMutableData()
-            guard let destination = CGImageDestinationCreateWithData(bytes as CFMutableData, UTType.jpeg.identifier as CFString, 1, nil) else {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else {
                 throw PickerConnectorError.invalidFile
             }
-            CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
-            guard CGImageDestinationFinalize(destination) else { throw PickerConnectorError.invalidFile }
-            return ConnectorPhoto(data: bytes as Data)
+            return ConnectorPhoto(data: try jpegPreview(from: source))
         }
+    }
+
+    static func preview(for data: Data) -> Data? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary),
+              let identifier = CGImageSourceGetType(source), UTType(identifier as String)?.conforms(to: .image) == true,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any],
+              let width = properties[kCGImagePropertyPixelWidth as String] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight as String] as? Int,
+              (1...12_000).contains(width), (1...12_000).contains(height), width * height <= 80_000_000 else {
+            return nil
+        }
+        return try? jpegPreview(from: source)
+    }
+
+    private static func jpegPreview(from source: CGImageSource) throws -> Data {
+        guard let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 640
+        ] as CFDictionary) else { throw PickerConnectorError.invalidFile }
+        let bytes = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(bytes as CFMutableData, UTType.jpeg.identifier as CFString, 1, nil) else {
+            throw PickerConnectorError.invalidFile
+        }
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: 0.85] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { throw PickerConnectorError.invalidFile }
+        return bytes as Data
     }
 }
 
@@ -75,6 +93,7 @@ private struct ConnectorPhoto: Transferable {
     struct Record: Identifiable {
         let item: ConnectorItem
         let data: Data
+        let photoPreview: Data?
         var id: UUID { item.id }
     }
 
@@ -88,7 +107,7 @@ private struct ConnectorPhoto: Transferable {
     init(source: Source) { self.source = source }
 
     var id: String { source == .photos ? "apple-photos" : "icloud-files" }
-    var name: String { source == .photos ? "Apple Fotos" : "iCloud Drive via Filer" }
+    var name: String { source == .photos ? "Apple Fotos" : "Filer" }
     var icon: String { source == .photos ? "photo.on.rectangle" : "folder" }
     var status: ConnectorStatus { records.isEmpty ? .ready : .selected(records.count) }
 
@@ -96,6 +115,8 @@ private struct ConnectorPhoto: Transferable {
 
     func disconnect() async {
         readTask?.cancel()
+        readTask = nil
+        showPicker = false
         records = []
         notice = nil
         loading = false
@@ -127,7 +148,7 @@ private struct ConnectorPhoto: Transferable {
                 guard let photo = try await item.loadTransferable(type: ConnectorPhoto.self) else {
                     throw PickerConnectorError.invalidFile
                 }
-                selected.append(Self.record(name: "Foto \(index + 1)", data: photo.data))
+                selected.append(Self.record(name: "Foto \(index + 1)", data: photo.data, photoPreview: photo.data))
             }
             return selected
         }
@@ -137,8 +158,18 @@ private struct ConnectorPhoto: Transferable {
         switch result {
         case .success(let url):
             startRead {
-                let data = try await Task.detached(priority: .userInitiated) { try Self.readFile(url) }.value
-                return [Self.record(name: url.lastPathComponent, data: data)]
+                let reader = Task.detached(priority: .userInitiated) {
+                    try Task.checkCancellation()
+                    let data = try Self.readFile(url)
+                    try Task.checkCancellation()
+                    return (data, ConnectorPhoto.preview(for: data))
+                }
+                let (data, preview) = try await withTaskCancellationHandler {
+                    try await reader.value
+                } onCancel: {
+                    reader.cancel()
+                }
+                return [Self.record(name: url.lastPathComponent, data: data, photoPreview: preview)]
             }
         case .failure(let error):
             guard (error as? CocoaError)?.code != .userCancelled else { return }
@@ -152,7 +183,12 @@ private struct ConnectorPhoto: Transferable {
         loading = true
         notice = nil
         readTask = Task {
-            defer { if !Task.isCancelled { loading = false } }
+            defer {
+                if !Task.isCancelled {
+                    loading = false
+                    readTask = nil
+                }
+            }
             do {
                 let items = try await work()
                 try Task.checkCancellation()
@@ -167,14 +203,26 @@ private struct ConnectorPhoto: Transferable {
         }
     }
 
-    private static func record(name: String, data: Data) -> Record {
-        Record(item: ConnectorItem(id: UUID(), name: name, size: data.count), data: data)
+    private static func record(name: String, data: Data, photoPreview: Data?) -> Record {
+        Record(item: ConnectorItem(id: UUID(), name: name, size: data.count), data: data, photoPreview: photoPreview)
     }
 
     nonisolated private static func readFile(_ url: URL) throws -> Data {
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
-        do { return try LocalFileStore.readBytes(from: url, maximumBytes: 5_000_000) }
+        let limit = 5_000_000
+        if let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]) {
+            guard values.isRegularFile != false, values.isSymbolicLink != true else { throw PickerConnectorError.invalidFile }
+            if let size = values.fileSize, size > limit { throw PickerConnectorError.tooLarge }
+        }
+        var coordinationError: NSError?
+        var read: Result<Data, Error>?
+        NSFileCoordinator(filePresenter: nil).coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinationError) { coordinatedURL in
+            read = Result { try LocalFileStore.readBytes(from: coordinatedURL, maximumBytes: limit) }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let read else { throw PickerConnectorError.invalidFile }
+        do { return try read.get() }
         catch LocalFileStore.Failure.tooLarge { throw PickerConnectorError.tooLarge }
     }
 }
@@ -223,7 +271,7 @@ struct ConnectionsView: View {
                 Text("Vælg indhold fra din telefon. Valget vises kun her i denne session.")
                     .foregroundStyle(palette.secondary)
                 pickerCard(photos, detail: "Vælg op til tre billeder i Apples billedvælger. Her vises små lokale forhåndsvisninger.")
-                pickerCard(files, detail: "Vælg én fil op til 5 MB fra iCloud Drive eller en anden placering i Filer.")
+                pickerCard(files, detail: "Vælg én fil op til 5 MB fra iCloud Drive eller en anden placering i Filer. Se billeder og uddrag fra tekstfiler her.")
                 DisclosureGroup("Eksterne tjenester · \(providers.count)") {
                     VStack(spacing: 10) { ForEach(providers) { providerCard($0) } }
                         .padding(.top, 10)
@@ -243,7 +291,9 @@ struct ConnectionsView: View {
         }
         .fileImporter(isPresented: $fileConnector.showPicker, allowedContentTypes: [.data], onCompletion: files.pickFile)
         .sheet(item: $photoToAnalyze) { record in
-            LocalImageAnalysisView(data: record.data, onChooseNote: onChooseNote)
+            if let preview = record.photoPreview {
+                LocalImageAnalysisView(data: preview, onChooseNote: onChooseNote)
+            }
         }
     }
 
@@ -259,7 +309,8 @@ struct ConnectionsView: View {
                 if connector.loading { ProgressView("Læser dit valg…") }
                 if let notice = connector.notice { Text(notice).font(.caption).foregroundStyle(palette.secondary) }
                 ForEach(connector.records) { record in
-                    if connector.source == .photos, let image = UIImage(data: record.data) {
+                    if let preview = record.photoPreview, let image = UIImage(data: preview) {
+                        if connector.source == .files { fileLabel(record) }
                         Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 190)
                             .clipShape(RoundedRectangle(cornerRadius: FadedRadius.small))
                             .accessibilityLabel(record.item.name)
@@ -267,12 +318,12 @@ struct ConnectionsView: View {
                             photoToAnalyze = record
                         }
                     } else {
-                        Label(record.item.name, systemImage: "doc").font(.subheadline)
-                        Text(ByteCountFormatter.string(fromByteCount: Int64(record.item.size), countStyle: .file))
-                            .font(.caption).foregroundStyle(palette.secondary)
-                        if let onChooseNote, let excerpt = noteExcerpt(record) {
-                            Text(excerpt).font(.caption).lineLimit(4)
-                            FadedSecondaryButton("Vedhæft tekstuddrag", icon: "note.text") { onChooseNote(excerpt) }
+                        fileLabel(record)
+                        if let excerpt = noteExcerpt(record) {
+                            Text(verbatim: excerpt).font(.caption).lineLimit(4).textSelection(.enabled)
+                            if let onChooseNote {
+                                FadedSecondaryButton("Vedhæft tekstuddrag", icon: "note.text") { onChooseNote(excerpt) }
+                            }
                         }
                     }
                 }
@@ -280,6 +331,14 @@ struct ConnectionsView: View {
                     FadedSecondaryButton("Fjern valg", icon: "xmark") { Task { await connector.disconnect() } }
                 }
             }
+        }
+    }
+
+    private func fileLabel(_ record: PickerConnector.Record) -> some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            Label(record.item.name, systemImage: "doc").font(.subheadline)
+            Text(ByteCountFormatter.string(fromByteCount: Int64(record.item.size), countStyle: .file))
+                .font(.caption).foregroundStyle(palette.secondary)
         }
     }
 

@@ -66,11 +66,11 @@ extension Home {
     }
 
     var settingsSheet: some View {
-        NavigationStack {
+        NavigationStack(path: $settingsPath) {
             ScrollView {
                 VStack(alignment: .leading, spacing: FadedSpacing.section) {
                     ForEach(SettingsCategory.allCases, id: \.self) { category in
-                        NavigationLink { settingsPage(category) } label: { settingsRow(category) }
+                        NavigationLink(value: category) { settingsRow(category) }
                             .buttonStyle(.plain)
                     }
                 }.padding(FadedSpacing.edge)
@@ -78,7 +78,10 @@ extension Home {
             .background(FadedBackground())
             .navigationTitle("Indstillinger")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Luk") { showSettings = false } }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("Luk") { showSettings = false } }
+            }
+            .navigationDestination(for: SettingsCategory.self) { settingsPage($0) }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
@@ -116,22 +119,29 @@ extension Home {
         Form {
             switch category {
             case .connection:
-                connectionIndicator
-                pingSetting
-                Button("Skift forbindelse") { closeSettings(for: .login) }.disabled(switchDisabled)
-                NavigationLink("Forbindelser") { ConnectionsView() }
-                Toggle("Vis forbindelsesbanner", isOn: $showConnectionBanner)
-                Toggle("Opdatér ved faneskift", isOn: $autoRefreshTabs)
+                Section("PC-forbindelse") {
+                    connectionIndicator
+                    pingSetting
+                    Button("Skift forbindelse") { closeSettings(for: .login) }.disabled(switchDisabled)
+                    NavigationLink("Forbindelser") { ConnectionsView() }
+                }
+                Section("Status og opdatering") {
+                    Toggle("Vis forbindelsesbanner", isOn: $showConnectionBanner)
+                    Toggle("Opdatér ved faneskift", isOn: $autoRefreshTabs)
+                }
             case .models:
-                Button("Lokale modeller (iPhone)") { closeSettings(for: .models) }
-                NavigationLink("PC-modeller (RTX 3070)") { PCModelsView(api: studioAPI) }
-                Toggle("Vælg automatisk model", isOn: $autoModelRouter)
-                Text("Automatisk modelvalg bruger Telefon og PC. Grok vælges manuelt.")
-                    .font(.caption).foregroundStyle(palette.secondary)
-                Button("Privat Studio") { closeSettings(for: .privateChat) }
-                Button("Mine bots") { closeSettings(for: .bots) }
-                Button("Code Bot og Agent Workspace") { closeSettings(for: .code) }
-                CloudModelSettings()
+                Section("Telefon og PC") {
+                    Button("Lokale modeller (iPhone)") { closeSettings(for: .models) }
+                    NavigationLink("PC-modeller (RTX 3070)") { PCModelsView(api: studioAPI) }
+                    Toggle("Vælg automatisk model", isOn: $autoModelRouter)
+                    FadedDetailText("Automatisk modelvalg bruger Telefon og PC. Grok vælges manuelt.")
+                }
+                Section("Grok") { CloudModelSettings() }
+                Section("Værktøjer") {
+                    Button("Privat Studio") { closeSettings(for: .privateChat) }
+                    Button("Mine bots") { closeSettings(for: .bots) }
+                    Button("Code Bot og Agent Workspace") { closeSettings(for: .code) }
+                }
             case .appearance:
                 appearanceSettings
                 Section("Chat og lyd") {
@@ -141,24 +151,35 @@ extension Home {
                     Text("Vælg stemme i chatten eller på din bots profil.").font(.callout).foregroundStyle(palette.secondary)
                 }
             case .diagnostics:
-                pingSetting
-                ResourceMonitor()
-                Section("Notifikationer") { JobNotificationSettings() }
-                Toggle("Liveaktivitet på låseskærmen", isOn: $liveActivityEnabled)
-                Button("Eksportér fejllog", systemImage: "square.and.arrow.up") { closeSettings(for: .export) }
-                Toggle("Gem genererede billeder i Fotos", isOn: $saveImagesToPhotos)
-                Toggle("Bekræft før video startes", isOn: $confirmVideoStart)
-                VideoCleanupSettings(prunePreviews: prunePreviews) {
-                    let previousCount = hiddenJobs.count
-                    hiddenJobs.formUnion(model.jobs.filter { !$0.status.active }.map(\.id))
-                    return hiddenJobs.count - previousCount
+                Section("PC og ressourcer") {
+                    pingSetting
+                    ResourceMonitor()
+                    Button("Eksportér fejllog", systemImage: "square.and.arrow.up") { closeSettings(for: .export) }
                 }
-                NukeLocalDataButton()
+                Section("Notifikationer") {
+                    JobNotificationSettings()
+                    Toggle("Liveaktivitet på låseskærmen", isOn: $liveActivityEnabled)
+                }
+                Section("Medier") {
+                    Toggle("Gem almindelige billeder i Fotos", isOn: $saveImagesToPhotos)
+                    FadedDetailText("Privat Studio gemmer kun en kopi i Fotos, når du selv vælger det.")
+                    Toggle("Bekræft før video startes", isOn: $confirmVideoStart)
+                    VideoCleanupSettings(prunePreviews: prunePreviews) {
+                        let previousCount = hiddenJobs.count
+                        hiddenJobs.formUnion(model.jobs.filter { !$0.status.active }.map(\.id))
+                        return hiddenJobs.count - previousCount
+                    }
+                }
+                Section("Eksperimentelle funktioner") { ExperimentalVillageSetting() }
+                Section("Lokale data") { NukeLocalDataButton() }
             }
         }
         .scrollContentBackground(.hidden)
         .background(FadedBackground())
         .navigationTitle(category.rawValue)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { Button("Luk") { showSettings = false } }
+        }
     }
 
     @ViewBuilder private var pingSetting: some View {
@@ -178,6 +199,7 @@ extension Home {
     }
 
     func openSettingsFollowup() {
+        settingsPath.removeAll()
         guard let destination = settingsFollowup else { return }
         settingsFollowup = nil
         switch destination {
@@ -191,23 +213,29 @@ extension Home {
     }
 
     @ViewBuilder private var appearanceSettings: some View {
-        Picker("Lys og mørke", selection: $appearanceMode) {
-            ForEach(FadedAppearance.allCases, id: \.self) { mode in Text(mode.rawValue).tag(mode) }
+        Section("Tema og tekst") {
+            Picker("Lys og mørke", selection: $appearanceMode) {
+                ForEach(FadedAppearance.allCases, id: \.self) { mode in Text(mode.rawValue).tag(mode) }
+            }
+            Picker("Tema", selection: $theme) {
+                ForEach(FadedTheme.allCases) { choice in Text(choice.rawValue).tag(choice) }
+            }
+            textSizeSetting
+            Picker("Skrift", selection: $font) {
+                ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
+            }
         }
-        Picker("Tema", selection: $theme) {
-            ForEach(FadedTheme.allCases) { choice in Text(choice.rawValue).tag(choice) }
+        Section("Bevægelse og navigation") {
+            Toggle("Bevægelse i baggrunden", isOn: $motion)
+            Toggle("Ekstra rolig bevægelse", isOn: $calmMotion)
+            Toggle("Husk seneste fane", isOn: $rememberLastSpace)
+            Toggle("Hold skærmen vågen", isOn: $keepScreenAwake)
         }
-        textSizeSetting
-        Picker("Skrift", selection: $font) {
-            ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
+        Section("Video") {
+            Toggle("Kompakte klipkort", isOn: $compactClipCards)
+            Toggle("Vis kliplængde", isOn: $showClipDurations)
+            Toggle("Vis jobdetaljer", isOn: $showJobDetails)
         }
-        Toggle("Bevægelse i baggrunden", isOn: $motion)
-        Toggle("Ekstra rolig bevægelse", isOn: $calmMotion)
-        Toggle("Husk seneste fane", isOn: $rememberLastSpace)
-        Toggle("Hold skærmen vågen", isOn: $keepScreenAwake)
-        Toggle("Kompakte klipkort", isOn: $compactClipCards)
-        Toggle("Vis kliplængde", isOn: $showClipDurations)
-        Toggle("Vis jobdetaljer", isOn: $showJobDetails)
     }
 
     private var textSizeSetting: some View {

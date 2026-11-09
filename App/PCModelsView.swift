@@ -18,7 +18,26 @@ enum PCModelSelection {
     }
 
     static func usable(_ entry: V2Models.Entry) -> Bool {
-        entry.available && entry.capabilities.contains("chat")
+        entry.available && entry.capabilities.contains("chat") && !entry.requiresImageForChat
+    }
+
+    static func installed(in catalog: V2Models) -> [V2Models.Entry] {
+        var seen = Set<String>()
+        return catalog.models.filter { $0.available && !$0.id.isEmpty && seen.insert($0.id).inserted }
+    }
+
+    static func advertised(in catalog: V2Models) -> [V2Models.Entry] {
+        let available = Dictionary(uniqueKeysWithValues: installed(in: catalog).map { ($0.id, $0) })
+        var seen = Set<String>()
+        return catalog.models.filter { !$0.id.isEmpty && seen.insert($0.id).inserted }.map { available[$0.id] ?? $0 }
+    }
+
+    static func textModel(in catalog: V2Models, preferredID: String?) -> V2Models.Entry? {
+        let models = installed(in: catalog).filter(usable)
+        return models.first { $0.id == preferredID }
+            ?? models.first { $0.id == catalog.default_model_id }
+            ?? models.first { $0.loaded }
+            ?? models.first
     }
 }
 
@@ -40,8 +59,9 @@ struct PCModelsView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: FadedSpacing.action) {
                 FadedSignature()
-                FadedDetailText("Vælg den model, PC’en skal bruge næste gang du sender en chatbesked.")
+                FadedDetailText("Vælg din foretrukne model til PC-chat. PC’en indlæser modellen ved brug. Auto kan vælge en anden model til opgaven.")
                 modelContent
+                cloudCard
             }
             .padding(FadedSpacing.edge).frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
@@ -49,6 +69,10 @@ struct PCModelsView: View {
         .foregroundStyle(palette.text)
         .navigationTitle("PC-modeller")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            Button("Opdatér modeller", systemImage: "arrow.clockwise") { Task { await refresh() } }
+                .disabled(api == nil || requestID != nil)
+        }
         .task(id: api?.queueTargetID) { await refresh() }
         .refreshable { await refresh() }
     }
@@ -66,16 +90,18 @@ struct PCModelsView: View {
                     FadedSecondaryButton("Prøv igen", icon: "arrow.clockwise") { Task { await refresh() } }
                 }
             }
-        } else if let catalog, catalog.models.isEmpty {
-            FadedEmptyState(icon: "cpu", title: "Ingen modeller at vise",
-                            detail: "Kontrollér, at en model er installeret på PC’en, og opdatér listen.",
+        } else if let catalog, PCModelSelection.advertised(in: catalog).isEmpty {
+            FadedEmptyState(icon: "cpu", title: "Ingen modeller i PC-kataloget",
+                            detail: "PC’en sendte et tomt modelkatalog. Kontrollér Ollama på PC’en, og opdatér listen.",
                             actionTitle: "Opdatér modeller") { Task { await refresh() } }
         } else if let catalog {
             if !selected.isEmpty && !catalog.models.contains(where: { $0.id == selected && PCModelSelection.usable($0) }) {
                 Text("Den tidligere valgte model er utilgængelig. Vælg en installeret chatmodel, hvis der er en klar.")
                     .font(.footnote).foregroundStyle(palette.secondary)
             }
-            ForEach(catalog.models) { model in modelCard(model, standard: model.id == catalog.default_model_id) }
+            ForEach(PCModelSelection.advertised(in: catalog)) { model in
+                modelCard(model, standard: model.id == catalog.default_model_id)
+            }
         } else {
             LoadingSkeleton(label: "Henter modeller fra PC’en…")
         }
@@ -87,21 +113,41 @@ struct PCModelsView: View {
         return FadedCard(accent: chosen ? palette.lime : model.loaded ? palette.cyan : nil) {
             VStack(alignment: .leading, spacing: 8) {
                 Label(model.label, systemImage: "cpu").font(FadedTypography.section).accessibilityAddTraits(.isHeader)
-                Label(model.available ? "Installeret" : "Ikke installeret",
-                      systemImage: model.available ? "checkmark.circle" : "circle.dashed")
-                    .font(.subheadline).foregroundStyle(palette.secondary)
-                if model.loaded { Label("Indlæst på PC’en", systemImage: "bolt.fill").font(.subheadline) }
+                FadedBadge(model.available ? (model.loaded ? "Indlæst på PC" : "Tilgængelig på PC") : "Utilgængelig på PC",
+                           tone: model.available ? .success : .warning)
+                if let bytes = model.size_bytes, bytes > 0 {
+                    FadedDetailText(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
+                }
+                FadedDetailText(modelDetail(model))
                 if standard { Text("Standard på PC’en").font(.caption).foregroundStyle(palette.secondary) }
                 if chosen {
-                    Label("Valgt til næste chat", systemImage: "checkmark.circle.fill").font(.subheadline)
+                    Label("Foretrukken til PC-chat", systemImage: "checkmark.circle.fill").font(.subheadline)
                 } else if usable {
                     FadedSecondaryButton("Vælg til chat", icon: "bubble.left") { selected = model.id }
                         .disabled(requestID != nil)
                         .accessibilityLabel("Vælg \(model.label) til chat")
-                } else if model.available {
-                    Text("PC’en tilbyder ikke denne model til chat.").font(.caption).foregroundStyle(palette.secondary)
                 }
             }
+        }
+    }
+
+    private func modelDetail(_ model: V2Models.Entry) -> String {
+        if !model.available { return "Kontrollér modellens installation eller opsætning på PC’en." }
+        if model.supportsImageChat {
+            return PCModelSelection.usable(model) ? "Til tekstchat og billedanalyse." : "Brug modellen via Analysér billede i chatten."
+        }
+        if !PCModelSelection.usable(model) { return "PC’en tilbyder denne model til andre opgaver end tekstchat." }
+        if model.capabilities.contains(where: { $0 == "code" || $0 == "coding" }) { return "Til tekstchat og kode." }
+        if model.capabilities.contains("long_context") { return "Til tekstchat med længere kontekst." }
+        return "Til tekstchat på PC’en."
+    }
+
+    private var cloudCard: some View {
+        FadedCard(accent: palette.purple) {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                FadedSectionHeader("Grok", detail: "Separat cloud-destination via xAI. Vælg Grok direkte i AI-chat.")
+                FadedBadge(CloudModelKey.exists() ? "xAI-nøgle gemt" : "Kræver xAI-nøgle", tone: .info)
+            }.frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -115,10 +161,8 @@ struct PCModelsView: View {
             let result = try await api.v2Models()
             try Task.checkCancellation()
             guard requestID == id else { return }
-            var seen = Set<String>()
             loadedTargetID = api.queueTargetID
-            catalog = V2Models(default_model_id: result.default_model_id,
-                               models: result.models.filter { !$0.id.isEmpty && seen.insert($0.id).inserted })
+            catalog = result
         } catch is CancellationError {
             return
         } catch {
@@ -126,7 +170,7 @@ struct PCModelsView: View {
             guard !Task.isCancelled, requestID == id else { return }
             loadedTargetID = api.queueTargetID
             catalog = nil
-            if case .http(status: 401, code: _, message: _)? = error as? V2Failure {
+            if let failure = error as? V2Failure, case .http(status: 401, code: _, message: _) = failure {
                 notice = "PC’en afviste tokenet. Kontrollér forbindelsen i Indstillinger."
             } else if case .http(let status, _, _)? = error as? V2Failure, [404, 405, 501].contains(status) {
                 notice = "PC-serveren tilbyder endnu ingen modeloversigt."

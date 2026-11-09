@@ -1,5 +1,6 @@
-// Migrates six existing defaults values and keeps shared UI data consistent.
+// Migrates local app data and bridges chat storage while older views still use defaults.
 
+import CryptoKit
 import Foundation
 import Observation
 
@@ -36,6 +37,34 @@ import Observation
         }
     }
 
+    private enum ChatField {
+        case archive, session(String), draft(String), promptHistory
+
+        var defaultsKey: String {
+            switch self {
+            case .archive: AppStorageKeys.spacesChatArchiveV1
+            case .session(let sessionKey): sessionKey
+            case .draft(let sessionKey): AppStorageKeys.chatDraft(sessionKey)
+            case .promptHistory: AppStorageKeys.privateChatPromptsV1
+            }
+        }
+
+        var fileKey: String {
+            switch self {
+            case .archive: return "chat_archive"
+            case .promptHistory: return "studio_prompt_history"
+            case .session, .draft:
+                let digest = SHA256.hash(data: Data(defaultsKey.utf8))
+                return "chat_" + digest.map { String(format: "%02x", $0) }.joined()
+            }
+        }
+
+        var isText: Bool {
+            if case .draft = self { return true }
+            return false
+        }
+    }
+
     private let store: LocalModelStore
     private let legacyStore: LocalModelStore?
     private let defaults: UserDefaults
@@ -58,6 +87,9 @@ import Observation
         migrateUserDefaultsToFilesIfNeeded()
         return cachedPreviews
     }
+
+    // Keeps both the existing property and the new call syntax available.
+    func dashboardPreviews(_ compatibility: Void = ()) -> Data { dashboardPreviews }
 
     init(defaults: UserDefaults = .standard,
          store: LocalModelStore = LocalModelStore(root: .applicationSupportDirectory.appending(path: "FadedAI", directoryHint: .isDirectory)),
@@ -133,6 +165,49 @@ import Observation
         try legacyStore?.delete(forKey: Field.turns.rawValue)
         try store.delete(forKey: Field.turns.rawValue)
         defaults.removeObject(forKey: Field.turns.defaultsKey)
+        try store.delete(forKey: ChatField.promptHistory.fileKey)
+        defaults.removeObject(forKey: ChatField.promptHistory.defaultsKey)
+    }
+
+    func chatArchive() -> [SavedAgentSession] {
+        guard let data = readChatBytes(.archive), !data.isEmpty else { return [] }
+        return (try? JSONDecoder().decode([SavedAgentSession].self, from: data)) ?? []
+    }
+
+    func saveChatArchive(_ sessions: [SavedAgentSession]) throws {
+        let data = try JSONEncoder().encode(Array(sessions.prefix(100)))
+        try writeChatBytes(data, for: .archive)
+    }
+
+    func chatSession(_ sessionKey: String) -> Data? {
+        guard Self.isChatSessionKey(sessionKey) else { return nil }
+        return readChatBytes(.session(sessionKey))
+    }
+
+    func saveChatSession(_ data: Data, sessionKey: String) throws {
+        guard Self.isChatSessionKey(sessionKey) else { throw LocalFileStore.Failure.invalidPath }
+        try writeChatBytes(data, for: .session(sessionKey))
+    }
+
+    func chatDraft(_ sessionKey: String) -> String {
+        guard Self.isChatSessionKey(sessionKey), let data = readChatBytes(.draft(sessionKey)) else { return "" }
+        return String(data: data, encoding: .utf8) ?? ""
+    }
+
+    func saveChatDraft(_ text: String, sessionKey: String) throws {
+        guard Self.isChatSessionKey(sessionKey) else { throw LocalFileStore.Failure.invalidPath }
+        try writeChatBytes(Data(text.utf8), for: .draft(sessionKey))
+    }
+
+    // Only regular Studio callers may use this history. Private sessions stay in memory.
+    func promptHistory() -> [String] {
+        guard let data = readChatBytes(.promptHistory), !data.isEmpty else { return [] }
+        return Array(((try? JSONDecoder().decode([String].self, from: data)) ?? []).prefix(10))
+    }
+
+    func savePromptHistory(_ prompts: [String]) throws {
+        let data = try JSONEncoder().encode(Array(prompts.prefix(10)))
+        try writeChatBytes(data, for: .promptHistory)
     }
 
     func codeContext() -> [String] {
@@ -150,6 +225,62 @@ import Observation
         cachedBots = Data()
         cachedNotes = ""
         cachedPreviews = Data()
+    }
+
+    private static func isChatSessionKey(_ key: String) -> Bool {
+        let prefix = AppStorageKeys.chatSessionPrefix
+        return key.hasPrefix(prefix) && key.utf8.count > prefix.utf8.count && key.utf8.count <= 512
+            && key != AppStorageKeys.spacesChatArchiveV1 && !key.hasSuffix(".draft")
+    }
+
+    private func readChatBytes(_ field: ChatField) -> Data? {
+        do {
+            if let value = defaults.object(forKey: field.defaultsKey) {
+                let bytes: Data
+                if field.isText, let text = value as? String { bytes = Data(text.utf8) }
+                else if !field.isText, let data = value as? Data { bytes = data }
+                else { throw LocalFileStore.Failure.invalidFile }
+
+                // Old callers can still update defaults. Even an explicit empty value wins.
+                do {
+                    if try store.loadBytes(forKey: field.fileKey, text: field.isText) != bytes {
+                        try validateChatBytes(bytes, for: field)
+                        try store.saveBytes(bytes, forKey: field.fileKey, text: field.isText)
+                    }
+                } catch { AppDiagnostics.record(error) }
+                return bytes
+            }
+            guard let bytes = try store.loadBytes(forKey: field.fileKey, text: field.isText) else { return nil }
+            try validateChatBytes(bytes, for: field)
+            return bytes
+        } catch { AppDiagnostics.record(error); return nil }
+    }
+
+    private func writeChatBytes(_ bytes: Data, for field: ChatField) throws {
+        try validateChatBytes(bytes, for: field)
+        try store.saveBytes(bytes, forKey: field.fileKey, text: field.isText)
+        if field.isText, let text = String(data: bytes, encoding: .utf8) {
+            defaults.set(text, forKey: field.defaultsKey)
+        } else {
+            defaults.set(bytes, forKey: field.defaultsKey)
+        }
+    }
+
+    private func validateChatBytes(_ bytes: Data, for field: ChatField) throws {
+        guard bytes.count <= store.maximumBytes else { throw LocalFileStore.Failure.tooLarge }
+        let decoder = JSONDecoder()
+        switch field {
+        case .archive:
+            if !bytes.isEmpty { _ = try decoder.decode([SavedAgentSession].self, from: bytes) }
+        case .session:
+            if (try? decoder.decode(SavedAgentSession.self, from: bytes)) == nil {
+                _ = try decoder.decode([ChatTurn].self, from: bytes)
+            }
+        case .draft:
+            guard String(data: bytes, encoding: .utf8) != nil else { throw LocalFileStore.Failure.invalidFile }
+        case .promptHistory:
+            if !bytes.isEmpty { _ = try decoder.decode([String].self, from: bytes) }
+        }
     }
 
     private func storedBytes(_ field: Field, in source: LocalModelStore) throws -> Data? {

@@ -49,7 +49,7 @@ enum FadedColors {
     static let secondary = Color(red: 168 / 255, green: 171 / 255, blue: 184 / 255)
     static let muted = Color(red: 107 / 255, green: 110 / 255, blue: 125 / 255)
     static let babyBlue = Color(red: 168 / 255, green: 216 / 255, blue: 255 / 255)
-    static let lime = babyBlue
+    static let lime = Color(red: 212 / 255, green: 255 / 255, blue: 63 / 255)
     static let cyan = Color(red: 63 / 255, green: 232 / 255, blue: 255 / 255)
     static let purple = Color(red: 183 / 255, green: 140 / 255, blue: 255 / 255)
     static let green = Color(red: 74 / 255, green: 222 / 255, blue: 128 / 255)
@@ -107,15 +107,26 @@ extension EnvironmentValues {
 }
 
 enum FadedSpacing {
+    static let xs: CGFloat = 4
+    static let s: CGFloat = 8
+    static let m: CGFloat = 12
     static let edge: CGFloat = 16
-    static let section: CGFloat = 12
-    static let action: CGFloat = 20
+    static let l: CGFloat = 20
+    static let xl: CGFloat = 24
+    static let xxl: CGFloat = 32
+    static let xxxl: CGFloat = 40
+    static let huge: CGFloat = 48
+
+    static let section = m
+    static let action = l
 }
 
 enum FadedRadius {
+    static let small: CGFloat = 8
+    static let medium: CGFloat = 12
     static let card: CGFloat = 16
-    static let small: CGFloat = 12
-    static let media: CGFloat = 20
+    static let hero: CGFloat = 20
+    static let media = hero
     static let primary: CGFloat = 14
 }
 

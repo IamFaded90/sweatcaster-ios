@@ -42,6 +42,10 @@ extension ChatView {
         let message = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let route = resolvedRoute
         let outgoing = transportMessage(for: route.source)
+        if route.automatic != nil, PhoneModels.shouldUseLiteModel, ModelRouter.intent(for: message) == .cardCollection {
+            chatNotice = "Kortsamlingen ligger på PC’en. Vælg PC manuelt for at spørge den."
+            return
+        }
         if !demo, route.source == .phone, !PhoneModels.isReady(route.modelID ?? phoneModel) {
             chatNotice = "Telefonmodellen er ikke klar. Din kladde bliver gemt."
             return
@@ -137,8 +141,9 @@ extension ChatView {
     private func queuePCMessage(_ prompt: String, outgoing: String, address: String, modelID: String?) {
         guard canQueuePC, pcTargetAddress == address, let pcQueueTargetID else { return }
         do {
-            try PCChatOutbox().enqueue(address: address, targetID: pcQueueTargetID, prompt: prompt, message: outgoing, sessionID: sessionID,
-                                       modelID: modelID)
+            let entry = try PCChatOutbox().enqueue(address: address, targetID: pcQueueTargetID, prompt: prompt,
+                                                   message: outgoing, sessionID: sessionID, modelID: modelID)
+            turns.append(ChatTurn(id: entry.id, prompt: entry.prompt, notice: "Venter på PC", source: "PC", createdAt: entry.createdAt))
             manualRoute = nil
             attachedNote = nil
             attachedQuote = nil
@@ -165,6 +170,27 @@ extension ChatView {
         }
     }
 
+    func phoneModelLabel(for id: String) -> String {
+        switch id {
+        case "apple": "Apple Foundation Models"
+        case "imported": "Importeret model"
+        default: PhoneModels.catalog.first { $0.id == id }?.name ?? id
+        }
+    }
+
+    func replyAttribution(for turn: ChatTurn) -> String {
+        let source = turn.source ?? "AI"
+        guard let id = turn.replyModelID else {
+            return turn.source == nil ? source : "\(source) · Model ikke oplyst"
+        }
+        let name = switch source {
+        case "Telefon": phoneModelLabel(for: id)
+        case "PC": models.first { $0.id == id }?.label ?? id
+        default: id
+        }
+        return "\(source) · \(name)"
+    }
+
     private func grokMessages(endingWith message: String) -> [GrokAPI.Message] {
         let history = turns.filter { $0.source == GrokAPI.sourceLabel && $0.notice == nil && !$0.reply.isEmpty }
             .suffix(4).flatMap { turn in
@@ -180,13 +206,14 @@ extension ChatView {
         guard let index = turnIndex(turnID) else { return }
         turns[index].source = GrokAPI.sourceLabel
         status = "Grok · Venter på svar…"
-        try await GrokAPI.reply(input: messages) { output in
+        let modelID = try await GrokAPI.reply(input: messages) { output in
             await MainActor.run {
                 guard !Task.isCancelled, let index = turnIndex(turnID) else { return }
                 streamedText = output
                 turns[index].reply = safeText(output, complete: true)
             }
         }
+        if let index = turnIndex(turnID) { turns[index].replyModelID = modelID }
     }
 
     private func answerOnPhone(_ message: String, context: String, modelID: String, turnID: UUID) async throws {
@@ -198,6 +225,7 @@ extension ChatView {
                                     instructions: "Svar på brugerens sprog. Du kan bruge teksten i chatten og udfører ingen opgaver på PC’en.") { answer in
             guard !Task.isCancelled, let index = turnIndex(turnID) else { return }
             turns[index].reply = safeText(answer)
+            turns[index].replyModelID = modelID
             streamedText = answer
         }
         try Task.checkCancellation()
@@ -211,6 +239,7 @@ extension ChatView {
         if case .busy? = error as? LocalComputeError { return "Telefonen arbejder allerede. Prøv igen om lidt." }
         if case .lowMemory? = error as? LocalComputeError { return "Telefonen har for lidt ledig hukommelse til modellen." }
         if case .unavailable? = error as? PhoneModelError { return "Vælg en klar model under Lokale modeller, eller skift til PC." }
+        if case .contextLimit? = error as? PhoneModelError { return "Beskeden er for lang til telefonmodellen. Forkort den, eller vælg en anden model." }
         return "Telefonmodellen kunne ikke svare. Prøv igen, eller vælg en anden kilde."
     }
 
@@ -227,6 +256,7 @@ extension ChatView {
             try await live.v2Chat(request) { event in
                 await MainActor.run {
                     guard !Task.isCancelled, let index = turnIndex(turnID) else { return }
+                    if let reported = live.reportedReplyModelID(for: event) { turns[index].replyModelID = reported }
                     receive(type: event.type.rawValue, content: event.content, index: index)
                 }
             }

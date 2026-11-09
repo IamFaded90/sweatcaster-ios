@@ -7,6 +7,7 @@ struct TeamRoster: View {
     let api: LiveAPI?
     @Binding var studioUnlocked: Bool
     let onPrivateSessionEnded: () -> Void
+    let connectPC: () -> Void
     let close: (() -> Void)?
 
     @Environment(\.scenePhase) private var phase
@@ -19,6 +20,8 @@ struct TeamRoster: View {
     @AppStorage(AppStorageKeys.teamSleepingExpanded) private var sleepingOpen = false
     @State private var hub: V2Hub?
     @State private var approvals: [CodeBatchList.Job]?
+    @State private var approvalError: AppErrorPresentation?
+    @State private var reloadID: UUID?
     @State private var route: Route?
     @State private var refresh = 0
     @State private var query = ""
@@ -32,7 +35,7 @@ struct TeamRoster: View {
 
     private enum Route: Identifiable {
         case profile(VillageBot), chat(VillageBot), edit(VillageBot), newBot
-        case approval(String), agent(V2Hub.Agent)
+        case approval(id: String, targetID: String), agent(V2Hub.Agent)
         case workflow(TeamWorkflowMode), notebook(VillageBot), routines
 
         var id: String {
@@ -41,7 +44,7 @@ struct TeamRoster: View {
             case .chat(let bot): "chat-\(bot.id)"
             case .edit(let bot): "edit-\(bot.id)"
             case .newBot: "new"
-            case .approval(let id): "approval-\(id)"
+            case .approval(let id, let targetID): "approval-\(targetID)-\(id)"
             case .agent(let agent): "agent-\(agent.id)"
             case .workflow(let mode): "workflow-\(mode.rawValue)"
             case .notebook(let bot): "notebook-\(bot.id)"
@@ -83,15 +86,16 @@ struct TeamRoster: View {
                     .textFieldStyle(.roundedBorder).frame(minHeight: 44).accessibilityLabel("Søg i Holdet")
             }
             ScrollView {
-                VStack(alignment: .leading, spacing: FadedSpacing.section) {
+                LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
                     switch page {
                     case .roster: rosterSection
-                    case .approvals: approvalSection
+                    case .approvals: approvalSection(showAll: true)
                     case .workflows: workflowSection
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .id(page)
             .refreshable { await reload() }
         }
         .padding(FadedSpacing.edge)
@@ -119,8 +123,15 @@ struct TeamRoster: View {
                 VillageBotBuilder(api: api, bot: bot, onBack: { route = nil })
             case .newBot:
                 VillageBotBuilder(api: api, onBack: { route = nil })
-            case .approval(let id):
-                if let api { navigationSheet { BatchProposalView(api: api, id: id) } }
+            case .approval(let id, let targetID):
+                navigationSheet {
+                    if let api, api.queueTargetID == targetID {
+                        BatchProposalView(api: api, id: id).id(targetID)
+                    } else {
+                        FadedEmptyState(icon: "desktopcomputer", title: "Forbind til den oprindelige PC",
+                                        detail: "Luk gennemgangen, og forbind til den PC, der oprettede forslaget.")
+                    }
+                }
             case .agent(let agent):
                 if let api { navigationSheet { TeamAgentActivity(api: api, agent: agent) } }
             case .workflow(let mode):
@@ -144,7 +155,8 @@ struct TeamRoster: View {
     }
 
     @ViewBuilder private var rosterSection: some View {
-        if let chief = agents.first(where: isChief) { agentRow(chief, chief: true) }
+        approvalSection(showAll: false)
+        chiefSection
         if visibleBots.contains(where: { pinned.contains($0.id) }) {
             DisclosureGroup("Favoritter", isExpanded: $favoritesOpen) {
                 ForEach(visibleBots.filter { pinned.contains($0.id) }, content: botRow)
@@ -160,6 +172,25 @@ struct TeamRoster: View {
             else { FadedPrimaryButton("Ny bot", icon: "plus") { route = .newBot } }
         }.disabled(bots.count >= 10)
         if bots.count >= 10 { Text("Der er plads til 10 bots.").font(.caption) }
+        FadedSecondaryButton("Ny gruppechat", icon: "person.2") { route = .workflow(.group) }
+    }
+
+    private var chiefSection: some View {
+        let chief = hub?.agents.first(where: isChief)
+        return FadedCard(size: .compact, accent: palette.lime) {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                Label("Chief", systemImage: "crown").font(FadedTypography.action)
+                FadedDetailText("Stabschef · Koordinerer holdet")
+                FadedSecondaryButton("Spørg Chief", icon: "bubble.left") { route = .workflow(.chief) }
+                if let chief {
+                    let (status, tone) = agentStatus(chief.status)
+                    if chief.status == .offline { FadedDetailText(status) }
+                    else { FadedBadge(status, tone: tone) }
+                    Button("Se Chiefs aktivitet", systemImage: "clock") { route = .agent(chief) }
+                        .frame(minHeight: 44)
+                }
+            }
+        }
     }
 
     private var workflowSection: some View {
@@ -194,39 +225,44 @@ struct TeamRoster: View {
         }
     }
 
-    @ViewBuilder private var approvalSection: some View {
-        FadedSectionLabel("Venter på dig")
-        if let approvals {
+    @ViewBuilder private func approvalSection(showAll: Bool) -> some View {
+        FadedSectionHeader("Venter på dig", detail: approvals.map { "\($0.count) forslag til gennemgang" })
+        if let api, let approvals {
             if approvals.isEmpty {
-                Label("Ingen kodeforslag venter på dig.", systemImage: "checkmark.circle").font(.subheadline)
+                FadedBadge("Ingen forslag venter", tone: .success)
             }
-            ForEach(approvals) { job in
-                Button { route = .approval(job.id) } label: {
-                    FadedCard(accent: palette.coral) {
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Code Bot · Gennemgå forslag").font(FadedTypography.action)
-                            Text(job.goal).lineLimit(3)
-                            Text(job.repo).font(.caption.monospaced()).foregroundStyle(palette.secondary)
-                        }.frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                }.buttonStyle(.plain)
+            ForEach(showAll ? approvals[...] : approvals.prefix(1)) { job in
+                TeamApprovalCard(api: api, job: job) { route = .approval(id: job.id, targetID: api.queueTargetID) }
             }
+            if !showAll, approvals.count > 1 {
+                FadedSecondaryButton("Se alle \(approvals.count) forslag", icon: "list.bullet") { page = .approvals }
+            }
+        } else if let approvalError {
+            if case .connect = approvalError.fixAction {
+                FadedDetailText(approvalError.title)
+                FadedSecondaryButton("Tjek forbindelsen", icon: "network", action: connectPC)
+            } else {
+                RetryNotice(message: approvalError.title) { refresh += 1 }
+            }
+        } else if api == nil {
+            FadedDetailText("Forbind til PC’en for at se forslag.")
+            FadedSecondaryButton("Forbind til PC", icon: "network", action: connectPC)
         } else {
-            Text(api == nil ? "Forbind til PC’en for at se forslag." : "Kan ikke vise kodeforslag endnu.")
-                .font(.subheadline).foregroundStyle(palette.secondary)
-            if api != nil {
-                FadedSecondaryButton("Opdatér", icon: "arrow.clockwise") { refresh += 1 }
-            }
+            FadedSkeleton(label: "Henter kodeforslag…")
         }
     }
 
     private var agentSections: some View {
         let specialists = agents.filter { !isChief($0) }
+        let active = specialists.filter { $0.status != .offline }
+        let sleeping = specialists.filter { $0.status == .offline }
         return Group {
             FadedSectionLabel("Aktive på PC")
-            ForEach(specialists.filter { $0.status != .offline }) { agent in agentRow(agent) }
+            if active.isEmpty { FadedDetailText("Ingen aktive PC-agenter i listen.") }
+            ForEach(active) { agent in agentRow(agent) }
             DisclosureGroup("Sovende", isExpanded: $sleepingOpen) {
-                ForEach(specialists.filter { $0.status == .offline }) { agent in agentRow(agent) }
+                if sleeping.isEmpty { FadedDetailText("Ingen sovende PC-agenter i listen.") }
+                ForEach(sleeping) { agent in agentRow(agent) }
             }
         }
     }
@@ -258,19 +294,22 @@ struct TeamRoster: View {
         }
     }
 
-    private func agentRow(_ agent: V2Hub.Agent, chief: Bool = false) -> some View {
-        let (status, color): (String, Color) = switch agent.status {
-        case .working: ("Arbejder", palette.lime)
-        case .thinking: ("Tænker", palette.cyan)
-        case .ready: ("Klar", palette.green)
-        case .offline: ("Sover", palette.muted)
+    private func agentStatus(_ status: V2Hub.Agent.Status) -> (String, FadedStatusTone) {
+        switch status {
+        case .working: ("Arbejder", .warning)
+        case .thinking: ("Tænker", .info)
+        case .ready: ("Klar", .success)
+        case .offline: ("Sover", .info)
         }
+    }
+
+    private func agentRow(_ agent: V2Hub.Agent) -> some View {
+        let (status, tone) = agentStatus(agent.status)
+        let color = agent.status == .offline ? palette.muted : tone.color(in: palette)
         return Button { route = .agent(agent) } label: {
             FadedCard(accent: color) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Label(chief ? "Chief" : agent.name, systemImage: chief ? "crown" : "desktopcomputer")
-                        .font(FadedTypography.action)
-                    if chief { Text("Stabschef · Koordinerer holdet").font(.caption) }
+                    Label(agent.name, systemImage: "desktopcomputer").font(FadedTypography.action)
                     Text(status).font(.caption).foregroundStyle(palette.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -294,12 +333,110 @@ struct TeamRoster: View {
 
     private func reload() async {
         guard let api else { return }
+        let request = UUID()
+        reloadID = request
         async let snapshot = try? api.v2Hub()
-        async let batches = try? api.codeBatches()
-        let (nextHub, nextBatches) = await (snapshot, batches)
-        guard !Task.isCancelled else { return }
-        hub = nextHub
-        approvals = nextBatches?.jobs.filter { $0.status == "review" }
+        do {
+            let batches = try await api.codeBatches()
+            let nextHub = await snapshot
+            guard !Task.isCancelled, reloadID == request else { return }
+            hub = nextHub
+            approvals = batches.jobs.filter { $0.status == "review" }
+            approvalError = nil
+        } catch {
+            let nextHub = await snapshot
+            guard !Task.isCancelled, reloadID == request else { return }
+            AppDiagnostics.record(error)
+            hub = nextHub
+            approvals = nil
+            if case .http(404, _)? = error as? APIError {
+                approvalError = AppErrorPresentation(error, title: "PC’en tilbyder ikke kodeforslag. Tjek FadedAI-modulet på PC’en.")
+            } else if case .http(401, _)? = error as? APIError {
+                approvalError = AppErrorPresentation(error, title: "PC’en afviste forbindelsen. Tjek IP og token.")
+            } else {
+                let title = pcBusyMessage(error) ?? "Forslagene kunne ikke hentes. Tjek forbindelsen til PC’en."
+                approvalError = AppErrorPresentation(error, title: title)
+            }
+        }
+    }
+}
+
+private struct TeamApprovalCard: View {
+    let api: LiveAPI
+    let job: CodeBatchList.Job
+    let review: () -> Void
+
+    @Environment(\.fadedPalette) private var palette
+    @State private var showPreview = false
+    @State private var preview: DiffPreview?
+    @State private var previewError: String?
+    @State private var retry = 0
+
+    private struct DiffPreview {
+        let files: [String]
+        let excerpt: String
+    }
+
+    var body: some View {
+        FadedCard(size: .compact, accent: palette.coral) {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                Label("Code Bot", systemImage: "terminal").font(FadedTypography.action)
+                Text(verbatim: job.goal).lineLimit(3)
+                Text(verbatim: job.repo).font(.caption.monospaced()).foregroundStyle(palette.secondary)
+                DisclosureGroup("Vis filer og diff", isExpanded: $showPreview) {
+                    previewContent.padding(.top, FadedSpacing.s)
+                }.frame(minHeight: 44)
+                FadedSecondaryButton("Gennemgå ændringer", icon: "arrow.up.right", action: review)
+            }
+        }
+        .task(id: "\(showPreview):\(retry)") {
+            if showPreview, preview == nil { await loadPreview() }
+        }
+    }
+
+    @ViewBuilder private var previewContent: some View {
+        if let preview {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                if !preview.files.isEmpty {
+                    FadedFieldLabel("Berørte filer")
+                    ForEach(preview.files, id: \.self) { file in
+                        Text(verbatim: file).font(.caption.monospaced())
+                    }
+                }
+                FadedFieldLabel("Uddrag")
+                FadedDiff(diff: preview.excerpt)
+            }
+        } else if let previewError {
+            RetryNotice(message: previewError) { retry += 1 }
+        } else {
+            FadedSkeleton(label: "Henter uddrag…")
+        }
+    }
+
+    private func loadPreview() async {
+        previewError = nil
+        do {
+            let detail = try await api.codeBatch(job.id)
+            try Task.checkCancellation()
+            guard detail.id == job.id else { throw V2Failure.invalidResponse }
+            guard detail.status == "review", let diff = detail.result?.diff, !diff.isEmpty else {
+                previewError = "Uddraget er ikke længere tilgængeligt. Åbn forslaget for at se status."
+                return
+            }
+            let lines = api.redactChat(diff, complete: true).split(separator: "\n", omittingEmptySubsequences: false)
+            var seen = Set<String>()
+            let files = zip(lines, lines.dropFirst()).compactMap { old, new -> String? in
+                guard old.hasPrefix("--- a/"), new.hasPrefix("+++ b/") else { return nil }
+                let path = String(new.dropFirst(6))
+                return !path.isEmpty && String(old.dropFirst(6)) == path && seen.insert(path).inserted ? path : nil
+            }
+            let excerpt = lines.prefix(9).map { String($0.prefix(180)) }.joined(separator: "\n")
+            preview = DiffPreview(files: Array(files.prefix(5)), excerpt: excerpt)
+        } catch {
+            guard !Task.isCancelled else { return }
+            AppDiagnostics.record(error)
+            previewError = "Uddraget kunne ikke hentes. Prøv igen, eller åbn forslaget."
+        }
     }
 }
 

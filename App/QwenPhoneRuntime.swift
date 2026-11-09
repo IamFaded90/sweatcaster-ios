@@ -1,0 +1,243 @@
+// Loads the pinned Qwen Core ML bundles and their local tokenizers.
+import CoreGraphics
+import CoreMLLLM
+import Foundation
+import Tokenizers
+
+enum QwenPhoneRuntime {
+    enum Variant {
+        case compact, vision
+
+        init?(modelID: String) {
+            switch modelID {
+            case ModelDownloader.ModelInfo.qwen35_08b.id: self = .compact
+            case ModelDownloader.ModelInfo.qwen3vl_2b.id: self = .vision
+            default: return nil
+            }
+        }
+
+        var chunks: String {
+            switch self {
+            case .compact: "qwen3_5_0_8b_decode_chunks_mlkv"
+            case .vision: "qwen3_vl_2b_decode_chunks"
+            }
+        }
+
+        var requiredModels: [String] {
+            switch self {
+            case .compact: ["chunk_a", "chunk_b", "chunk_c", "chunk_d"].map { "\(chunks)/\($0)" }
+            case .vision:
+                ["chunk_0", "chunk_1", "chunk_2", "chunk_3", "chunk_head", "chunk_0_vision"].map { "\(chunks)/\($0)" }
+                    + ["qwen3_vl_2b_vision/vision"]
+            }
+        }
+
+        var embeddingBytes: Int {
+            switch self {
+            case .compact: 248_320 * 1_024 * 2
+            case .vision: 151_936 * 2_048 * 2
+            }
+        }
+
+        var source: (repo: String, revision: String) {
+            switch self {
+            case .compact: ("Qwen3.5-0.8B", "2fc06364715b967f1860aea9cf38778875588b17")
+            case .vision: ("Qwen3-VL-2B-Instruct", "89644892e4d85e24eaac8bacfd4f463576704203")
+            }
+        }
+
+        var tokenizerFiles: [(name: String, bytes: Int)] {
+            switch self {
+            case .compact: [("tokenizer.json", 12_807_982), ("tokenizer_config.json", 16_709), ("config.json", 2_907)]
+            case .vision: [("tokenizer.json", 7_032_403), ("tokenizer_config.json", 10_868), ("config.json", 1_505)]
+            }
+        }
+
+        var tokenizerBytes: Int64 { tokenizerFiles.reduce(0) { $0 + Int64($1.bytes) } }
+    }
+
+    static let visionAssets: [(path: String, bytes: Int64)]? = {
+        let layout = Variant.vision
+        let modelSizes: [Int64] = [207_029, 207_085, 207_127, 207_127, 5_493, 209_391, 395_493]
+        let weightSizes: [Int64] = Array(repeating: 352_419_520, count: 4) + [311_169_792, 352_419_520, 405_955_200]
+        guard modelSizes.count == layout.requiredModels.count,
+              weightSizes.count == layout.requiredModels.count else { return nil }
+        var assets = [(path: "\(layout.chunks)/embed_weight.bin", bytes: Int64(layout.embeddingBytes))]
+        for (name, sizes) in zip(layout.requiredModels, zip(modelSizes, weightSizes)) {
+            let prefix = "\(name).mlpackage"
+            assets += [("\(prefix)/Manifest.json", 617),
+                       ("\(prefix)/Data/com.apple.CoreML/model.mlmodel", sizes.0),
+                       ("\(prefix)/Data/com.apple.CoreML/weights/weight.bin", sizes.1)]
+        }
+        return assets
+    }()
+
+    static let visionWeightsBytes = visionAssets?.reduce(Int64(0)) { $0 + $1.bytes } ?? 0
+
+    // The published snapshot provides recurrent decoding. The SDK's optional prefill files are absent.
+    @MainActor static func installVisionWeights(in folder: URL, progress: (Double) -> Void) async throws {
+        guard let visionAssets else { throw V2Failure.invalidResponse }
+        let revision = "44e0c8401d253a8e7b331a55332f2ce9aac954ca"
+        let root = folder.deletingLastPathComponent().resolvingSymlinksInPath().appending(path: folder.lastPathComponent)
+        guard root.path == root.resolvingSymlinksInPath().path else { throw PhoneModelError.invalidBundle }
+        var modelFolder = root
+        var options = URLResourceValues()
+        options.isExcludedFromBackup = true
+        try modelFolder.setResourceValues(options)
+        let manager = FileManager.default
+        var completed: Int64 = 0
+        for asset in visionAssets {
+            try Task.checkCancellation()
+            let destination = root.appending(path: asset.path)
+            guard destination.path == destination.resolvingSymlinksInPath().path else { throw PhoneModelError.invalidBundle }
+            if !matchesFile(destination, bytes: asset.bytes) {
+                guard let source = URL(string: "https://huggingface.co/mlboydaisuke/qwen3-vl-2b-coreml/resolve/\(revision)/\(asset.path)") else {
+                    throw PhoneModelError.invalidBundle
+                }
+                let (temporary, response) = try await URLSession.shared.download(from: source)
+                defer { try? manager.removeItem(at: temporary) }
+                guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      http.url?.scheme == "https", matchesFile(temporary, bytes: asset.bytes) else {
+                    throw PhoneModelError.invalidBundle
+                }
+                try Task.checkCancellation()
+                try manager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try LocalFileStore.protectFile(temporary)
+                if manager.fileExists(atPath: destination.path) {
+                    _ = try manager.replaceItemAt(destination, withItemAt: temporary, options: .usingNewMetadataOnly)
+                } else {
+                    try manager.moveItem(at: temporary, to: destination)
+                }
+            }
+            completed += asset.bytes
+            progress(Double(completed) / Double(visionWeightsBytes))
+        }
+    }
+
+    private static func matchesFile(_ url: URL, bytes: Int64) -> Bool {
+        guard let flags = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]),
+              flags.isRegularFile == true, flags.isSymbolicLink != true, let size = flags.fileSize else { return false }
+        return Int64(size) == bytes
+    }
+
+    @MainActor static func prepareTokenizer(for variant: Variant, folder: URL) async throws {
+        let base = folder.deletingLastPathComponent().resolvingSymlinksInPath()
+        let directory = base.appending(path: folder.lastPathComponent).appending(path: "hf_model", directoryHint: .isDirectory)
+        guard directory.path == directory.resolvingSymlinksInPath().path else { throw PhoneModelError.invalidBundle }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        for (name, bytes) in variant.tokenizerFiles {
+            try Task.checkCancellation()
+            let destination = directory.appending(path: name)
+            if matchesFile(destination, bytes: Int64(bytes)) { continue }
+            guard destination.path == destination.resolvingSymlinksInPath().path,
+                  let url = URL(string: "https://huggingface.co/Qwen/\(variant.source.repo)/resolve/\(variant.source.revision)/\(name)") else {
+                throw PhoneModelError.invalidBundle
+            }
+            let (temporary, response) = try await URLSession.shared.download(from: url)
+            defer { try? FileManager.default.removeItem(at: temporary) }
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200, http.url?.scheme == "https" else {
+                throw PhoneModelError.invalidBundle
+            }
+            let data = try LocalFileStore.readBytes(from: temporary, maximumBytes: bytes)
+            guard data.count == bytes, (try JSONSerialization.jsonObject(with: data)) is [String: Any] else {
+                throw PhoneModelError.invalidBundle
+            }
+            try Task.checkCancellation()
+            try LocalFileStore.writeBytes(data, to: destination, within: directory)
+        }
+    }
+
+    @MainActor static func generate(_ variant: Variant, folder: URL, prompt: String, instructions: String,
+                                    image: CGImage? = nil, maxTokens: Int, update: @escaping (String) -> Void) async throws -> (text: String, rate: Double) {
+        LocalCompute.beginModelLoad()
+        let tokenizer = try await AutoTokenizer.from(modelFolder: folder.appending(path: "hf_model"))
+        let start = try token("<|im_start|>", tokenizer: tokenizer)
+        let end = try token("<|im_end|>", tokenizer: tokenizer)
+        let stop = try token("<|endoftext|>", tokenizer: tokenizer)
+        let eos: Set<Int32> = [start, end, stop]
+        let body = instructions.isEmpty ? prompt : instructions + "\n\n" + prompt
+        func encode(_ text: String) -> [Int32] {
+            tokenizer.encode(text: text, addSpecialTokens: false).map(Int32.init)
+        }
+        var input = [start] + encode("user\n")
+        let (tokens, continuation) = AsyncStream<Int32>.makeStream()
+        let delivery = Task { @MainActor in
+            var emitted: [Int] = []
+            for await id in tokens {
+                guard !Task.isCancelled, !eos.contains(id) else { break }
+                emitted.append(Int(id))
+                if emitted.count == 1 || emitted.count.isMultiple(of: 4) {
+                    update(tokenizer.decode(tokens: emitted, skipSpecialTokens: true))
+                }
+            }
+        }
+        let emit: @Sendable (Int32) -> Void = { id in
+            if !Task.isCancelled { _ = continuation.yield(id) }
+        }
+        defer { continuation.finish(); delivery.cancel() }
+        let generated: [Int32]
+        let started: ContinuousClock.Instant
+        switch variant {
+        case .compact:
+            guard image == nil else { throw PhoneModelError.unavailable }
+            let generator = Qwen35MLKVGenerator(cfg: .default0_8B)
+            generator.setModelFolder(folder)
+            try await generator.load()
+            try Task.checkCancellation()
+            LocalCompute.didLoadModel()
+            input += encode(body).filter { !eos.contains($0) } + [end] + encode("\n")
+            input += [start] + encode("assistant\n<think>\n\n</think>\n\n")
+            let budget = try outputLimit(context: 2_048, input: input.count, requested: maxTokens)
+            started = .now
+            generated = try await generator.generate(inputIds: input, maxNewTokens: budget, eosTokenIds: eos, onToken: emit)
+        case .vision:
+            let generator = Qwen3VL2BGenerator()
+            generator.modelFolderOverride = folder
+            try generator.load()
+            var features: Qwen3VL2BVisionFeatures?
+            var imagePad: Int32 = 151_655
+            if let image {
+                guard let visionURL = Qwen3VL2BVisionEncoder.resolveModel(folder: folder) else { throw PhoneModelError.invalidBundle }
+                let encoder = Qwen3VL2BVisionEncoder()
+                try encoder.load(modelURL: visionURL)
+                let encoded = try await encoder.encode(image)
+                guard (1...256).contains(encoded.count) else { throw PhoneModelError.invalidBundle }
+                features = encoded
+                imagePad = try token("<|image_pad|>", tokenizer: tokenizer)
+                input += [try token("<|vision_start|>", tokenizer: tokenizer)]
+                input += Array(repeating: imagePad, count: encoded.count)
+                input += [try token("<|vision_end|>", tokenizer: tokenizer)]
+            }
+            try Task.checkCancellation()
+            LocalCompute.didLoadModel()
+            input += encode(body).filter { !eos.contains($0) && $0 != imagePad } + [end] + encode("\n")
+            input += [start] + encode("assistant\n")
+            let budget = try outputLimit(context: 1_024, input: input.count, requested: maxTokens)
+            started = .now
+            generated = try await generator.generate(inputIds: input, maxNewTokens: budget, eosTokenIds: eos,
+                                                     visionFeatures: features, imagePadTokenId: imagePad, onToken: emit)
+        }
+        let elapsed = started.duration(to: .now).components
+        try Task.checkCancellation()
+        continuation.finish()
+        await delivery.value
+        try Task.checkCancellation()
+        let output = generated.prefix { !eos.contains($0) }.map(Int.init)
+        let text = tokenizer.decode(tokens: output, skipSpecialTokens: true)
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PhoneModelError.emptyResponse }
+        update(text)
+        let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+        return (text, Double(output.count) / max(0.001, seconds))
+    }
+
+    private static func token(_ text: String, tokenizer: any Tokenizer) throws -> Int32 {
+        guard let id = tokenizer.convertTokenToId(text), let safe = Int32(exactly: id) else { throw PhoneModelError.invalidBundle }
+        return safe
+    }
+
+    private static func outputLimit(context: Int, input: Int, requested: Int) throws -> Int {
+        let remaining = context - input - 1
+        guard remaining > 0 else { throw PhoneModelError.contextLimit }
+        return min(requested, remaining)
+    }
+}

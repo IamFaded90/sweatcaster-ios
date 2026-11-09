@@ -53,12 +53,16 @@ struct PixelOfficeView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if !workers.isEmpty {
+                FadedSectionHeader("Arbejdsstationer",
+                                   detail: "Lokale bots åbner deres profil. PC-agenter åbner historik og hukommelse.")
+            }
             officeScene
             if workers.isEmpty {
                 FadedEmptyState(icon: "desktopcomputer", title: "Kontoret er tomt",
                                 detail: "Opret en bot under Mine bots nedenfor, eller forbind til PC’en for at se dens agenter.")
             } else {
-                FadedSectionHeader("På kontoret")
+                FadedSectionLabel("På kontoret")
                 if workers.count > stationCount {
                     Text("Kortet viser de første \(stationCount) bots. Hele holdet står herunder.")
                         .font(.footnote).foregroundStyle(palette.secondary)
@@ -84,8 +88,8 @@ struct PixelOfficeView: View {
             let deviceScale = max(1, displayScale)
             let availableWidth = geometry.size.width * deviceScale
             let availableHeight = geometry.size.height * deviceScale
-            let pixelsPerPoint = max(1, floor(min(availableWidth / canvasSize.width, availableHeight / canvasSize.height)))
-            let scale = pixelsPerPoint / deviceScale
+            let pixelsPerCell = max(1, floor(min(availableWidth / canvasSize.width, availableHeight / canvasSize.height)))
+            let scale = pixelsPerCell / deviceScale
             let width = canvasSize.width * scale
             let height = canvasSize.height * scale
             let x = floor(max(0, (availableWidth - width * deviceScale) / 2)) / deviceScale
@@ -121,7 +125,7 @@ struct PixelOfficeView: View {
     }
 
     private func stationTargets(scale: CGFloat) -> some View {
-        ForEach(Array(workers.prefix(stationCount).enumerated()), id: \.offset) { index, worker in
+        ForEach(Array(workers.prefix(stationCount).enumerated()), id: \.element.id) { index, worker in
             let point = stationOrigin(index)
             Button { onSelect(worker) } label: {
                 Rectangle().fill(.clear)
@@ -243,7 +247,10 @@ private struct PixelOfficeDrawing {
         fill(x + 8, y + 32, 20, 2, ink.opacity(0.55))
         guard let worker else { return }
         let role = worker.specialty.isEmpty ? worker.name : worker.specialty
-        label(String(role.prefix(11)).uppercased(), x: x + 2, y: y + 5, color: ink, size: 6, anchor: .leading)
+        label(String(role.uppercased().prefix(11)), x: x + 2, y: y + 5, color: ink, size: 6, anchor: .leading)
+        for (dx, dy) in [(0, 0), (2, 2), (4, 4), (2, 6), (0, 8)] {
+            fill(x + 58 + dx, y + dy, 2, 2, ink)
+        }
         avatar(x: x + 39, y: y + 34, color: color, status: worker.status, blink: blink)
     }
 
@@ -283,7 +290,7 @@ private struct PixelOfficeDrawing {
     private func fill(_ x: Int, _ y: Int, _ width: Int, _ height: Int, _ color: Color) {
         let rect = CGRect(x: CGFloat(x) * scale, y: CGFloat(y) * scale,
                           width: CGFloat(width) * scale, height: CGFloat(height) * scale)
-        context.fill(Path(rect), with: .color(color))
+        context.fill(Path(rect), with: .color(color), style: FillStyle(eoFill: false, antialiased: false))
     }
 
     private func label(_ title: String, x: Int, y: Int, color: Color, size: CGFloat, anchor: UnitPoint) {

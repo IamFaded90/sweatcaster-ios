@@ -2,7 +2,7 @@ import Foundation
 
 @MainActor struct PCChatOutbox {
     struct Entry: Codable, Identifiable, Equatable {
-        enum State: String, Codable { case waiting, attempted, completed }
+        enum State: String, Codable { case waiting, attempted, review, completed }
 
         let id: UUID
         let address: String
@@ -14,9 +14,14 @@ import Foundation
         let createdAt: Date
         fileprivate(set) var state: State
         fileprivate(set) var reply: String?
+        fileprivate(set) var replyModelID: String?
+        fileprivate(set) var attempts: Int?
+        fileprivate(set) var retryRequestID: UUID?
+
+        var needsReview: Bool { state == .attempted || state == .review }
 
         func request() throws -> V2ChatRequest {
-            try V2ChatRequest(message: message, sessionID: sessionID.uuidString, modelID: modelID, requestID: id)
+            try V2ChatRequest(message: message, sessionID: sessionID.uuidString, modelID: modelID, requestID: retryRequestID ?? id)
         }
     }
 
@@ -52,7 +57,7 @@ import Foundation
 
     func reviewCount(for address: String, targetID: String? = nil) -> Int {
         (try? entries(for: address).filter {
-            !Self.isDelivering($0.id) && ($0.state == .attempted || (targetID != nil && $0.targetID != targetID))
+            !Self.isDelivering($0.id) && ($0.needsReview || (targetID != nil && $0.targetID != targetID))
         }.count) ?? 0
     }
 
@@ -77,17 +82,43 @@ import Foundation
             $0.id == id && $0.address == address && $0.targetID == targetID && $0.state == .waiting
         }) else { return nil }
         stored[index].state = .attempted
+        stored[index].attempts = min(2, max(0, stored[index].attempts ?? 0)) + 1
         try write(stored)
         return stored[index]
     }
 
-    func complete(_ id: UUID, for address: String, targetID: String, reply: String) throws {
+    @discardableResult
+    func retry(_ id: UUID, for address: String, targetID: String) throws -> Bool {
+        var stored = try read()
+        guard !Self.isDelivering(id), let index = stored.firstIndex(where: {
+            $0.id == id && $0.address == address && $0.targetID == targetID && $0.needsReview
+        }) else { return false }
+        stored[index].state = .waiting
+        stored[index].attempts = 0
+        stored[index].retryRequestID = UUID()
+        try write(stored)
+        return true
+    }
+
+    private func fail(_ id: UUID, for address: String, targetID: String,
+                      canRetry: Bool, restoreAttempt: Bool) throws {
+        var stored = try read()
+        guard let index = stored.firstIndex(where: {
+            $0.id == id && $0.address == address && $0.targetID == targetID && $0.state == .attempted
+        }) else { return }
+        if restoreAttempt { stored[index].attempts = max(0, (stored[index].attempts ?? 1) - 1) }
+        stored[index].state = canRetry && (stored[index].attempts ?? 1) < 3 ? .waiting : .review
+        try write(stored)
+    }
+
+    func complete(_ id: UUID, for address: String, targetID: String, reply: String, replyModelID: String? = nil) throws {
         var stored = try read()
         guard let index = stored.firstIndex(where: {
             $0.id == id && $0.address == address && $0.targetID == targetID && $0.state == .attempted
         }) else { return }
         stored[index].state = .completed
         stored[index].reply = reply
+        stored[index].replyModelID = replyModelID
         try write(stored)
     }
 
@@ -113,7 +144,7 @@ import Foundation
             }
         } catch {
             AppDiagnostics.record(error)
-            // Network failures stop this drain. Claimed requests remain attempted and cannot replay.
+            // Stop this drain. A subsequent pass may retry only requests known not to have connected.
         }
     }
 
@@ -125,13 +156,38 @@ import Foundation
             NotificationCenter.default.post(name: Self.didChange, object: nil)
         }
         guard try claim(item.id, for: api.server.address, targetID: api.queueTargetID) != nil else { return }
-        try Task.checkCancellation()
         let answer = Answer()
-        try await api.v2Chat(request) { event in
-            if event.type == .text { await answer.append(event.content) }
+        do {
+            try Task.checkCancellation()
+            try await api.v2Chat(request, willPost: { await answer.markPosting() }) { event in
+                await answer.record(event, modelID: api.reportedReplyModelID(for: event))
+            }
+            try complete(item.id, for: api.server.address, targetID: api.queueTargetID,
+                         reply: api.redactChat(answer.text, complete: true), replyModelID: answer.modelID)
+        } catch {
+            let deferred = !answer.startedPOST && Self.deferredBeforePOST(error)
+            let canRetry = !answer.sawEvent && (deferred || Self.failedToConnect(error)
+                || (!answer.startedPOST && Self.confirmedOffline(error as? APIError)))
+            try fail(item.id, for: api.server.address, targetID: api.queueTargetID,
+                     canRetry: canRetry, restoreAttempt: deferred)
+            throw error
         }
-        try complete(item.id, for: api.server.address, targetID: api.queueTargetID,
-                     reply: api.redactChat(answer.text, complete: true))
+    }
+
+    private static func deferredBeforePOST(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if case .http(503, _)? = error as? APIError { return true }
+        return false
+    }
+
+    private static func failedToConnect(_ error: Error) -> Bool {
+        let code: Int
+        if case .transport(let value)? = error as? APIError { code = value }
+        else if let failure = error as? URLError { code = failure.code.rawValue }
+        else { return false }
+        // A timeout or lost connection can happen after the server accepted the POST.
+        return [URLError.Code.cannotConnectToHost, .cannotFindHost, .notConnectedToInternet, .dnsLookupFailed]
+            .contains { $0.rawValue == code }
     }
 
     private func read() throws -> [Entry] {
@@ -167,10 +223,19 @@ import Foundation
         private var output = ""
         private var remaining = 12_000
         private var truncated = false
+        private(set) var modelID: String?
+        private(set) var sawEvent = false
+        private(set) var startedPOST = false
+
+        func markPosting() { startedPOST = true }
 
         var text: String { output + (truncated ? "\n\nSvaret er forkortet i udbakken." : "") }
 
-        func append(_ delta: String) {
+        func record(_ event: V2ChatEvent, modelID: String?) {
+            sawEvent = true
+            if let modelID { self.modelID = modelID }
+            guard event.type == .text else { return }
+            let delta = event.content
             let part = delta.unicodeScalars.prefix(remaining)
             output += String(part)
             remaining -= part.count

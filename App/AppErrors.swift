@@ -45,7 +45,7 @@ struct AppErrorPresentation {
     private static func describe(_ error: Error) -> Self {
         if let api = error as? APIError {
             let fix: FixAction = switch api {
-            case .address, .token, .http(401, _): .connect
+            case .address, .addressLeadingZeros, .token, .http(401, _): .connect
             case .input, .http(422, _): .reviseInput
             case .http(409, _): .review
             default: .retry

@@ -45,10 +45,10 @@ extension Home {
             if !model.needsPairing {
                 homeFeedback
                     .safeAreaInset(edge: .leading, spacing: 0) {
-                        if horizontalSizeClass == .regular { teamRoster(close: nil).frame(width: 300) }
+                        if teamPinned { teamRoster(close: nil).frame(width: 300) }
                     }
-                    .accessibilityHidden(showTeam && horizontalSizeClass != .regular)
-                if showTeam && horizontalSizeClass != .regular {
+                    .accessibilityHidden(showTeam && !teamPinned)
+                if showTeam && !teamPinned {
                     Button { showTeam = false } label: {
                         Color.black.opacity(0.38).ignoresSafeArea()
                     }
@@ -65,6 +65,9 @@ extension Home {
             }
         }
         .fontDesign(design)
+        .onChange(of: teamPinned) { _, pinned in
+            if pinned { showTeam = false }
+        }
     }
 
     private var homeStartup: some View {
@@ -80,7 +83,7 @@ extension Home {
         .onOpenURL { url in
             guard url.scheme == "fadedai" else { return }
             switch url.host {
-            case "video": selectSpace(.gallery); showJobs += 1
+            case "video": openVideoJobs()
             case "code": selectSpace(.library)
             default: break
             }
@@ -100,7 +103,7 @@ extension Home {
 
     private func teamRoster(close: (() -> Void)?) -> some View {
         TeamRoster(api: studioAPI, studioUnlocked: $nsfwSessionUnlocked,
-                   onPrivateSessionEnded: showPrivateSessionNotice, close: close)
+                   onPrivateSessionEnded: showPrivateSessionNotice, connectPC: { showLogin = true }, close: close)
             .id(studioAPI?.queueTargetID ?? "phone")
     }
 
@@ -170,6 +173,19 @@ extension Home {
         .sheet(isPresented: $showCodeWorkspace) {
             CodeWorkspaceView(api: studioAPI, onBack: { showCodeWorkspace = false }, initialPath: searchCodePath)
         }
+        .sheet(item: $dashboardApproval) { approval in
+            NavigationStack {
+                Group {
+                    if studioAPI?.queueTargetID == approval.api.queueTargetID {
+                        BatchProposalView(api: approval.api, id: approval.id)
+                    } else {
+                        FadedEmptyState(icon: "desktopcomputer", title: "Forbind til din PC",
+                                        detail: "Forslaget ligger på PC’en, hvor det blev lavet. Forbind igen for at se det.")
+                    }
+                }
+                .toolbar { Button("Luk") { dashboardApproval = nil } }
+            }
+        }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
         .sheet(isPresented: $showOfflineStudio) {
             OfflineStudio(api: studioAPI, sessionUnlocked: $nsfwSessionUnlocked,
@@ -220,6 +236,7 @@ extension Home {
     func refreshAfterChat() {
         preferPhoneInChat = false
         searchChatQuery = ""
+        newChatRequest = nil
         refreshDashboard()
         if privateStudioAfterChat {
             privateStudioAfterChat = false
@@ -231,13 +248,28 @@ extension Home {
             openStudio(.images, prompt: prompt)
             return
         }
+        if botsAfterChat {
+            botsAfterChat = false
+            showBots = true
+            return
+        }
         guard !model.isDemo else { return }
         Task { await model.refresh() }
     }
 
     func openPhoneChat() {
         preferPhoneInChat = true
-        showChat = true
+        openChat()
+    }
+
+    func openNewChat() {
+        newChatRequest = UUID()
+        openChat()
+    }
+
+    func openChat() {
+        if model.needsPairing { showChat = true }
+        else { selectSpace(.notes) }
     }
 
     private func reconnectFromChat() {
@@ -248,21 +280,41 @@ extension Home {
         }
     }
 
-    var chatSheet: some View {
+    var chatSheet: some View { chatContent(embedded: false) }
+
+    func chatContent(embedded: Bool) -> some View {
         let session = model.isDemo ? "demo" : (model.address.isEmpty ? "offline" : model.address)
         let api: (any ChatAPI)? = model.connected || model.isDemo ? model.api as? any ChatAPI : nil
         let status = model.connected ? "Forbundet" : "Ikke forbundet"
         let connection = model.isDemo ? "Demo · Testdata" : "\(model.activeProfile.route) · \(status)"
         let target = model.api as? LiveAPI
         return ChatView(api: api, demo: model.isDemo, initialDraft: "", connection: connection,
-                        storageKey: AppStorageKeys.chatSession(session), onBack: { showChat = false },
-                        openImageStudio: openImagesFromChat, pcTargetAddress: target?.server.address,
+                        storageKey: AppStorageKeys.chatSession(session), onBack: {
+                            if embedded { goBackFromChat() }
+                            else { showChat = false }
+                        }, openImageStudio: { prompt in
+                            if embedded { openStudio(.images, prompt: prompt) }
+                            else { openImagesFromChat(prompt) }
+                        }, pcTargetAddress: target?.server.address,
                         pcQueueTargetID: target?.queueTargetID,
                         pcConnectionError: model.error, reconnectPC: reconnectFromChat,
                         initialSearch: searchChatQuery, openPrivateStudio: {
-                            privateStudioAfterChat = true
-                            showChat = false
-                        }, preferPhone: preferPhoneInChat)
+                            if embedded { openStudio(.chat) }
+                            else {
+                                privateStudioAfterChat = true
+                                showChat = false
+                            }
+                        }, preferPhone: preferPhoneInChat, embedded: embedded,
+                        newConversationRequest: newChatRequest,
+                        onConsumeNewConversation: { newChatRequest = nil },
+                        openBots: {
+                            if embedded { showBots = true }
+                            else {
+                                botsAfterChat = true
+                                showChat = false
+                            }
+                        }, onConsumeSearch: { searchChatQuery = "" },
+                        onConsumePhonePreference: { preferPhoneInChat = false })
             .id(session)
     }
 
@@ -304,8 +356,8 @@ extension Home {
         case "images": openStudio(.images)
         case "connection":
             if !model.address.isEmpty || model.isDemo { showLogin = true }
-        case "video": selectSpace(.gallery); showClips += 1
-        case "video-jobs": selectSpace(.gallery); showJobs += 1
+        case "video": openVideoClips()
+        case "video-jobs": openVideoJobs()
         case "code": selectSpace(.library)
         default: break
         }
@@ -339,6 +391,8 @@ extension Home {
         var codePoll: Task<Void, Never>?
         var deliveryTarget: String?
         var delivery: Task<Void, Never>?
+        var needsVideoDelivery = false
+        var nextDelivery = clock.now
         defer {
             codePoll?.cancel()
             delivery?.cancel()
@@ -370,14 +424,22 @@ extension Home {
                 delivery?.cancel()
                 delivery = nil
                 deliveryTarget = eligible
-                if let eligible, let live {
-                    // One drain per eligible connection. It can stream while status polling continues.
-                    delivery = Task { @MainActor in
-                        await model.deliverQueuedVideos()
-                        guard !Task.isCancelled, model.connected, !model.requiresVideoReview,
-                              (model.api as? LiveAPI)?.queueTargetID == eligible else { return }
-                        await PCChatOutbox().deliverReady(using: live)
+                needsVideoDelivery = eligible != nil
+                nextDelivery = clock.now
+            }
+            if let eligible, let live, delivery == nil, clock.now >= nextDelivery,
+               needsVideoDelivery || queuedChatCount > 0 {
+                let sendVideos = needsVideoDelivery
+                needsVideoDelivery = false
+                nextDelivery = clock.now.advanced(by: .seconds(8))
+                delivery = Task { @MainActor in
+                    defer {
+                        if !Task.isCancelled { delivery = nil }
                     }
+                    if sendVideos { await model.deliverQueuedVideos() }
+                    guard !Task.isCancelled, model.connected, !model.requiresVideoReview,
+                          (model.api as? LiveAPI)?.queueTargetID == eligible else { return }
+                    await PCChatOutbox().deliverReady(using: live)
                 }
             }
 

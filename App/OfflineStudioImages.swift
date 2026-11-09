@@ -83,8 +83,10 @@ extension OfflineStudio {
         let selected = privateSession ? sessionPreferences.lora : loraName
         guard selected.hasPrefix("fadedai-"), selected.hasSuffix("_lora_f16.ckpt"),
               !selected.contains("/"), !selected.contains("\\"),
-              MediaGenerationEnvironment.default.externalUrls.contains(where: {
-                  FileManager.default.fileExists(atPath: $0.appendingPathComponent(selected).path)
+              MediaGenerationEnvironment.default.externalUrls.contains(where: { root in
+                  let file = root.appendingPathComponent(selected)
+                  guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { return false }
+                  return values.isRegularFile == true && values.isSymbolicLink != true
               }) else { return nil }
         return selected
     }
@@ -96,10 +98,16 @@ extension OfflineStudio {
     private var loraPreviews: URL { URL.applicationSupportDirectory.appending(path: "StudioLoRAPreviews", directoryHint: .isDirectory) }
 
     private var importedLoRAs: [String] {
-        Array(Set(MediaGenerationEnvironment.default.externalUrls.flatMap { root in
-            ((try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])) ?? [])
-                .filter { $0.lastPathComponent.hasPrefix("fadedai-") && $0.lastPathComponent.hasSuffix("_lora_f16.ckpt") }
-                .map(\.lastPathComponent)
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey]
+        return Array(Set(MediaGenerationEnvironment.default.externalUrls.flatMap { root in
+            let files = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles])) ?? []
+            return files.compactMap { file -> String? in
+                let name = file.lastPathComponent
+                guard name.hasPrefix("fadedai-"), name.hasSuffix("_lora_f16.ckpt"),
+                      let values = try? file.resourceValues(forKeys: keys), values.isRegularFile == true,
+                      values.isSymbolicLink != true else { return nil }
+                return name
+            }
         })).sorted()
     }
 
@@ -116,10 +124,12 @@ extension OfflineStudio {
             if privateSession {
                 Text(imageReady ? "Billedmodellen er klar på telefonen." : "Hent billedmodellen uden for den private session.")
                     .font(.caption).foregroundStyle(palette.secondary)
-                Picker("Installeret LoRA", selection: $sessionPreferences.lora) {
-                    Text("Ingen").tag("")
-                    ForEach(importedLoRAs, id: \.self) { name in Text(loraLabels[name] ?? name).tag(name) }
-                }.disabled(task != nil)
+                let names = importedLoRAs
+                if !names.isEmpty {
+                    DisclosureGroup("Installeret LoRA") {
+                        loraRows(names, selection: $sessionPreferences.lora)
+                    }.disabled(task != nil)
+                }
                 if !canRenderPrivateImages { offlineImageNotice }
                 Text("Private billeder kan gemmes i Fotos med din godkendelse.")
                     .font(.caption).foregroundStyle(palette.secondary)
@@ -137,32 +147,45 @@ extension OfflineStudio {
         Text("Lad FadedAI være åben under download af billedmodeller.")
             .font(.caption).foregroundStyle(.secondary)
         Button("Importér LoRA fra Filer") { importLoRA = true }.frame(minHeight: 44).disabled(task != nil)
-        if !importedLoRAs.isEmpty {
-                DisclosureGroup("LoRA-forhåndsvisninger") {
-                    ForEach(importedLoRAs, id: \.self) { name in
-                        let previewURL = loraPreviews.appendingPathComponent(name + ".jpg")
-                        HStack {
-                            if let image = studioThumbnail(previewURL, maxPixelSize: 160) {
-                                Image(uiImage: image).resizable().scaledToFill().frame(width: 52, height: 52).clipped()
-                                    .accessibilityLabel("LoRA-forhåndsvisning")
-                            } else {
-                                Image(systemName: "photo").frame(width: 52, height: 52).foregroundStyle(.secondary)
-                                    .accessibilityLabel("Ingen forhåndsvisning")
-                            }
-                            Toggle(loraLabels[name] ?? name, isOn: Binding(get: { useLoRA && loraName == name }, set: { selected in
-                                if selected { loraName = name; useLoRA = true }
-                                else if loraName == name { useLoRA = false }
-                            }))
-                        }.id("\(name)-\(loraPreviewRefresh)")
-                    }
-                    if installedLoRA != nil {
-                        PhotosPicker("Vælg forhåndsvisning til valgt LoRA", selection: $loraPreviewSelection, matching: .images)
-                            .frame(minHeight: 44)
-                            .task(id: loraPreviewSelection) { await saveLoRAPreview() }
-                    }
-                }.disabled(task != nil)
+        let names = importedLoRAs
+        if !names.isEmpty {
+            DisclosureGroup("LoRA-forhåndsvisninger") {
+                loraRows(names, selection: $loraName, enabled: $useLoRA)
+                if installedLoRA != nil {
+                    PhotosPicker("Vælg forhåndsvisning til valgt LoRA", selection: $loraPreviewSelection, matching: .images)
+                        .frame(minHeight: 44)
+                        .task(id: loraPreviewSelection) { await saveLoRAPreview() }
+                }
+            }.disabled(task != nil)
         }
         Toggle("Beskyt batteriet under billedgenerering", isOn: $imageBatteryProtection).disabled(task != nil)
+    }
+
+    private func loraRows(_ names: [String], selection: Binding<String>, enabled: Binding<Bool>? = nil) -> some View {
+        let labels = loraLabels
+        return ForEach(names, id: \.self) { name in
+            let previewURL = loraPreviews.appendingPathComponent(name + ".jpg")
+            HStack {
+                if let image = studioThumbnail(previewURL, maxPixelSize: 160) {
+                    Image(uiImage: image).resizable().scaledToFill().frame(width: 52, height: 52).clipped()
+                        .accessibilityLabel("LoRA-forhåndsvisning")
+                } else {
+                    Image(systemName: "photo").frame(width: 52, height: 52).foregroundStyle(.secondary)
+                        .accessibilityLabel("Ingen forhåndsvisning")
+                }
+                Toggle(labels[name] ?? name, isOn: Binding(get: {
+                    (enabled?.wrappedValue ?? true) && selection.wrappedValue == name
+                }, set: { selected in
+                    if selected {
+                        selection.wrappedValue = name
+                        enabled?.wrappedValue = true
+                    } else if selection.wrappedValue == name {
+                        if let enabled { enabled.wrappedValue = false }
+                        else { selection.wrappedValue = "" }
+                    }
+                })).frame(minHeight: 44)
+            }.id("\(name)-\(loraPreviewRefresh)")
+        }
     }
 
     private func saveLoRAPreview() async {
