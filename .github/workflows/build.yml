@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-26-intel
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -19,18 +19,19 @@ jobs:
           simulator="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; runtimes=json.load(sys.stdin)["devices"]; print(next(d["udid"] for devices in runtimes.values() for d in devices if d["name"].startswith("iPhone")))')"
           xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
             -destination "platform=iOS Simulator,id=$simulator" \
-            -parallel-testing-enabled NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test
+            -parallel-testing-enabled NO ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test
       - name: Build for iPhone without signing
         run: |
           xcodebuild -version
           xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
             -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/SweatCasterBuild" \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+            ARCHS=arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
       - name: Package IPA
         run: |
           app="$RUNNER_TEMP/SweatCasterBuild/Build/Products/Release-iphoneos/SweatCaster.app"
           test -x "$app/SweatCaster"
+          xcrun lipo -verify_arch arm64 "$app/SweatCaster"
           test ! -e "$app/_CodeSignature"
           staging="$(mktemp -d)"
           mkdir "$staging/Payload"
