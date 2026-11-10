@@ -465,7 +465,8 @@ extension OfflineStudio {
         let sessionID = temporaryImagesID
         let folder = request.isPrivate ? privateImageFolder : historyFolder
         if request.isPrivate && !canRenderPrivateImages { throw StudioImageInterruption.network }
-        let ready = (try? await MediaGenerationEnvironment.default.inspectModel(request.model, offline: true))?.isDownloaded == true
+        guard let model = StudioImageModel(rawValue: request.model) else { throw PhoneModelError.unavailable }
+        let ready = model.isInstalled
         try Task.checkCancellation()
         let localOnly = !request.allowPCFallback || request.isPrivate || request.sourceImage != nil || request.seed != nil || request.prompt.count > 1_000
             || request.count > 1 || !request.negative.isEmpty || !request.lora.isEmpty
@@ -473,7 +474,6 @@ extension OfflineStudio {
             status = "Hent billedmodellen på telefonen for at bruge de valgte indstillinger."
             return
         }
-        let steps = request.model.hasPrefix("flux") ? 4 : 20
         var created: [URL] = []
         var photosDenied = false
         if !request.isPrivate { try prepareImageFolder(folder) }
@@ -487,13 +487,13 @@ extension OfflineStudio {
             let label = request.sourceImage != nil || variation != nil ? part + " Bruger dit billede som base…" : part
             var source = "Telefon"
             var metadata = StudioImageDetails(prompt: request.prompt, negativePrompt: request.negative,
-                                              seed: seed, model: request.model, steps: steps)
+                                              seed: seed, model: model.id, steps: model.renderSteps)
             do {
                 guard ready else { throw PhoneModelError.unavailable }
-                let data = try await renderStudioImage(model: request.model, prompt: request.prompt, lora: request.lora, seed: seed,
+                let data = try await renderStudioImage(model: model, prompt: request.prompt, lora: request.lora, seed: seed,
                                                        sourceImage: request.sourceImage, variation: variation,
                                                        destination: request.isPrivate ? nil : destination, within: folder,
-                                                       label: label, steps: steps, negativePrompt: request.negative,
+                                                       label: label, negativePrompt: request.negative,
                                                        requireOffline: request.isPrivate)
                 try Task.checkCancellation()
                 if request.isPrivate {

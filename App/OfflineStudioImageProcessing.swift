@@ -36,9 +36,9 @@ extension OfflineStudio {
         }
     }
 
-    func renderStudioImage(model: String, prompt: String, lora: String, seed: UInt32,
+    func renderStudioImage(model: StudioImageModel, prompt: String, lora: String, seed: UInt32,
                                    sourceImage: Data?, variation: URL?, destination: URL?, within outputDirectory: URL,
-                                   label: String, steps: Int? = nil, negativePrompt: String = "",
+                                   label: String, negativePrompt: String = "",
                                    requireOffline: Bool = false) async throws -> Data? {
         let destination = try destination.map { try LocalFileStore.safeWriteURL($0, within: outputDirectory) }
         if requireOffline { privateImageRendering = true }
@@ -58,23 +58,21 @@ extension OfflineStudio {
             imageCooling = false
             status = label
             do {
-                let data: Data? = try await LocalCompute.run(minimumMiB: model.hasPrefix("flux") ? 4_096 : 2_048) {
+                let data: Data? = try await LocalCompute.run(minimumMiB: model.minimumWorkingMemoryMiB) {
                     try await withThrowingTaskGroup(of: Optional<Data>.self) { group in
                         group.addTask { @MainActor in
                             try Task.checkCancellation()
                             if requireOffline && !canRenderPrivateImages { throw StudioImageInterruption.network }
                             LocalCompute.beginModelLoad()
-                            var pipeline = try await MediaGenerationPipeline.fromPretrained(model, backend: .local)
+                            var pipeline = try await MediaGenerationPipeline.fromPretrained(model.id, backend: .local)
                             LocalCompute.didLoadModel()
                             try Task.checkCancellation()
                             if requireOffline && !canRenderPrivateImages { throw StudioImageInterruption.network }
-                            pipeline.configuration.width = 512
-                            pipeline.configuration.height = 512
+                            model.applyRenderProfile(to: &pipeline.configuration)
                             pipeline.configuration.batchCount = 1
                             pipeline.configuration.batchSize = 1
                             pipeline.configuration.seed = seed
-                            if let steps { pipeline.configuration.steps = steps }
-                            if !lora.isEmpty { pipeline.configuration.loras = [.init(file: lora, weight: 1, mode: .base)] }
+                            pipeline.configuration.loras = lora.isEmpty ? [] : [.init(file: lora, weight: 1, mode: .base)]
                             var inputs: [MediaGenerationPipeline.Input] = []
                             if let variation, let bytes = privateImages[variation] {
                                 inputs = [MediaGenerationPipeline.data(bytes)]
@@ -129,7 +127,7 @@ extension OfflineStudio {
     }
 
     func benchmarkImageModel() {
-        let selected = imageModel
+        guard let selected = StudioImageModel(rawValue: imageModel) else { return }
         let requireOffline = privateSession
         let directory = FileManager.default.temporaryDirectory
         let destination = requireOffline ? nil : directory.appendingPathComponent("\(UUID()).png")
@@ -140,11 +138,10 @@ extension OfflineStudio {
             do {
                 _ = try await renderStudioImage(model: selected, prompt: "A red apple on a light table", lora: "",
                                                 seed: 42, sourceImage: nil, variation: nil, destination: destination, within: directory,
-                                                label: "Måler billedmodellens hastighed…", steps: 4, requireOffline: requireOffline)
+                                                label: "Måler billedmodellens hastighed…", requireOffline: requireOffline)
                 let time = start.duration(to: .now).components
                 let seconds = Double(time.seconds) + Double(time.attoseconds) / 1e18
-                let label = selected.hasPrefix("flux") ? "FLUX.2 Klein" : "Stable Diffusion 1.5"
-                imageBenchmark = "\(label): \(seconds.formatted(.number.precision(.fractionLength(1)))) sek. pr. billede (512 px, 4 trin, inkl. indlæsning)."
+                imageBenchmark = "\(selected.title): \(seconds.formatted(.number.precision(.fractionLength(1)))) sek. pr. billede (\(selected.renderSize) px, \(selected.renderSteps) trin, inkl. indlæsning)."
                 status = "Benchmark færdig."
             } catch StudioImageInterruption.battery {
                 AppDiagnostics.record(StudioImageInterruption.battery)
@@ -236,5 +233,35 @@ extension OfflineStudio {
         try Task.checkCancellation()
         await progress(1)
         return encoded
+    }
+}
+
+private extension StudioImageModel {
+    func applyRenderProfile(to configuration: inout MediaGenerationPipeline.Configuration) {
+        // The SDK may fall back to a generic preset when its catalog cannot be loaded offline.
+        configuration.width = renderSize
+        configuration.height = renderSize
+        configuration.steps = renderSteps
+        configuration.strength = 1
+        configuration.seedMode = .scaleAlike
+        configuration.resolutionDependentShift = false
+        configuration.hiresFix = false
+        configuration.teaCache = false
+        configuration.controls = []
+        switch self {
+        case .stableDiffusion:
+            configuration.sampler = .DPMPP2MAYS
+            configuration.guidanceScale = 5
+            configuration.clipSkip = 1
+            configuration.shift = 1
+            configuration.speedUpWithGuidanceEmbed = false
+        case .fluxKlein:
+            configuration.sampler = .dDIMTrailing
+            configuration.guidanceScale = 1
+            configuration.clipSkip = 2
+            configuration.shift = 3
+            configuration.speedUpWithGuidanceEmbed = true
+            configuration.t5TextEncoder = true
+        }
     }
 }

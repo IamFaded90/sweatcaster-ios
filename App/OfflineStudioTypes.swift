@@ -73,6 +73,9 @@ enum StudioImageModel: String, CaseIterable, Identifiable {
         }
     }
     var minimumFreeBytes: Int64 { self == .fluxKlein ? 8_000_000_000 : 4_000_000_000 }
+    var renderSize: Int { self == .fluxKlein ? 1024 : 512 }
+    var renderSteps: Int { self == .fluxKlein ? 4 : 16 }
+    var minimumWorkingMemoryMiB: UInt64 { self == .fluxKlein ? 4_096 : 2_048 }
     var isInstalled: Bool {
         (try? MediaGenerationEnvironment.default.inspectModel(rawValue, offline: true))?.isDownloaded == true
     }

@@ -117,7 +117,7 @@ extension ChatView {
             if busyPCTurn == turn.id {
                 FadedSecondaryButton("Brug Telefon imens", icon: "iphone") {
                     if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { restoreDraft(turn) }
-                    chooseSource(.phone)
+                    chooseModelForNextMessage(.phone)
                 }.disabled(task != nil)
             } else if canRetryOnPhone(turn) {
                 FadedSecondaryButton("Prøv igen på telefonen", icon: "arrow.clockwise") { retryOnPhone(turn) }

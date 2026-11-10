@@ -4,7 +4,7 @@ import Foundation
 import SwiftUI
 
 extension ChatView {
-    private func enhancedPrompt(_ message: String) -> String {
+    private func responsePreferences() -> [String] {
         var rules = ["tone=\(aiTone)", "længde=\(aiLength)", "sprog=\(aiLanguage)", "kreativitet=\(aiCreativity)"]
         let flags: [(Bool, String)] = [
             (aiBullets, "punktform"), (aiExamples, "eksempler"), (aiSummary, "kort resumé først"),
@@ -19,12 +19,28 @@ extension ChatView {
             (aiProsCons, "fordele og ulemper"), (aiChecklist, "tjekliste ved opgaver")
         ]
         rules.append(contentsOf: flags.filter { $0.0 }.map { $0.1 })
+        return rules
+    }
+
+    private func enhancedPrompt(_ message: String, preferences: [String]) -> String {
         let prefix = "\n\n[Svarpræferencer: "
         let suffix = "]"
         let available = 2000 - message.unicodeScalars.count - prefix.unicodeScalars.count - suffix.unicodeScalars.count
         guard available > 0 else { return message }
-        let preferences = rules.joined(separator: "; ").unicodeScalars.prefix(available)
-        return message + prefix + String(preferences) + suffix
+        let settings = preferences.joined(separator: "; ").unicodeScalars.prefix(available)
+        return message + prefix + String(settings) + suffix
+    }
+
+    private func phoneHistory(for message: String) -> [PhoneModels.ChatExchange] {
+        var remaining = max(0, 3_000 - message.count)
+        var history: [PhoneModels.ChatExchange] = []
+        for turn in turns.suffix(6).reversed() where turn.notice == nil && !turn.reply.isEmpty {
+            let size = turn.prompt.count + turn.reply.count + 24
+            guard size <= remaining else { break }
+            history.append(.init(prompt: turn.prompt, reply: turn.reply))
+            remaining -= size
+        }
+        return Array(history.reversed())
     }
 
     var transportMessage: String { transportMessage(for: effectiveReplySource) }
@@ -42,7 +58,8 @@ extension ChatView {
         let message = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         let route = resolvedRoute
         let outgoing = transportMessage(for: route.source)
-        if route.automatic != nil, PhoneModels.shouldUseLiteModel, ModelRouter.intent(for: message) == .cardCollection {
+        if route.source != .pc, route.automatic != nil, PhoneModels.shouldUseLiteModel,
+           ModelRouter.intent(for: message) == .cardCollection {
             chatNotice = "Kortsamlingen ligger på PC’en. Vælg PC manuelt for at spørge den."
             return
         }
@@ -56,7 +73,9 @@ extension ChatView {
         let phoneQuote = source == .phone && quoteDestination == .phone ? attachedQuote : nil
         let routeGrok = source == .grok && !demo
         let collectionQuestion = message.lowercased().hasPrefix("kortsamling:")
-        let modelMessage = routeGrok || collectionQuestion ? outgoing : enhancedPrompt(outgoing)
+        let preferences = responsePreferences()
+        let modelMessage = source == .pc && !collectionQuestion ? enhancedPrompt(outgoing, preferences: preferences) : outgoing
+        clearPCFallbackAction()
         if source == .pc && canQueuePC, let address = pcTargetAddress {
             queuePCMessage(message, outgoing: modelMessage, address: address, modelID: route.modelID)
             return
@@ -71,11 +90,9 @@ extension ChatView {
         searchSteps = []
         streamedText = ""
         let turn = ChatTurn(prompt: message, createdAt: .now)
-        let history = turns.suffix(6).filter { !$0.reply.isEmpty }
-            .map { "Bruger: \($0.prompt)\nSvar: \($0.reply)" }.joined(separator: "\n")
+        let history = source == .phone ? phoneHistory(for: outgoing) : []
         turns.append(turn)
         let turnID = turn.id
-        let context = String(history.suffix(max(0, 3000 - modelMessage.count)))
         status = "Venter på svar…"
         let input = ChatRequest(message: modelMessage, session_id: sessionID)
         inFlightAutoRoute = route.automatic
@@ -99,7 +116,8 @@ extension ChatView {
                 } else {
                     switch source {
                     case .phone:
-                        try await answerOnPhone(modelMessage, context: context, modelID: route.modelID ?? phoneModel, turnID: turnID)
+                        try await answerOnPhone(outgoing, history: history, preferences: preferences,
+                                                modelID: route.modelID ?? phoneModel, turnID: turnID)
                     case .pc: try await answerOnPC(input, modelID: route.modelID, turnID: turnID)
                     case .grok: try await answerOnGrok(cloudMessages, turnID: turnID)
                     }
@@ -128,8 +146,7 @@ extension ChatView {
                             if let phoneQuote { attachedQuote = phoneQuote; quoteDestination = .phone }
                         }
                     } else {
-                        if source == .pc, pcBusyMessage(error) != nil { busyPCTurn = turnID }
-                        turns[index].notice = pcBusyMessage(error) ?? AppErrorPresentation(error).title
+                        turns[index].notice = source == .pc ? pcChatFailure(error, turnID: turnID) : AppErrorPresentation(error).title
                     }
                 }
             }
@@ -216,13 +233,22 @@ extension ChatView {
         if let index = turnIndex(turnID) { turns[index].replyModelID = modelID }
     }
 
-    private func answerOnPhone(_ message: String, context: String, modelID: String, turnID: UUID) async throws {
+    private func answerOnPhone(_ message: String, history: [PhoneModels.ChatExchange], preferences: [String],
+                               modelID: String, turnID: UUID) async throws {
         guard let index = turnIndex(turnID) else { return }
         turns[index].source = "Telefon"
         status = "Telefon · Forbereder svar…"
-        let prompt = context.isEmpty ? message : "\(context)\nBruger: \(message)"
-        try await PhoneModels.reply(modelID: modelID, prompt: prompt,
-                                    instructions: "Svar på brugerens sprog. Du kan bruge teksten i chatten og udfører ingen opgaver på PC’en.") { answer in
+        let instructions = "Besvar brugerens seneste besked direkte. En hilsen skal bare have en kort hilsen som svar. "
+            + "Brug tidligere beskeder, når de er relevante. Du udfører ingen opgaver på PC’en. "
+            + "Svarpræferencer: " + preferences.joined(separator: ", ") + "."
+        let prompt: String
+        if modelID == "apple" && !history.isEmpty {
+            let context = history.map { "Bruger: \($0.prompt)\nSvar: \($0.reply)" }.joined(separator: "\n")
+            prompt = "\(context)\nBruger: \(message)"
+        } else {
+            prompt = message
+        }
+        try await PhoneModels.reply(modelID: modelID, prompt: prompt, instructions: instructions, history: history) { answer in
             guard !Task.isCancelled, let index = turnIndex(turnID) else { return }
             turns[index].reply = safeText(answer)
             turns[index].replyModelID = modelID
@@ -261,6 +287,7 @@ extension ChatView {
                 }
             }
             try Task.checkCancellation()
+            pcEngineOffline = false
         } else {
             await run(api, input: input, turnID: turnID)
         }
@@ -278,10 +305,37 @@ extension ChatView {
         } catch {
             AppDiagnostics.record(error)
             guard let index = turnIndex(turnID) else { return }
-            if !Task.isCancelled, pcBusyMessage(error) != nil { busyPCTurn = turnID }
             turns[index].notice = Task.isCancelled ? "Modtagelsen er stoppet. Et job kan stadig køre."
-                : pcBusyMessage(error) ?? AppErrorPresentation(error).title
+                : pcChatFailure(error, turnID: turnID)
         }
+    }
+
+    private func pcChatFailure(_ error: Error, turnID: UUID) -> String {
+        let problem: (code: String?, message: String?)
+        if case .http(503, let code, let message)? = error as? V2Failure {
+            problem = (code, message)
+        } else if case .http(503, let body)? = error as? APIError {
+            problem = (body?.code, body?.message)
+        } else {
+            problem = (nil, nil)
+        }
+        if problem.code?.uppercased() == "DEPENDENCY_MISSING" {
+            busyPCTurn = turnID
+            let reason = problem.message?.lowercased() ?? ""
+            if reason.contains("assistant container") || reason.contains("agent container") {
+                pcEngineOffline = true
+                return pcEngineOfflineMessage
+            }
+            if reason.contains("model") {
+                return "PC’en kan ikke indlæse den valgte model. Tjek Ollama på PC’en, eller vælg en anden PC-model."
+            }
+            return "PC’en mangler en tjeneste til chat. Start FadedAI og Ollama på PC’en, og prøv igen."
+        }
+        if let busy = pcBusyMessage(error) {
+            busyPCTurn = turnID
+            return busy
+        }
+        return AppErrorPresentation(error).title
     }
 
     private func receive(type: String, content: String, index: Int) {

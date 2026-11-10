@@ -40,16 +40,24 @@ extension ChatView {
 
     private var automaticRoutingAvailable: Bool { autoRouterEnabled && !demo }
     private var usesAutomaticRouting: Bool { automaticRoutingAvailable && manualRoute == nil }
+    private var pcReadyForText: Bool {
+        !demo && api is LiveAPI && !modelsLoading && !pcEngineOffline && (legacyChat || !models.isEmpty)
+    }
+
+    var pcEngineOfflineMessage: String {
+        "PC’ens chatmotor svarer ikke. Start FadedAI på PC’en, og prøv igen."
+    }
 
     private var automaticSelection: ModelRouter.Selection? {
         if let inFlightAutoRoute { return inFlightAutoRoute }
         guard usesAutomaticRouting else { return nil }
+        if let pc = ModelRouter.choose(text: draft, candidates: pcRoutingCandidates) { return pc }
         let readyPhones = phoneRoutingCandidates
         if PhoneModels.shouldUseLiteModel,
            let lite = readyPhones.first(where: { $0.defaultChoice }) {
             return ModelRouter.Selection(candidate: lite, reason: "Lavt batteri. Bruger den lette telefonmodel.")
         }
-        return ModelRouter.choose(text: draft, candidates: readyPhones + pcRoutingCandidates)
+        return ModelRouter.choose(text: draft, candidates: readyPhones)
     }
 
     var resolvedRoute: ResolvedRoute {
@@ -58,7 +66,7 @@ extension ChatView {
                                  modelID: automaticSelection.candidate.id.isEmpty ? nil : automaticSelection.candidate.id,
                                  automatic: automaticSelection)
         }
-        let requestedSource = manualRoute?.source ?? replySource
+        let requestedSource = manualRoute?.source ?? replySource ?? (pcReadyForText ? .pc : .phone)
         let source = requestedSource == .grok && !cloudKeyAvailable ? ReplySource.phone : requestedSource
         let modelID: String?
         switch source {
@@ -89,7 +97,7 @@ extension ChatView {
     }
 
     private var pcRoutingCandidates: [ModelRouter.Candidate] {
-        guard let live = api as? LiveAPI else { return [] }
+        guard pcReadyForText, let live = api as? LiveAPI else { return [] }
         if legacyChat {
             return [.init(id: "", name: "PC’ens standardmodel (v1)", location: .pc, ready: true, defaultChoice: true)]
         }
@@ -103,6 +111,7 @@ extension ChatView {
 
     func chooseSource(_ source: ReplySource, modelID: String? = nil) {
         guard task == nil, source != .grok || cloudKeyAvailable else { return }
+        if source == .phone { clearPCFallbackAction() }
         if automaticRoutingAvailable {
             manualRoute = ManualRoute(source: source, modelID: modelID)
         } else {
@@ -117,7 +126,12 @@ extension ChatView {
 
     func chooseModelForNextMessage(_ source: ReplySource, modelID: String? = nil) {
         guard task == nil, source != .grok || cloudKeyAvailable else { return }
+        if source == .phone { clearPCFallbackAction() }
         manualRoute = ManualRoute(source: source, modelID: modelID)
+    }
+
+    func clearPCFallbackAction() {
+        busyPCTurn = nil
     }
 
     func sourceColor(_ source: ReplySource) -> Color {
@@ -130,8 +144,12 @@ extension ChatView {
 
     var sourceNote: String? {
         guard !demo else { return nil }
-        if effectiveReplySource == .pc, api != nil, !modelsLoading, !hasRequestedPCModel(resolvedRoute) {
-            return "Den valgte PC-model er ikke klar. Vælg en anden model for at sende."
+        if effectiveReplySource == .pc, api is LiveAPI {
+            if modelsLoading { return "Tjekker PC’ens modeller…" }
+            if pcEngineOffline { return pcEngineOfflineMessage }
+            if !hasRequestedPCModel(resolvedRoute) {
+                return modelsError ?? "Den valgte PC-model er ikke klar. Vælg en anden model for at sende."
+            }
         }
         return switch effectiveReplySource {
         case .phone: nil
@@ -158,7 +176,7 @@ extension ChatView {
     }
 
     private func hasRequestedPCModel(_ route: ResolvedRoute) -> Bool {
-        guard let id = route.modelID else { return true }
+        guard let id = route.modelID else { return legacyChat || !(api is LiveAPI) || !models.isEmpty }
         return models.contains { $0.id == id }
     }
 
@@ -494,6 +512,7 @@ extension ChatView {
         defer { if !Task.isCancelled { modelsLoading = false } }
         modelsError = nil
         legacyChat = false
+        pcEngineOffline = false
         guard let live = api as? LiveAPI else {
             models = []
             selectedModel = ""
@@ -505,6 +524,11 @@ extension ChatView {
             let catalog = try await live.v2Models()
             guard !Task.isCancelled else { return }
             let available = PCModelSelection.installed(in: catalog).filter(PCModelSelection.usable)
+            if !available.isEmpty {
+                let hub = try? await live.v2Hub()
+                guard !Task.isCancelled else { return }
+                pcEngineOffline = hub?.agents.first(where: { $0.id == "manager" })?.status == .offline
+            }
             models = available
             pcDefaultModelID = catalog.default_model_id
             let preferred = PCModelSelection.saved(for: live)

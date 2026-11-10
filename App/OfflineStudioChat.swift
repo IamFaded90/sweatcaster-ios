@@ -174,6 +174,9 @@ extension OfflineStudio {
                 Text("Vælg en lokal tekstmodel under Galleri og indstillinger.").font(.footnote).foregroundStyle(palette.secondary)
             } else if hasPrompt && !messageFitsContext {
                 Text("Beskeden er for lang til den valgte model.").font(.footnote).foregroundStyle(palette.secondary)
+            } else if !promptFocused {
+                Label(studioTextModelName(effectiveTextModel), systemImage: "iphone")
+                    .font(.caption).foregroundStyle(palette.secondary)
             }
             HStack(alignment: .bottom, spacing: 4) {
                 sessionPlusMenu
@@ -312,7 +315,7 @@ extension OfflineStudio {
         }
         let history = Array(context.reversed())
         rememberPrompt(message)
-        runPrivateReply(historyPrompt: message, source: "Telefon", progress: "Din bot skriver…") { id in
+        runPrivateReply(historyPrompt: message, source: "Telefon · \(studioTextModelName(model))", progress: "Din bot skriver…") { id in
             try await PhoneModels.reply(modelID: model, prompt: message, instructions: instructions, history: history) {
                 updateChatReply(id, with: $0)
             }
@@ -405,10 +408,15 @@ extension OfflineStudio {
         Self.companionInstructions(for: selectedPrivateBot, preset: privateSession ? sessionPreferences.personality : personalityPreset)
     }
 
+    private func studioTextModelName(_ id: String) -> String {
+        if id == "imported" { return "Importeret model" }
+        return PhoneModels.catalog.first { $0.id == id }?.name ?? id
+    }
+
     static func companionInstructions(for profile: VillageBot?, preset choice: String = "bot") -> String {
         let custom = profile?.prompt.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let base = "Du er \(profile?.name ?? "brugerens private AI-companion"). Svar direkte på brugerens seneste besked på samme sprog. Brug tidligere beskeder, når de er relevante. Bevar din personlighed, og respekter brugerens grænser."
-        let tone = profile == nil ? "Brug en varm, naturlig tone. Vær flirtende, når samtalen lægger op til det." : ""
+        let base = "Du er \(profile?.name ?? "brugerens private samtalepartner"). Svar direkte på den seneste besked på samme sprog. Brug relevante fakta fra samtalen. Respekter brugerens grænser."
+        let tone = profile == nil ? "Brug en varm, naturlig tone. Flirt, når brugeren selv lægger op til det." : ""
         let preset: String = switch choice {
         case "calm": "Svar kort, roligt og med enkle sætninger."
         case "creative": "Brug fantasi og en let, legende tone."

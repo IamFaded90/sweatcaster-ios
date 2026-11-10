@@ -534,7 +534,8 @@ extension Home {
             }
             guard !Task.isCancelled, videoFolderScope == server, selectedGameFolder == id, pageLoading == ticket else { return }
             var seen = Set<String>()
-            let pageClips = Array(clips.lazy.filter { validWireID($0.id) && seen.insert($0.id).inserted }.prefix(limit))
+            // Filter eagerly so index traversal cannot mark clips as seen before copying them.
+            let pageClips = Array(clips.filter { validWireID($0.id) && seen.insert($0.id).inserted }.prefix(limit))
             folderPages[id] = pageClips
             folderPageNotices[id] = notice
             model.includeFolderClips(pageClips, folderID: id)

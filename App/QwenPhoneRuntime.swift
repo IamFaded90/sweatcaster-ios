@@ -186,13 +186,6 @@ enum QwenPhoneRuntime {
             tokens += encode("\n")
             return tokens
         }
-        var input: [Int32] = []
-        if !instructions.isEmpty { input += message("system", instructions) }
-        for exchange in history {
-            input += message("user", exchange.prompt)
-            input += message("assistant", exchange.reply)
-        }
-        input += [start] + encode("user\n")
         let (tokens, continuation) = AsyncStream<Int32>.makeStream()
         let delivery = Task { @MainActor in
             var emitted: [Int] = []
@@ -213,17 +206,26 @@ enum QwenPhoneRuntime {
         switch variant {
         case .compact:
             guard image == nil else { throw PhoneModelError.unavailable }
+            let input = encode(compactPrompt(prompt, instructions: instructions, history: history))
+            let budget = try outputLimit(context: variant.contextLimit, input: input.count, requested: maxTokens)
             let generator = Qwen35MLKVGenerator(cfg: .default0_8B)
             generator.setModelFolder(folder)
             try await generator.load()
             try Task.checkCancellation()
             LocalCompute.didLoadModel()
-            input += encode(prompt).filter { !eos.contains($0) } + [end] + encode("\n")
-            input += [start] + encode("assistant\n<think>\n\n</think>\n\n")
-            let budget = try outputLimit(context: variant.contextLimit, input: input.count, requested: maxTokens)
             started = .now
-            generated = try await generator.generate(inputIds: input, maxNewTokens: budget, eosTokenIds: eos, onToken: emit)
+            // CoreML-LLM v1.9.0's full-logit sampler ignores topP when temperature is nonzero.
+            // Use its documented iPhone argmax path with a repetition penalty.
+            generated = try await generator.generate(inputIds: input, maxNewTokens: budget, temperature: 0,
+                                                     repetitionPenalty: 1.1, eosTokenIds: eos, onToken: emit)
         case .vision:
+            var input: [Int32] = []
+            if !instructions.isEmpty { input += message("system", instructions) }
+            for exchange in history {
+                input += message("user", exchange.prompt)
+                input += message("assistant", exchange.reply)
+            }
+            input += [start] + encode("user\n")
             let generator = Qwen3VL2BGenerator()
             generator.modelFolderOverride = folder
             try generator.load()
@@ -261,6 +263,25 @@ enum QwenPhoneRuntime {
         update(text)
         let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
         return (text, Double(output.count) / max(0.001, seconds))
+    }
+
+    // Text-only subset of the pinned Qwen3.5 template with thinking disabled.
+    // Encode the entire rendered prompt together to preserve tokenizer boundaries.
+    private static func compactPrompt(_ prompt: String, instructions: String, history: [PhoneModels.ChatExchange]) -> String {
+        let controls = ["<|im_start|>", "<|im_end|>", "<|endoftext|>", "<think>", "</think>",
+                        "<tool_call>", "</tool_call>", "<tool_response>", "</tool_response>",
+                        "<|vision_start|>", "<|vision_end|>", "<|image_pad|>", "<|video_pad|>"]
+        func turn(_ role: String, _ text: String) -> String {
+            let content = controls.reduce(text) { $0.replacingOccurrences(of: $1, with: " ") }
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return "<|im_start|>\(role)\n\(content)<|im_end|>\n"
+        }
+        var result = instructions.isEmpty ? "" : turn("system", instructions)
+        for exchange in history {
+            result += turn("user", exchange.prompt)
+            result += turn("assistant", exchange.reply)
+        }
+        return result + turn("user", prompt) + "<|im_start|>assistant\n<think>\n\n</think>\n\n"
     }
 
     private static func token(_ text: String, tokenizer: any Tokenizer) throws -> Int32 {

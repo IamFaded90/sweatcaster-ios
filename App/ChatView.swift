@@ -89,10 +89,11 @@ struct ChatView: View {
     @State var manualRoute: ManualRoute?
     @State var inFlightAutoRoute: ModelRouter.Selection?
     @State var cloudKeyAvailable = CloudModelKey.exists()
-    @State var replySource = ReplySource.phone
+    @State var replySource: ReplySource?
     @State var modelsLoading = true
     @State var modelsError: String?
     @State var legacyChat = false
+    @State var pcEngineOffline = false
     @State var completedReplies = 0
     @AppStorage(AppStorageKeys.phoneModel) var phoneModel = "apple"
     @AppStorage(AppStorageKeys.phoneModelFavorites) var phoneFavorites = ""
@@ -386,10 +387,7 @@ struct ChatView: View {
         guard !loaded else { return }
         loaded = true
         UserDefaults.standard.removeObject(forKey: AppStorageKeys.aiPrivate)
-        let localModelID = PhoneModels.effectiveModelID(phoneModel)
-        let localReady = localModelID == "apple" ? PhoneModels.appleAvailable : PhoneModels.installedDirectory(localModelID) != nil
         if preferPhone { chooseSource(.phone) }
-        else if api != nil && !localReady && !demo { replySource = .pc }
         loadHistory()
         draft = savedDraft.isEmpty ? initialDraft : savedDraft
         if !savedDraft.isEmpty, !initialDraft.isEmpty, initialDraft != savedDraft {
