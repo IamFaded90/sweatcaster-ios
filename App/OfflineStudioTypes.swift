@@ -4,6 +4,7 @@
 import AVFAudio
 import CoreTransferable
 import ImageIO
+import MediaGenerationKit
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -59,6 +60,136 @@ struct StudioPhotoInput: Transferable {
 }
 
 enum StudioImageInterruption: Error { case heat, battery, network }
+
+enum StudioImageModel: String, CaseIterable, Identifiable {
+    case stableDiffusion = "sd_v1.5_f16.ckpt"
+    case fluxKlein = "flux_2_klein_4b_q8p.ckpt"
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .stableDiffusion: "Stable Diffusion 1.5"
+        case .fluxKlein: "FLUX.2 Klein 4B"
+        }
+    }
+    var minimumFreeBytes: Int64 { self == .fluxKlein ? 8_000_000_000 : 4_000_000_000 }
+    var renderSize: Int { self == .fluxKlein ? 1024 : 512 }
+    var renderSteps: Int { self == .fluxKlein ? 4 : 16 }
+    var minimumWorkingMemoryMiB: UInt64 { self == .fluxKlein ? 4_096 : 2_048 }
+    private var requiredFiles: [String] {
+        // The pinned SDK's catalog also requires a text encoder and autoencoder for each model.
+        switch self {
+        case .stableDiffusion: [id, "clip_vit_l14_f16.ckpt", "vae_ft_mse_840000_f16.ckpt"]
+        case .fluxKlein: [id, "qwen_3_4b_q8p.ckpt", "flux_2_vae_f16.ckpt"]
+        }
+    }
+
+    var isInstalled: Bool {
+        let roots = Set(MediaGenerationEnvironment.default.externalUrls + [PhoneModels.downloadedRoot])
+        return requiredFiles.allSatisfy { name in
+            roots.contains { root in
+                let file = root.appendingPathComponent(name, isDirectory: false)
+                return ((try? LocalFileStore.checkedFileSize(file, maximumBytes: Int.max)) ?? 0) > 0
+            }
+        }
+    }
+
+    func ensure(progress: @escaping @Sendable (Double) -> Void) async throws {
+        try Task.checkCancellation()
+        guard !isInstalled else { return }
+        _ = try await MediaGenerationEnvironment.default.ensure(rawValue) { state in
+            if case .downloading(_, let index, let count, let written, let total) = state, count > 0, total > 0 {
+                let part = min(1, Double(written) / Double(total))
+                progress(min(1, (Double(max(0, index - 1)) + part) / Double(count)))
+            }
+        }
+        try Task.checkCancellation()
+        guard isInstalled else { throw PhoneModelError.unavailable }
+    }
+}
+
+struct StudioImageDownloadsView: View {
+    @Binding var downloading: StudioImageModel?
+    let canStart: Bool
+    let onDownloaded: () -> Void
+    @State private var task: Task<Void, Never>?
+    @State private var progress: Double?
+    @State private var notice: String?
+    @State private var activeDownload: UUID?
+
+    init(downloading: Binding<StudioImageModel?>, canStart: Bool, onDownloaded: @escaping () -> Void) {
+        _downloading = downloading
+        self.canStart = canStart
+        self.onDownloaded = onDownloaded
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.section) {
+            FadedSectionHeader("Billedmodeller", detail: "Hent modellen én gang til din telefon. Hold siden åben, mens den hentes.")
+            ForEach(StudioImageModel.allCases) { model in
+                FadedCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label(model.title, systemImage: "photo").font(.headline)
+                        FadedDetailText(model == .stableDiffusion
+                                        ? "Start her. Kræver mindst 4 GB ledig plads før download."
+                                        : "Tungere model. Kræver mindst 8 GB ledig plads før download.")
+                        if downloading == model {
+                            if let progress {
+                                ProgressView(value: progress) { Text(progress.formatted(.percent)) }
+                            } else {
+                                ProgressView("Henter billedmodellen…")
+                            }
+                            FadedSecondaryButton("Stop download", icon: "stop.fill") { task?.cancel() }
+                        } else if model.isInstalled {
+                            Label("Gemt på telefonen", systemImage: "checkmark.circle")
+                        } else {
+                            FadedSecondaryButton("Hent billedmodel", icon: "arrow.down.circle") { download(model) }
+                                .accessibilityLabel("Hent \(model.title)").disabled(!canStart)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            if let notice { FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently) }
+        }
+        .onDisappear { task?.cancel() }
+    }
+
+    private func download(_ model: StudioImageModel) {
+        guard canStart, !model.isInstalled else { return }
+        guard PhoneModels.hasDownloadSpace(bytes: model.minimumFreeBytes) else {
+            notice = "Der er for lidt ledig plads. Frigør plads, og prøv igen."
+            return
+        }
+        let id = UUID()
+        activeDownload = id
+        downloading = model
+        progress = nil
+        notice = nil
+        task = Task { @MainActor in
+            defer {
+                activeDownload = nil
+                downloading = nil
+                progress = nil
+                task = nil
+            }
+            do {
+                try await model.ensure { value in
+                    Task { @MainActor in
+                        if activeDownload == id { progress = value }
+                    }
+                }
+                try Task.checkCancellation()
+                notice = "\(model.title) er klar på telefonen."
+                onDownloaded()
+            } catch is CancellationError {
+                notice = "Download stoppet."
+            } catch {
+                AppDiagnostics.record(error)
+                notice = "Billedmodellen kunne ikke hentes. Tjek internet og ledig plads, og prøv igen."
+            }
+        }
+    }
+}
 
 struct StudioImageDetails: Codable, Sendable {
     var prompt: String? = nil
@@ -170,9 +301,17 @@ func studioImageSource(_ file: URL, privateImages: [URL: Data]) -> CGImageSource
 }
 
 enum LocalSpeechVoice {
-    static func options(language: String) -> [AVSpeechSynthesisVoice] {
+    static var personalVoices: [AVSpeechSynthesisVoice] {
+        guard AVSpeechSynthesizer.personalVoiceAuthorizationStatus == .authorized else { return [] }
+        return AVSpeechSynthesisVoice.speechVoices().filter { $0.voiceTraits.contains(.isPersonalVoice) }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+    }
+
+    static func options(language: String, includePersonalVoices: Bool = false) -> [AVSpeechSynthesisVoice] {
         let base = language.split(separator: "-").first
-        return AVSpeechSynthesisVoice.speechVoices().filter { $0.language.split(separator: "-").first == base }
+        let systemVoices = AVSpeechSynthesisVoice.speechVoices().filter {
+            !$0.voiceTraits.contains(.isPersonalVoice) && $0.language.split(separator: "-").first == base
+        }
             .sorted { lhs, rhs in
                 let leftMatch = lhs.language == language
                 let rightMatch = rhs.language == language
@@ -180,22 +319,42 @@ enum LocalSpeechVoice {
                 if lhs.quality != rhs.quality { return lhs.quality.rawValue > rhs.quality.rawValue }
                 return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
             }
+        return includePersonalVoices ? personalVoices + systemVoices : systemVoices
     }
 
     static func preferred(language: String) -> AVSpeechSynthesisVoice? {
-        options(language: language).first ?? AVSpeechSynthesisVoice(language: language)
+        if let voice = options(language: language).first { return voice }
+        guard let voice = AVSpeechSynthesisVoice(language: language), !voice.voiceTraits.contains(.isPersonalVoice) else { return nil }
+        return voice
     }
 
     static func resolve(identifier: String?, language: String) -> AVSpeechSynthesisVoice? {
-        identifier.flatMap { AVSpeechSynthesisVoice(identifier: $0) } ?? preferred(language: language)
+        if let identifier, !identifier.isEmpty, let voice = AVSpeechSynthesisVoice(identifier: identifier),
+           !voice.voiceTraits.contains(.isPersonalVoice) || AVSpeechSynthesizer.personalVoiceAuthorizationStatus == .authorized {
+            return voice
+        }
+        return preferred(language: language)
     }
 
     static func label(_ voice: AVSpeechSynthesisVoice) -> String {
-        let quality = switch voice.quality {
+        "\(voice.name) · \(qualityLabel(voice)) · \(voice.language)"
+    }
+
+    static func qualityLabel(_ voice: AVSpeechSynthesisVoice) -> String {
+        if voice.voiceTraits.contains(.isPersonalVoice) { return "Personlig" }
+        return switch voice.quality {
         case .premium: "Premium"
         case .enhanced: "Forbedret"
         default: "Standard"
         }
-        return "\(voice.name) · \(quality) · \(voice.language)"
+    }
+
+    static func previewSentence(language: String) -> String {
+        switch language.split(separator: "-").first.map(String.init) ?? "" {
+        case "en": "Hello. This is how my voice sounds in FadedAI."
+        case "es": "Hola. Así suena mi voz en FadedAI."
+        case "zh": "你好！这是我在 FadedAI 里的声音。"
+        default: "Hej. Sådan lyder min stemme i FadedAI."
+        }
     }
 }

@@ -8,6 +8,34 @@ struct V2Models: Decodable, Sendable {
         let id, label: String
         let available, loaded: Bool
         let capabilities: [String]
+        let size_bytes: Int64?
+
+        private enum CodingKeys: String, CodingKey {
+            case id, label, available, loaded, capabilities, size_bytes
+        }
+
+        init(id: String, label: String, available: Bool, loaded: Bool, capabilities: [String], size_bytes: Int64? = nil) {
+            self.id = id
+            self.label = label
+            self.available = available
+            self.loaded = loaded
+            self.capabilities = capabilities
+            self.size_bytes = size_bytes
+        }
+
+        init(from decoder: Decoder) throws {
+            let fields = try decoder.container(keyedBy: CodingKeys.self)
+            id = try fields.decode(String.self, forKey: .id)
+            label = try fields.decode(String.self, forKey: .label)
+            available = try fields.decode(Bool.self, forKey: .available)
+            loaded = try fields.decode(Bool.self, forKey: .loaded)
+            capabilities = try fields.decode([String].self, forKey: .capabilities)
+            size_bytes = try? fields.decode(Int64.self, forKey: .size_bytes)
+        }
+
+        // Older PC catalogs use "chat" for the route even when it requires an image.
+        var requiresImageForChat: Bool { capabilities.contains("vision") && !capabilities.contains("text") }
+        var supportsImageChat: Bool { available && capabilities.contains("vision") }
     }
 
     static let preview = Self(default_model_id: "qwen25-7b", models: [
@@ -17,12 +45,25 @@ struct V2Models: Decodable, Sendable {
 }
 
 struct V2ChatRequest: Encodable, Sendable {
+    struct Image: Encodable, Sendable {
+        let media_type = "image/jpeg"
+        let data_base64: Data
+
+        init(jpegData: Data) throws {
+            guard jpegData.count <= 4_000_000, jpegData.starts(with: [0xFF, 0xD8, 0xFF]) else {
+                throw V2Failure.invalidInput
+            }
+            data_base64 = jpegData
+        }
+    }
+
     let message: String
     let session_id: String?
     let model_id: String?
     let request_id: UUID
+    let image: Image?
 
-    init(message: String, sessionID: String? = nil, modelID: String? = nil, requestID: UUID = UUID()) throws {
+    init(message: String, sessionID: String? = nil, modelID: String? = nil, requestID: UUID = UUID(), image: Image? = nil) throws {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard (1...2000).contains(trimmed.unicodeScalars.count),
               sessionID.map({ $0.utf8.count <= 64 && $0.utf8.allSatisfy {
@@ -32,6 +73,7 @@ struct V2ChatRequest: Encodable, Sendable {
         session_id = sessionID
         model_id = modelID
         request_id = requestID
+        self.image = image
     }
 }
 

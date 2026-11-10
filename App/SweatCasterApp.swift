@@ -83,11 +83,15 @@ struct PromptExample: Identifiable {
     @AppStorage(AppStorageKeys.appTextScale) private var textScale = 0.0
     @AppStorage(AppStorageKeys.appResetGeneration) private var resetGeneration = ""
     @Environment(\.dynamicTypeSize) private var systemTextSize
+    @Environment(\.scenePhase) private var scenePhase
     var body: some Scene {
         WindowGroup {
             Home().id(resetGeneration).dynamicTypeSize(textScale == 0 ? systemTextSize :
                 [DynamicTypeSize.large, .xLarge, .xxLarge, .xxxLarge,
                  .accessibility1, .accessibility2][min(5, max(0, Int(textScale)))])
+                .onChange(of: scenePhase, initial: true) { _, phase in
+                    if phase == .active { Task { await PhoneModelDownloads.shared.resumeInterruptedVisionDownload() } }
+                }
         }
     }
 }

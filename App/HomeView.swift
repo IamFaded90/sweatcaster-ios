@@ -4,7 +4,7 @@ import SwiftUI
 import UIKit
 
 struct Home: View {
-    enum SettingsCategory: String, CaseIterable {
+    enum SettingsCategory: String, CaseIterable, Hashable, Sendable {
         case connection = "Forbindelse", models = "AI-modeller", appearance = "Udseende", diagnostics = "Fejlfinding"
 
         var icon: String {
@@ -22,6 +22,15 @@ struct Home: View {
             case .models: "Kåre, Core ML og Grok"
             case .appearance: "Tema, tekst og bevægelse"
             case .diagnostics: "Ping, log og lokale data"
+            }
+        }
+
+        var searchKeywords: String {
+            switch self {
+            case .connection: "netværk forbindelse IP QR Hjem Tailscale"
+            case .models: "model download Core ML Apple Foundation Ollama Grok automatisk"
+            case .appearance: "tema mørk lys OLED skrifttype tekststørrelse animation haptik"
+            case .diagnostics: "ping fejllog eksport ressourcer notifikationer Live Activity ryd"
             }
         }
     }
@@ -43,10 +52,19 @@ struct Home: View {
         }
     }
     struct SearchBot: Identifiable { let id: UUID }
+    struct DashboardApproval: Identifiable {
+        let id: String
+        let api: LiveAPI
+    }
     enum SettingsFollowup { case login, models, privateChat, bots, code, export }
     enum Space: String, CaseIterable, Identifiable {
         case brain = "Brain", notes = "Notes", gallery = "Gallery", tasks = "Tasks", library = "Library"
         var id: Self { self }
+    }
+    private enum TabDestination: Equatable {
+        case fixed(Space)
+        case video(VideoPage)
+        case module(selection: String, targetID: String)
     }
     enum VideoPage: String, CaseIterable, Identifiable {
         case clips = "Klip", recipe = "Opskrift", jobs = "Jobs"
@@ -57,9 +75,14 @@ struct Home: View {
     @State var model = Model()
     @State var showLogin = false
     @State var showSettings = false
+    @State var showPCStatus = false
+    @State var showingBackupTools = false
+    @State var settingsPath: [SettingsCategory] = []
     @State var showConnections = false
     @State var showTeam = false
+    @State var dashboardApproval: DashboardApproval?
     @Environment(\.horizontalSizeClass) var horizontalSizeClass
+    var teamPinned: Bool { UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular }
     @State var settingsFollowup: SettingsFollowup?
     @State var recentChats: [ChatTurn] = []
     var dashboardChatPreviews: Data { MigratedAppData.shared.dashboardPreviews }
@@ -68,6 +91,7 @@ struct Home: View {
     @State var cachedJobAddress = ""
     @State var showSearch = false
     @State var searchRecords: [FadedSearchRecord] = []
+    @State var searchLoad: Task<Void, Never>?
     @State var searchDestination: FadedSearchDestination?
     @State var searchBot: SearchBot?
     @State var searchChatQuery = ""
@@ -90,7 +114,11 @@ struct Home: View {
     @State var diagnosticsError = false
     @State var media: Media?
     @State var showChat = false
+    @State private var chatComposerFocused = false
+    @State var newChatRequest: UUID?
     @State var preferPhoneInChat = false
+    @State private var tabHistory: [TabDestination] = []
+    @State private var restoredNavigation = false
     @State var errorDetails = false
     @AccessibilityFocusState var errorFocus: Bool
     @AccessibilityFocusState var jobsFocus: Bool
@@ -98,6 +126,7 @@ struct Home: View {
     @State var space: Space = .brain
     @State private var moduleTabs: [ModuleTab] = []
     @State private var moduleAddress: String?
+    @State private var moduleTargetID: String?
     @State var selectedModuleTab: String?
     @State var showHelp = false
     @State var showCodeWorkspace = false
@@ -109,6 +138,7 @@ struct Home: View {
     @State var studioImagePrompt = ""
     @State var imagePromptAfterChat: String?
     @State var privateStudioAfterChat = false
+    @State var botsAfterChat = false
     @State var studioToast: StudioToast?
     @State var nsfwSessionUnlocked = false
     @State var showSavedVideos = false
@@ -162,19 +192,62 @@ struct Home: View {
         FadedPalette(theme: appearanceMode.resolve(theme: theme, system: systemScheme))
     }
 
-    @State var showClips = 0
     @State var shareResult: Media?
 
     var privateStudioPresented: Bool { showOfflineStudio && studioPage == .chat }
 
+    private var visibleModuleTarget: String? {
+        guard !privateStudioPresented, !model.isDemo, moduleAddress == model.address,
+              let live = model.api as? LiveAPI, moduleTargetID == live.queueTargetID else { return nil }
+        return live.queueTargetID
+    }
+
+    private var currentDestination: TabDestination {
+        if let selection = selectedModuleTab, let targetID = visibleModuleTarget {
+            return .module(selection: selection, targetID: targetID)
+        }
+        return space == .gallery ? .video(videoPage) : .fixed(space)
+    }
+
     var homeContent: some View {
-        TabView(selection: Binding(get: { selectedModuleTab ?? space.rawValue }, set: { value in
-            if let fixed = Space(rawValue: value) {
-                selectedModuleTab = nil
-                space = fixed
-            } else {
-                selectedModuleTab = value
+        VStack(spacing: 0) {
+            homeTabs
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if currentDestination != .fixed(.notes) || !chatComposerFocused {
+                spacesBar
             }
+        }
+        .onChange(of: showJobs) {
+            navigate(to: .video(.jobs))
+        }
+        .task(id: "\(model.isDemo):\(model.address):\((model.api as? LiveAPI)?.queueTargetID ?? ""):\(phase == .active && !privateStudioPresented)") {
+            if phase == .active && !privateStudioPresented { await loadModuleTabs() }
+        }
+        .onChange(of: space) { _, value in
+            if value == .brain { refreshDashboard() }
+            if rememberLastSpace { lastSpace = value.rawValue }
+            if autoRefreshTabs && !model.isDemo && !privateStudioPresented { Task { await model.refresh() } }
+        }
+        .onChange(of: keepScreenAwake) { UIApplication.shared.isIdleTimerDisabled = keepScreenAwake }
+        .onAppear {
+            if !restoredNavigation {
+                restoredNavigation = true
+                if tabHistory.isEmpty, rememberLastSpace, let saved = Space(rawValue: lastSpace) { space = saved }
+            }
+            refreshDashboard()
+            UIApplication.shared.isIdleTimerDisabled = keepScreenAwake
+        }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+
+    private var homeTabs: some View {
+        TabView(selection: Binding(get: {
+            if case .module(let selection, _) = currentDestination { return selection }
+            return space.rawValue
+        }, set: { value in
+            guard !privateStudioPresented else { return }
+            if let fixed = Space(rawValue: value) { selectTab(fixed) }
+            else { selectModule(value) }
         })) {
             homeTab
                 .toolbarVisibility(.hidden, for: .tabBar)
@@ -187,16 +260,17 @@ struct Home: View {
                 .tabItem { Label("Video", systemImage: "film.fill") }.tag(Space.gallery.rawValue)
             AgentHub(api: studioAPI, isVisible: space == .tasks && selectedModuleTab == nil,
                      studioUnlocked: $nsfwSessionUnlocked,
-                     onPrivateSessionEnded: showPrivateSessionNotice, onBack: { selectSpace(.brain) })
+                     onPrivateSessionEnded: showPrivateSessionNotice, onBack: goBack,
+                     experimentalWork: experimentalVillageWork, onExperimentalAction: openExperimentalVillageWork)
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Landsby", systemImage: "house.lodge.fill") }.tag(Space.tasks.rawValue)
-            CodeWorkspaceView(api: privateStudioPresented ? nil : model.api as? LiveAPI, onBack: { selectSpace(.brain) })
+            CodeWorkspaceView(api: privateStudioPresented ? nil : model.api as? LiveAPI, onBack: goBack)
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Code Bot", systemImage: "chevron.left.forwardslash.chevron.right") }.tag(Space.library.rawValue)
-            if !privateStudioPresented, moduleAddress == model.address, let api = model.api as? LiveAPI {
+            if visibleModuleTarget != nil, let api = model.api as? LiveAPI {
                 ForEach(moduleTabs) { tab in
-                    ModuleTabView(tab: tab, api: api, onBack: { selectSpace(.brain) })
-                        .id(model.address + ":" + tab.id)
+                    ModuleTabView(tab: tab, api: api, onBack: goBack)
+                        .id(api.queueTargetID + ":" + tab.id)
                         .toolbarVisibility(.hidden, for: .tabBar)
                         .tabItem { Label(tab.title, systemImage: tab.kind == "cards" ? "rectangle.on.rectangle" : "info.circle") }
                         .tag("module:" + tab.id)
@@ -204,36 +278,13 @@ struct Home: View {
             }
         }
         .toolbarVisibility(.hidden, for: .tabBar)
-        .safeAreaInset(edge: .bottom, spacing: 0) { spacesBar }
-        .onChange(of: showJobs) {
-            videoPage = .jobs
-            selectSpace(.gallery)
-        }
-        .onChange(of: showClips) {
-            videoPage = .clips
-            selectSpace(.gallery)
-        }
-        .task(id: "\(model.isDemo):\(model.address):\(phase == .active && !privateStudioPresented)") {
-            if phase == .active && !privateStudioPresented { await loadModuleTabs() }
-        }
-        .onChange(of: space) { _, value in
-            selectedModuleTab = nil
-            if value == .brain { refreshDashboard() }
-            if rememberLastSpace { lastSpace = value.rawValue }
-            if autoRefreshTabs && !model.isDemo && !privateStudioPresented { Task { await model.refresh() } }
-        }
-        .onChange(of: keepScreenAwake) { UIApplication.shared.isIdleTimerDisabled = keepScreenAwake }
-        .onAppear {
-            if rememberLastSpace, let saved = Space(rawValue: lastSpace) { space = saved }
-            refreshDashboard()
-            UIApplication.shared.isIdleTimerDisabled = keepScreenAwake
-        }
-        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
     }
 
     private func loadModuleTabs() async {
+        guard !privateStudioPresented else { return }
         let address = model.address
-        if moduleAddress != address {
+        let targetID = (model.api as? LiveAPI)?.queueTargetID
+        if moduleAddress != address || moduleTargetID != targetID {
             moduleTabs = []
             selectedModuleTab = nil
         }
@@ -243,9 +294,11 @@ struct Home: View {
             return
         }
         guard let manifest = try? await api.moduleManifest(), manifest.version == 1,
-              !Task.isCancelled, !model.isDemo, model.address == address else { return }
+              !Task.isCancelled, !model.isDemo, !privateStudioPresented, model.address == address,
+              (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
         var seen = Set<String>()
         moduleAddress = address
+        moduleTargetID = api.queueTargetID
         moduleTabs = Array(manifest.tabs.filter { $0.supported && seen.insert($0.id).inserted }.prefix(8))
         if let selectedModuleTab, !moduleTabs.contains(where: { "module:" + $0.id == selectedModuleTab }) {
             self.selectedModuleTab = nil
@@ -264,14 +317,22 @@ struct Home: View {
     private var homeTab: some View {
         NavigationStack {
             tabPage("Hjem") {
-                FadedSignature()
                 header
-                loadingStatus
+            }
+            .safeAreaInset(edge: .top, spacing: 0) {
+                VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                    dashboardConnection
+                    FadedSignature()
+                }
+                .frame(maxWidth: 640, alignment: .leading)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, FadedSpacing.edge)
+                .background(palette.background)
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if horizontalSizeClass == .regular {
+                    if teamPinned {
                         Text("FadedAI").font(FadedTypography.title).tracking(-0.5)
                             .accessibilityAddTraits(.isHeader)
                     } else {
@@ -283,15 +344,17 @@ struct Home: View {
                         }
                     }
                 }
-                ToolbarItem(placement: .principal) { dashboardConnection }
-                ToolbarItem(placement: .topBarTrailing) {
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("Søg i FadedAI", systemImage: "magnifyingglass", action: openSearch)
+                        .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                        .keyboardShortcut("k", modifiers: .command)
                     Menu {
-                        Button("Søg", systemImage: "magnifyingglass", action: openSearch)
                         Button("Noter", systemImage: "note.text") { showNotes = true }
-                        if horizontalSizeClass != .regular {
+                        if !teamPinned {
                             Button("Holdet", systemImage: "person.2") { showTeam = true }
                         }
                         Button("Indstillinger", systemImage: "gearshape") { showSettings = true }
+                        Button("PC-status", systemImage: "stethoscope") { showPCStatus = true }
                         Button("Forbindelser", systemImage: "link") { showConnections = true }
                         Button("Privat Studio", systemImage: "lock.shield") { openStudio(.chat) }
                         Button("Lokale modeller", systemImage: "iphone") { showPhoneModels = true }
@@ -312,47 +375,76 @@ struct Home: View {
     }
 
     private var chatTab: some View {
-        NavigationStack {
-            List {
-                chatEntry("AI-chat", detail: "Vælg telefon, PC eller Grok.", icon: "bubble.left") { showChat = true }
-                chatEntry("Privat Studio", detail: "Privat chat (NSFW) · Kun på telefonen", icon: "lock.shield") { openStudio(.chat) }
-                chatEntry("Billeder", detail: "Generér billeder, eller åbn dit galleri.", icon: "photo") { openStudio(.images) }
-                chatEntry("Mine bots", detail: "Åbn en bot, og prøv dens personlighed og stemme.", icon: "person.2") { showBots = true }
-            }
-            .scrollContentBackground(.hidden)
-            .safeAreaInset(edge: .top, spacing: 0) { FadedSignature().padding(.horizontal, FadedSpacing.edge) }
-            .navigationTitle("Chat")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Tilbage", systemImage: "chevron.left") { selectSpace(.brain) }
-                }
-            }
-        }
-    }
-
-    private func chatEntry(_ title: String, detail: String, icon: String, work: @escaping () -> Void) -> some View {
-        Button(action: work) {
-            FadedCard {
-                HStack(spacing: 12) {
-                    Image(systemName: icon).frame(width: 24).accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(title).font(FadedTypography.action)
-                        Text(detail).font(.subheadline).foregroundStyle(palette.secondary)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.right").foregroundStyle(palette.secondary).accessibilityHidden(true)
-                }
-            }.frame(minHeight: 52)
-        }
-        .buttonStyle(.plain)
-        .listRowBackground(Color.clear)
-        .listRowSeparator(.hidden)
+        chatContent(embedded: true) { chatComposerFocused = $0 }
     }
 
     func selectSpace(_ destination: Space) {
-        selectedModuleTab = nil
-        if destination == .brain { showSettings = false }
-        space = destination
+        navigate(to: destination == .gallery ? .video(videoPage) : .fixed(destination))
+    }
+
+    func openVideoClips() {
+        navigate(to: .video(.clips))
+    }
+
+    func openVideoJobs() {
+        navigate(to: .video(.jobs))
+        showJobs += 1
+    }
+
+    private func selectTab(_ destination: Space) {
+        if destination == .gallery, space != .gallery || selectedModuleTab != nil { openVideoClips() }
+        else { selectSpace(destination) }
+    }
+
+    private func selectModule(_ selection: String) {
+        guard let targetID = visibleModuleTarget else { return }
+        let destination = TabDestination.module(selection: selection, targetID: targetID)
+        if canShow(destination) { navigate(to: destination) }
+    }
+
+    private func canShow(_ destination: TabDestination) -> Bool {
+        guard case .module(let selection, let targetID) = destination else { return true }
+        return targetID == visibleModuleTarget && moduleTabs.contains { "module:" + $0.id == selection }
+    }
+
+    private func navigate(to destination: TabDestination) {
+        let origin = currentDestination
+        guard origin != destination else { return }
+        if case .video = origin, case .video = destination {
+            apply(destination)
+            return
+        }
+        if tabHistory.count == 32 { tabHistory.removeFirst() }
+        tabHistory.append(origin)
+        apply(destination)
+    }
+
+    func goBackFromChat() { goBack() }
+
+    func goBack() {
+        let current = currentDestination
+        while let previous = tabHistory.popLast() {
+            if previous != current, canShow(previous) {
+                apply(previous)
+                return
+            }
+        }
+        apply(.fixed(.brain))
+    }
+
+    private func apply(_ destination: TabDestination) {
+        switch destination {
+        case .fixed(let target):
+            selectedModuleTab = nil
+            if target == .brain { showSettings = false }
+            space = target
+        case .video(let page):
+            selectedModuleTab = nil
+            videoPage = page
+            space = .gallery
+        case .module(let selection, _):
+            selectedModuleTab = selection
+        }
     }
 
     private var spacesBar: some View {
@@ -372,8 +464,8 @@ struct Home: View {
             ForEach(Space.allCases) { item in
                 let selected = selectedModuleTab == nil && space == item
                 Button {
-                    if reduceMotion { selectSpace(item) }
-                    else { withAnimation(.spring(response: calmMotion ? 0.70 : 0.35, dampingFraction: 0.8)) { selectSpace(item) } }
+                    if reduceMotion { selectTab(item) }
+                    else { withAnimation(.spring(response: calmMotion ? 0.70 : 0.35, dampingFraction: 0.8)) { selectTab(item) } }
                 } label: {
                     VStack(spacing: 3) {
                         Image(systemName: spaceIcon(item)).font(.body)
@@ -389,14 +481,14 @@ struct Home: View {
                 .accessibilityLabel("Åbn " + spaceTitle(item))
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
-            if moduleAddress == model.address, !moduleTabs.isEmpty { moduleTabMenu }
+            if visibleModuleTarget != nil, !moduleTabs.isEmpty { moduleTabMenu }
         }
     }
 
     private var moduleTabMenu: some View {
         Menu {
             ForEach(moduleTabs) { tab in
-                Button(tab.title) { selectedModuleTab = "module:" + tab.id }
+                Button(tab.title) { selectModule("module:" + tab.id) }
             }
         } label: {
             VStack(spacing: 3) {

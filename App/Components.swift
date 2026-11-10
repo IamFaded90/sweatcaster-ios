@@ -139,28 +139,94 @@ struct FadedSecondaryButton: View {
     }
 }
 
+enum FadedCardSize {
+    case compact, standard, hero
+
+    var inset: CGFloat {
+        switch self {
+        case .compact: FadedSpacing.s
+        case .standard: FadedSpacing.m
+        case .hero: FadedSpacing.l
+        }
+    }
+
+    var radius: CGFloat {
+        switch self {
+        case .compact: FadedRadius.medium
+        case .standard: FadedRadius.card
+        case .hero: FadedRadius.hero
+        }
+    }
+}
+
 struct FadedCard<Content: View>: View {
+    let size: FadedCardSize
     let accent: Color?
     let content: Content
     @Environment(\.fadedPalette) private var palette
 
-    init(accent: Color? = nil, @ViewBuilder content: () -> Content) {
+    init(size: FadedCardSize = .standard, accent: Color? = nil, @ViewBuilder content: () -> Content) {
+        self.size = size
         self.accent = accent
         self.content = content()
     }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: FadedRadius.card)
+        let shape = RoundedRectangle(cornerRadius: size.radius)
         content
-            .padding(FadedSpacing.section)
+            .padding(size.inset)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(palette.card, in: shape)
             .overlay(alignment: .leading) {
-                if let accent { Rectangle().fill(accent).frame(width: 4).accessibilityHidden(true) }
+                if let accent { Rectangle().fill(accent).frame(width: FadedSpacing.xs).accessibilityHidden(true) }
             }
             .clipShape(shape)
             .overlay { shape.strokeBorder(palette.border, lineWidth: 1).allowsHitTesting(false) }
             .shadow(color: .black.opacity(palette.isDark ? 0.35 : 0.08), radius: 12, y: 6)
+    }
+}
+
+enum FadedStatusTone {
+    case success, info, warning, error
+
+    func color(in palette: FadedPalette) -> Color {
+        switch self {
+        case .success: palette.green
+        case .info: palette.cyan
+        case .warning: palette.lime
+        case .error: palette.coral
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .success: "checkmark.circle.fill"
+        case .info: "info.circle"
+        case .warning: "exclamationmark.triangle"
+        case .error: "exclamationmark.circle.fill"
+        }
+    }
+}
+
+struct FadedBadge: View {
+    let title: String
+    let tone: FadedStatusTone
+    @Environment(\.fadedPalette) private var palette
+
+    init(_ title: String, tone: FadedStatusTone) {
+        self.title = title
+        self.tone = tone
+    }
+
+    var body: some View {
+        let accent = tone.color(in: palette)
+        Label(title, systemImage: tone.icon)
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(palette.isDark ? accent : palette.text)
+            .padding(.horizontal, FadedSpacing.s)
+            .padding(.vertical, FadedSpacing.xs)
+            .background(accent.opacity(palette.isDark ? 0.13 : 0.22), in: Capsule())
+            .accessibilityLabel(title)
     }
 }
 
@@ -221,6 +287,71 @@ struct FadedProgress: View {
         .frame(height: 8)
         .accessibilityLabel("Fremdrift")
         .accessibilityValue(failed ? "Fejlet" : progress.formatted(.percent.precision(.fractionLength(0))))
+    }
+}
+
+// Shared video status for Home and Video Studio. Progress represents PC job stages.
+struct VideoJobStatusLine: View {
+    let status: Stage
+    let progress: Double
+    let isCurrent: Bool
+    let accent: Color
+    var updatedAt: Date? = nil
+    var outputAvailable = false
+    var failureDetail: String? = nil
+    @Environment(\.fadedPalette) private var palette
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            if !isCurrent { FadedDetailText("Sidst set på PC’en") }
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(palette.isDark ? accent : palette.text)
+            if isCurrent || status == .failed { FadedDetailText(detail) }
+            if status.active {
+                FadedProgress(value: progress).accessibilityHidden(true)
+                if progress.isFinite, (0...1).contains(progress) {
+                    Text("Fremdrift \(progress.formatted(.percent.precision(.fractionLength(0))))")
+                        .font(.caption.monospacedDigit()).foregroundStyle(palette.secondary)
+                }
+            }
+            if let updatedAt {
+                Text("Seneste status \(updatedAt, format: .dateTime.day().month().hour().minute())")
+                    .font(.caption).foregroundStyle(palette.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var title: String {
+        if status == .completed { return outputAvailable ? "Klar til afspilning" : "Videofilen er ikke tilgængelig" }
+        return status.title
+    }
+
+    private var icon: String {
+        switch status {
+        case .queued: "clock"
+        case .analyzing: "film"
+        case .commentating: "text.bubble"
+        case .synthesizing: "waveform"
+        case .rendering: "film.stack"
+        case .completed: "checkmark.circle"
+        case .failed: "exclamationmark.circle"
+        case .cancelled: "stop.circle"
+        }
+    }
+
+    private var detail: String {
+        switch status {
+        case .queued: "PC’en har modtaget jobbet. Det venter på sin tur."
+        case .analyzing: "PC’en gennemgår klippet før redigeringen."
+        case .commentating: "PC’en skriver en kommentar ud fra klippet."
+        case .synthesizing: "Kommentaren bliver lavet om til lyd."
+        case .rendering: "PC’en samler billede og lyd til den færdige video."
+        case .completed: outputAvailable ? "Åbn videoen herfra." : "PC’en melder jobbet færdigt, men har ingen videofil at afspille."
+        case .failed: failureDetail ?? "PC’en kunne ikke gøre videoen færdig."
+        case .cancelled: "PC’en har stoppet jobbet."
+        }
     }
 }
 

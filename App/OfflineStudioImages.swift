@@ -26,7 +26,6 @@ extension OfflineStudio {
                         .frame(minHeight: 44)
                 }
                 DisclosureGroup("Billedindstillinger") { imageInlineOptions }
-                if privateSession && !canRenderPrivateImages { offlineImageNotice }
             }.padding(FadedSpacing.edge)
         }
         .scrollDismissesKeyboard(.interactively)
@@ -35,8 +34,10 @@ extension OfflineStudio {
     }
 
     private var studioImageComposer: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Label(privateSession || api == nil || !allowPCFallback ? "Kun telefon" : "Telefon først · PC ved behov",
+        let blocker = privateImageBlocker
+        return VStack(alignment: .leading, spacing: 8) {
+            Label(privateSession && blocker == nil ? "Kun telefon · Klar til billeder" :
+                  privateSession || api == nil || !allowPCFallback ? "Kun telefon" : "Telefon først · PC ved behov",
                   systemImage: "iphone").font(.caption).foregroundStyle(.secondary)
             if imagePromptFocused {
                 ScrollView(.horizontal) {
@@ -60,7 +61,8 @@ extension OfflineStudio {
                     }
                 studioEditorButton(forImage: true)
             }
-            imageGenerationButton
+            imageGenerationButton(blocked: blocker != nil)
+            if let blocker { FadedDetailText(blocker).accessibilityAddTraits(.updatesFrequently) }
             if task != nil {
                 FadedSecondaryButton("Stop billedkø", icon: "stop.fill") { stopStudioImageQueue() }
             }
@@ -70,21 +72,26 @@ extension OfflineStudio {
         .padding(.horizontal, 12).padding(.vertical, 6)
     }
 
-    private var offlineImageNotice: some View {
-        Label("Slå Wi-Fi og mobildata fra for at generere billeder privat.", systemImage: "airplane")
-            .font(.footnote).foregroundStyle(palette.secondary)
+    private var privateImageBlocker: String? {
+        guard privateSession else { return nil }
+        if !imageReady { return "Hent billedmodellen under Hjem → ⋯ → Lokale modeller → Billeder." }
+        if privateNetworkOffline == nil { return "Tjekker, om telefonen er offline…" }
+        if !canRenderPrivateImages { return privateImageOfflineInstructions }
+        return nil
     }
 
     var imageReady: Bool {
-        (try? MediaGenerationEnvironment.default.inspectModel(imageModel, offline: true))?.isDownloaded == true
+        StudioImageModel(rawValue: imageModel)?.isInstalled == true
     }
 
     private var installedLoRA: String? {
         let selected = privateSession ? sessionPreferences.lora : loraName
         guard selected.hasPrefix("fadedai-"), selected.hasSuffix("_lora_f16.ckpt"),
               !selected.contains("/"), !selected.contains("\\"),
-              MediaGenerationEnvironment.default.externalUrls.contains(where: {
-                  FileManager.default.fileExists(atPath: $0.appendingPathComponent(selected).path)
+              MediaGenerationEnvironment.default.externalUrls.contains(where: { root in
+                  let file = root.appendingPathComponent(selected)
+                  guard let values = try? file.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]) else { return false }
+                  return values.isRegularFile == true && values.isSymbolicLink != true
               }) else { return nil }
         return selected
     }
@@ -96,10 +103,16 @@ extension OfflineStudio {
     private var loraPreviews: URL { URL.applicationSupportDirectory.appending(path: "StudioLoRAPreviews", directoryHint: .isDirectory) }
 
     private var importedLoRAs: [String] {
-        Array(Set(MediaGenerationEnvironment.default.externalUrls.flatMap { root in
-            ((try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])) ?? [])
-                .filter { $0.lastPathComponent.hasPrefix("fadedai-") && $0.lastPathComponent.hasSuffix("_lora_f16.ckpt") }
-                .map(\.lastPathComponent)
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey]
+        return Array(Set(MediaGenerationEnvironment.default.externalUrls.flatMap { root in
+            let files = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles])) ?? []
+            return files.compactMap { file -> String? in
+                let name = file.lastPathComponent
+                guard name.hasPrefix("fadedai-"), name.hasSuffix("_lora_f16.ckpt"),
+                      let values = try? file.resourceValues(forKeys: keys), values.isRegularFile == true,
+                      values.isSymbolicLink != true else { return nil }
+                return name
+            }
         })).sorted()
     }
 
@@ -110,17 +123,17 @@ extension OfflineStudio {
     var privateImageSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("Billedmodel", selection: privateSession ? $sessionPreferences.imageModel : $savedImageModel) {
-                Text("Stable Diffusion 1.5").tag("sd_v1.5_f16.ckpt")
-                Text("FLUX.2 Klein 4B").tag("flux_2_klein_4b_q8p.ckpt")
+                ForEach(StudioImageModel.allCases) { model in Text(model.title).tag(model.id) }
             }.disabled(task != nil)
             if privateSession {
-                Text(imageReady ? "Billedmodellen er klar på telefonen." : "Hent billedmodellen uden for den private session.")
+                Text(imageReady ? "Billedmodellen er klar på telefonen." : "Hent billedmodellen under Hjem → ⋯ → Lokale modeller → Billeder.")
                     .font(.caption).foregroundStyle(palette.secondary)
-                Picker("Installeret LoRA", selection: $sessionPreferences.lora) {
-                    Text("Ingen").tag("")
-                    ForEach(importedLoRAs, id: \.self) { name in Text(loraLabels[name] ?? name).tag(name) }
-                }.disabled(task != nil)
-                if !canRenderPrivateImages { offlineImageNotice }
+                let names = importedLoRAs
+                if !names.isEmpty {
+                    DisclosureGroup("Installeret LoRA") {
+                        loraRows(names, selection: $sessionPreferences.lora)
+                    }.disabled(task != nil)
+                }
                 Text("Private billeder kan gemmes i Fotos med din godkendelse.")
                     .font(.caption).foregroundStyle(palette.secondary)
             } else {
@@ -133,36 +146,53 @@ extension OfflineStudio {
     }
 
     @ViewBuilder private var regularImageModelActions: some View {
-        Button("Download billedmodel") { downloadImageModel() }.frame(minHeight: 44).disabled(task != nil)
-        Text("Lad FadedAI være åben under download af billedmodeller.")
-            .font(.caption).foregroundStyle(.secondary)
+        if imageReady {
+            Label("Billedmodellen er gemt på telefonen", systemImage: "checkmark.circle")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            Button("Hent billedmodel") { downloadImageModel() }.frame(minHeight: 44).disabled(task != nil)
+            FadedDetailText("Lad FadedAI være åben, mens billedmodellen hentes.")
+        }
         Button("Importér LoRA fra Filer") { importLoRA = true }.frame(minHeight: 44).disabled(task != nil)
-        if !importedLoRAs.isEmpty {
-                DisclosureGroup("LoRA-forhåndsvisninger") {
-                    ForEach(importedLoRAs, id: \.self) { name in
-                        let previewURL = loraPreviews.appendingPathComponent(name + ".jpg")
-                        HStack {
-                            if let image = studioThumbnail(previewURL, maxPixelSize: 160) {
-                                Image(uiImage: image).resizable().scaledToFill().frame(width: 52, height: 52).clipped()
-                                    .accessibilityLabel("LoRA-forhåndsvisning")
-                            } else {
-                                Image(systemName: "photo").frame(width: 52, height: 52).foregroundStyle(.secondary)
-                                    .accessibilityLabel("Ingen forhåndsvisning")
-                            }
-                            Toggle(loraLabels[name] ?? name, isOn: Binding(get: { useLoRA && loraName == name }, set: { selected in
-                                if selected { loraName = name; useLoRA = true }
-                                else if loraName == name { useLoRA = false }
-                            }))
-                        }.id("\(name)-\(loraPreviewRefresh)")
-                    }
-                    if installedLoRA != nil {
-                        PhotosPicker("Vælg forhåndsvisning til valgt LoRA", selection: $loraPreviewSelection, matching: .images)
-                            .frame(minHeight: 44)
-                            .task(id: loraPreviewSelection) { await saveLoRAPreview() }
-                    }
-                }.disabled(task != nil)
+        let names = importedLoRAs
+        if !names.isEmpty {
+            DisclosureGroup("LoRA-forhåndsvisninger") {
+                loraRows(names, selection: $loraName, enabled: $useLoRA)
+                if installedLoRA != nil {
+                    PhotosPicker("Vælg forhåndsvisning til valgt LoRA", selection: $loraPreviewSelection, matching: .images)
+                        .frame(minHeight: 44)
+                        .task(id: loraPreviewSelection) { await saveLoRAPreview() }
+                }
+            }.disabled(task != nil)
         }
         Toggle("Beskyt batteriet under billedgenerering", isOn: $imageBatteryProtection).disabled(task != nil)
+    }
+
+    private func loraRows(_ names: [String], selection: Binding<String>, enabled: Binding<Bool>? = nil) -> some View {
+        let labels = loraLabels
+        return ForEach(names, id: \.self) { name in
+            let previewURL = loraPreviews.appendingPathComponent(name + ".jpg")
+            HStack {
+                if let image = studioThumbnail(previewURL, maxPixelSize: 160) {
+                    Image(uiImage: image).resizable().scaledToFill().frame(width: 52, height: 52).clipped()
+                        .accessibilityLabel("LoRA-forhåndsvisning")
+                } else {
+                    Image(systemName: "photo").frame(width: 52, height: 52).foregroundStyle(.secondary)
+                        .accessibilityLabel("Ingen forhåndsvisning")
+                }
+                Toggle(labels[name] ?? name, isOn: Binding(get: {
+                    (enabled?.wrappedValue ?? true) && selection.wrappedValue == name
+                }, set: { selected in
+                    if selected {
+                        selection.wrappedValue = name
+                        enabled?.wrappedValue = true
+                    } else if selection.wrappedValue == name {
+                        if let enabled { enabled.wrappedValue = false }
+                        else { selection.wrappedValue = "" }
+                    }
+                })).frame(minHeight: 44)
+            }.id("\(name)-\(loraPreviewRefresh)")
+        }
     }
 
     private func saveLoRAPreview() async {
@@ -229,10 +259,10 @@ extension OfflineStudio {
         }
     }
 
-    private var imageGenerationButton: some View {
+    private func imageGenerationButton(blocked: Bool) -> some View {
         let label = pendingImages.isEmpty ? "Lav billede" : "Lav billede · I kø (\(pendingImages.count))"
         return FadedPrimaryButton(label, icon: "photo.badge.plus") { generateImage() }
-            .disabled(!canEnqueueImage || loadingBaseImage || pendingImages.count >= 5 || (privateSession && !canRenderPrivateImages)
+            .disabled(blocked || !canEnqueueImage || loadingBaseImage || pendingImages.count >= 5
                 || imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || imagePrompt.count > 2_000 || negativeImagePrompt.count > 1_000)
     }
@@ -338,17 +368,26 @@ extension OfflineStudio {
 
     private func loadBasePhoto() async {
         guard let item = basePhoto else { loadingBaseImage = false; return }
+        guard !privateSession || canRenderPrivateImages else {
+            basePhoto = nil
+            status = privateImageOfflineInstructions
+            return
+        }
         loadingBaseImage = true
         defer { if basePhoto == item { loadingBaseImage = false } }
         do {
             let photo = try await item.loadTransferable(type: StudioPhotoInput.self)
             try Task.checkCancellation()
             guard basePhoto == item else { return }
+            guard !privateSession || canRenderPrivateImages else { throw StudioImageInterruption.network }
             guard let photo else { throw CocoaError(.fileReadCorruptFile) }
             baseImage = photo.data
             status = "Basebillede valgt. Det bliver på telefonen."
         } catch is CancellationError {
             return
+        } catch StudioImageInterruption.network {
+            AppDiagnostics.record(StudioImageInterruption.network)
+            status = privateImageOfflineInstructions
         } catch {
             AppDiagnostics.record(error)
             if basePhoto == item {
@@ -357,7 +396,6 @@ extension OfflineStudio {
             }
         }
     }
-
     private func saveImageFavorite() {
         let value = imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !privateSession, !value.isEmpty, value.count <= 2_000 else { return }
@@ -387,8 +425,8 @@ extension OfflineStudio {
         let negative = negativeImagePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard studioEnabled, canShowStudio, canEnqueueImage, pendingImages.count < 5,
               !message.isEmpty, message.count <= 2_000, negative.count <= 1_000, !loadingBaseImage else { return }
-        guard !privateSession || canRenderPrivateImages else {
-            status = "Slå Wi-Fi og mobildata fra for at generere billeder privat."
+        if let blocker = privateImageBlocker {
+            status = blocker
             return
         }
         let request = StudioImageRequest(model: imageModel, prompt: message, negative: negative,
@@ -415,9 +453,15 @@ extension OfflineStudio {
                     return
                 } catch StudioImageInterruption.network {
                     AppDiagnostics.record(StudioImageInterruption.network)
-                    status = "Slå Wi-Fi og mobildata fra for at generere billeder privat."
+                    status = privateImageOfflineInstructions
                     return
                 } catch is CancellationError { throw CancellationError() }
+                catch LocalComputeError.lowMemory {
+                    AppDiagnostics.record(LocalComputeError.lowMemory)
+                    status = next.model == StudioImageModel.fluxKlein.id
+                        ? "Telefonen har for lidt ledig hukommelse. Prøv Stable Diffusion 1.5 under Billedindstillinger."
+                        : "Telefonen har for lidt ledig hukommelse. Luk andre tunge opgaver, og prøv igen."
+                }
                 catch {
                     AppDiagnostics.record(error)
                     status = pcBusyMessage(error) ?? "Billedopgaven kunne ikke gennemføres. Tjek billedmodel og plads."
@@ -435,7 +479,8 @@ extension OfflineStudio {
         let sessionID = temporaryImagesID
         let folder = request.isPrivate ? privateImageFolder : historyFolder
         if request.isPrivate && !canRenderPrivateImages { throw StudioImageInterruption.network }
-        let ready = (try? await MediaGenerationEnvironment.default.inspectModel(request.model, offline: true))?.isDownloaded == true
+        guard let model = StudioImageModel(rawValue: request.model) else { throw PhoneModelError.unavailable }
+        let ready = model.isInstalled
         try Task.checkCancellation()
         let localOnly = !request.allowPCFallback || request.isPrivate || request.sourceImage != nil || request.seed != nil || request.prompt.count > 1_000
             || request.count > 1 || !request.negative.isEmpty || !request.lora.isEmpty
@@ -443,7 +488,6 @@ extension OfflineStudio {
             status = "Hent billedmodellen på telefonen for at bruge de valgte indstillinger."
             return
         }
-        let steps = request.model.hasPrefix("flux") ? 4 : 20
         var created: [URL] = []
         var photosDenied = false
         if !request.isPrivate { try prepareImageFolder(folder) }
@@ -457,13 +501,13 @@ extension OfflineStudio {
             let label = request.sourceImage != nil || variation != nil ? part + " Bruger dit billede som base…" : part
             var source = "Telefon"
             var metadata = StudioImageDetails(prompt: request.prompt, negativePrompt: request.negative,
-                                              seed: seed, model: request.model, steps: steps)
+                                              seed: seed, model: model.id, steps: model.renderSteps)
             do {
                 guard ready else { throw PhoneModelError.unavailable }
-                let data = try await renderStudioImage(model: request.model, prompt: request.prompt, lora: request.lora, seed: seed,
+                let data = try await renderStudioImage(model: model, prompt: request.prompt, lora: request.lora, seed: seed,
                                                        sourceImage: request.sourceImage, variation: variation,
                                                        destination: request.isPrivate ? nil : destination, within: folder,
-                                                       label: label, steps: steps, negativePrompt: request.negative,
+                                                       label: label, negativePrompt: request.negative,
                                                        requireOffline: request.isPrivate)
                 try Task.checkCancellation()
                 if request.isPrivate {
@@ -506,27 +550,6 @@ extension OfflineStudio {
         status = request.count > 1 ? "Forslagene er klar. Vælg dit bedste billede." : "Billede klar."
         if photosDenied { status += " Billedet er gemt i studiet. Tjek tilladelsen til Fotos." }
         offlineSuccessHaptic()
-    }
-
-    private func downloadImageModel() {
-        guard !privateSession else { return }
-        let selected = imageModel
-        let reserve: Int64 = selected.hasPrefix("flux") ? 8_000_000_000 : 4_000_000_000
-        guard PhoneModels.hasDownloadSpace(bytes: reserve) else { status = "Frigør mere plads før download."; return }
-        run("Henter billedmodel…") {
-            defer { downloadProgress = nil }
-            _ = try await MediaGenerationEnvironment.default.ensure(selected) { state in
-                if case .downloading(_, let index, let count, let written, let total) = state,
-                   count > 0, total > 0 {
-                    let part = min(1, Double(written) / Double(total))
-                    Task { @MainActor in downloadProgress = min(1, (Double(max(0, index - 1)) + part) / Double(count)) }
-                }
-            }
-            try Task.checkCancellation()
-            status = "Billedmodel hentet."
-            await JobNotifications.shared.completed(kind: "image-model", server: "phone", id: UUID().uuidString,
-                                                     title: "Din lokale billedmodel er klar!")
-        }
     }
 
     func loadLoRA(_ source: URL) {

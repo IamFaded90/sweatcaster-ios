@@ -154,6 +154,8 @@ struct TeamBotNotebookStore {
 struct TeamBotNotebook: View {
     let botID: UUID
     @Environment(\.fadedPalette) private var palette
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @State private var page: Page = .memory
     @State private var memories: [TeamBotNotebookStore.Memory] = []
     @State private var skills: [TeamBotNotebookStore.Skill] = []
     @State private var editor: BotNotebookDraft?
@@ -163,6 +165,11 @@ struct TeamBotNotebook: View {
     @State private var learned: TeamBotNotebookStore.Skill?
     @State private var skillToRun: TeamBotNotebookStore.Skill?
 
+    private enum Page: String, CaseIterable {
+        case memory = "Hukommelse"
+        case skills = "Færdigheder"
+    }
+
     private var store: TeamBotNotebookStore { TeamBotNotebookStore(botID: botID) }
     private var profile: VillageBot? {
         let bots = try? JSONDecoder().decode([VillageBot].self, from: MigratedAppData.shared.villageBots)
@@ -170,24 +177,20 @@ struct TeamBotNotebook: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: FadedSpacing.section) {
-                Text("Kun på telefonen. Du vælger selv, hvilke noter og arbejdsgange du bruger.")
-                    .font(.subheadline).foregroundStyle(palette.secondary)
-                if let notice { Text(notice).font(.caption).foregroundStyle(palette.secondary) }
-                FadedSectionLabel("Hukommelse")
-                ForEach(memories) { item in
-                    recordCard(BotNotebookDraft(id: item.id, kind: .memory, title: item.title, text: item.text), copy: item.text)
-                }
-                FadedSecondaryButton("Tilføj hukommelse", icon: "plus") { editor = BotNotebookDraft(kind: .memory) }
-                FadedSectionLabel("Færdigheder")
-                ForEach(skills) { item in
-                    recordCard(BotNotebookDraft(id: item.id, kind: .skill, title: item.title, steps: item.steps, sop: item.sop),
-                               copy: item.prompt, run: profile == nil ? nil : { skillToRun = item })
-                }
-                FadedSecondaryButton("Tilføj færdighed", icon: "plus") { editor = BotNotebookDraft(kind: .skill) }
-                FadedSecondaryButton("Lær botten en opgave", icon: "list.number") { teaching = true }
-            }.padding(FadedSpacing.edge)
+        VStack(spacing: FadedSpacing.s) {
+            Group {
+                if typeSize.isAccessibilitySize { pagePicker.pickerStyle(.menu) }
+                else { pagePicker.pickerStyle(.segmented) }
+            }.frame(minHeight: 44).padding(.horizontal, FadedSpacing.edge)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
+                    if let notice { Text(notice).font(.caption).foregroundStyle(palette.secondary) }
+                    switch page {
+                    case .memory: memorySection
+                    case .skills: skillsSection
+                    }
+                }.padding(FadedSpacing.edge)
+            }.id(page)
         }
         .background { FadedBackground() }
         .navigationTitle("Bottens notesbog")
@@ -215,14 +218,56 @@ struct TeamBotNotebook: View {
         }
     }
 
+    private var pagePicker: some View {
+        Picker("Notesbogens indhold", selection: $page) {
+            ForEach(Page.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+        }
+    }
+
+    private var memorySection: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.section) {
+            FadedDetailText("Gem fakta og præferencer, du vil beholde i bottens lokale notesbog.")
+            FadedSecondaryButton("Tilføj hukommelse", icon: "plus") { editor = BotNotebookDraft(kind: .memory) }
+            ForEach(memories) { item in
+                recordCard(BotNotebookDraft(id: item.id, kind: .memory, title: item.title, text: item.text), copy: item.text)
+            }
+        }
+    }
+
+    private var skillsSection: some View {
+        let canRun = profile != nil
+        return VStack(alignment: .leading, spacing: FadedSpacing.section) {
+            FadedDetailText("Gem en arbejdsgang på telefonen. Du kan læse trinnene, før du bruger den som tekst.")
+            FadedSecondaryButton("Tilføj færdighed", icon: "plus") { editor = BotNotebookDraft(kind: .skill) }
+            FadedSecondaryButton("Lær botten en opgave", icon: "list.number") { teaching = true }
+            ForEach(skills) { item in
+                recordCard(BotNotebookDraft(id: item.id, kind: .skill, title: item.title, steps: item.steps, sop: item.sop),
+                           copy: item.prompt, run: canRun ? { skillToRun = item } : nil)
+            }
+        }
+    }
+
     private func recordCard(_ item: BotNotebookDraft, copy text: String, run: (() -> Void)? = nil) -> some View {
         FadedCard(accent: item.kind == .memory ? palette.cyan : palette.purple) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(item.title).font(FadedTypography.action)
                 Text(item.kind == .memory ? item.text : "\(item.steps.count) trin" + (item.sop == nil ? "" : " · SOP vedlagt"))
                     .font(.subheadline).lineLimit(3).foregroundStyle(palette.secondary)
+                if item.kind == .skill {
+                    DisclosureGroup("Se arbejdsgangen") {
+                        VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                            ForEach(Array(item.steps.enumerated()), id: \.offset) { entry in
+                                Text("\(entry.offset + 1). \(entry.element)")
+                            }
+                            if let sop = item.sop {
+                                FadedFieldLabel("Vejledning")
+                                Text(verbatim: sop)
+                            }
+                        }.padding(.vertical, FadedSpacing.s)
+                    }.frame(minHeight: 44)
+                }
+                if let run { FadedSecondaryButton("Kør som tekst", icon: "play", action: run) }
                 Menu("Handlinger", systemImage: "ellipsis.circle") {
-                    if let run { Button("Kør som tekst", systemImage: "play", action: run) }
                     Button("Redigér", systemImage: "pencil") { editor = item }
                     Button("Kopiér", systemImage: "doc.on.doc") {
                         UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: text]], options: [.localOnly: true])

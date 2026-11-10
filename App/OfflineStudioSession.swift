@@ -34,14 +34,18 @@ extension OfflineStudio {
         let minutes = min(30, max(1, Int(setting)))
         do { try await Task.sleep(for: .seconds(minutes * 60)) } catch { return }
         guard sessionUnlocked, studioPhase == .active, task == nil else { return }
-        speech.synthesizer.stopSpeaking(at: .immediate)
+        speech.stop()
         idleAsleep = true
     }
 
     func handleStudioPhase(_ phase: ScenePhase) {
         if phase == .background {
             dictation.stop()
-            speech.synthesizer.stopSpeaking(at: .immediate)
+            speech.stop()
+            if privateSession, loaded, sessionUnlocked {
+                let backgroundLimit = ContinuousClock.now.advanced(by: .seconds(300))
+                privateDeadline = min(privateDeadline ?? backgroundLimit, backgroundLimit)
+            }
         } else if phase == .active && privateSession {
             if sessionExpired { wipeExpiredPrivateSession(); return }
             if privateDeadline == nil { resetIdleTimer(); return }
@@ -61,32 +65,51 @@ extension OfflineStudio {
         status = "Privat session afsluttet og slettet."
     }
 
-    func clearStudioContent() {
-        if privateSession {
+    func clearStudioContent(includingModels: Bool) {
+        if !includingModels {
             wipeExpiredPrivateSession()
             return
         }
-        guard task == nil else { return }
-        do {
-            let manager = FileManager.default
-            if manager.fileExists(atPath: historyFolder.path) { try manager.removeItem(at: historyFolder) }
-            closeChatSession()
-            try MigratedAppData.shared.clearRegularStudio()
-            promptHistoryData = Data()
-            imageFavoritesData = Data()
-            resetPublicGallery()
-            imageURL = nil
-            batchImageURLs = []
-            batchTurnID = nil
-            sessionUnlocked = false
-            status = "Studiets samtaler og galleri er ryddet."
-        } catch { AppDiagnostics.record(error); status = "Studiets galleri kunne ikke ryddes. Samtaler og modeller er bevaret." }
+        guard task == nil, !LocalCompute.isRunning else {
+            status = "Vent til den lokale opgave er færdig, før du rydder studiet."
+            return
+        }
+        LocalCompute.suspend()
+        defer { LocalCompute.resume() }
+        PhoneModelDownloads.shared.cancel()
+        closeChatSession()
+        loraPreviewSelection = nil
+        removeTemporaryStudioImages()
+        var finished = true
+        do { try MigratedAppData.shared.clearRegularStudio() }
+        catch { AppDiagnostics.record(error); finished = false }
+
+        let previews = URL.applicationSupportDirectory.appending(path: "StudioLoRAPreviews", directoryHint: .isDirectory)
+        for directory in [historyFolder, previews, PhoneModels.importedFolder, PhoneModels.downloadedRoot] {
+            do { try FileManager.default.removeItem(at: directory) }
+            catch let error where LocalFileStore.isMissing(error) { continue }
+            catch { AppDiagnostics.record(error); finished = false }
+        }
+        promptHistoryData = Data()
+        imageFavoritesData = Data()
+        loraLabelsData = Data()
+        loraName = ""
+        useLoRA = false
+        textModel = "apple"
+        resetPublicGallery()
+        imageURL = nil
+        batchImageURLs = []
+        studioShareSheet = nil
+        sessionUnlocked = false
+        status = finished ? "Studiets samtaler, billeder og downloadede modeller er slettet."
+            : "Oprydningen blev ikke færdig. Lås op igen for at prøve på ny."
     }
 
     func monitorPrivateConnectivity() async {
         guard privateSession, loaded, sessionUnlocked else { return }
         let monitor = NWPathMonitor()
         privatePathMonitor = monitor
+        privateNetworkOffline = nil
         let changes = AsyncStream<Bool>(bufferingPolicy: .bufferingNewest(1)) { continuation in
             monitor.pathUpdateHandler = { path in continuation.yield(path.status == .unsatisfied) }
             continuation.onTermination = { _ in monitor.cancel() }
@@ -96,16 +119,17 @@ extension OfflineStudio {
             monitor.cancel()
             if privatePathMonitor === monitor {
                 privatePathMonitor = nil
-                privateNetworkOffline = false
+                privateNetworkOffline = nil
             }
         }
         for await offline in changes {
             guard privateSession, loaded, sessionUnlocked, !Task.isCancelled else { return }
             privateNetworkOffline = offline
+            if !offline && loadingBaseImage { basePhoto = nil }
             if !offline && (generatingImages || privateImageRendering) {
                 pendingImages.removeAll()
                 task?.cancel()
-                status = "Netværket er aktivt. Privat billedgenerering er stoppet."
+                status = "Netværket er aktivt. Billedet blev stoppet. Slå flytilstand til og Wi-Fi fra for at prøve igen."
             }
         }
     }
@@ -125,9 +149,16 @@ extension OfflineStudio {
 
     private func configureSessionPreferences() {
         var preferences = StudioSessionPreferences()
-        preferences.imageModel = savedImageModel
+        preferences.imageModel = if StudioImageModel(rawValue: savedImageModel)?.isInstalled == true {
+            savedImageModel
+        } else {
+            StudioImageModel.allCases.first(where: \.isInstalled)?.id ?? savedImageModel
+        }
+        let compact = QwenPhoneRuntime.Variant.compact.modelID
         if PhoneModels.installedDirectory(textModel) != nil {
             preferences.textModel = textModel
+        } else if PhoneModels.installedDirectory(compact) != nil {
+            preferences.textModel = compact
         } else if let available = PhoneModels.catalog.first(where: { PhoneModels.installedDirectory($0.id) != nil }) {
             preferences.textModel = available.id
         } else if PhoneModels.installedDirectory("imported") != nil {
@@ -151,11 +182,12 @@ extension OfflineStudio {
     }
 
     func newPrivateConversation() {
-        speech.synthesizer.stopSpeaking(at: .immediate)
+        speech.stop()
         if privateSession {
             removeTemporaryStudioImages()
             sessionNote = ""
             turns = []
+            privateReplyIssues.removeAll()
         } else {
             let remaining = turns.filter { !belongsToCurrentBot($0) }
             turns = remaining
@@ -171,7 +203,7 @@ extension OfflineStudio {
         studioAuthentication = nil
         authenticating = false
         dictation.stop()
-        speech.synthesizer.stopSpeaking(at: .immediate)
+        speech.stop()
         task?.cancel()
         if chatWorkID != nil {
             chatWorkID = nil
@@ -191,6 +223,7 @@ extension OfflineStudio {
         }
         loaded = false
         turns = []
+        privateReplyIssues.removeAll()
         prompt = ""
         imagePrompt = ""
         negativeImagePrompt = ""
@@ -249,7 +282,7 @@ extension OfflineStudio {
                 case is CancellationError:
                     if !status.hasPrefix("Netværket er aktivt") { status = "Stoppet." }
                 case StudioImageInterruption.network:
-                    status = "Slå Wi-Fi og mobildata fra for at generere billeder privat."
+                    status = privateImageOfflineInstructions
                 case LocalComputeError.busy:
                     status = "Telefonen kører allerede en lokal AI-opgave. Prøv igen om lidt."
                 case LocalComputeError.lowMemory:
@@ -290,7 +323,7 @@ extension OfflineStudio {
                 Text("Engelsk (US)").tag("en-US")
             }
             studioVoicePicker(language: previewLanguage, saved: previewLanguage == "da-DK" ? $danishVoiceID : $englishVoiceID)
-            Button("Afspil prøvesætning", systemImage: "play.circle") { previewStudioVoice() }
+            Button(studioVoicePreviewTitle, systemImage: studioVoicePreviewIcon, action: previewStudioVoice)
                 .frame(minHeight: 44).disabled(task != nil)
             ColorPicker("Chatbaggrund", selection: Binding(get: { chatBackdrop }, set: { setChatBackdrop($0) }),
                         supportsOpacity: false)
@@ -323,6 +356,9 @@ extension OfflineStudio {
     var sessionChatSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
             sessionModelPicker
+            if effectiveTextModel == QwenPhoneRuntime.Variant.compact.modelID {
+                FadedDetailText("Qwen3.5 0.8B er en lille model. Hvis den misforstår dig, kan du prøve en anden installeret tekstmodel.")
+            }
             Picker("Systemprompt", selection: $sessionPreferences.personality) {
                 Text("Standard").tag("bot")
                 Text("Kort og rolig").tag("calm")
@@ -335,7 +371,7 @@ extension OfflineStudio {
             }
             studioVoicePicker(language: sessionPreferences.voiceLanguage,
                               saved: sessionPreferences.voiceLanguage == "da-DK" ? $sessionPreferences.danishVoice : $sessionPreferences.englishVoice)
-            FadedSecondaryButton("Afspil prøvesætning", icon: "play.circle", action: previewStudioVoice)
+            FadedSecondaryButton(studioVoicePreviewTitle, icon: studioVoicePreviewIcon, action: previewStudioVoice)
                 .disabled(task != nil)
             ColorPicker("Chatbaggrund", selection: Binding(get: { chatBackdrop }, set: { setChatBackdrop($0) }),
                         supportsOpacity: false)
@@ -344,14 +380,22 @@ extension OfflineStudio {
             }
             Stepper("Ryd efter \(Int(sessionPreferences.idleMinutes)) min uden aktivitet", value: $sessionPreferences.idleMinutes,
                     in: 1...15, step: 1)
-            Stepper("Modeldvale efter \(Int(sessionPreferences.modelTimeoutMinutes)) min", value: $sessionPreferences.modelTimeoutMinutes,
-                    in: 1...15, step: 1)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Modeldvale efter \(Int(sessionPreferences.modelTimeoutMinutes)) min")
+                Slider(value: $sessionPreferences.modelTimeoutMinutes, in: 1...15, step: 1)
+                    .accessibilityLabel("Minutter til studiets dvale")
+                    .onChange(of: sessionPreferences.modelTimeoutMinutes) { _, value in
+                        if studioHaptics && (value == 1 || value == 15) {
+                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                        }
+                    }
+            }
             Text("Modeller frigives efter hver opgave. Dvale stopper oplæsning og skjuler forhåndsvisningen.")
                 .font(.caption).foregroundStyle(palette.secondary)
         }
     }
 
-    private var sessionModelPicker: some View {
+    var sessionModelPicker: some View {
         let models = PhoneModels.catalog.filter { PhoneModels.installedDirectory($0.id) != nil }
         let imported = PhoneModels.installedDirectory("imported") != nil
         return Group {
@@ -382,7 +426,11 @@ extension OfflineStudio {
         else { backdropData = data }
     }
 
+    private var studioVoicePreviewTitle: String { speech.playback == .preview ? "Stop stemmeprøve" : "Afspil prøvesætning" }
+    private var studioVoicePreviewIcon: String { speech.playback == .preview ? "stop.circle" : "play.circle" }
+
     private func previewStudioVoice() {
+        if speech.playback == .preview { speech.stop(); return }
         let language = privateSession ? sessionPreferences.voiceLanguage : previewLanguage
         guard let voice = studioVoice(language: language, bot: selectedPrivateBot) else {
             status = "Stemmen er ikke tilgængelig på telefonen."
@@ -390,15 +438,14 @@ extension OfflineStudio {
         }
         resetIdleTimer()
         dictation.stop()
-        speech.synthesizer.stopSpeaking(at: .immediate)
-        let utterance = AVSpeechUtterance(string: language == "da-DK" ? "Hej. Sådan lyder min stemme i FadedAI." : "Hello. This is how my voice sounds in FadedAI.")
+        let utterance = AVSpeechUtterance(string: LocalSpeechVoice.previewSentence(language: voice.language))
         utterance.voice = voice
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(selectedPrivateBot?.voiceRate ?? 1)
-        speech.synthesizer.speak(utterance)
+        speech.play(utterance, as: .preview)
     }
 
     private func studioVoicePicker(language: String, saved: Binding<String>) -> some View {
-        let available = LocalSpeechVoice.options(language: language)
+        let available = studioVoiceOptions(language: language)
         let selection = Binding(get: { available.contains { $0.identifier == saved.wrappedValue } ? saved.wrappedValue : "" },
                                 set: { saved.wrappedValue = $0 })
         return Picker("Installeret stemme", selection: selection) {
@@ -410,7 +457,7 @@ extension OfflineStudio {
     }
 
     func studioVoice(language: String, bot: VillageBot?) -> AVSpeechSynthesisVoice? {
-        let options = LocalSpeechVoice.options(language: language)
+        let options = studioVoiceOptions(language: language)
         let saved = if privateSession {
             language == "da-DK" ? sessionPreferences.danishVoice : sessionPreferences.englishVoice
         } else {
@@ -418,8 +465,13 @@ extension OfflineStudio {
         }
         return options.first { $0.identifier == saved }
             ?? options.first { $0.identifier == bot?.voice }
-            ?? options.first
-            ?? AVSpeechSynthesisVoice(language: language)
+            ?? LocalSpeechVoice.preferred(language: language)
+    }
+
+    private func studioVoiceOptions(language: String) -> [AVSpeechSynthesisVoice] {
+        let base = language.split(separator: "-").first
+        return LocalSpeechVoice.options(language: language, includePersonalVoices: true)
+            .filter { $0.language.split(separator: "-").first == base }
     }
 
     func studioEditorButton(forImage: Bool) -> some View {

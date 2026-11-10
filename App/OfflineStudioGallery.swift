@@ -57,15 +57,18 @@ extension OfflineStudio {
         let gallery = ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 studioImageHistory
-                DisclosureGroup("Chat og stemme") {
-                    if privateSession { sessionChatSettings.padding(.top, 10) }
-                    else { privateSettings.padding(.top, 10) }
+                DisclosureGroup("Indstillinger") {
+                    DisclosureGroup("Chat og stemme") {
+                        if privateSession { sessionChatSettings.padding(.top, 10) }
+                        else { privateSettings.padding(.top, 10) }
+                    }.padding(.top, 10)
+                    DisclosureGroup("Billedmodel og LoRA") { privateImageSettings.padding(.top, 10) }
+                    StudioRAMStatus()
+                    FadedSecondaryButton("Slet studiets indhold og modeller", icon: "trash", role: .destructive) {
+                        panicDeletesDownloads = true
+                        confirmStudioPanic = true
+                    }.disabled(task != nil)
                 }
-                DisclosureGroup("Billedmodel og LoRA") { privateImageSettings.padding(.top, 10) }
-                StudioRAMStatus()
-                FadedSecondaryButton(privateSession ? "Ryd denne session" : "Ryd studiets indhold",
-                                     icon: "trash", role: .destructive) { confirmStudioPanic = true }
-                    .disabled(!privateSession && task != nil)
             }.padding(16)
         }
         .onScrollPhaseChange { _, phase in if phase == .interacting { resetIdleTimer() } }
@@ -355,7 +358,12 @@ extension OfflineStudio {
     }
 
     @ViewBuilder private var gallerySelectionActions: some View {
-        if !privateSession {
+        if privateSession {
+            Button("Gem valgte i Fotos", systemImage: "square.and.arrow.down") {
+                let files = filteredImageHistory.filter { selectedGalleryImages.contains($0) }
+                pendingPrivatePhoto = StudioMultiShare(files: files)
+            }.frame(minHeight: 44).disabled(selectedGalleryImages.isEmpty || task != nil || photoAuthentication != nil)
+        } else {
             Button("Del valgte (\(selectedGalleryImages.count))", systemImage: "square.and.arrow.up") {
                 studioShareSheet = StudioMultiShare(files: filteredImageHistory.filter { selectedGalleryImages.contains($0) })
             }.frame(minHeight: 44).disabled(selectedGalleryImages.isEmpty)
@@ -509,43 +517,49 @@ extension OfflineStudio {
 
     func privatePhotoButton(_ file: URL) -> some View {
         Button(photosSaving.contains(file) ? "Gemmer…" : "Gem i Fotos", systemImage: "square.and.arrow.down") {
-            if canShowStudio, privateImages[file] != nil { pendingPrivatePhoto = StudioImageSheet(url: file) }
+            if canShowStudio, privateImages[file] != nil { pendingPrivatePhoto = StudioMultiShare(files: [file]) }
         }
         .frame(minHeight: 44)
         .disabled(photosSaving.contains(file) || task != nil)
     }
 
-    func exportPrivatePhoto(_ file: URL) {
+    func exportPrivatePhotos(_ files: [URL]) {
+        let selection = Set(files)
         guard canShowStudio, privateSession, photoAuthentication == nil,
-              privateImages[file] != nil, photosSaving.insert(file).inserted else { return }
+              !selection.isEmpty, selection.isDisjoint(with: photosSaving),
+              selection.allSatisfy({ privateImages[$0] != nil }) else { return }
+        photosSaving.formUnion(selection)
         let sessionID = temporaryImagesID
         let context = LAContext()
         photoAuthentication = context
         Task {
             defer {
                 if photoAuthentication === context { photoAuthentication = nil }
-                photosSaving.remove(file)
+                photosSaving.subtract(selection)
             }
             do {
                 let accepted = try await context.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
-                                                                 localizedReason: "Godkend en kopi af billedet i Fotos")
+                                                                 localizedReason: "Godkend kopier af dine billeder i Fotos")
                 guard accepted, isCurrentPrivateSession(sessionID) else { return }
                 let current = PHPhotoLibrary.authorizationStatus(for: .addOnly)
                 let access: PHAuthorizationStatus
                 if current == .notDetermined { access = await PHPhotoLibrary.requestAuthorization(for: .addOnly) }
                 else { access = current }
                 guard isCurrentPrivateSession(sessionID) else { return }
-                guard access == .authorized || access == .limited, let data = privateImages[file] else {
+                let images = selection.compactMap { privateImages[$0] }
+                guard access == .authorized || access == .limited, images.count == selection.count else {
                     status = "Kunne ikke gemme. Tjek FadedAI’s adgang til Fotos."
                     return
                 }
                 try await PHPhotoLibrary.shared().performChanges {
-                    PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
+                    for data in images {
+                        PHAssetCreationRequest.forAsset().addResource(with: .photo, data: data, options: nil)
+                    }
                 }
-                if isCurrentPrivateSession(sessionID) { status = "En kopi er gemt i Fotos." }
+                if isCurrentPrivateSession(sessionID) { status = images.count == 1 ? "En kopi er gemt i Fotos." : "Kopier er gemt i Fotos." }
             } catch {
                 AppDiagnostics.record(error)
-                if isCurrentPrivateSession(sessionID) { status = "Billedet blev ikke gemt i Fotos." }
+                if isCurrentPrivateSession(sessionID) { status = "Kunne ikke gemme i Fotos." }
             }
         }
     }

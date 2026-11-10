@@ -21,9 +21,14 @@ enum GrokFailure: Error, Equatable {
 struct GrokResponsesParser {
     private struct Event: Decodable { let type: String }
     private struct TextDelta: Decodable { let delta: String }
+    private struct Completion: Decodable {
+        struct Response: Decodable { let model: String? }
+        let response: Response?
+    }
 
     private var frames = V2SSEFrames()
     private(set) var finished = false
+    private(set) var reportedModelID: String?
 
     mutating func feed(_ byte: UInt8) throws -> String? {
         guard !finished else { return nil }
@@ -34,6 +39,8 @@ struct GrokResponsesParser {
             guard let event = try? JSONDecoder().decode(TextDelta.self, from: payload) else { throw GrokFailure.invalidResponse }
             return event.delta
         case "response.completed":
+            let completion = try? JSONDecoder().decode(Completion.self, from: payload)
+            reportedModelID = ModelRouter.validReportedID(completion?.response?.model)
             finished = true
         case "response.failed", "response.incomplete", "response.cancelled", "error":
             throw GrokFailure.interrupted
@@ -49,6 +56,7 @@ struct GrokResponsesParser {
 
 enum GrokAPI {
     static let sourceLabel = "Grok · Cloud"
+    static let requestedModelID = "grok-4.7"
 
     struct Message: Encodable, Sendable {
         enum Role: String, Encodable, Sendable { case user, assistant }
@@ -58,7 +66,7 @@ enum GrokAPI {
 
     private struct RequestBody: Encodable {
         struct Reasoning: Encodable { let effort = "low" }
-        let model = "grok-4.7"
+        let model = GrokAPI.requestedModelID
         let input: [Message]
         let stream = true
         let store = false
@@ -81,7 +89,8 @@ enum GrokAPI {
         return request
     }
 
-    static func reply(input: [Message], receive: @Sendable (String) async -> Void) async throws {
+    @discardableResult
+    static func reply(input: [Message], receive: @Sendable (String) async -> Void) async throws -> String? {
         let key = try CloudModelKey.load()
         let request = try Self.request(input: input, key: key)
         let configuration = URLSessionConfiguration.ephemeral
@@ -97,7 +106,8 @@ enum GrokAPI {
         do {
             let (bytes, response) = try await session.bytes(for: request)
             defer { bytes.task.cancel() }
-            guard let http = response as? HTTPURLResponse, http.url == request.url else { throw GrokFailure.invalidResponse }
+            guard let http = response as? HTTPURLResponse,
+                  http.url?.host?.lowercased() == "api.x.ai" else { throw GrokFailure.invalidResponse }
             guard http.statusCode == 200 else { throw GrokFailure.http(http.statusCode) }
             guard http.mimeType == "text/event-stream" else { throw GrokFailure.invalidResponse }
             for try await byte in bytes {
@@ -122,6 +132,8 @@ enum GrokAPI {
         }
         guard !output.isEmpty else { throw GrokFailure.invalidResponse }
         await receive(redacted(output, key: key, streaming: false))
+        guard let id = parser.reportedModelID, redacted(id, key: key, streaming: false) == id else { return nil }
+        return id
     }
 
     static func redacted(_ text: String, key: String, streaming: Bool) -> String {

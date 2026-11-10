@@ -11,8 +11,11 @@ struct AgentHub: View {
     @Binding var studioUnlocked: Bool
     let onPrivateSessionEnded: () -> Void
     let onBack: () -> Void
+    var experimentalWork = ExperimentalVillageWork()
+    var onExperimentalAction: (ExperimentalVillageAction) -> Void = { _ in }
     @State private var selectedRoom = "research"
     @AppStorage(AppStorageKeys.villageShowOffice) private var showOffice = true
+    @AppStorage(AppStorageKeys.villageExperimentalEnabled) private var experimentalVillageEnabled = false
     var localBotsData: Data { MigratedAppData.shared.villageBots }
     @State var localBot: VillageBot?
     @State private var villageChatBot: VillageBot?
@@ -51,8 +54,12 @@ struct AgentHub: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                hubContent
+            VStack(spacing: 0) {
+                if !cinematic { hubHeader }
+                ScrollView {
+                    hubContent
+                }
+                .refreshable { attempt += 1 }
             }
             .background { FadedBackground(variant: .village) }
             .foregroundStyle(palette.text)
@@ -69,7 +76,6 @@ struct AgentHub: View {
                 resetRemoteIfNeeded()
                 if hubPhase == .active { await followHub() }
             }
-            .refreshable { attempt += 1 }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Tilbage", systemImage: "chevron.left", action: onBack)
@@ -84,20 +90,35 @@ struct AgentHub: View {
         }
     }
 
+    private var hubHeader: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.s) {
+            FadedSignature()
+            Text("Agent-Hub").font(FadedTypography.title).accessibilityAddTraits(.isHeader)
+            if hubTypeSize.isAccessibilitySize {
+                hubViewPicker.pickerStyle(.menu).frame(minHeight: 44)
+            } else {
+                hubViewPicker.pickerStyle(.segmented)
+            }
+        }
+        .padding(.horizontal, FadedSpacing.edge)
+        .padding(.top, FadedSpacing.s)
+        .frame(maxWidth: 640)
+        .frame(maxWidth: .infinity)
+    }
+
     private var hubContent: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.action) {
-            if !cinematic {
-                FadedSignature()
-                Text("Agent-Hub").font(FadedTypography.title).accessibilityAddTraits(.isHeader)
-                if hubTypeSize.isAccessibilitySize { hubViewPicker.pickerStyle(.menu).frame(minHeight: 44) }
-                else { hubViewPicker.pickerStyle(.segmented) }
-            }
             if showOffice && !cinematic {
                 PixelOfficeView(workers: officeWorkers, isVisible: villageVisible, onSelect: openOfficeWorker)
             } else {
                 village
             }
             if !cinematic {
+                if !showOffice && ExperimentalVillageGate.available && experimentalVillageEnabled {
+                    ExperimentalVillageView(bots: localVillageBots, work: experimentalWork, paused: villagePause,
+                                            isVisible: villageVisible, openProfile: { localBot = $0 },
+                                            openWork: onExperimentalAction)
+                }
                 if offline {
                     Label("PC’en er offline. Botsene hviler.", systemImage: "cloud.rain")
                         .font(.subheadline).foregroundStyle(palette.secondary)

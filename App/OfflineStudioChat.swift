@@ -69,12 +69,22 @@ extension OfflineStudio {
                         Text(turn.reply).textSelection(.enabled)
                     }
                     if turn.imageName == nil {
-                        Button(privateSession ? "Læs svar op" : "Skift stemme og læs op", systemImage: "speaker.wave.2") {
+                        let reading = speech.playback == .reply(turn.id)
+                        let title = reading ? "Stop oplæsning" : privateSession ? "Læs svar op" : "Skift stemme og læs op"
+                        Button(title, systemImage: reading ? "stop.circle" : "speaker.wave.2") {
                             switchVoice(for: turn)
                         }
                             .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                            .accessibilityLabel(privateSession ? "Læs svar op" : "Skift stemme mellem dansk og engelsk og læs svaret op")
                             .disabled(task != nil)
+                    }
+                }
+                if let issue = privateReplyIssues[turn.id] {
+                    FadedDetailText(issue)
+                    if !hasPrompt {
+                        FadedSecondaryButton("Brug som kladde", icon: "square.and.pencil") {
+                            prompt = turn.prompt
+                            promptFocused = true
+                        }.disabled(task != nil)
                     }
                 }
                 if let name = turn.imageName {
@@ -174,6 +184,9 @@ extension OfflineStudio {
                 Text("Vælg en lokal tekstmodel under Galleri og indstillinger.").font(.footnote).foregroundStyle(palette.secondary)
             } else if hasPrompt && !messageFitsContext {
                 Text("Beskeden er for lang til den valgte model.").font(.footnote).foregroundStyle(palette.secondary)
+            } else if !promptFocused {
+                Label(studioTextModelName(effectiveTextModel), systemImage: "iphone")
+                    .font(.caption).foregroundStyle(palette.secondary)
             }
             HStack(alignment: .bottom, spacing: 4) {
                 sessionPlusMenu
@@ -253,6 +266,7 @@ extension OfflineStudio {
     private func toggleSessionDictation() {
         guard privateSession, canShowStudio, task == nil else { return }
         if dictation.active { dictation.stop(); return }
+        speech.stop()
         let existing = prompt.isEmpty ? "" : prompt + " "
         let sessionID = temporaryImagesID
         Task {
@@ -303,18 +317,20 @@ extension OfflineStudio {
         let model = effectiveTextModel
         let instructions = companionInstructions
         var remaining = chatInputBudget - estimateTokens(message) - 8
-        var context: [String] = []
-        for turn in currentBotTurns.suffix(8).reversed() where turn.imageName == nil && !turn.reply.isEmpty {
-            let block = "Bruger: \(turn.prompt)\nBot: \(turn.reply)"
-            let cost = estimateTokens(block) + 4
+        var context: [PhoneModels.ChatExchange] = []
+        let recentTurns = currentBotTurns.reversed().lazy.filter {
+            $0.imageName == nil && !$0.reply.isEmpty && privateReplyIssues[$0.id] == nil
+        }
+        for turn in recentTurns.prefix(8) {
+            let cost = estimateTokens(turn.prompt) + estimateTokens(turn.reply) + 16
             guard cost <= remaining else { break }
-            context.append(block)
+            context.append(.init(prompt: turn.prompt, reply: turn.reply))
             remaining -= cost
         }
-        let request = (Array(context.reversed()) + ["Bruger: " + message]).joined(separator: "\n")
+        let history = Array(context.reversed())
         rememberPrompt(message)
-        runPrivateReply(historyPrompt: message, source: "Telefon", progress: "Din bot skriver…") { id in
-            try await PhoneModels.reply(modelID: model, prompt: request, instructions: instructions) {
+        runPrivateReply(historyPrompt: message, source: "Telefon · \(studioTextModelName(model))", progress: "Din bot skriver…") { id in
+            try await PhoneModels.reply(modelID: model, prompt: message, instructions: instructions, history: history) {
                 updateChatReply(id, with: $0)
             }
         }
@@ -376,14 +392,25 @@ extension OfflineStudio {
             } catch {
                 AppDiagnostics.record(error)
                 if chatWorkID == turn.id {
+                    let issue: String
                     if Task.isCancelled || error is CancellationError {
-                        status = "Svaret blev stoppet."
+                        issue = "Svaret blev stoppet."
+                    } else if case .busy? = error as? LocalComputeError {
+                        issue = "Telefonen kører allerede en AI-opgave. Prøv igen om lidt."
                     } else if case .lowMemory? = error as? LocalComputeError {
-                        status = "Telefonen har for lidt ledig hukommelse til modellen lige nu."
+                        issue = "Telefonen har for lidt ledig hukommelse. Prøv en mindre lokal model."
+                    } else if case .contextLimit? = error as? PhoneModelError {
+                        issue = "Samtalen er for lang til modellen. Forkort beskeden, eller start en ny samtale."
                     } else {
-                        status = "Telefonen kunne ikke svare. Tjek din tekstmodel under Private indstillinger."
+                        issue = "Telefonen kunne ikke svare. Prøv igen, eller skift lokal tekstmodel."
                     }
-                    if answer.isEmpty { updateChatReply(turn.id, with: status) }
+                    if privateSession {
+                        status = ""
+                        privateReplyIssues[turn.id] = issue
+                    } else {
+                        status = issue
+                        if answer.isEmpty { updateChatReply(turn.id, with: issue) }
+                    }
                 }
             }
             if chatWorkID == turn.id {
@@ -404,9 +431,15 @@ extension OfflineStudio {
         Self.companionInstructions(for: selectedPrivateBot, preset: privateSession ? sessionPreferences.personality : personalityPreset)
     }
 
+    private func studioTextModelName(_ id: String) -> String {
+        if id == "imported" { return "Importeret model" }
+        return PhoneModels.catalog.first { $0.id == id }?.name ?? id
+    }
+
     static func companionInstructions(for profile: VillageBot?, preset choice: String = "bot") -> String {
         let custom = profile?.prompt.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let base = "Du er \(profile?.name ?? "brugerens private AI-companion"). Du er varm, flirtende og taler naturligt med en voksen bruger. Bevar din personlighed og respekter brugerens grænser."
+        let base = "Svar først på brugerens seneste spørgsmål. Svar kort og konkret på samme sprog. Brug kun relevante fakta fra samtalen. Opfind ikke detaljer. Respekter brugerens grænser."
+        let tone = profile.map { "Dit navn er \($0.name)." } ?? "Tilpas tonen efter brugerens besked."
         let preset: String = switch choice {
         case "calm": "Svar kort, roligt og med enkle sætninger."
         case "creative": "Brug fantasi og en let, legende tone."
@@ -415,7 +448,7 @@ extension OfflineStudio {
         }
         let role = profile.map { "Dit speciale er \($0.specialtyTitle)." } ?? ""
         let responsibility = profile?.responsibility?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return [base, role, responsibility.isEmpty ? "" : "Ansvar og grænser: " + String(responsibility.prefix(400)),
+        return [base, tone, role, responsibility.isEmpty ? "" : "Ansvar og grænser: " + String(responsibility.prefix(400)),
                 custom.isEmpty ? "" : "Din personlighed: " + String(custom.prefix(600)), preset]
             .filter { !$0.isEmpty }.joined(separator: " ")
     }
@@ -463,6 +496,7 @@ extension OfflineStudio {
     }
 
     private func switchVoice(for turn: PrivateChatTurn) {
+        if speech.playback == .reply(turn.id) { speech.stop(); status = "Oplæsning stoppet."; return }
         let bot = turn.botID.flatMap { id in privateBots.first { $0.id == id } } ?? selectedPrivateBot
         let id = bot?.id ?? turn.id
         let baseLanguage = bot?.language?.hasPrefix("en") == true ? "en-US" : "da-DK"
@@ -475,11 +509,10 @@ extension OfflineStudio {
         }
         voiceLanguages[id] = language
         dictation.stop()
-        speech.synthesizer.stopSpeaking(at: .immediate)
         let utterance = AVSpeechUtterance(string: turn.reply)
         utterance.voice = voice
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(bot?.voiceRate ?? 1)
-        speech.synthesizer.speak(utterance)
+        speech.play(utterance, as: .reply(turn.id))
         status = privateSession ? "Læser op på \(label.lowercased())." : "Stemme skiftet til \(label)"
     }
 
@@ -490,6 +523,7 @@ extension OfflineStudio {
     }
 
     func contextWindow(for model: String) -> Int {
+        if let variant = QwenPhoneRuntime.Variant(modelID: model) { return variant.contextLimit }
         guard let folder = PhoneModels.installedDirectory(model),
               let data = try? LocalFileStore.readBytes(from: folder.appending(path: "model_config.json"), maximumBytes: 65_536),
               let config = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
@@ -505,6 +539,7 @@ extension OfflineStudio {
 
     private func deleteTurn(_ id: UUID) {
         turns.removeAll { $0.id == id }
+        privateReplyIssues[id] = nil
         savePrivateConversation()
     }
 

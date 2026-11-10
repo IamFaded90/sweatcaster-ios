@@ -44,6 +44,7 @@ enum AppStorageKeys {
     static let chatVoiceLanguage = "chat.voice.language"
     static let chatVoiceBot = "chat.voiceBot"
     static let chatVoiceMode = "chat.voiceMode"
+    static let chatVoiceRate = "chat.voice.rate"
     static let codeActiveContext = "code.active.context"
     static let codeAutonomy = "code.autonomy"
     static let dashboardChatPreviews = "dashboard.chat.previews"
@@ -103,6 +104,9 @@ enum AppStorageKeys {
     static let teamSleepingExpanded = "team.sleeping.expanded"
     static let videoLastMood = "video.lastMood"
     static let villageBots = "village.bots"
+    static let villageExperimentalEnabled = "village.experimental.enabled"
+    static let villageExperimentalFounders = "village.experimental.founders"
+    static let villageExperimentalJobs = "village.experimental.completed"
     static let villageShowOffice = "village.showOffice"
 
     static let chatSessionPrefix = "spaces.chat."

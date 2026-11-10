@@ -35,7 +35,11 @@ struct VillageBot: Codable, Identifiable, Equatable {
 
     var previewSentence: String {
         let trait = personality ?? "Nysgerrig"
-        if playbackVoice?.language.hasPrefix("en") == true {
+        let voice = playbackVoice
+        if let voice, voice.voiceTraits.contains(.isPersonalVoice) {
+            return LocalSpeechVoice.previewSentence(language: voice.language)
+        }
+        if voice?.language.hasPrefix("en") == true {
             let englishTrait = ["Nysgerrig": "curious", "Rolig": "calm", "Sjov": "playful", "Omsorgsfuld": "caring"][trait] ?? trait.lowercased()
             return "Hi, I'm \(name.isEmpty ? "your bot" : name). I'm \(englishTrait)."
         }
@@ -44,14 +48,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
 
     var voiceDetails: String { playbackVoice.map(LocalSpeechVoice.label) ?? "Systemstemme" }
 
-    var voiceQuality: String {
-        switch playbackVoice?.quality {
-        case .premium?: "Premium"
-        case .enhanced?: "Forbedret"
-        case .default?: "Standard"
-        default: "Systemstemme"
-        }
-    }
+    var voiceQuality: String { playbackVoice.map(LocalSpeechVoice.qualityLabel) ?? "Systemstemme" }
 
     func utterance(_ text: String) -> AVSpeechUtterance {
         let result = AVSpeechUtterance(string: text)
@@ -135,7 +132,6 @@ struct VillageBotBuilder: View {
     @State private var draft: VillageBot
     @State private var draftLoaded = false
     @StateObject private var voicePreviewBox = SpeechBox()
-    private var voicePreview: AVSpeechSynthesizer { voicePreviewBox.synthesizer }
     @State private var importing = false
     @State private var selectedSprite: PhotosPickerItem?
     @State private var exporting = false
@@ -299,7 +295,7 @@ struct VillageBotBuilder: View {
             Picker("Stemme", selection: $draft.voice) {
                 Text("Bedste danske stemme").tag("da-DK")
                 Text("Bedste engelske stemme").tag("en-US")
-                ForEach(LocalSpeechVoice.options(language: "da-DK") + LocalSpeechVoice.options(language: "en-US"),
+                ForEach(LocalSpeechVoice.options(language: "da-DK", includePersonalVoices: true) + LocalSpeechVoice.options(language: "en-US"),
                         id: \.identifier) { voice in
                     Text(LocalSpeechVoice.label(voice)).tag(voice.identifier)
                 }
@@ -309,7 +305,8 @@ struct VillageBotBuilder: View {
                 Slider(value: Binding(get: { draft.voiceRate ?? 1 }, set: { draft.voiceRate = $0 }),
                        in: 0.7...1.3, step: 0.1)
             }
-            FadedSecondaryButton("Prøv stemme", icon: "speaker.wave.2") { speakPreview(draft.previewSentence) }
+            let playing = voicePreviewBox.playback == .preview
+            FadedSecondaryButton(playing ? "Stop stemmeprøve" : "Prøv stemme", icon: playing ? "stop.circle" : "play.circle") { speakPreview(draft.previewSentence) }
         }
     }
 
@@ -360,7 +357,8 @@ struct VillageBotBuilder: View {
             if !testReply.isEmpty {
                 Label("Telefon", systemImage: "iphone")
                 Text(testReply).textSelection(.enabled)
-                Button("Læs testsvar op", systemImage: "speaker.wave.2") { speakPreview(testReply) }
+                Button(voicePreviewBox.playback == .preview ? "Stop oplæsning" : "Læs testsvar op",
+                       systemImage: voicePreviewBox.playback == .preview ? "stop.circle" : "speaker.wave.2") { speakPreview(testReply) }
                     .frame(minHeight: 44).disabled(testing)
             }
         }
@@ -385,13 +383,13 @@ struct VillageBotBuilder: View {
     }
 
     private func speakPreview(_ text: String) {
-        voicePreview.stopSpeaking(at: .immediate)
-        voicePreview.speak(draft.utterance(text))
+        if voicePreviewBox.playback == .preview { voicePreviewBox.stop() }
+        else { voicePreviewBox.play(draft.utterance(text), as: .preview) }
     }
 
     private func stopPreview() {
         testTask?.cancel()
-        voicePreview.stopSpeaking(at: .immediate)
+        voicePreviewBox.stop()
     }
 
     private func selectDraft(_ bot: VillageBot) {

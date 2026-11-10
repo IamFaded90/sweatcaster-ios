@@ -19,7 +19,7 @@ extension Home {
                 .safeAreaInset(edge: .bottom, spacing: 0) { videoBottomBar }
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button("Tilbage", systemImage: "chevron.left") { selectSpace(.brain) }
+                        Button("Tilbage", systemImage: "chevron.left", action: goBack)
                     }
                     if videoPage == .clips && selectedGameFolder != nil {
                         ToolbarItem(placement: .topBarTrailing) {
@@ -34,10 +34,6 @@ extension Home {
             guard let server = videoFolderScope, videoFolderServer != server else { return }
             await loadGameFolders(for: server)
         }
-        .task(id: "\(videoFolderScope ?? ""):\(selectedGameFolder ?? "")") {
-            guard let id = selectedGameFolder, let server = videoFolderScope else { return }
-            await loadFolderPage(id, for: server)
-        }
     }
 
     @ViewBuilder private var videoPageContent: some View {
@@ -50,10 +46,7 @@ extension Home {
             .refreshable { await refreshVideoStudio() }
         case .recipe:
             videoSection {
-                if model.selected.isEmpty {
-                    FadedEmptyState(icon: "film", title: "Vælg klip først", detail: "Vælg op til 10 klip, og lav så din video.",
-                                    actionTitle: "Åbn Klip") { videoPage = .clips }
-                } else {
+                if !model.selected.isEmpty {
                     FadedDetailText("\(model.selected.count) klip valgt")
                 }
                 moodSection
@@ -81,6 +74,7 @@ extension Home {
             }
             .padding(FadedSpacing.edge).frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private var videoPageBar: some View {
@@ -95,22 +89,6 @@ extension Home {
     private var videoPagePicker: some View {
         Picker("Sektion i Video Studio", selection: $videoPage) {
             ForEach(VideoPage.allCases) { page in Text(page.rawValue).tag(page) }
-        }
-    }
-
-    @ViewBuilder private var videoBottomBar: some View {
-        if !model.selected.isEmpty && videoPage != .jobs {
-            Group {
-                if videoPage == .clips {
-                    FadedPrimaryButton("Gå til opskrift · \(model.selected.count) klip", icon: "arrow.right", action: openVideoRecipe)
-                        .frame(maxWidth: 640)
-                } else {
-                    videoStartControls
-                }
-            }
-            .padding(.horizontal, FadedSpacing.edge).padding(.vertical, 8)
-            .frame(maxWidth: .infinity)
-            .background(palette.raised.opacity(0.96))
         }
     }
 
@@ -161,24 +139,11 @@ extension Home {
         }
     }
 
-    func startVideo(_ mood: Mood) {
-        videoStartNotice = nil
-        Task {
-            let accepted = await model.submit(mood)
-            if accepted || model.requiresVideoReview {
-                selectedGameFolder = nil
-                showJobs += 1
-            } else if model.error == nil {
-                videoStartNotice = videoStartBlocker ?? "Videojobbet blev ikke sendt. Kontrollér klipvalget, og prøv igen."
-            }
-        }
-    }
-
     func clipColor(_ clip: Clip) -> Color {
         let colors = [palette.green, palette.purple, palette.cyan, palette.coral]
         return colors[Int(clip.id.hashValue.magnitude % UInt(colors.count))]
     }
-    private var availableVideoMood: Mood? {
+    var availableVideoMood: Mood? {
         let moods = videoMoods
         let preference = model.isDemo ? selectedVideoMood : model.lastVideoMood ?? .hype
         return moods.contains(preference) ? preference : moods.first
@@ -187,44 +152,6 @@ extension Home {
         if let moods = model.capabilities?.moods { return moods }
         return model.connected ? [] : Mood.allCases
     }
-    private var videoStartBlocker: String? {
-        if model.requiresVideoReview { return "Tjek joblisten, før du starter et nyt job." }
-        if model.checkingVideoOutbox { return "Kontrollerer den lokale videokø…" }
-        if model.blocked { return "PC’en mangler en tjeneste. Se Status på PC’en under videoindstillinger." }
-        if !model.options.roi.valid { return "Ret området til tekstlæsning i videoindstillinger." }
-        if availableVideoMood == nil { return "PC’en har ingen tilgængelige stilarter." }
-        if model.selected.count > (model.capabilities?.limit ?? 0) { return "PC’en tillader færre klip. Ryd klipvalget, og vælg igen." }
-        if !model.cancelling.isEmpty { return "Venter på, at PC’en stopper videojobbet." }
-        if !model.connected { return "Forbind til PC’en for at starte." }
-        return nil
-    }
-
-    private var videoStartControls: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if !model.connected && !model.isDemo {
-                if let notice = videoStartNotice { Text(notice).font(.caption).foregroundStyle(palette.secondary) }
-                Text("Køjob sendes første gang, når appen igen får kontakt til denne PC.")
-                    .font(.caption).foregroundStyle(palette.secondary)
-                FadedPrimaryButton("Gem i lokal kø · \(model.selected.count) klip", icon: "tray.and.arrow.down") {
-                    guard let mood = availableVideoMood else { return }
-                    if model.queueVideoOffline(mood) { selectedGameFolder = nil; videoStartNotice = "Videojob gemt på telefonen."; showJobs += 1 }
-                    else { videoStartNotice = "Køjobbet kunne ikke gemmes. Kontrollér klipvalget." }
-                }.disabled(!model.canQueueVideoOffline || availableVideoMood == nil)
-            } else {
-                if let message = videoStartNotice ?? model.errorTitle ?? videoStartBlocker {
-                    Label(message, systemImage: "info.circle").font(.caption).foregroundStyle(palette.secondary)
-                }
-                FadedPrimaryButton(model.busy ? "Sender videojob…" : "Start videomagi · \(model.selected.count) klip",
-                                   icon: "play.fill") {
-                    guard let mood = availableVideoMood else { return }
-                    if confirmVideoStart { pendingVideoMood = mood }
-                    else { startVideo(mood) }
-                }.disabled(!model.canSubmit || videoStartBlocker != nil)
-            }
-        }
-        .frame(maxWidth: 640)
-    }
-
     private var moodSection: some View {
         FadedCard {
             VStack(alignment: .leading, spacing: 12) { videoRecipeContents }
@@ -246,6 +173,7 @@ extension Home {
                     }
                 }
             }
+            framingSection
             if !model.isDemo {
                 Toggle("Kommentator", isOn: Binding(
                     get: { model.options.commentary != false },
@@ -270,18 +198,36 @@ extension Home {
             }
             advanced(Binding(get: { model.options }, set: { model.options = $0 }))
                 .disabled(model.busy)
-            Label(model.options.crop_mode == .auto ? "9:16 · Automatisk beskæring" : "9:16 · Beskær til midten",
-                  systemImage: "aspectratio")
-                .font(.caption.monospaced()).foregroundStyle(palette.secondary)
+    }
+
+    private var framingSection: some View {
+        let crop = Binding(get: { model.options.crop_mode }, set: { model.options.crop_mode = $0 })
+        return VStack(alignment: .leading, spacing: 6) {
+            Label("Billedformat · 9:16", systemImage: "aspectratio")
+                .font(FadedTypography.section)
+                .accessibilityAddTraits(.isHeader)
+            if videoTypeSize.isAccessibilitySize {
+                framingPicker(crop).pickerStyle(.menu).frame(minHeight: 44)
+            } else {
+                framingPicker(crop).pickerStyle(.segmented).frame(minHeight: 44)
+            }
+            FadedDetailText(model.options.crop_mode == .auto
+                            ? "Hele klippet vises i midten. Sløret baggrund fylder pladsen omkring det."
+                            : "Midten af klippet zoomes ind og fylder hele skærmen. Siderne beskæres.")
+        }
+        .disabled(model.busy)
+    }
+
+    private func framingPicker(_ crop: Binding<Crop>) -> some View {
+        Picker("Billedformat", selection: crop) {
+            Text("Hele klippet").tag(Crop.auto)
+            Text("Fyld skærmen").tag(Crop.center)
+        }
     }
 
     private func advanced(_ options: Binding<Options>) -> some View {
         DisclosureGroup("Avancerede indstillinger") {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Beskæring", selection: options.crop_mode) {
-                    Text("Automatisk").tag(Crop.auto)
-                    Text("Midten").tag(Crop.center)
-                }.frame(minHeight: 48)
                 Text("Område til tekstlæsning").font(.headline)
                 Text("Brug tal fra 0 til 1, målt fra øverste venstre hjørne.")
                 coordinate("Fra venstre", options.roi.x)
@@ -316,7 +262,8 @@ extension Home {
         FadedCard {
             VStack(alignment: .leading, spacing: 12) {
                 FadedSectionLabel("Vælg klip")
-                Text("\(model.selected.count) valgt af maks. \(model.capabilities?.limit ?? 10)")
+                Text(model.capabilities.map { "\(model.selected.count) valgt af maks. \($0.limit)" }
+                     ?? "\(model.selected.count) klip valgt")
                     .font(.subheadline).foregroundStyle(palette.secondary)
                 if !model.selected.isEmpty {
                     let seconds = model.clips.filter { model.selected.contains($0.id) }.reduce(0) { $0 + $1.duration_seconds }
@@ -343,9 +290,9 @@ extension Home {
     @ViewBuilder private func videoFolders(onDone: @escaping () -> Void) -> some View {
         if model.isDemo {
             clipFolder(id: "demo", title: "Testklip", subtitle: nil, onDone: onDone)
-        } else if catalogLoading != nil || (videoFolderServer != model.address && folderNotice == nil) {
+        } else if catalogLoading != nil || (videoFolderServer != videoFolderScope && folderNotice == nil) {
             LoadingSkeleton(label: "Henter spilmapper…")
-        } else if videoFolderServer == model.address {
+        } else if let server = videoFolderScope, videoFolderServer == server {
             if legacyClipCatalog {
                 clipFolder(id: "legacy", title: "PC’ens V1-klipliste", subtitle: "Ældre server uden spilmapper", onDone: onDone)
             } else {
@@ -382,19 +329,38 @@ extension Home {
             if expanded {
                 if id == "demo" {
                     clipList(model.clips, onDone: onDone)
-                } else if pageLoading != nil {
-                    LoadingSkeleton(label: "Henter klip i mappen…")
-                } else if let clips = folderPages[id] {
-                    clipList(clips, onDone: onDone)
-                }
-                if let notice = folderPageNotices[id] {
-                    Text(notice).font(.caption).foregroundStyle(palette.secondary)
-                    FadedSecondaryButton("Opdatér mappen", icon: "arrow.clockwise") {
-                        guard let server = videoFolderScope else { return }
-                        Task { await loadFolderPage(id, for: server, force: true) }
-                    }
+                } else {
+                    expandedClipFolder(id, onDone: onDone)
+                        .id(id)
                 }
             }
+        }
+    }
+
+    private func expandedClipFolder(_ id: String, onDone: @escaping () -> Void) -> some View {
+        let clips = folderPages[id] ?? []
+        return VStack(alignment: .leading, spacing: 8) {
+            if !clips.isEmpty {
+                clipList(clips, onDone: onDone)
+            }
+            if pageLoading != nil {
+                LoadingSkeleton(label: "Henter klip i mappen…")
+            } else if let notice = folderPageNotices[id] {
+                FadedDetailText(notice)
+            } else if clips.isEmpty {
+                FadedDetailText(folderPages[id] == nil ? "Klip er endnu ikke hentet." :
+                                "PC’en har ingen klip klar til valg i denne mappe. Klip må højst vare tre minutter.")
+            }
+            if clips.isEmpty || folderPageNotices[id] != nil {
+                FadedSecondaryButton("Opdatér mappen", icon: "arrow.clockwise") {
+                    guard let server = videoFolderScope else { return }
+                    Task { await loadFolderPage(id, for: server, force: true) }
+                }.disabled(pageLoading != nil)
+            }
+        }
+        .task(id: videoFolderScope) {
+            guard let server = videoFolderScope else { return }
+            await loadFolderPage(id, for: server)
         }
     }
 
@@ -508,7 +474,7 @@ extension Home {
     var videoFolderScope: String? {
         guard !privateStudioPresented else { return nil }
         guard phase == .active, space == .gallery, videoPage == .clips, selectedModuleTab == nil, model.connected else { return nil }
-        return model.isDemo ? "demo" : model.address
+        return model.isDemo ? "demo" : (model.api as? LiveAPI)?.queueTargetID
     }
 
     func refreshVideoStudio() async {
@@ -563,9 +529,9 @@ extension Home {
     }
 
     func loadFolderPage(_ id: String, for server: String, force: Bool = false) async {
-        guard videoFolderScope == server, videoFolderServer == server, !model.isDemo,
+        guard videoFolderScope == server, videoFolderServer == server, selectedGameFolder == id, !model.isDemo,
               let api = model.api as? LiveAPI,
-              force || folderPages[id] == nil || folderPageNotices[id] != nil else { return }
+              force || folderPages[id]?.isEmpty != false || folderPageNotices[id] != nil else { return }
         let ticket = UUID()
         pageLoading = ticket
         defer { if pageLoading == ticket { pageLoading = nil } }
@@ -587,14 +553,15 @@ extension Home {
             }
             guard !Task.isCancelled, videoFolderScope == server, selectedGameFolder == id, pageLoading == ticket else { return }
             var seen = Set<String>()
-            let pageClips = Array(clips.lazy.filter { validWireID($0.id) && seen.insert($0.id).inserted }.prefix(limit))
+            // Filter eagerly so index traversal cannot mark clips as seen before copying them.
+            let pageClips = Array(clips.filter { validWireID($0.id) && seen.insert($0.id).inserted }.prefix(limit))
             folderPages[id] = pageClips
             folderPageNotices[id] = notice
             model.includeFolderClips(pageClips, folderID: id)
         } catch {
-            AppDiagnostics.record(error)
             guard !Task.isCancelled, videoFolderScope == server, selectedGameFolder == id, pageLoading == ticket else { return }
-            folderPageNotices[id] = "Klip i denne mappe kunne ikke hentes."
+            AppDiagnostics.record(error)
+            folderPageNotices[id] = "Klip i denne mappe kunne ikke hentes. Tjek PC-forbindelsen, og opdatér mappen."
         }
     }
 }

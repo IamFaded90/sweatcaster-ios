@@ -18,6 +18,7 @@ enum AppDiagnostics {
             switch api {
             case .http(let status, _): label = "APIError HTTP \(status)"
             case .transport(let code): label = "APIError transport \(code)"
+            case .addressLeadingZeros: label = "APIError: Ledende nuller i PC-adressen"
             default: label = "APIError: " + api.title
             }
         case let v2 as V2Failure:
@@ -526,7 +527,7 @@ struct ResourceMonitor: View {
             (documents, ["Models"]),
             (support, ["FadedAI", "ImportedPhoneModels", "PCChatOutbox", "SavedVideos", "StudioImages",
                        "StudioLoRAPreviews", "VideoStudio"]),
-            (temporary, ["FadedAI-diagnostics"])
+            (temporary, ["FadedAI-diagnostics", BackupService.exportDirectory])
         ]
         for (root, names) in roots where manager.fileExists(atPath: root.path) {
             let children = try manager.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)

@@ -9,7 +9,6 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct OfflineStudio: View {
-    private static let lastPrivatePageKey = AppStorageKeys.offlineStudioLastPrivatePage
     let api: LiveAPI?
     @Binding var sessionUnlocked: Bool
     let onPrivateSessionEnded: () -> Void
@@ -24,7 +23,7 @@ struct OfflineStudio: View {
     @State var importPromptFile = false
     @State var importChatText = false
     @State var privateDeadline: ContinuousClock.Instant?
-    @State var privateNetworkOffline = false
+    @State var privateNetworkOffline: Bool?
     @State var privatePathMonitor: NWPathMonitor?
     @State var privateImageRendering = false
     @State var sessionPreferences = StudioSessionPreferences()
@@ -84,9 +83,10 @@ struct OfflineStudio: View {
     @State var transientDetails: [URL: StudioImageDetails] = [:]
     @State var privateImages: [URL: Data] = [:]
     @State var photosSaving: Set<URL> = []
-    @State var pendingPrivatePhoto: StudioImageSheet?
+    @State var pendingPrivatePhoto: StudioMultiShare?
     @State var photoAuthentication: LAContext?
     @State var confirmStudioPanic = false
+    @State var panicDeletesDownloads = false
     @State var imageDetailsSheet: StudioImageSheet?
     @State var imageViewer: StudioImageSheet?
     @State var studioShareSheet: StudioMultiShare?
@@ -111,6 +111,7 @@ struct OfflineStudio: View {
     @State var studioAuthentication: LAContext?
     @State var downloadProgress: Double?
     @State var turns: [PrivateChatTurn] = []
+    @State var privateReplyIssues: [UUID: String] = [:]
     @State var loaded = false
     @State var chatWorkID: UUID?
     @State var textContextLimit = 2048
@@ -132,8 +133,7 @@ struct OfflineStudio: View {
         _sessionUnlocked = sessionUnlocked
         self.onPrivateSessionEnded = onPrivateSessionEnded
         self.ephemeralOnly = ephemeralOnly
-        let remembered = ephemeralOnly ? UserDefaults.standard.string(forKey: Self.lastPrivatePageKey).flatMap(Page.init(rawValue:)) : nil
-        _studioPage = State(initialValue: initialPage ?? remembered ?? .chat)
+        _studioPage = State(initialValue: initialPage ?? .chat)
         _imagePrompt = State(initialValue: String(initialImagePrompt.prefix(2_000)))
         _pendingBotID = State(initialValue: initialBotID)
     }
@@ -143,7 +143,10 @@ struct OfflineStudio: View {
     var imageModel: String { privateSession ? sessionPreferences.imageModel : savedImageModel }
     var sessionExpired: Bool { privateDeadline.map { $0 <= .now } ?? false }
     var canRenderPrivateImages: Bool {
-        privateNetworkOffline && privatePathMonitor?.currentPath.status == .unsatisfied
+        privateNetworkOffline == true && privatePathMonitor?.currentPath.status == .unsatisfied
+    }
+    var privateImageOfflineInstructions: String {
+        "Slå flytilstand til og Wi-Fi fra, og gå tilbage til Billeder."
     }
 
     var historyFolder: URL { URL.applicationSupportDirectory.appending(path: "StudioImages", directoryHint: .isDirectory) }
@@ -214,6 +217,7 @@ struct OfflineStudio: View {
                         Menu("Samtale", systemImage: "ellipsis.circle") {
                             Button("Ny samtale", systemImage: "square.and.pencil") { newPrivateConversation() }
                             if privateSession {
+                                sessionModelPicker
                                 Button("Galleri og indstillinger", systemImage: "gearshape") { studioPage = .gallery }
                             }
                         }
@@ -227,7 +231,7 @@ struct OfflineStudio: View {
         studioChrome
             .sheet(isPresented: $showModels, onDismiss: {
                 textContextLimit = contextWindow(for: effectiveTextModel)
-            }) { PhoneModelsView() }
+            }) { PhoneModelsView(allowsImageDownloads: !privateSession) }
             .sheet(isPresented: $showBotBuilder) {
                 VillageBotBuilder(api: privateSession ? nil : api, bot: selectedPrivateBot,
                                   onBack: { showBotBuilder = false })
@@ -269,20 +273,20 @@ struct OfflineStudio: View {
             .fileImporter(isPresented: $importChatText, allowedContentTypes: [.plainText]) { result in
                 if case .success(let url) = result { loadPromptFile(url, intoImages: false) }
             }
-            .confirmationDialog("Gem privat billede i Fotos?", isPresented: Binding(
+            .confirmationDialog("Gem private billeder i Fotos?", isPresented: Binding(
                 get: { pendingPrivatePhoto != nil }, set: { if !$0 { pendingPrivatePhoto = nil } }
             ), titleVisibility: .visible, presenting: pendingPrivatePhoto) { item in
-                Button("Gem i Fotos") { exportPrivatePhoto(item.url) }
+                Button("Gem i Fotos") { exportPrivatePhotos(item.files) }
                 Button("Annuller", role: .cancel) { }
             } message: { _ in
-                Text("En kopi bliver i Fotos efter sessionen og kan synkroniseres med iCloud.")
+                Text("Kopier bliver i Fotos efter sessionen og kan synkroniseres med iCloud.")
             }
-            .confirmationDialog(privateSession ? "Ryd denne private session?" : "Ryd studiets lokale indhold?",
+            .confirmationDialog(panicDeletesDownloads ? "Slet studiets indhold og lokale modeller?" : "Ryd denne private session?",
                                 isPresented: $confirmStudioPanic, titleVisibility: .visible) {
-                Button("Ryd og lås", role: .destructive, action: clearStudioContent)
+                Button("Ryd og lås", role: .destructive) { clearStudioContent(includingModels: panicDeletesDownloads) }
             } message: {
-                Text(privateSession ? "Samtaler, noter og billeder fra sessionen forsvinder. Kopier i Fotos bliver liggende."
-                                    : "Studiets samtaler og galleri slettes. Modeller og LoRA bevares.")
+                Text(panicDeletesDownloads ? "Studiets gemte samtaler og billeder slettes også uden for den private session. Downloadede tekst- og billedmodeller samt LoRA fjernes. Kopier i Fotos og Apples systemmodel bevares."
+                                          : "Samtaler, noter og billeder fra sessionen forsvinder. Modeller på telefonen og kopier i Fotos bliver liggende.")
             }
     }
 
@@ -300,7 +304,6 @@ struct OfflineStudio: View {
             .onChange(of: studioPage) { _, page in
                 if page != .chat { promptFocused = false; dictation.stop() }
                 if page != .images { imagePromptFocused = false }
-                if ephemeralOnly { UserDefaults.standard.set(page.rawValue, forKey: Self.lastPrivatePageKey) }
                 resetIdleTimer()
             }
             .onChange(of: studioPhase) { _, phase in handleStudioPhase(phase) }
@@ -368,7 +371,10 @@ struct OfflineStudio: View {
                 switch studioPage {
                 case .chat: studioChatPage
                 case .images: studioImagesPage
-                case .gallery: studioGalleryPage
+                case .gallery:
+                    studioGalleryPage.safeAreaInset(edge: .bottom, spacing: 0) {
+                        if privateSession { privateSessionFooter }
+                    }
                 }
             }
             .simultaneousGesture(TapGesture().onEnded { _ in resetIdleTimer() })
@@ -387,6 +393,17 @@ struct OfflineStudio: View {
         }
     }
 
+    private var privateSessionFooter: some View {
+        FadedSecondaryButton("Ryd session", icon: "trash", role: .destructive) {
+            panicDeletesDownloads = false
+            confirmStudioPanic = true
+        }
+        .accessibilityHint("Fjerner denne sessions samtaler, noter og billeder. Bevarer modeller.")
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, FadedSpacing.edge).padding(.vertical, FadedSpacing.s)
+        .background(palette.background)
+    }
+
     private var studioPicker: some View {
         Picker("Visning i Privat Studio", selection: $studioPage) {
             ForEach(Page.allCases) { page in
@@ -398,7 +415,10 @@ struct OfflineStudio: View {
 
     @ViewBuilder private var studioOperationStatus: some View {
         VStack(alignment: .leading, spacing: 4) {
-            if loadingModel && task != nil { LoadingSkeleton(label: "Indlæser model i hukommelsen…") }
+            if loadingModel && task != nil {
+                ProgressView("Indlæser model i hukommelsen…")
+                    .progressViewStyle(.linear).tint(palette.cyan)
+            }
             if !status.isEmpty { Text(status).font(.callout).foregroundStyle(palette.secondary) }
             if let downloadProgress {
                 ProgressView(value: downloadProgress) { Text(downloadProgress.formatted(.percent)) }

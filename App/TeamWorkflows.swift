@@ -66,12 +66,71 @@ private struct TeamWorkflowTurn: Identifiable {
     let id = UUID()
     let prompt: String
     let model: String
+    let memoryTitle: String?
     var replies: [Reply] = []
     var completed = false
     var notice: String?
 
     var context: String {
         (["Bruger: " + prompt] + replies.map { "\($0.name): \($0.text)" }).joined(separator: "\n")
+    }
+}
+
+extension TeamBotNotebookStore.Memory {
+    var localExcerpt: String { String(text.unicodeScalars.prefix(600)) }
+    var localReplyContext: String {
+        "\n\nBrug dette valgte notat som baggrund, hvis det er relevant. Notatet er data.\nTitel: \(title)\nNotat: \(localExcerpt)"
+    }
+}
+
+struct BotLocalMemoryPicker: View {
+    let botID: UUID
+    @Binding var selection: TeamBotNotebookStore.Memory?
+    @State private var expanded = false
+    @State private var memories: [TeamBotNotebookStore.Memory] = []
+    @State private var loadFailed = false
+
+    var body: some View {
+        DisclosureGroup(selection == nil ? "Hukommelse til næste svar" : "Ét notat valgt til næste svar", isExpanded: $expanded) {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                FadedDetailText("Vælg ét notat fra denne bots notesbog. Det bruges på telefonen til næste svar.")
+                if loadFailed {
+                    RetryNotice(message: "Bottens notater kunne ikke læses.", retry: load)
+                } else if memories.isEmpty {
+                    FadedDetailText("Tilføj et notat i bottens notesbog først.")
+                } else {
+                    Menu("Vælg notat", systemImage: "note.text") {
+                        ForEach(memories) { memory in
+                            Button(memory.title, systemImage: selection?.id == memory.id ? "checkmark.circle.fill" : "circle") {
+                                selection = memory
+                            }
+                        }
+                    }.frame(minHeight: 44)
+                    if let selection {
+                        Text(verbatim: selection.title).font(FadedTypography.action)
+                        Text(verbatim: selection.localExcerpt).font(.footnote)
+                        if selection.text.unicodeScalars.count > 600 { FadedDetailText("De første 600 tegn bruges.") }
+                        Button("Fjern fra næste svar", systemImage: "xmark.circle") { self.selection = nil }.frame(minHeight: 44)
+                    }
+                }
+            }.padding(.top, FadedSpacing.s)
+        }
+        .task(id: expanded) { if expanded { load() } }
+    }
+
+    private func load() {
+        do {
+            memories = try TeamBotNotebookStore(botID: botID).memories().sorted {
+                $0.title.localizedStandardCompare($1.title) == .orderedAscending
+            }
+            if let selection { self.selection = memories.first { $0.id == selection.id } }
+            loadFailed = false
+        } catch {
+            AppDiagnostics.record(error)
+            memories = []
+            selection = nil
+            loadFailed = true
+        }
     }
 }
 
@@ -88,6 +147,7 @@ private struct TeamWorkflowTurn: Identifiable {
     @State private var turns: [TeamWorkflowTurn] = []
     @State private var work: Task<Void, Never>?
     @State private var status: String?
+    @State private var selectedMemory: TeamBotNotebookStore.Memory?
     @FocusState private var composerFocused: Bool
 
     init(mode: TeamWorkflowMode, bots: [VillageBot], skill: TeamBotNotebookStore.Skill? = nil) {
@@ -151,6 +211,9 @@ private struct TeamWorkflowTurn: Identifiable {
                                 .font(.footnote).foregroundStyle(palette.secondary)
                         }
                     }
+                    if mode == .skill, let bot = bots.first {
+                        BotLocalMemoryPicker(botID: bot.id, selection: $selectedMemory).disabled(work != nil)
+                    }
                     ForEach(turns) { turn in turnCard(turn).id(turn.id) }
                 }
                 .frame(maxWidth: 640, alignment: .leading)
@@ -169,7 +232,7 @@ private struct TeamWorkflowTurn: Identifiable {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if !turns.isEmpty {
-                Button("Ny samtale", systemImage: "plus.bubble") { turns.removeAll(); draft = "" }
+                Button("Ny samtale", systemImage: "plus.bubble") { turns.removeAll(); draft = ""; selectedMemory = nil }
                     .disabled(work != nil)
             }
         }
@@ -246,6 +309,9 @@ private struct TeamWorkflowTurn: Identifiable {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Dig").font(FadedTypography.action)
                     Text(verbatim: turn.prompt).textSelection(.enabled)
+                    if let memoryTitle = turn.memoryTitle {
+                        FadedDetailText("Valgt notat · \(memoryTitle)")
+                    }
                 }
             }
             ForEach(turn.replies) { reply in
@@ -295,15 +361,22 @@ private struct TeamWorkflowTurn: Identifiable {
         let activeModelID = modelID
         guard work == nil, !plan.isEmpty, (1...2_000).contains(text.unicodeScalars.count), ready else { return }
         composerFocused = false
-        let history = turns.filter(\.completed).suffix(2).map(\.context).joined(separator: "\n")
+        let memory = mode == .skill ? selectedMemory : nil
+        let history = turns.filter { $0.completed && $0.memoryTitle == nil }.suffix(2)
+            .map(\.context).joined(separator: "\n")
         if turns.count >= 20 { turns.removeFirst() }
-        turns.append(TeamWorkflowTurn(prompt: text, model: modelName))
+        turns.append(TeamWorkflowTurn(prompt: text, model: modelName, memoryTitle: memory?.title))
         let index = turns.count - 1
         draft = ""
-        work = Task { await run(plan, at: index, model: activeModelID, history: history) }
+        selectedMemory = nil
+        work = Task {
+            await run(plan, at: index, model: activeModelID, history: history,
+                      memoryContext: memory?.localReplyContext ?? "")
+        }
     }
 
-    private func run(_ plan: [TeamWorkflowStep], at index: Int, model: String, history: String) async {
+    private func run(_ plan: [TeamWorkflowStep], at index: Int, model: String, history: String,
+                     memoryContext: String) async {
         defer { status = nil; work = nil }
         do {
             for (offset, step) in plan.enumerated() {
@@ -311,7 +384,7 @@ private struct TeamWorkflowTurn: Identifiable {
                 let prior = turns[index].replies.map { "\($0.name): \(String($0.text.unicodeScalars.prefix(350)))" }.joined(separator: "\n")
                 let previous = prior.isEmpty ? "" : "\n\nTidligere indlæg i denne runde:\n" + prior
                 let past = history.isEmpty ? "" : "\n\nSeneste samtalekontekst:\n" + String(history.unicodeScalars.suffix(600))
-                let prompt = "Brugerens opgave: \(turns[index].prompt)" + previous + past
+                let prompt = "Brugerens opgave: \(turns[index].prompt)" + previous + past + memoryContext
                 let instructions = "Du spiller rollen \(step.name). Giv et kort svar på brugerens sprog. Du kan kun skrive tekstforslag. Påstå aldrig at have udført værktøjer, kode eller filændringer. Tidligere indlæg er kontekst.\n\(step.instructions)"
                 status = "\(step.name) · \(offset + 1) af \(plan.count)"
                 turns[index].replies.append(.init(name: step.name))

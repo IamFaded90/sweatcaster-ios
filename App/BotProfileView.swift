@@ -1,6 +1,5 @@
 // Bot profile, local voice previews and a private chat entry point.
 
-import AVFoundation
 import Foundation
 import SwiftUI
 
@@ -20,10 +19,11 @@ struct VillageBotProfile: View {
     @State private var deletedIndex = 0
     @State private var testQuestion = ""
     @State private var testReply = ""
+    @State private var testMemory: TeamBotNotebookStore.Memory?
+    @State private var testMemoryTitle: String?
     @State private var testTask: Task<Void, Never>?
     @State private var notice: String?
     @StateObject private var speechBox = SpeechBox()
-    private var speech: AVSpeechSynthesizer { speechBox.synthesizer }
 
     private var bot: VillageBot? {
         (try? JSONDecoder().decode([VillageBot].self, from: savedBots))?.first { $0.id == botID }
@@ -72,7 +72,7 @@ struct VillageBotProfile: View {
         .foregroundStyle(palette.text)
         .navigationTitle("Botprofil")
         .navigationBarTitleDisplayMode(.inline)
-        .onDisappear { speech.stopSpeaking(at: .immediate); testTask?.cancel() }
+        .onDisappear { speechBox.stop(); testTask?.cancel() }
         .sheet(isPresented: $showBuilder) {
             if let bot { VillageBotBuilder(api: api, bot: bot, onBack: { showBuilder = false }) }
         }
@@ -106,9 +106,10 @@ struct VillageBotProfile: View {
             VStack(alignment: .leading, spacing: 10) {
                 FadedSectionLabel("Stemme")
                 Text(bot.voiceDetails).font(.subheadline).foregroundStyle(palette.secondary)
-                FadedSecondaryButton("Prøv stemme", icon: "speaker.wave.2") {
-                    speech.stopSpeaking(at: .immediate)
-                    speech.speak(bot.utterance(bot.previewSentence))
+                let playing = speechBox.playback == .preview
+                FadedSecondaryButton(playing ? "Stop stemmeprøve" : "Prøv stemme", icon: playing ? "stop.circle" : "play.circle") {
+                    if playing { speechBox.stop() }
+                    else { speechBox.play(bot.utterance(bot.previewSentence), as: .preview) }
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -138,6 +139,7 @@ struct VillageBotProfile: View {
             VStack(alignment: .leading, spacing: 10) {
                 FadedSectionLabel("Prøv personligheden")
                 if canTest {
+                    BotLocalMemoryPicker(botID: bot.id, selection: $testMemory).disabled(testTask != nil)
                     testComposer(bot)
                 } else {
                     Text("Vælg en klar telefonmodel for at prøve botten.").font(.subheadline).foregroundStyle(palette.secondary)
@@ -147,6 +149,9 @@ struct VillageBotProfile: View {
                     VStack(alignment: .leading, spacing: 6) {
                         Label("Svar fra telefonen", systemImage: "iphone")
                             .font(.caption.weight(.semibold)).foregroundStyle(palette.isDark ? palette.cyan : palette.text)
+                        if let testMemoryTitle {
+                            FadedDetailText("Valgt notat · \(testMemoryTitle)")
+                        }
                         Text(testReply).textSelection(.enabled)
                     }
                     .padding(12).frame(maxWidth: .infinity, alignment: .leading)
@@ -176,11 +181,11 @@ struct VillageBotProfile: View {
     private var profileActions: some View {
         VStack(alignment: .leading, spacing: 8) {
             FadedSecondaryButton("Chat med botten", icon: "lock.shield") {
-                speech.stopSpeaking(at: .immediate)
+                speechBox.stop()
                 showPrivateChat = true
             }
             FadedSecondaryButton("Redigér", icon: "pencil") {
-                speech.stopSpeaking(at: .immediate)
+                speechBox.stop()
                 showBuilder = true
             }
             FadedSecondaryButton("Slet bot", icon: "trash", role: .destructive, action: deleteBot)
@@ -191,12 +196,15 @@ struct VillageBotProfile: View {
         let question = testQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canTest, !question.isEmpty, testTask == nil else { return }
         let selectedModel = modelID
+        let localPrompt = question + (testMemory?.localReplyContext ?? "")
+        testMemoryTitle = testMemory?.title
+        testMemory = nil
         testReply = ""
         notice = nil
         testTask = Task {
             defer { testTask = nil }
             do {
-                try await PhoneModels.reply(modelID: selectedModel, prompt: question,
+                try await PhoneModels.reply(modelID: selectedModel, prompt: localPrompt,
                                             instructions: OfflineStudio.companionInstructions(for: bot)) {
                     if !Task.isCancelled { testReply = $0 }
                 }
@@ -218,7 +226,7 @@ struct VillageBotProfile: View {
         }
         do {
             try MigratedAppData.shared.saveVillageBots(remaining)
-            speech.stopSpeaking(at: .immediate)
+            speechBox.stop()
             deletedBot = bots[index]
             deletedIndex = index
             notice = nil

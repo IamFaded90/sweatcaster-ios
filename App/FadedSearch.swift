@@ -56,6 +56,7 @@ enum FadedSearchDestination: Hashable, Sendable {
     case connections
     case note
     case settings
+    case settingsCategory(Home.SettingsCategory)
     case privateStudio
 }
 
@@ -83,6 +84,7 @@ struct FadedSearchRecord: Identifiable, Hashable, Sendable {
 
 struct FadedSearchIndex: Equatable, Sendable {
     static let limit = 80
+    static let queryLimit = 120
     private static let maximumRecords = 2_000
     private let records: [FadedSearchRecord]
 
@@ -98,13 +100,18 @@ struct FadedSearchIndex: Equatable, Sendable {
     }
 
     func matches(_ input: String) -> [FadedSearchRecord] {
-        let query = Self.fold(String(input.prefix(120)).trimmingCharacters(in: .whitespacesAndNewlines))
+        (try? cancellableMatches(input)) ?? []
+    }
+
+    func cancellableMatches(_ input: String) throws -> [FadedSearchRecord] {
+        try Task.checkCancellation()
+        let query = Self.fold(Self.boundedQuery(input).trimmingCharacters(in: .whitespacesAndNewlines))
         let words = query.split(whereSeparator: \.isWhitespace)
         guard !words.isEmpty else { return [] }
 
         var matches: [(order: Int, score: Int, record: FadedSearchRecord)] = []
         for (order, record) in records.enumerated() {
-            guard !Task.isCancelled else { return [] }
+            try Task.checkCancellation()
             let title = Self.fold(record.title)
             let fullText = Self.fold([record.title, record.detail, record.keywords,
                                       record.category.rawValue, record.source?.rawValue ?? ""].joined(separator: " "))
@@ -115,6 +122,10 @@ struct FadedSearchIndex: Equatable, Sendable {
         return matches.sorted { left, right in
             left.score == right.score ? left.order < right.order : left.score < right.score
         }.prefix(Self.limit).map { $0.record }
+    }
+
+    static func boundedQuery(_ input: String) -> String {
+        String(input.prefix(queryLimit))
     }
 
     private static func fold(_ value: String) -> String {
@@ -138,13 +149,13 @@ struct FadedSearchSheet: View {
     }
 
     private var request: Request {
-        Request(query: query.trimmingCharacters(in: .whitespacesAndNewlines), index: index)
+        Request(query: FadedSearchIndex.boundedQuery(query).trimmingCharacters(in: .whitespacesAndNewlines), index: index)
     }
 
     init(index: FadedSearchIndex, initialQuery: String = "", onSelect: @escaping (FadedSearchDestination) -> Void) {
         self.index = index
         self.onSelect = onSelect
-        _query = State(initialValue: String(initialQuery.prefix(120)))
+        _query = State(initialValue: FadedSearchIndex.boundedQuery(initialQuery))
     }
 
     var body: some View {
@@ -171,10 +182,10 @@ struct FadedSearchSheet: View {
                 .accessibilityLabel("Søgefelt")
                 .onSubmit { focused = false }
                 .onChange(of: query) { _, value in
-                    if value.count > 120 { query = String(value.prefix(120)) }
+                    if value.count > FadedSearchIndex.queryLimit { query = FadedSearchIndex.boundedQuery(value) }
                 }
             if !query.isEmpty {
-                Button { query = "" } label: {
+                Button(action: clearQuery) {
                     Image(systemName: "xmark.circle.fill").frame(width: 44, height: 44)
                 }.buttonStyle(.plain).foregroundStyle(palette.secondary).accessibilityLabel("Ryd søgning")
             }
@@ -189,12 +200,14 @@ struct FadedSearchSheet: View {
             LazyVStack(alignment: .leading, spacing: 10) {
                 if request.query.isEmpty {
                     FadedEmptyState(icon: "magnifyingglass", title: "Søg på telefonen",
-                                    detail: "Find chats, bots, videoer, filer, noter og indstillinger.")
+                                    detail: "Find chats, bots, videoer, filer, noter og indstillinger.",
+                                    actionTitle: "Søg") { focused = true }
                 } else if completedRequest != request {
-                    ProgressView("Søger…").frame(maxWidth: .infinity, alignment: .leading)
+                    LoadingSkeleton(label: "Søger…")
                 } else if results.isEmpty {
                     FadedEmptyState(icon: "magnifyingglass", title: "Ingen resultater",
-                                    detail: "Prøv et kortere søgeord eller en anden stavemåde.")
+                                    detail: "Prøv et kortere søgeord eller en anden stavemåde.",
+                                    actionTitle: "Ryd søgning", action: clearQuery)
                 } else {
                     FadedSectionLabel("Resultater · \(results.count)")
                     ForEach(results, content: resultRow)
@@ -252,10 +265,26 @@ struct FadedSearchSheet: View {
     }
 
     private func search(_ request: Request) async {
-        let worker = Task.detached(priority: .userInitiated) { request.index.matches(request.query) }
-        let found = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
         guard !Task.isCancelled else { return }
+        if request.query.isEmpty {
+            results = []
+            completedRequest = request
+            return
+        }
+        do { try await Task.sleep(for: .milliseconds(220)) }
+        catch { return }
+        let worker = Task.detached(priority: .userInitiated) { try request.index.cancellableMatches(request.query) }
+        let found: [FadedSearchRecord]
+        do {
+            found = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
+        } catch { return }
+        guard !Task.isCancelled, self.request == request else { return }
         results = found
         completedRequest = request
+    }
+
+    private func clearQuery() {
+        query = ""
+        focused = true
     }
 }

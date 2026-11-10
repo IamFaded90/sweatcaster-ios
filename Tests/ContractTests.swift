@@ -13,8 +13,8 @@ extension ContractTests {
     func testFivePhoneModelsIncludeOnlySupportedDownloadChoices() {
         XCTAssertEqual(Set(PhoneModels.catalog.map(\.name)),
                        Set(["MiniCPM5 1B", "Gemma 4 E2B", "Qwen3.5 0.8B", "Qwen3-VL 2B", "LFM2.5 350M"]))
-        XCTAssertEqual(PhoneModels.catalog.filter { PhoneModels.supportsLocalInference($0.id) }.map(\.name),
-                       ["Gemma 4 E2B", "LFM2.5 350M"])
+        XCTAssertEqual(Set(PhoneModels.catalog.filter { PhoneModels.supportsLocalInference($0.id) }.map(\.name)),
+                       Set(["LFM2.5 350M", "Qwen3.5 0.8B", "Qwen3-VL 2B", "Gemma 4 E2B"]))
     }
 
     func testDarkModeFollowsSystemAndAppStorage() {

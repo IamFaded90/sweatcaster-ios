@@ -40,6 +40,8 @@ struct PairingQRCode: Decodable {
 }
 
 struct LoginView: View {
+    private enum ManualField: Equatable { case address, token, connection }
+
     let model: Model
     let close: (() -> Void)?
     let openLocalChat: () -> Void
@@ -47,12 +49,18 @@ struct LoginView: View {
     let openLocalBots: () -> Void
     let exportDiagnostics: () -> Void
 
+    @Environment(\.fadedPalette) private var palette
     @State private var profile: ConnectionProfile
     @State private var address: String
     @State private var token = ""
-    @State private var scannedExpiry: Date?
+    @State private var scannedPairing: PairingQRCode?
+    @State private var qrError: String?
+    @State private var manualError: (field: ManualField, text: String)?
+    @State private var pingNotice: String?
+    @State private var manualExpanded = false
+    @State private var diagnosticsExpanded = false
+    @State private var attemptedConnection = false
     @State private var connecting = false
-    @State private var message: String?
     @State private var scanning = false
     @State private var pinging = false
 
@@ -72,98 +80,23 @@ struct LoginView: View {
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Forbindelse til din PC") {
-                    Picker("Forbindelse", selection: Binding(get: { profile }, set: { selection in
-                        profile = selection
-                        address = model.savedAddresses[selection] ?? ""
-                        token = ""
-                        scannedExpiry = nil
-                        message = nil
-                    })) {
-                        Text("Hjem").tag(ConnectionProfile.home)
-                        Text("Tailscale").tag(ConnectionProfile.tailscale)
-                    }
-                    .pickerStyle(.segmented)
-                    TextField("PC’ens IP-adresse", text: $address)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                        .frame(minHeight: 44)
-                        .disabled(scannedExpiry != nil)
-                    SecureField("Token fra PC’en", text: $token)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .frame(minHeight: 44)
-                        .disabled(scannedExpiry != nil)
-                    if scannedExpiry != nil {
-                        Button("Indtast IP og token manuelt") {
-                            clearScannedPairing()
-                            message = nil
-                        }.frame(minHeight: 44)
-                    } else if let saved = model.savedAddresses[profile], saved == address.trimmingCharacters(in: .whitespacesAndNewlines) {
-                        Text("Lad tokenfeltet stå tomt for at bruge den gemte adgang.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    FadedPrimaryButton(connecting ? "Tester forbindelsen…" : "Test og forbind", icon: "network") {
-                        Task { await connect() }
-                    }
-                    .disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    if address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text("Indtast PC’ens IP, eller scan QR-koden.").font(.caption).foregroundStyle(.secondary)
-                    }
-                    FadedSecondaryButton(pinging ? "Tester PC…" : "Ping PC", icon: "network") {
-                        Task { await ping() }
-                    }
-                    .disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    Button("Scan QR fra PC’en", systemImage: "qrcode.viewfinder") {
-                        Task {
-                            if await AVCaptureDevice.requestAccess(for: .video) { scanning = true }
-                            else { message = "Giv FadedAI adgang til kameraet i iOS-indstillinger." }
-                        }
-                    }.frame(minHeight: 44)
-                    if model.refreshing { ProgressView("Kontrollerer den gemte forbindelse…") }
-                    if let error = message ?? model.errorTitle { Text(error).foregroundStyle(.secondary) }
-                }.disabled(pinging || connecting || model.busy || model.refreshing || model.mediaLoading || !model.cancelling.isEmpty)
-                if close == nil {
-                    Section("På telefonen") {
-                        Button("Åbn lokal chat", action: openLocalChat).frame(minHeight: 44)
-                        Button("Privat Studio", action: openLocalStudio).frame(minHeight: 44)
-                        Button("Mine bots", action: openLocalBots).frame(minHeight: 44)
-                        Button("Prøv demo") { Task { await model.useDemo() } }.frame(minHeight: 44)
-                            .disabled(connecting || model.busy || model.refreshing)
-                    }
-                    Section("Fejlfinding") {
-                        ResourceMonitor()
-                        Button("Eksportér fejllog", action: exportDiagnostics).frame(minHeight: 44)
-                    }
+            ScrollView {
+                VStack(alignment: .leading, spacing: FadedSpacing.section) {
+                    qrSection
+                    manualSection
+                    if close == nil { phoneSection }
+                    diagnosticsSection
                 }
+                .padding(FadedSpacing.edge)
             }
-            .scrollContentBackground(.hidden)
             .background(FadedBackground())
+            .onChange(of: manualExpanded) { _, _ in pingNotice = nil }
             .navigationTitle("Forbind til PC")
             .sheet(isPresented: $scanning) {
                 NavigationStack {
-                    PairingQRScanner { result in
-                        scanning = false
-                        clearScannedPairing()
-                        do {
-                            let payload = try PairingQRSession.accept(result.get())
-                            profile = try Server(payload.address).profile
-                            address = payload.address
-                            token = payload.token
-                            scannedExpiry = payload.expiresAt
-                            message = "QR læst. Tryk Test og Forbind."
-                        } catch {
-                            AppDiagnostics.record(error)
-                            if case .pairingExpired? = error as? APIError {
-                                message = APIError.pairingExpired.title
-                            } else if case .replay? = error as? PairingQRSession.Failure {
-                                message = "QR-koden er allerede scannet. Lav en ny kode på PC’en."
-                            } else {
-                                message = "QR-koden er ikke en gyldig FadedAI-forbindelse."
-                            }
-                        }
-                    }
-                    .navigationTitle("Scan forbindelseskode")
-                    .toolbar { Button("Luk") { scanning = false } }
+                    PairingQRScanner { result in finishScan(result) }
+                        .navigationTitle("Scan forbindelseskode")
+                        .toolbar { Button("Luk") { scanning = false } }
                 }
             }
             .toolbar {
@@ -172,52 +105,235 @@ struct LoginView: View {
         }
     }
 
-    private func connect() async {
-        guard !connecting else { return }
-        if let scannedExpiry, scannedExpiry <= .now {
-            clearScannedPairing()
-            message = APIError.pairingExpired.title
+    private var connectionBusy: Bool {
+        pinging || connecting || model.busy || model.refreshing || model.mediaLoading || !model.cancelling.isEmpty
+    }
+
+    private var manualAddressEmpty: Bool { address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var pingHasAddress: Bool { !manualAddressEmpty || (!manualExpanded && scannedPairing != nil) }
+
+    private var qrSection: some View {
+        FadedCard(size: .hero) {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                FadedSectionHeader("QR fra din PC", detail: "Åbn forbindelseskoden på din PC, og scan den her.")
+                if let pairing = scannedPairing, !manualExpanded {
+                    FadedDetailText("QR læst. Bekræft forbindelsen til \(pairing.address).")
+                    FadedPrimaryButton(connecting ? "Tester forbindelsen…" : "Test og forbind", icon: "network") {
+                        Task { await connect(pairing) }
+                    }
+                    FadedSecondaryButton("Scan en anden QR-kode", icon: "qrcode.viewfinder") { scanQR() }
+                } else if manualExpanded {
+                    FadedSecondaryButton("Scan QR fra PC’en", icon: "qrcode.viewfinder") { scanQR() }
+                } else {
+                    FadedPrimaryButton("Scan QR fra PC’en", icon: "qrcode.viewfinder") { scanQR() }
+                }
+                if let qrError {
+                    pairingError(qrError)
+                } else if model.refreshing && !connecting {
+                    ProgressView("Kontrollerer den gemte forbindelse…")
+                } else if !attemptedConnection, !manualExpanded, let error = model.errorTitle {
+                    FadedDetailText(error)
+                }
+            }
+        }
+        .disabled(connectionBusy)
+    }
+
+    private var manualSection: some View {
+        FadedCard {
+            DisclosureGroup(isExpanded: $manualExpanded) {
+                VStack(alignment: .leading, spacing: FadedSpacing.section) {
+                    Picker("Forbindelse", selection: Binding(get: { profile }, set: { selection in
+                        profile = selection
+                        address = model.savedAddresses[selection] ?? ""
+                        token = ""
+                        manualError = nil
+                        pingNotice = nil
+                    })) {
+                        Text("Hjem").tag(ConnectionProfile.home)
+                        Text("Tailscale").tag(ConnectionProfile.tailscale)
+                    }.pickerStyle(.segmented)
+                    VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                        FadedFieldLabel("PC’ens IP-adresse")
+                        TextField("PC’ens IP-adresse", text: $address)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                            .padding(.horizontal, FadedSpacing.s).frame(minHeight: 44)
+                            .background(palette.raised, in: RoundedRectangle(cornerRadius: FadedRadius.small))
+                            .onChange(of: address) { _, _ in manualError = nil; pingNotice = nil }
+                        if let error = manualError, error.field == .address { pairingError(error.text) }
+                    }
+                    VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                        FadedFieldLabel("Token fra PC’en")
+                        SecureField("Token fra PC’en", text: $token)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .padding(.horizontal, FadedSpacing.s).frame(minHeight: 44)
+                            .background(palette.raised, in: RoundedRectangle(cornerRadius: FadedRadius.small))
+                            .onChange(of: token) { _, _ in manualError = nil }
+                        if let error = manualError, error.field == .token {
+                            pairingError(error.text)
+                        } else if let saved = model.savedAddresses[profile],
+                                  saved == address.trimmingCharacters(in: .whitespacesAndNewlines) {
+                            FadedDetailText("Lad tokenfeltet stå tomt for at bruge den gemte adgang.")
+                        }
+                    }
+                    FadedPrimaryButton(connecting ? "Tester forbindelsen…" : "Test og forbind", icon: "network") {
+                        Task { await connect() }
+                    }.disabled(manualAddressEmpty)
+                    if manualAddressEmpty { FadedDetailText("Indtast IP-adressen, der vises på din PC.") }
+                    if let error = manualError, error.field == .connection { pairingError(error.text) }
+                }.padding(.top, FadedSpacing.s)
+            } label: {
+                Label("Indtast IP og token manuelt", systemImage: "keyboard")
+                    .frame(minHeight: 44, alignment: .leading)
+            }
+        }.disabled(connectionBusy)
+    }
+
+    private var phoneSection: some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                FadedSectionLabel("På telefonen")
+                FadedSecondaryButton("Brug telefonen", icon: "iphone", action: openLocalChat)
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: FadedSpacing.s) { phoneShortcuts }
+                    VStack(alignment: .leading, spacing: FadedSpacing.s) { phoneShortcuts }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var phoneShortcuts: some View {
+        Button("Privat Studio", action: openLocalStudio).frame(minHeight: 44)
+        Button("Mine bots", action: openLocalBots).frame(minHeight: 44)
+        Button("Prøv demo") { Task { await model.useDemo() } }.frame(minHeight: 44)
+            .disabled(connecting || model.busy || model.refreshing)
+    }
+
+    private var diagnosticsSection: some View {
+        FadedCard {
+            DisclosureGroup(isExpanded: $diagnosticsExpanded) {
+                VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                    FadedSecondaryButton(pinging ? "Tester PC…" : "Ping PC", icon: "network") {
+                        Task { await ping() }
+                    }.disabled(connectionBusy || !pingHasAddress)
+                    if let pingNotice { FadedDetailText(pingNotice) }
+                    if !pingHasAddress {
+                        FadedDetailText("Indtast IP-adressen, eller scan QR-koden, før du tester.")
+                    }
+                    if close == nil {
+                        ResourceMonitor()
+                        Button("Eksportér fejllog", action: exportDiagnostics).frame(minHeight: 44)
+                    }
+                }.padding(.top, FadedSpacing.s)
+            } label: {
+                Label("Flere muligheder", systemImage: "wrench.and.screwdriver")
+                    .frame(minHeight: 44, alignment: .leading)
+            }
+        }
+    }
+
+    private func pairingError(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.circle")
+            .font(.footnote).foregroundStyle(palette.coralText)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func scanQR() {
+        Task {
+            if await AVCaptureDevice.requestAccess(for: .video) { scanning = true }
+            else { qrError = "Giv FadedAI adgang til kameraet i iOS-indstillinger." }
+        }
+    }
+
+    private func finishScan(_ result: Result<String, Error>) {
+        scanning = false
+        scannedPairing = nil
+        qrError = nil
+        pingNotice = nil
+        do {
+            scannedPairing = try PairingQRSession.accept(result.get())
+            manualExpanded = false
+        } catch {
+            AppDiagnostics.record(error)
+            if case .pairingExpired? = error as? APIError {
+                qrError = APIError.pairingExpired.title
+            } else if case .replay? = error as? PairingQRSession.Failure {
+                qrError = "QR-koden er allerede scannet. Lav en ny kode på PC’en."
+            } else {
+                qrError = "QR-koden er ikke en gyldig FadedAI-forbindelse."
+            }
+        }
+    }
+
+    private func connect(_ pairing: PairingQRCode? = nil) async {
+        guard !connectionBusy else { return }
+        attemptedConnection = true
+        if let expiresAt = pairing?.expiresAt, expiresAt <= .now {
+            scannedPairing = nil
+            qrError = APIError.pairingExpired.title
             return
         }
         connecting = true
-        message = nil
         defer { connecting = false }
-        await model.saveProfile(profile, address: address, token: token, pairingExpiresAt: scannedExpiry)
+        let server: Server
+        do { server = try Server(pairing?.address ?? address) }
+        catch {
+            AppDiagnostics.record(error)
+            let title = AppErrorPresentation(error).title
+            if pairing != nil { qrError = title }
+            else { manualError = (.address, title) }
+            return
+        }
+        if pairing != nil { qrError = nil }
+        else {
+            manualError = nil
+            guard server.profile == profile else {
+                manualError = (.address, "Vælg Hjem eller Tailscale, så det passer til IP-adressen.")
+                return
+            }
+        }
+        await model.saveProfile(server.profile, address: server.address, token: pairing?.token ?? token,
+                                pairingExpiresAt: pairing?.expiresAt)
         guard !Task.isCancelled else { return }
-        if case .pairingExpired? = model.error { clearScannedPairing() }
-        if let error = model.errorTitle { message = error; return }
+        if let error = model.errorTitle {
+            if pairing != nil {
+                if case .pairingExpired? = model.error { scannedPairing = nil }
+                qrError = error
+            } else {
+                switch model.error {
+                case .token?, .http(401, _)?: manualError = (.token, error)
+                default: manualError = (.connection, error)
+                }
+            }
+            return
+        }
         if model.connected && !model.isDemo {
             token = ""
-            scannedExpiry = nil
+            scannedPairing = nil
             close?()
         }
     }
 
-    private func clearScannedPairing() {
-        guard scannedExpiry != nil else { return }
-        scannedExpiry = nil
-        token = ""
-    }
-
     private func ping() async {
-        guard !pinging else { return }
+        guard !connectionBusy else { return }
         pinging = true
-        message = nil
+        pingNotice = nil
         defer { pinging = false }
         do {
-            let server = try Server(address)
-            guard server.profile == profile else {
-                message = "Vælg Hjem eller Tailscale, så det passer til IP-adressen."
+            let pairing = manualExpanded ? nil : scannedPairing
+            let server = try Server(pairing?.address ?? address)
+            guard pairing != nil || server.profile == profile else {
+                pingNotice = "Vælg Hjem eller Tailscale, så det passer til IP-adressen."
                 return
             }
             let ms = try await Model.probe(server)
-            message = "PC’en svarer · \(ms) ms. Tryk Test og forbind."
+            pingNotice = "PC’en svarer · \(ms) ms. Tryk Test og forbind."
         } catch let error as APIError {
             AppDiagnostics.record(error)
-            message = AppErrorPresentation(error).title
+            pingNotice = AppErrorPresentation(error).title
         } catch {
             AppDiagnostics.record(error)
-            message = "PC’en svarer ikke. Tjek IP-adressen, Wi-Fi eller Tailscale."
+            pingNotice = "PC’en svarer ikke. Tjek IP-adressen, Wi-Fi eller Tailscale."
         }
     }
 }

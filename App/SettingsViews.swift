@@ -1,5 +1,6 @@
 // Viser indstillinger, noter, forbindelsestest og eksport af fejllog.
 
+import AVFAudio
 import SwiftUI
 import UIKit
 
@@ -53,6 +54,69 @@ private struct VideoCleanupSettings: View {
     }
 }
 
+private struct PersonalVoiceSettings: View {
+    @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(AppStorageKeys.chatVoiceIdentifier) private var voiceID = ""
+    @AppStorage(AppStorageKeys.chatVoiceBot) private var voiceBotID = ""
+    @State private var authorization = AVSpeechSynthesizer.personalVoiceAuthorizationStatus
+    @State private var voices: [AVSpeechSynthesisVoice] = []
+    @State private var requesting = false
+
+    var body: some View {
+        Section("Personlig stemme") {
+            switch authorization {
+            case .authorized:
+                if voices.isEmpty {
+                    FadedDetailText("Opret eller færdiggør din stemme i iPhones Indstillinger → Tilgængelighed → Personlig stemme.")
+                }
+                ForEach(voices, id: \.identifier) { voice in
+                    let selected = voiceBotID.isEmpty && voiceID == voice.identifier
+                    Button {
+                        voiceBotID = ""
+                        voiceID = voice.identifier
+                    } label: {
+                        Label(LocalSpeechVoice.label(voice), systemImage: selected ? "checkmark.circle.fill" : "waveform")
+                    }
+                    .accessibilityAddTraits(selected ? [.isSelected] : [])
+                }
+                if !voices.isEmpty {
+                    FadedDetailText("Tryk på en stemme til chatten. Vælg svar på samme sprog i chatindstillingerne for at høre den.")
+                }
+            case .notDetermined:
+                Button("Tillad personlig stemme", systemImage: "waveform") { requestAccess() }
+                    .disabled(requesting)
+                FadedDetailText("Slå Apps må anmode om at bruge til under Tilgængelighed → Personlig stemme på din iPhone.")
+            case .denied:
+                FadedDetailText("Giv FadedAI adgang under iPhones Indstillinger → Tilgængelighed → Personlig stemme.")
+            case .unsupported:
+                FadedDetailText("Denne enhed understøtter ikke Personlig stemme. Du kan vælge en systemstemme i chatten.")
+            @unknown default:
+                FadedDetailText("Personlig stemme er utilgængelig. Du kan vælge en systemstemme i chatten.")
+            }
+            FadedDetailText("Personlig stemme følger optagelsens sprog. Vælg en dansk systemstemme til dansk oplæsning.")
+        }
+        .onAppear(perform: refresh)
+        .onChange(of: scenePhase) { _, phase in if phase == .active { refresh() } }
+        .onReceive(NotificationCenter.default.publisher(for: AVSpeechSynthesizer.availableVoicesDidChangeNotification)) { _ in
+            Task { @MainActor in refresh() }
+        }
+    }
+
+    private func requestAccess() {
+        requesting = true
+        Task { @MainActor in
+            _ = await AVSpeechSynthesizer.requestPersonalVoiceAuthorization()
+            requesting = false
+            refresh()
+        }
+    }
+
+    private func refresh() {
+        authorization = AVSpeechSynthesizer.personalVoiceAuthorizationStatus
+        voices = LocalSpeechVoice.personalVoices
+    }
+}
+
 extension Home {
     private var connectionIndicator: some View {
         let latency = model.latencyMs
@@ -66,11 +130,11 @@ extension Home {
     }
 
     var settingsSheet: some View {
-        NavigationStack {
+        NavigationStack(path: $settingsPath) {
             ScrollView {
                 VStack(alignment: .leading, spacing: FadedSpacing.section) {
                     ForEach(SettingsCategory.allCases, id: \.self) { category in
-                        NavigationLink { settingsPage(category) } label: { settingsRow(category) }
+                        NavigationLink(value: category) { settingsRow(category) }
                             .buttonStyle(.plain)
                     }
                 }.padding(FadedSpacing.edge)
@@ -78,7 +142,10 @@ extension Home {
             .background(FadedBackground())
             .navigationTitle("Indstillinger")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Luk") { showSettings = false } }
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("Luk") { showSettings = false } }
+            }
+            .navigationDestination(for: SettingsCategory.self) { settingsPage($0) }
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
@@ -116,22 +183,34 @@ extension Home {
         Form {
             switch category {
             case .connection:
-                connectionIndicator
-                pingSetting
-                Button("Skift forbindelse") { closeSettings(for: .login) }.disabled(switchDisabled)
-                NavigationLink("Forbindelser") { ConnectionsView() }
-                Toggle("Vis forbindelsesbanner", isOn: $showConnectionBanner)
-                Toggle("Opdatér ved faneskift", isOn: $autoRefreshTabs)
+                Section("PC-forbindelse") {
+                    connectionIndicator
+                    pingSetting
+                    Button("Skift forbindelse") { closeSettings(for: .login) }.disabled(switchDisabled)
+                    NavigationLink("Forbindelser") { ConnectionsView() }
+                }
+                Section("Status og opdatering") {
+                    Toggle("Vis forbindelsesbanner", isOn: $showConnectionBanner)
+                    Toggle("Opdatér ved faneskift", isOn: $autoRefreshTabs)
+                }
             case .models:
-                Button("Lokale modeller (iPhone)") { closeSettings(for: .models) }
-                NavigationLink("PC-modeller (RTX 3070)") { PCModelsView(api: studioAPI) }
-                Toggle("Vælg automatisk model", isOn: $autoModelRouter)
-                Text("Automatisk modelvalg bruger Telefon og PC. Grok vælges manuelt.")
-                    .font(.caption).foregroundStyle(palette.secondary)
-                Button("Privat Studio") { closeSettings(for: .privateChat) }
-                Button("Mine bots") { closeSettings(for: .bots) }
-                Button("Code Bot og Agent Workspace") { closeSettings(for: .code) }
-                CloudModelSettings()
+                Section("Telefon og PC") {
+                    Button("Lokale modeller (iPhone)", systemImage: "iphone") { closeSettings(for: .models) }
+                    FadedDetailText("Hent tekst- og billedmodeller til iPhone, og brug dem igen uden download.")
+                    NavigationLink {
+                        PCModelsView(api: studioAPI)
+                    } label: {
+                        Label("PC-modeller (RTX 3070)", systemImage: "desktopcomputer")
+                    }
+                    Toggle("Vælg automatisk model", isOn: $autoModelRouter)
+                    FadedDetailText("Automatisk modelvalg bruger Telefon og PC. Grok vælges manuelt.")
+                }
+                Section("Grok") { CloudModelSettings() }
+                Section("Værktøjer") {
+                    Button("Privat Studio") { closeSettings(for: .privateChat) }
+                    Button("Mine bots") { closeSettings(for: .bots) }
+                    Button("Code Bot og Agent Workspace") { closeSettings(for: .code) }
+                }
             case .appearance:
                 appearanceSettings
                 Section("Chat og lyd") {
@@ -140,25 +219,49 @@ extension Home {
                     Toggle("Haptisk feedback", isOn: $appHaptics)
                     Text("Vælg stemme i chatten eller på din bots profil.").font(.callout).foregroundStyle(palette.secondary)
                 }
+                PersonalVoiceSettings()
             case .diagnostics:
-                pingSetting
-                ResourceMonitor()
-                Section("Notifikationer") { JobNotificationSettings() }
-                Toggle("Liveaktivitet på låseskærmen", isOn: $liveActivityEnabled)
-                Button("Eksportér fejllog", systemImage: "square.and.arrow.up") { closeSettings(for: .export) }
-                Toggle("Gem genererede billeder i Fotos", isOn: $saveImagesToPhotos)
-                Toggle("Bekræft før video startes", isOn: $confirmVideoStart)
-                VideoCleanupSettings(prunePreviews: prunePreviews) {
-                    let previousCount = hiddenJobs.count
-                    hiddenJobs.formUnion(model.jobs.filter { !$0.status.active }.map(\.id))
-                    return hiddenJobs.count - previousCount
+                Section("PC og ressourcer") {
+                    pingSetting
+                    ResourceMonitor()
+                    Button("Eksportér fejllog", systemImage: "square.and.arrow.up") { closeSettings(for: .export) }
                 }
-                NukeLocalDataButton()
+                Section("Notifikationer") {
+                    JobNotificationSettings()
+                    Toggle("Liveaktivitet på låseskærmen", isOn: $liveActivityEnabled)
+                }
+                Section("Medier") {
+                    Toggle("Gem almindelige billeder i Fotos", isOn: $saveImagesToPhotos)
+                    FadedDetailText("Privat Studio gemmer kun en kopi i Fotos, når du selv vælger det.")
+                    Toggle("Bekræft før video startes", isOn: $confirmVideoStart)
+                    VideoCleanupSettings(prunePreviews: prunePreviews) {
+                        let previousCount = hiddenJobs.count
+                        hiddenJobs.formUnion(model.jobs.filter { !$0.status.active }.map(\.id))
+                        return hiddenJobs.count - previousCount
+                    }
+                }
+                Section("Eksperimentelle funktioner") { ExperimentalVillageSetting() }
+                Section("Lokale data") {
+                    NavigationLink("Backup og gendan") {
+                        BackupSettingsView(canRestore: {
+                            !model.busy && !model.refreshing && !model.checkingVideoOutbox &&
+                                !model.mediaLoading && model.cancelling.isEmpty
+                        }, onRestore: {
+                            UserDefaults.standard.set(UUID().uuidString, forKey: AppStorageKeys.appResetGeneration)
+                        })
+                        .onAppear { showingBackupTools = true }
+                        .onDisappear { showingBackupTools = false }
+                    }
+                    NukeLocalDataButton()
+                }
             }
         }
         .scrollContentBackground(.hidden)
         .background(FadedBackground())
         .navigationTitle(category.rawValue)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) { Button("Luk") { showSettings = false } }
+        }
     }
 
     @ViewBuilder private var pingSetting: some View {
@@ -178,6 +281,7 @@ extension Home {
     }
 
     func openSettingsFollowup() {
+        settingsPath.removeAll()
         guard let destination = settingsFollowup else { return }
         settingsFollowup = nil
         switch destination {
@@ -191,23 +295,29 @@ extension Home {
     }
 
     @ViewBuilder private var appearanceSettings: some View {
-        Picker("Lys og mørke", selection: $appearanceMode) {
-            ForEach(FadedAppearance.allCases, id: \.self) { mode in Text(mode.rawValue).tag(mode) }
+        Section("Tema og tekst") {
+            Picker("Lys og mørke", selection: $appearanceMode) {
+                ForEach(FadedAppearance.allCases, id: \.self) { mode in Text(mode.rawValue).tag(mode) }
+            }
+            Picker("Tema", selection: $theme) {
+                ForEach(FadedTheme.allCases) { choice in Text(choice.rawValue).tag(choice) }
+            }
+            textSizeSetting
+            Picker("Skrift", selection: $font) {
+                ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
+            }
         }
-        Picker("Tema", selection: $theme) {
-            ForEach(FadedTheme.allCases) { choice in Text(choice.rawValue).tag(choice) }
+        Section("Bevægelse og navigation") {
+            Toggle("Bevægelse i baggrunden", isOn: $motion)
+            Toggle("Ekstra rolig bevægelse", isOn: $calmMotion)
+            Toggle("Husk seneste fane", isOn: $rememberLastSpace)
+            Toggle("Hold skærmen vågen", isOn: $keepScreenAwake)
         }
-        textSizeSetting
-        Picker("Skrift", selection: $font) {
-            ForEach(["Standard", "Afrundet", "Monospace"], id: \.self) { Text($0) }
+        Section("Video") {
+            Toggle("Kompakte klipkort", isOn: $compactClipCards)
+            Toggle("Vis kliplængde", isOn: $showClipDurations)
+            Toggle("Vis jobdetaljer", isOn: $showJobDetails)
         }
-        Toggle("Bevægelse i baggrunden", isOn: $motion)
-        Toggle("Ekstra rolig bevægelse", isOn: $calmMotion)
-        Toggle("Husk seneste fane", isOn: $rememberLastSpace)
-        Toggle("Hold skærmen vågen", isOn: $keepScreenAwake)
-        Toggle("Kompakte klipkort", isOn: $compactClipCards)
-        Toggle("Vis kliplængde", isOn: $showClipDurations)
-        Toggle("Vis jobdetaljer", isOn: $showJobDetails)
     }
 
     private var textSizeSetting: some View {

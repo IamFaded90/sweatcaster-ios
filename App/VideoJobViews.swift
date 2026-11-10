@@ -1,4 +1,4 @@
-// Viser jobs og udbakke og håndterer lokal afspilning, deling og gemte videoer.
+// Starter videojobs, viser kø og status og håndterer lokal afspilning, deling og gemte videoer.
 
 import SwiftUI
 import UIKit
@@ -6,7 +6,150 @@ import AVFoundation
 import AVKit
 import Foundation
 
+private struct VideoStartBlock {
+    enum Action {
+        case clips, jobs, connection, refresh, resetROI
+
+        var title: String {
+            switch self {
+            case .clips: "Åbn Klip"
+            case .jobs: "Se jobs"
+            case .connection: "Forbind til PC"
+            case .refresh: "Opdatér PC-status"
+            case .resetROI: "Brug standardområde"
+            }
+        }
+    }
+
+    let message: String
+    let action: Action?
+
+    init(_ message: String, action: Action? = nil) {
+        self.message = message
+        self.action = action
+    }
+}
+
 extension Home {
+    var videoBottomBar: some View {
+        videoStartControls
+            .frame(maxWidth: 640)
+            .padding(.horizontal, FadedSpacing.edge).padding(.vertical, FadedSpacing.s)
+            .frame(maxWidth: .infinity)
+            .background(palette.raised.opacity(0.96))
+    }
+
+    private var canSubmitReason: VideoStartBlock? {
+        let jobsAction: VideoStartBlock.Action? = videoPage == .jobs ? nil : .jobs
+        if model.requiresVideoReview {
+            return .init("Starten på et tidligere job er uafklaret. Tjek joblisten først.", action: jobsAction)
+        }
+        if model.checkingVideoOutbox { return .init("Kontrollerer den lokale videokø…") }
+        if model.busy { return .init("Venter på svar fra PC’en.") }
+        if model.refreshing { return .init("Kontrollerer forbindelsen til PC’en…") }
+        if !model.cancelling.isEmpty { return .init("Venter på, at PC’en stopper videojobbet.") }
+        let clipAction: VideoStartBlock.Action? = videoPage == .clips ? nil : .clips
+        if model.selected.isEmpty { return .init("Vælg mindst ét klip.", action: clipAction) }
+        if !model.options.roi.valid {
+            return .init("Området til tekstlæsning skal ligge inden for billedet.", action: .resetROI)
+        }
+        if !model.connected && !model.isDemo {
+            guard let live = model.api as? LiveAPI, live.server.address == model.address else {
+                return .init("Forbind til en PC, før du gemmer et køjob.", action: .connection)
+            }
+            if !model.videoStateReadable { return .init("Videokøen kunne ikke læses. Forbind til PC’en for at starte.", action: .connection) }
+            if model.videoOutbox.count >= 5 { return .init("Videokøen er fuld. Fjern eller send et køjob først.", action: jobsAction) }
+            if model.selected.count > 10 { return .init("Vælg højst 10 klip til den lokale kø.", action: clipAction) }
+            let savedClips = model.savedVideoClips
+            if savedClips.count != model.selected.count || savedClips.contains(where: { $0.folderID == nil }) {
+                return .init("Forbind til PC’en, og vælg klippene fra en spilmappe igen.", action: .connection)
+            }
+            if availableVideoMood == nil { return .init("Køjobbet mangler en tilgængelig stil.", action: .refresh) }
+            return nil
+        }
+        guard model.connected else { return .init("Forbind til PC’en for at starte.", action: .connection) }
+        guard let capabilities = model.capabilities else {
+            return .init("PC’ens videofunktioner er ikke hentet endnu.", action: .refresh)
+        }
+        if model.blocked {
+            let names = capabilities.missingRequired
+                .filter { model.options.commentary != false || $0.name == "ffmpeg" || $0.name == "ffprobe" }
+                .map(\.name).joined(separator: ", ")
+            return .init("PC’en mangler: \(names). Tjek tjenesterne på PC’en.", action: .refresh)
+        }
+        if availableVideoMood == nil { return .init("PC’en har ingen tilgængelige stilarter.", action: .refresh) }
+        if model.clips.lazy.filter({ model.selected.contains($0.id) }).count != model.selected.count {
+            return .init("Et valgt klip mangler. Vælg klippene igen.", action: clipAction)
+        }
+        if model.selected.count > capabilities.limit {
+            if capabilities.limit == 0 { return .init("PC’en tillader ingen klip lige nu.", action: .refresh) }
+            return .init("PC’en tillader højst \(capabilities.limit) klip. Fjern klip fra valget.", action: clipAction)
+        }
+        return nil
+    }
+
+    private var videoStartControls: some View {
+        let isOffline = !model.connected && !model.isDemo
+        let count = model.selected.count
+        let blocker = canSubmitReason
+        let title = model.busy ? "Sender videojob…" : (isOffline ? "Gem i lokal kø" : "Start videomagi")
+        return VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            FadedPrimaryButton(count > 0 && !model.busy ? "\(title) · \(count) klip" : title,
+                               icon: isOffline ? "tray.and.arrow.down" : "play.fill") {
+                guard let mood = availableVideoMood else { return }
+                if isOffline {
+                    if model.queueVideoOffline(mood) {
+                        selectedGameFolder = nil
+                        videoStartNotice = "Videojob gemt på telefonen."
+                        jobFilter = 0
+                        showJobs += 1
+                    } else {
+                        videoStartNotice = "Køjobbet kunne ikke gemmes. Kontrollér klipvalget."
+                    }
+                } else if confirmVideoStart {
+                    pendingVideoMood = mood
+                } else {
+                    startVideo(mood)
+                }
+            }.disabled(blocker != nil || !(isOffline ? model.canQueueVideoOffline : model.canSubmit))
+            if let blocker {
+                FadedDetailText(blocker.message)
+                if let action = blocker.action {
+                    Button(action.title) { resolveVideoStartBlock(action) }
+                        .frame(minHeight: 44)
+                }
+            } else if let notice = videoStartNotice ?? (isOffline ? nil : model.errorTitle) {
+                FadedDetailText(notice)
+            } else if isOffline {
+                FadedDetailText("Køjob sendes første gang, når appen igen får kontakt til denne PC.")
+            }
+        }
+    }
+
+    private func resolveVideoStartBlock(_ action: VideoStartBlock.Action) {
+        switch action {
+        case .clips: videoPage = .clips
+        case .jobs: showJobs += 1
+        case .connection: showLogin = true
+        case .refresh: Task { await model.refresh() }
+        case .resetROI: model.options.roi = ROI()
+        }
+    }
+
+    func startVideo(_ mood: Mood) {
+        videoStartNotice = nil
+        Task {
+            let accepted = await model.submit(mood)
+            if accepted || model.requiresVideoReview {
+                selectedGameFolder = nil
+                jobFilter = 0
+                showJobs += 1
+            } else if model.error == nil {
+                videoStartNotice = canSubmitReason?.message ?? "Videojobbet blev ikke sendt. Kontrollér klipvalget, og prøv igen."
+            }
+        }
+    }
+
     var visibleJobs: [Job] {
         model.jobs.filter { job in
             !hiddenJobs.contains(job.id) &&
@@ -141,27 +284,33 @@ extension Home {
     }
 
     private func videoJobCard(_ job: Job) -> some View {
-        let progress = job.status == .completed ? 1 : min(1, max(0, job.progress))
         let accent = videoJobAccent(job.status)
+        let failure = videoJobFailure(job)
         return FadedCard(accent: accent) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
                 Text(model.clips.first { $0.id == job.clip_id }?.name ?? "Klip")
                     .font(FadedTypography.section).accessibilityAddTraits(.isHeader)
-                Label(job.status.title + " · " + job.mood.title, systemImage: videoJobIcon(job.status))
-                    .font(.subheadline.weight(.semibold)).foregroundStyle(palette.isDark ? accent : palette.text)
-                Text(job.message).font(.subheadline).foregroundStyle(palette.secondary)
-                if job.status.active || job.status == .completed || job.status == .failed {
-                    FadedProgress(value: progress, failed: job.status == .failed)
-                }
-                if showJobDetails {
-                    Text("\(job.id) · \(progress.formatted(.percent.precision(.fractionLength(0))))")
-                        .font(.caption.monospaced()).foregroundStyle(palette.secondary)
-                }
-                videoJobActions(job)
-                if !job.warnings.isEmpty || job.error != nil {
-                    DisclosureGroup("Detaljer om jobbet") {
-                        ForEach(Array(job.warnings.enumerated()), id: \.offset) { Text($0.element) }
-                        if let problem = job.error { Text(problem.message) }
+                FadedDetailText(job.mood.title)
+                VideoJobStatusLine(status: job.status, progress: job.progress,
+                                   isCurrent: model.connected || model.isDemo, accent: accent,
+                                   updatedAt: job.updated_at,
+                                   outputAvailable: job.output_url != nil, failureDetail: failure?.detail)
+                videoJobPrimaryAction(job, recoveryPage: failure?.page)
+                if showJobDetails || !job.warnings.isEmpty || job.error != nil ||
+                    job.status == .failed || (job.status == .completed && job.output_url != nil) {
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                            if showJobDetails {
+                                Text(job.id)
+                                    .font(.caption.monospaced()).foregroundStyle(palette.secondary)
+                                if !job.message.isEmpty { FadedDetailText(job.message) }
+                            }
+                            ForEach(Array(job.warnings.enumerated()), id: \.offset) { Text($0.element) }
+                            if let problem = job.error { Text(problem.message) }
+                            videoJobSecondaryActions(job, recoveryPage: failure?.page)
+                        }.padding(.top, FadedSpacing.s)
+                    } label: {
+                        Text("Detaljer og handlinger").frame(minHeight: 44)
                     }
                 }
             }
@@ -177,27 +326,35 @@ extension Home {
         }
     }
 
-    private func videoJobIcon(_ status: Stage) -> String {
-        switch status {
-        case .completed: "checkmark.circle"
-        case .failed: "exclamationmark.circle"
-        case .cancelled: "stop.circle"
-        default: "clock"
+    private func videoJobFailure(_ job: Job) -> (detail: String, page: VideoPage?)? {
+        guard job.status == .failed else { return nil }
+        if !model.connected && !model.isDemo { return ("Tjek forbindelsen, og opdatér PC-status.", nil) }
+        switch job.error?.code ?? "" {
+        case "CLIP_CHANGED", "NOT_FOUND":
+            return ("Vælg klippet igen under Klip, og start et nyt job.", .clips)
+        case "DEPENDENCY_MISSING":
+            return ("Tjek på PC’en, at videotjenesterne kører, og prøv igen.", nil)
+        case "ENGLISH_REJECTED":
+            return ("Kommentaren kunne ikke bruges. Du kan slå kommentatoren fra under Opskrift.", .recipe)
+        default:
+            return (job.error == nil ? "PC’en angav ingen årsag. Prøv igen." : "Åbn Detaljer og handlinger for at se fejlbeskeden.", nil)
         }
     }
 
-    @ViewBuilder private func videoJobActions(_ job: Job) -> some View {
-        if job.status == .failed {
-            FadedSecondaryButton("Prøv igen", icon: "arrow.clockwise") { Task { await model.retry(job) } }
-                .disabled(!model.canRetry(job))
-            FadedSecondaryButton("Skjul fejlet job på telefonen", icon: "eye.slash") { hiddenJobs.insert(job.id) }
-            if !model.isDemo, let api = model.api as? LiveAPI {
-                FadedSecondaryButton("Slet fejlet job fra PC’en", icon: "trash", role: .destructive) {
-                    failedJobDeletion = (job.id, api)
-                }
-            }
-        }
-        if job.status.active {
+    private func videoJobRetryButton(_ job: Job) -> some View {
+        FadedSecondaryButton("Prøv igen", icon: "arrow.clockwise") { Task { await model.retry(job) } }
+            .disabled(!model.canRetry(job))
+    }
+
+    @ViewBuilder private func videoJobPrimaryAction(_ job: Job, recoveryPage: VideoPage?) -> some View {
+        if !model.connected && !model.isDemo && (job.status.active || job.status == .failed) {
+            FadedSecondaryButton("Opdatér PC-status", icon: "arrow.clockwise") { Task { await model.refresh() } }
+                .disabled(model.refreshing || switchDisabled)
+        } else if let recoveryPage {
+            FadedSecondaryButton("Åbn \(recoveryPage.rawValue)", icon: "arrow.right") { videoPage = recoveryPage }
+        } else if job.status == .failed {
+            videoJobRetryButton(job)
+        } else if job.status.active {
             if model.waitingForStop.contains(job.id) {
                 Text("Venter på, at jobbet stopper.")
             } else if model.capabilities?.features.cancel == true {
@@ -205,14 +362,26 @@ extension Home {
                                      icon: "stop.circle") { Task { await model.cancel(job) } }
                     .disabled(model.cancelling.contains(job.id) || model.busy || model.refreshing)
             }
-        }
-        if job.status == .completed, job.output_url != nil {
+        } else if job.status == .completed, job.output_url != nil {
             FadedSecondaryButton(model.isDemo ? "Se testvideo" : "Se video", icon: "play") {
                 Task {
                     let demo = model.isDemo
                     if let url = await model.video(job) { media = Media(url: url, demo: demo) }
                 }
             }.disabled(model.mediaLoading)
+        }
+    }
+
+    @ViewBuilder private func videoJobSecondaryActions(_ job: Job, recoveryPage: VideoPage?) -> some View {
+        if job.status == .failed {
+            if recoveryPage != nil { videoJobRetryButton(job) }
+            FadedSecondaryButton("Skjul fejlet job på telefonen", icon: "eye.slash") { hiddenJobs.insert(job.id) }
+            if !model.isDemo, let api = model.api as? LiveAPI {
+                FadedSecondaryButton("Slet fejlet job fra PC’en", icon: "trash", role: .destructive) {
+                    failedJobDeletion = (job.id, api)
+                }
+            }
+        } else if job.status == .completed, job.output_url != nil {
             if !model.isDemo {
                 FadedSecondaryButton("Gem på telefonen", icon: "square.and.arrow.down") { Task { await saveVideo(job) } }
                     .disabled(model.mediaLoading)
@@ -229,8 +398,6 @@ extension Home {
             }
         }
     }
-
-
     private var videoFolder: URL { URL.applicationSupportDirectory.appending(path: "SavedVideos", directoryHint: .isDirectory) }
 
     func reloadSavedVideos() {
