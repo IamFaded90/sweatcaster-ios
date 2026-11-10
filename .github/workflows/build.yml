@@ -16,7 +16,14 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
+      - name: Verify unchanged source for the packaging-only retry
+        if: ${{ github.ref_name == 'codex/ipa-bus-package-65e772a' }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 65e772a0c609c1e55b83f368a718ffe0a1e09989
+          git diff --exit-code FETCH_HEAD HEAD -- . ':(exclude).github/workflows/build.yml'
       - name: Run XCTest on an iPhone simulator
+        if: ${{ github.ref_name != 'codex/ipa-bus-package-65e772a' }}
         run: |
           set -o pipefail
           xcodebuild -version
@@ -83,9 +90,10 @@ jobs:
           PY
       - name: Package IPA
         run: |
+          set -euxo pipefail
           app="$RUNNER_TEMP/SweatCasterBuild/Build/Products/Release-iphoneos/SweatCaster.app"
           test -x "$app/SweatCaster"
-          xcrun lipo -verify_arch arm64 "$app/SweatCaster"
+          xcrun lipo "$app/SweatCaster" -verify_arch arm64
           test ! -e "$app/_CodeSignature"
           staging="$(mktemp -d)"
           mkdir "$staging/Payload"
