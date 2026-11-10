@@ -19,58 +19,7 @@ struct ChatComposer<Content: View>: View {
 }
 
 extension ChatView {
-    @ViewBuilder var quickModelPicker: some View {
-        if !demo {
-            let source = effectiveReplySource
-            let unavailablePC = source == .pc && (api == nil || pcEngineOffline)
-            Menu {
-                if manualRoute != nil {
-                    Button(autoRouterEnabled ? "Brug Auto igen" : "Brug mit normale valg", systemImage: "arrow.uturn.backward") {
-                        manualRoute = nil
-                    }
-                }
-                Menu("Telefon", systemImage: "iphone") {
-                    Button("Min telefonmodel") { chooseModelForNextMessage(.phone) }
-                    ForEach(phoneRoutingCandidates, id: \.id) { entry in
-                        Button(entry.name) { chooseModelForNextMessage(.phone, modelID: entry.id) }
-                    }
-                    Button("Lokale modeller", systemImage: "arrow.down.circle") { showPhoneModelSetup = true }
-                }
-                if api is LiveAPI, !legacyChat {
-                    Button("PC · Alle modeller", systemImage: "desktopcomputer") {
-                        composerFocused = false
-                        showPCModelSetup = true
-                    }
-                } else {
-                    Button("PC’ens standardmodel", systemImage: "desktopcomputer") {
-                        chooseModelForNextMessage(.pc)
-                    }
-                }
-                if cloudKeyAvailable {
-                    Button("Grok · Cloud", systemImage: "cloud") { chooseModelForNextMessage(.grok) }
-                }
-            } label: {
-                HStack(spacing: FadedSpacing.xs) {
-                    Image(systemName: unavailablePC ? "exclamationmark.circle" : source.icon)
-                        .foregroundStyle(palette.isDark ? sourceColor(source) : palette.text)
-                    Text(nextMessageModelName).lineLimit(chatTypeSize.isAccessibilitySize ? nil : 1)
-                    Image(systemName: "chevron.down")
-                }.font(.caption.bold()).frame(minWidth: 44, minHeight: 44, alignment: .leading)
-            }
-            .disabled(task != nil)
-            .accessibilityLabel("Model for næste besked")
-            .accessibilityValue(unavailablePC ? "PC-chat utilgængelig. \(nextMessageModelName)" : "\(source.rawValue), \(nextMessageModelName)")
-        }
-    }
-
-    private var nextMessageModelName: String {
-        let route = resolvedRoute
-        switch route.source {
-        case .phone: return phoneModelLabel(for: route.modelID ?? phoneModel)
-        case .pc: return models.first { $0.id == route.modelID }?.label ?? route.modelID ?? "PC’ens standardmodel"
-        case .grok: return GrokAPI.requestedModelID
-        }
-    }
+    var quickModelPicker: some View { chatModelSelectionButton }
 
     var composer: some View {
         VStack(alignment: .leading, spacing: 6) {

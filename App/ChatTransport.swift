@@ -93,6 +93,7 @@ extension ChatView {
         savedDraft = ""
         searchSteps = []
         streamedText = ""
+        responseDuration = nil
         let turn = ChatTurn(prompt: message, createdAt: .now)
         let history = source == .phone ? phoneHistory(for: outgoing) : []
         turns.append(turn)
@@ -101,6 +102,7 @@ extension ChatView {
         let input = ChatRequest(message: modelMessage, session_id: sessionID)
         inFlightAutoRoute = route.automatic
         save(pending: true)
+        let startedAt = ContinuousClock.now
         task = Task {
             defer {
                 status = nil
@@ -128,6 +130,10 @@ extension ChatView {
                 }
                 if let index = turnIndex(turnID), turns[index].notice == nil {
                     completedReplies += 1
+                    if !turns[index].reply.isEmpty {
+                        let elapsed = startedAt.duration(to: ContinuousClock.now).components.seconds
+                        responseDuration = (turnID, Int(clamping: elapsed))
+                    }
                     if voiceMode && !turns[index].reply.isEmpty && !dictation.active {
                         speak(turns[index].reply, turnID: turnID)
                     }

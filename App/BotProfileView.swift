@@ -11,7 +11,7 @@ struct VillageBotProfile: View {
     @Environment(\.fadedPalette) private var palette
     private var savedBots: Data { MigratedAppData.shared.villageBots }
     @AppStorage(AppStorageKeys.phoneModel) private var phoneModel = "apple"
-    @State private var showBuilder = false
+    @State private var editingBot: VillageBot?
     @State private var showPrivateChat = false
     @State private var showModels = false
     @State private var fullPrompt = false
@@ -25,9 +25,7 @@ struct VillageBotProfile: View {
     @State private var notice: String?
     @StateObject private var speechBox = SpeechBox()
 
-    private var bot: VillageBot? {
-        (try? JSONDecoder().decode([VillageBot].self, from: savedBots))?.first { $0.id == botID }
-    }
+    private var bots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: savedBots)) ?? [] }
 
     private var modelID: String { PhoneModels.effectiveModelID(phoneModel) }
     private var canTest: Bool {
@@ -35,9 +33,10 @@ struct VillageBotProfile: View {
     }
 
     var body: some View {
+        let localBots = bots
         ScrollView {
             VStack(spacing: 16) {
-                if let bot {
+                if let bot = localBots.first(where: { $0.id == botID }) {
                     hero(bot)
                     voiceCard(bot)
                     personalityCard(bot)
@@ -49,7 +48,7 @@ struct VillageBotProfile: View {
                                 .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         }
                     }.buttonStyle(.plain)
-                    profileActions
+                    profileActions(bot, canDuplicate: localBots.count < 10)
                 } else if let deletedBot {
                     FadedCard(accent: palette.coral) {
                         VStack(alignment: .leading, spacing: 8) {
@@ -73,8 +72,8 @@ struct VillageBotProfile: View {
         .navigationTitle("Botprofil")
         .navigationBarTitleDisplayMode(.inline)
         .onDisappear { speechBox.stop(); testTask?.cancel() }
-        .sheet(isPresented: $showBuilder) {
-            if let bot { VillageBotBuilder(api: api, bot: bot, onBack: { showBuilder = false }) }
+        .sheet(item: $editingBot) { selection in
+            VillageBotBuilder(api: api, bot: selection, onBack: { editingBot = nil })
         }
         .sheet(isPresented: $showModels) { PhoneModelsView() }
         .sheet(isPresented: $showPrivateChat) {
@@ -178,7 +177,7 @@ struct VillageBotProfile: View {
         }
     }
 
-    private var profileActions: some View {
+    private func profileActions(_ bot: VillageBot, canDuplicate: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             FadedSecondaryButton("Chat med botten", icon: "lock.shield") {
                 speechBox.stop()
@@ -186,8 +185,11 @@ struct VillageBotProfile: View {
             }
             FadedSecondaryButton("Redigér", icon: "pencil") {
                 speechBox.stop()
-                showBuilder = true
+                editingBot = bot
             }
+            FadedSecondaryButton("Duplikér bot", icon: "plus.square.on.square", action: duplicateBot)
+                .disabled(!canDuplicate)
+            if !canDuplicate { FadedDetailText("Der er plads til op til 10 bots.") }
             FadedSecondaryButton("Slet bot", icon: "trash", role: .destructive, action: deleteBot)
         }.frame(maxWidth: .infinity, alignment: .leading).disabled(testTask != nil)
     }
@@ -231,6 +233,34 @@ struct VillageBotProfile: View {
             deletedIndex = index
             notice = nil
         } catch { AppDiagnostics.record(error); notice = "Botprofilen kunne ikke slettes." }
+    }
+
+    private func duplicateBot() {
+        var updated = bots
+        guard let original = updated.first(where: { $0.id == botID }), updated.count < 10 else {
+            notice = "Botten kunne ikke duplikeres. Tjek, om der er plads på holdet."
+            return
+        }
+        let baseName = "\(original.name) – kopi"
+        var name = baseName
+        var number = 2
+        while updated.contains(where: { $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) {
+            name = "\(baseName) \(number)"
+            number += 1
+        }
+        let copy = VillageBot(name: name, prompt: original.prompt, voice: original.voice,
+                              personality: original.personality, notifications: false, voiceRate: original.voiceRate,
+                              language: original.language, specialty: original.specialty, responsibility: original.responsibility)
+        updated.append(copy)
+        do {
+            try MigratedAppData.shared.saveVillageBots(JSONEncoder().encode(updated))
+            speechBox.stop()
+            notice = nil
+            editingBot = copy
+        } catch {
+            AppDiagnostics.record(error)
+            notice = "Kopien kunne ikke gemmes. Prøv igen."
+        }
     }
 
     private func restoreBot() {

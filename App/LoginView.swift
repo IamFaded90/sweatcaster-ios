@@ -83,13 +83,19 @@ struct LoginView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: FadedSpacing.section) {
-                    qrSection
-                    manualSection
+                    if manualExpanded {
+                        manualSection
+                    } else {
+                        qrSection
+                        FadedSecondaryButton("Indtast IP og token manuelt", icon: "keyboard") { manualExpanded = true }
+                            .disabled(connectionBusy)
+                    }
                     if close == nil { phoneSection }
                     diagnosticsSection
                 }
                 .padding(FadedSpacing.edge)
             }
+            .scrollDismissesKeyboard(.interactively)
             .background(FadedBackground())
             .onChange(of: manualExpanded) { _, _ in pingNotice = nil }
             .navigationTitle("Forbind til PC")
@@ -117,15 +123,13 @@ struct LoginView: View {
         FadedCard(size: .hero) {
             VStack(alignment: .leading, spacing: FadedSpacing.s) {
                 FadedSectionHeader("QR fra din PC", detail: "Åbn forbindelseskoden på din PC, og scan den her.")
-                if !manualExpanded { qrStages }
-                if let pairing = scannedPairing, !manualExpanded {
+                qrStages
+                if let pairing = scannedPairing {
                     FadedDetailText("Bekræft forbindelsen til \(pairing.address).")
                     FadedPrimaryButton(connecting ? "Tester forbindelsen…" : "Test og forbind", icon: "network") {
                         Task { await connect(pairing) }
                     }
                     FadedSecondaryButton("Scan en anden QR-kode", icon: "qrcode.viewfinder") { scanQR() }
-                } else if manualExpanded {
-                    FadedSecondaryButton("Scan QR fra PC’en", icon: "qrcode.viewfinder") { scanQR() }
                 } else {
                     FadedPrimaryButton("Scan QR fra PC’en", icon: "qrcode.viewfinder") { scanQR() }
                 }
@@ -133,7 +137,7 @@ struct LoginView: View {
                     pairingError(qrError)
                 } else if model.refreshing && !connecting {
                     ProgressView("Kontrollerer den gemte forbindelse…")
-                } else if !attemptedConnection, !manualExpanded, let error = model.errorTitle {
+                } else if !attemptedConnection, let error = model.errorTitle {
                     FadedDetailText(error)
                 }
             }
@@ -160,52 +164,83 @@ struct LoginView: View {
 
     private var manualSection: some View {
         FadedCard {
-            DisclosureGroup(isExpanded: $manualExpanded) {
-                VStack(alignment: .leading, spacing: FadedSpacing.section) {
-                    Picker("Forbindelse", selection: Binding(get: { profile }, set: { selection in
-                        profile = selection
-                        address = model.savedAddresses[selection] ?? ""
-                        token = ""
-                        manualError = nil
-                        pingNotice = nil
-                    })) {
-                        Text("Hjem").tag(ConnectionProfile.home)
-                        Text("Tailscale").tag(ConnectionProfile.tailscale)
-                    }.pickerStyle(.segmented)
-                    VStack(alignment: .leading, spacing: FadedSpacing.xs) {
-                        FadedFieldLabel("PC’ens IP-adresse")
-                        TextField("PC’ens IP-adresse", text: $address)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                            .padding(.horizontal, FadedSpacing.s).frame(minHeight: 44)
-                            .background(palette.raised, in: RoundedRectangle(cornerRadius: FadedRadius.small))
-                            .onChange(of: address) { _, _ in manualError = nil; pingNotice = nil }
-                        if let error = manualError, error.field == .address { pairingError(error.text) }
-                    }
-                    VStack(alignment: .leading, spacing: FadedSpacing.xs) {
-                        FadedFieldLabel("Token fra PC’en")
-                        SecureField("Token fra PC’en", text: $token)
-                            .textInputAutocapitalization(.never).autocorrectionDisabled()
-                            .padding(.horizontal, FadedSpacing.s).frame(minHeight: 44)
-                            .background(palette.raised, in: RoundedRectangle(cornerRadius: FadedRadius.small))
-                            .onChange(of: token) { _, _ in manualError = nil }
-                        if let error = manualError, error.field == .token {
-                            pairingError(error.text)
-                        } else if let saved = model.savedAddresses[profile],
-                                  saved == address.trimmingCharacters(in: .whitespacesAndNewlines) {
-                            FadedDetailText("Lad tokenfeltet stå tomt for at bruge den gemte adgang.")
-                        }
-                    }
-                    FadedPrimaryButton(connecting ? "Tester forbindelsen…" : "Test og forbind", icon: "network") {
-                        Task { await connect() }
-                    }.disabled(manualAddressEmpty)
-                    if manualAddressEmpty { FadedDetailText("Indtast IP-adressen, der vises på din PC.") }
-                    if let error = manualError, error.field == .connection { pairingError(error.text) }
-                }.padding(.top, FadedSpacing.s)
-            } label: {
-                Label("Indtast IP og token manuelt", systemImage: "keyboard")
-                    .frame(minHeight: 44, alignment: .leading)
+            VStack(alignment: .leading, spacing: FadedSpacing.section) {
+                manualHeader
+                manualFields
+                Divider().overlay(palette.border)
+                manualFooter
             }
         }.disabled(connectionBusy)
+    }
+
+    private var manualHeader: some View {
+        let title = Text("Forbind manuelt").font(FadedTypography.title).accessibilityAddTraits(.isHeader)
+        let scan = Button("Scan QR", systemImage: "qrcode.viewfinder") {
+            manualExpanded = false
+            scanQR()
+        }.frame(minHeight: 44)
+        return VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: FadedSpacing.s) {
+                    title.fixedSize()
+                    Spacer(minLength: FadedSpacing.s)
+                    scan.fixedSize(horizontal: true, vertical: false)
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    title
+                    scan
+                }
+            }
+            FadedDetailText("Brug IP-adressen og tokenet fra FadedAI på din PC.")
+        }
+    }
+
+    private var manualFields: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.section) {
+            Picker("Forbindelse", selection: Binding(get: { profile }, set: { selection in
+                profile = selection
+                address = model.savedAddresses[selection] ?? ""
+                token = ""
+                manualError = nil
+                pingNotice = nil
+            })) {
+                Text("Hjem").tag(ConnectionProfile.home)
+                Text("Tailscale").tag(ConnectionProfile.tailscale)
+            }.pickerStyle(.segmented)
+            VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                FadedFieldLabel("PC’ens IP-adresse")
+                TextField("PC’ens IP-adresse", text: $address)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
+                    .padding(.horizontal, FadedSpacing.s).frame(minHeight: 44)
+                    .background(palette.raised, in: RoundedRectangle(cornerRadius: FadedRadius.small))
+                    .onChange(of: address) { _, _ in manualError = nil; pingNotice = nil }
+                if let error = manualError, error.field == .address { pairingError(error.text) }
+            }
+            VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                FadedFieldLabel("Token fra PC’en")
+                SecureField("Token fra PC’en", text: $token)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .padding(.horizontal, FadedSpacing.s).frame(minHeight: 44)
+                    .background(palette.raised, in: RoundedRectangle(cornerRadius: FadedRadius.small))
+                    .onChange(of: token) { _, _ in manualError = nil }
+                if let error = manualError, error.field == .token {
+                    pairingError(error.text)
+                } else if let saved = model.savedAddresses[profile],
+                          saved == address.trimmingCharacters(in: .whitespacesAndNewlines) {
+                    FadedDetailText("Lad tokenfeltet stå tomt for at bruge den gemte adgang.")
+                }
+            }
+        }
+    }
+
+    private var manualFooter: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            FadedPrimaryButton(connecting ? "Tester forbindelsen…" : "Test og forbind", icon: "network") {
+                Task { await connect() }
+            }.disabled(manualAddressEmpty)
+            if manualAddressEmpty { FadedDetailText("Indtast IP-adressen, der vises på din PC.") }
+            if let error = manualError, error.field == .connection { pairingError(error.text) }
+        }
     }
 
     private var phoneSection: some View {

@@ -49,7 +49,7 @@ enum FadedColors {
     static let secondary = Color(red: 168 / 255, green: 171 / 255, blue: 184 / 255)
     static let muted = Color(red: 107 / 255, green: 110 / 255, blue: 125 / 255)
     static let babyBlue = Color(red: 168 / 255, green: 216 / 255, blue: 255 / 255)
-    static let lime = Color(red: 212 / 255, green: 255 / 255, blue: 63 / 255)
+    static let lime = Color(red: 144 / 255, green: 213 / 255, blue: 255 / 255)
     static let cyan = Color(red: 63 / 255, green: 232 / 255, blue: 255 / 255)
     static let purple = Color(red: 183 / 255, green: 140 / 255, blue: 255 / 255)
     static let green = Color(red: 74 / 255, green: 222 / 255, blue: 128 / 255)

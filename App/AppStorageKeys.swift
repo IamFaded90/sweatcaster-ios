@@ -101,6 +101,7 @@ enum AppStorageKeys {
     static let teamActiveExpanded = "team.active.expanded"
     static let teamFavorites = "team.favorites"
     static let teamFavoritesExpanded = "team.favorites.expanded"
+    static let teamSavedGroups = "team.savedGroups"
     static let teamSleepingExpanded = "team.sleeping.expanded"
     static let videoLastMood = "video.lastMood"
     static let villageBots = "village.bots"

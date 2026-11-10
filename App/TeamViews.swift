@@ -198,7 +198,7 @@ struct TeamRoster: View {
             else { FadedPrimaryButton("Ny bot", icon: "plus") { route = .newBot } }
         }.disabled(bots.count >= 10)
         if bots.count >= 10 { Text("Der er plads til 10 bots.").font(.caption) }
-        FadedSecondaryButton("Ny gruppechat", icon: "person.2") { route = .workflow(.group) }
+        FadedSecondaryButton("Gruppechats", icon: "person.2") { route = .workflow(.group) }
     }
 
     private var chiefSection: some View {

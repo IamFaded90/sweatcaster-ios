@@ -54,6 +54,151 @@ extension OfflineStudio {
         }
     }
 
+    func studioImageFailureMessage(_ error: Error, model: String) -> String? {
+        let downloadHelp = "Hent billedmodellen under Lokale modeller → Billeder, og prøv igen."
+        if let storageError = error as? CocoaError, storageError.code == .fileWriteOutOfSpace {
+            return "Der er ikke plads til billedet. Frigør plads på telefonen, og prøv igen."
+        }
+        switch error {
+        case LocalComputeError.busy:
+            return "Telefonen kører allerede en lokal AI-opgave. Vent på den, og prøv igen."
+        case PhoneModelError.unavailable:
+            return downloadHelp
+        case PhoneModelError.emptyResponse:
+            return "Billedmodellen gav intet resultat. Prøv igen med en enkel prompt, fx En rød stol."
+        default:
+            break
+        }
+        guard let failure = error as? MediaGenerationKitError else { return nil }
+        switch failure {
+        case .unresolvedModelReference, .modelNotFoundInCatalog, .hashMismatch:
+            return downloadHelp
+        case .insufficientStorage:
+            return "Der er for lidt ledig plads. Frigør plads på telefonen, og prøv igen."
+        case .invalidModelsDirectory:
+            return "Telefonen kunne ikke åbne billedmodellerne. Genåbn FadedAI, og prøv igen."
+        case .generationFailed:
+            return model == StudioImageModel.fluxKlein.id
+                ? "FLUX.2 stoppede under genereringen. Vælg Stable Diffusion 1.5 i billedindstillingerne, og prøv igen."
+                : "Billedmodellen stoppede under genereringen. Luk andre tunge opgaver, og prøv igen med en enkel prompt."
+        default:
+            return nil
+        }
+    }
+
+    func generateQueuedImages(_ request: StudioImageRequest) async throws {
+        let sessionID = temporaryImagesID
+        let folder = request.isPrivate ? privateImageFolder : historyFolder
+        if request.isPrivate && !canRenderPrivateImages { throw StudioImageInterruption.network }
+        guard let model = StudioImageModel(rawValue: request.model) else { throw PhoneModelError.unavailable }
+        let pcAllowed = request.supportsPC && !privateSession && api != nil
+        let canFallBack = request.route == .automatic && request.allowPCFallback && pcAllowed
+        try Task.checkCancellation()
+        var created: [URL] = []
+        var photosDenied = false
+        if !request.isPrivate { try prepareImageFolder(folder) }
+        for index in 0..<request.count {
+            try Task.checkCancellation()
+            let destination = imageDestination(in: folder)
+            let seed = request.seed.map { $0 &+ UInt32(index) } ?? UInt32.random(in: 1...UInt32.max)
+            let variation = request.seed != nil && index > 0 ? created.first : nil
+            let source: String
+            let metadata: StudioImageDetails
+            if request.route == .pc {
+                metadata = try await renderStudioImageOnPC(request, to: destination, in: folder)
+                source = "PC"
+            } else {
+                do {
+                    try await renderStudioImageOnPhone(request, model: model, seed: seed, index: index,
+                                                      variation: variation, sessionID: sessionID,
+                                                      destination: destination, folder: folder)
+                    source = "Telefon"
+                    metadata = StudioImageDetails(prompt: request.prompt, negativePrompt: request.negative,
+                                                  seed: seed, model: model.id, steps: model.renderSteps)
+                } catch {
+                    try Task.checkCancellation()
+                    guard canFallBack else { throw error }
+                    AppDiagnostics.record(error)
+                    metadata = try await renderStudioImageOnPC(request, to: destination, in: folder)
+                    source = "PC"
+                }
+            }
+            try Task.checkCancellation()
+            storeImageDetails(metadata, for: destination)
+            created.append(destination)
+            if request.isPrivate { created.removeAll { privateImages[$0] == nil } }
+            if index == 0 {
+                let turn = PrivateChatTurn(prompt: request.prompt, reply: "Billede klar.",
+                                           imageName: destination.lastPathComponent, source: source, botID: request.botID)
+                batchTurnID = turn.id
+                turns.append(turn)
+                imageURL = destination
+                if !request.isPrivate {
+                    imageComparisonSource = StudioImageComparisonSource(result: destination, bytes: request.sourceImage)
+                }
+            }
+            batchImageURLs = created
+            savePrivateConversation()
+            if request.autoSave && !request.isPrivate && autoSaveStudioPhotos && !privateSession {
+                if !(await saveStudioPhoto(destination)) { photosDenied = true }
+            }
+        }
+        status = request.count > 1 ? "Forslagene er klar. Vælg dit bedste billede." : "Billede klar."
+        if photosDenied { status += " Billedet er gemt i studiet. Tjek tilladelsen til Fotos." }
+        offlineSuccessHaptic()
+    }
+
+    private func renderStudioImageOnPhone(_ request: StudioImageRequest, model: StudioImageModel, seed: UInt32,
+                                          index: Int, variation: URL?, sessionID: UUID, destination: URL,
+                                          folder: URL) async throws {
+        guard model.isInstalled else { throw PhoneModelError.unavailable }
+        try checkImageBattery()
+        let part = request.count > 1 ? "Genererer \(index + 1) af \(request.count)…" : "Genererer billede på telefonen…"
+        let label = request.sourceImage != nil || variation != nil ? part + " Bruger dit billede som base…" : part
+        let data = try await renderStudioImage(model: model, prompt: request.prompt, lora: request.lora, seed: seed,
+                                               sourceImage: request.sourceImage, variation: variation,
+                                               destination: request.isPrivate ? nil : destination, within: folder,
+                                               label: label, negativePrompt: request.negative,
+                                               requireOffline: request.isPrivate)
+        try Task.checkCancellation()
+        if request.isPrivate {
+            guard privateSession, sessionUnlocked, !sessionExpired, sessionID == temporaryImagesID else { throw CancellationError() }
+            guard let data else { throw PhoneModelError.emptyResponse }
+            try storePrivateImage(data, for: destination)
+        }
+    }
+
+    private func renderStudioImageOnPC(_ request: StudioImageRequest, to destination: URL,
+                                       in folder: URL) async throws -> StudioImageDetails {
+        // Privat: aldrig PC, aldrig Grok, aldrig forbindelser.
+        guard !privateSession, request.supportsPC, let api else { throw V2Failure.invalidInput }
+        status = "PC’en laver dit billede…"
+        let png = try await api.v2GenerateImage(prompt: request.prompt)
+        try Task.checkCancellation()
+        try LocalFileStore.writeBytes(png, to: destination, within: folder)
+        return StudioImageDetails(prompt: request.prompt, model: "PC’ens billedmodel")
+    }
+
+    func studioImageErrorMessage(_ error: Error, model: String) -> String {
+        if let failure = error as? V2Failure, case .http(_, let code, let message) = failure, code == "DEPENDENCY_MISSING" {
+            if message?.contains("Stable Diffusion") == true {
+                return "PC’en mangler sin Stable Diffusion-billedmodel. Tjek modellen i ComfyUI."
+            }
+            if message?.contains("lang tid") == true {
+                return "PC’en nåede ikke at lave billedet. Vent på den, og prøv igen."
+            }
+            if message?.contains("fejlede") == true || message?.contains("gyldigt PNG") == true {
+                return "Billedmotoren gav intet brugbart billede. Tjek ComfyUI, og prøv igen."
+            }
+            return "Tjek, at ComfyUI kører på PC’en, og prøv igen."
+        }
+        if error is APIError || error is URLError {
+            return "Forbindelsen til PC’en blev afbrudt. Tjek forbindelsen, og prøv igen."
+        }
+        return studioImageFailureMessage(error, model: model) ?? pcBusyMessage(error)
+            ?? "Billedet kunne ikke laves. Tjek billedmodel og ledig plads, og prøv igen."
+    }
+
     func renderStudioImage(model: StudioImageModel, prompt: String, lora: String, seed: UInt32,
                                    sourceImage: Data?, variation: URL?, destination: URL?, within outputDirectory: URL,
                                    label: String, negativePrompt: String = "",
@@ -83,10 +228,12 @@ extension OfflineStudio {
                             if requireOffline && !canRenderPrivateImages { throw StudioImageInterruption.network }
                             guard model.isInstalled else { throw PhoneModelError.unavailable }
                             LocalCompute.beginModelLoad()
+                            status = "Indlæser \(model.title) på telefonen…"
                             var pipeline = try await MediaGenerationPipeline.fromPretrained(model.id, backend: .local)
                             LocalCompute.didLoadModel()
                             try Task.checkCancellation()
                             if requireOffline && !canRenderPrivateImages { throw StudioImageInterruption.network }
+                            status = label
                             model.applyRenderProfile(to: &pipeline.configuration)
                             pipeline.configuration.batchCount = 1
                             pipeline.configuration.batchSize = 1
@@ -97,7 +244,8 @@ extension OfflineStudio {
                                 inputs = [MediaGenerationPipeline.data(bytes)]
                                 pipeline.configuration.strength = 0.32
                             } else if let variation, variation.isFileURL, !requireOffline {
-                                inputs = [MediaGenerationPipeline.file(variation.path)]
+                                let bytes = try LocalFileStore.readBytes(from: variation, maximumBytes: 80_000_000)
+                                inputs = [MediaGenerationPipeline.data(bytes)]
                                 pipeline.configuration.strength = 0.32
                             } else if let sourceImage {
                                 inputs = [MediaGenerationPipeline.data(sourceImage)]

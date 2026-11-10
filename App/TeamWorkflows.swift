@@ -76,6 +76,18 @@ private struct TeamWorkflowTurn: Identifiable {
     }
 }
 
+private struct TeamSavedGroup: Codable, Identifiable {
+    static let limit = 20
+    let id: UUID
+    let name: String
+    let members: [UUID]
+
+    var isValid: Bool {
+        (1...60).contains(name.unicodeScalars.count) && !name.contains("\0")
+            && (2...6).contains(members.count) && Set(members).count == members.count
+    }
+}
+
 extension TeamBotNotebookStore.Memory {
     var localExcerpt: String { String(text.unicodeScalars.prefix(600)) }
     var localReplyContext: String {
@@ -142,7 +154,12 @@ struct BotLocalMemoryPicker: View {
     @Environment(\.fadedPalette) private var palette
     @Environment(\.scenePhase) private var phase
     @AppStorage(AppStorageKeys.phoneModel) private var phoneModel = "apple"
+    @AppStorage(AppStorageKeys.teamSavedGroups) private var savedGroupData = Data()
     @State private var members: [UUID] = []
+    @State private var groupID: UUID?
+    @State private var groupName = ""
+    @State private var editingGroup = false
+    @State private var deletingGroup = false
     @State private var draft = ""
     @State private var turns: [TeamWorkflowTurn] = []
     @State private var work: Task<Void, Never>?
@@ -154,12 +171,21 @@ struct BotLocalMemoryPicker: View {
         self.mode = mode
         self.bots = bots
         self.skill = skill
+        _members = State(initialValue: bots.prefix(2).map(\.id))
     }
 
     private var goal: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var modelID: String { PhoneModels.effectiveModelID(phoneModel) }
     private var ready: Bool { PhoneModels.isReady(modelID) }
     private var selected: [VillageBot] { members.compactMap { id in bots.first { $0.id == id } } }
+    private var savedGroups: [TeamSavedGroup] {
+        guard savedGroupData.count <= 32_768,
+              let groups = try? JSONDecoder().decode([TeamSavedGroup].self, from: savedGroupData),
+              groups.count <= TeamSavedGroup.limit, Set(groups.map(\.id)).count == groups.count else { return [] }
+        return groups.filter(\.isValid)
+    }
+    private var activeGroup: TeamSavedGroup? { savedGroups.first { $0.id == groupID } }
+    private var canChangeGroup: Bool { work == nil && turns.isEmpty }
     private var modelName: String {
         PhoneModels.catalog.first { $0.id == modelID }?.name
             ?? (modelID == "apple" ? "Apple Foundation Models" : "Importeret model")
@@ -203,6 +229,7 @@ struct BotLocalMemoryPicker: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
                     overview
+                    if mode == .group { groupControls }
                     if mode == .group || mode == .handoff { participantPicker }
                     if let skill {
                         Text(skill.title).font(FadedTypography.section)
@@ -228,7 +255,7 @@ struct BotLocalMemoryPicker: View {
         .safeAreaInset(edge: .bottom) { composer }
         .background { FadedBackground() }
         .foregroundStyle(palette.text)
-        .navigationTitle(mode.title)
+        .navigationTitle(activeGroup?.name ?? mode.title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if !turns.isEmpty {
@@ -236,11 +263,101 @@ struct BotLocalMemoryPicker: View {
                     .disabled(work != nil)
             }
         }
-        .onAppear {
-            if members.isEmpty { members = bots.prefix(2).map(\.id) }
+        .alert("Gem gruppe", isPresented: $editingGroup) {
+            TextField("Gruppens navn", text: $groupName)
+            Button("Gem", action: saveGroup)
+            Button("Annullér", role: .cancel) {}
+        } message: {
+            Text("Navn og botvalg gemmes på telefonen. Beskederne ligger kun i den åbne samtale.")
+        }
+        .confirmationDialog("Fjern den gemte gruppe?", isPresented: $deletingGroup, titleVisibility: .visible) {
+            Button("Fjern gruppe", role: .destructive, action: removeGroup)
+            Button("Annullér", role: .cancel) {}
         }
         .onDisappear { work?.cancel() }
         .onChange(of: phase) { _, value in if value == .background { work?.cancel() } }
+    }
+
+    private var groupControls: some View {
+        FadedCard(size: .compact, accent: palette.green) {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                FadedSectionLabel("Gruppechat")
+                if !savedGroups.isEmpty {
+                    Menu(activeGroup?.name ?? "Åbn gemt gruppe", systemImage: "person.2") {
+                        ForEach(savedGroups) { group in
+                            Button(group.name, systemImage: group.id == groupID ? "checkmark.circle.fill" : "circle") {
+                                openGroup(group)
+                            }
+                        }
+                        if activeGroup != nil {
+                            Button("Brug et nyt botvalg", systemImage: "person.badge.plus") {
+                                groupID = nil
+                                members = bots.prefix(2).map(\.id)
+                                status = nil
+                            }
+                        }
+                    }.frame(minHeight: 44).disabled(!canChangeGroup)
+                }
+                if let activeGroup, activeGroup.members.contains(where: { id in !bots.contains(where: { $0.id == id }) }) {
+                    FadedDetailText("En eller flere bots mangler. Vælg medlemmerne igen, og gem gruppen.")
+                }
+                if !turns.isEmpty { FadedDetailText("Vælg Ny samtale for at skifte gruppe eller bots.") }
+                Menu("Gem og redigér", systemImage: "ellipsis.circle") {
+                    Button(activeGroup == nil ? "Gem gruppe" : "Gem ændringer", systemImage: "square.and.arrow.down") {
+                        groupName = activeGroup?.name ?? ""
+                        editingGroup = true
+                    }.disabled(!(2...6).contains(selected.count))
+                    if activeGroup != nil {
+                        Button("Fjern gemt gruppe", systemImage: "trash", role: .destructive) { deletingGroup = true }
+                    }
+                }.frame(minHeight: 44).disabled(work != nil)
+            }
+        }
+    }
+
+    private func openGroup(_ group: TeamSavedGroup) {
+        guard canChangeGroup else { return }
+        groupID = group.id
+        members = group.members.filter { id in bots.contains { $0.id == id } }
+        status = nil
+    }
+
+    private func saveGroup() {
+        guard mode == .group, work == nil else { return }
+        let name = groupName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let group = TeamSavedGroup(id: activeGroup?.id ?? UUID(), name: name, members: selected.map(\.id))
+        guard group.isValid else {
+            status = "Brug 1–60 tegn i navnet, og vælg 2–6 bots."
+            return
+        }
+        var updated = savedGroups
+        guard !updated.contains(where: { $0.id != group.id && $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame }) else {
+            status = "Det gruppenavn er allerede i brug."
+            return
+        }
+        if let index = updated.firstIndex(where: { $0.id == group.id }) { updated[index] = group }
+        else if updated.count < TeamSavedGroup.limit { updated.append(group) }
+        else { status = "Du har 20 gemte grupper. Fjern én først."; return }
+        if writeGroups(updated) { groupID = group.id; status = "Gruppen er gemt." }
+    }
+
+    private func removeGroup() {
+        guard mode == .group, work == nil, let activeGroup else { return }
+        if writeGroups(savedGroups.filter { $0.id != activeGroup.id }) {
+            groupID = nil
+            status = "Gruppen er fjernet."
+        }
+    }
+
+    private func writeGroups(_ groups: [TeamSavedGroup]) -> Bool {
+        do {
+            savedGroupData = try JSONEncoder().encode(groups)
+            return true
+        } catch {
+            AppDiagnostics.record(error)
+            status = "FadedAI kunne ikke gemme dine grupper."
+            return false
+        }
     }
 
     private var overview: some View {
@@ -272,7 +389,7 @@ struct BotLocalMemoryPicker: View {
                 }
             }
             .frame(minHeight: 44)
-            .disabled(work != nil)
+            .disabled(!canChangeGroup)
             Text(selected.map(\.name).joined(separator: " → ")).font(.footnote).foregroundStyle(palette.secondary)
         } else {
             VStack(alignment: .leading, spacing: 0) {

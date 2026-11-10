@@ -272,22 +272,14 @@ struct AgentToolWave: View {
 }
 
 private struct ChatAgentActivity: View {
+    let title: String
+    let running: Bool
     let liveStatus: String?
     let steps: [String]
 
     var body: some View {
         FadedCard(size: .compact) {
-            VStack(alignment: .leading, spacing: FadedSpacing.xs) {
-                Label(liveStatus == nil ? "Seneste agentaktivitet" : "Agentaktivitet", systemImage: "clock")
-                    .font(FadedTypography.action)
-                if let liveStatus {
-                    HStack(spacing: FadedSpacing.s) {
-                        AgentToolWave(status: liveStatus).accessibilityHidden(true)
-                        FadedDetailText(liveStatus)
-                    }
-                } else if let last = steps.last {
-                    FadedDetailText(last)
-                }
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
                 if !steps.isEmpty {
                     DisclosureGroup {
                         VStack(alignment: .leading, spacing: FadedSpacing.s) {
@@ -301,10 +293,24 @@ private struct ChatAgentActivity: View {
                             }
                         }.padding(.top, FadedSpacing.xs)
                     } label: {
-                        Text("Vis trin (\(steps.count))").frame(minHeight: 44)
+                        heading.frame(minHeight: 44)
+                            .accessibilityHint("Viser \(steps.count) statusopdateringer")
                     }
+                } else {
+                    heading
                 }
             }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var heading: some View {
+        HStack(alignment: .center, spacing: FadedSpacing.s) {
+            if running { AgentToolWave(status: title).accessibilityHidden(true) }
+            else { Image(systemName: "clock").accessibilityHidden(true) }
+            VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                Text(title).font(FadedTypography.action)
+                if let liveStatus { FadedDetailText(liveStatus) }
+            }
         }
     }
 }
@@ -344,13 +350,40 @@ struct CloudModelSettings: View {
 
 extension ChatView {
     @ViewBuilder var chatAgentActivity: some View {
-        let waitingForText = task != nil && streamedText.isEmpty
-        let liveStatus = waitingForText ? status : nil
-        if aiShowTools && (liveStatus != nil || !searchSteps.isEmpty) {
-            ChatAgentActivity(liveStatus: liveStatus, steps: searchSteps)
-        } else if waitingForText {
-            LoadingSkeleton(label: "Venter på AI…")
+        let steps = aiShowTools ? searchSteps : []
+        if task != nil {
+            let waiting = turns.last?.reply.isEmpty != false
+            ChatAgentActivity(title: waiting ? "AI’en tænker…" : "Skriver svar…", running: true,
+                              liveStatus: waiting && aiShowTools ? status : nil, steps: steps)
+        } else if let responseDuration, responseDuration.turnID == turns.last?.id, responseDuration.seconds > 0 {
+            ChatAgentActivity(title: "Svar klar · \(responseDuration.seconds) sek.", running: false,
+                              liveStatus: nil, steps: steps)
+        } else if !steps.isEmpty {
+            ChatAgentActivity(title: "Agentaktivitet · \(steps.count) trin", running: false,
+                              liveStatus: nil, steps: steps)
         }
+    }
+
+    var chatSuggestions: some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: FadedSpacing.s) {
+                chatSuggestion("Opsummér", icon: "text.alignleft", prompt: "Opsummér denne tekst i tre korte punkter:\n")
+                chatSuggestion("Brainstorm", icon: "lightbulb", prompt: "Giv mig fem idéer til ")
+                chatSuggestion("FPS-highlights", icon: "gamecontroller",
+                               prompt: "Hjælp mig med at vurdere, hvad der gør et FPS-klip til et godt highlight.")
+            }
+        }
+        .scrollIndicators(.hidden)
+        .accessibilityLabel("Forslag til at starte en samtale")
+    }
+
+    private func chatSuggestion(_ title: String, icon: String, prompt: String) -> some View {
+        FadedChip(title, accent: palette.lime, selected: false, icon: icon) {
+            guard draft.isEmpty, task == nil else { return }
+            draft = prompt
+            composerFocused = true
+        }
+        .accessibilityHint("Sætter et forslag ind i beskedfeltet")
     }
 
     var conversationText: String {

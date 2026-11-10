@@ -85,7 +85,10 @@ enum StudioImageModel: String, CaseIterable, Identifiable {
     }
 
     var isInstalled: Bool {
-        let roots = Set(MediaGenerationEnvironment.default.externalUrls + [PhoneModels.downloadedRoot])
+        let environment = MediaGenerationEnvironment.default
+        // Offline inspection checks the renderer's catalog; verify the dependency files as well.
+        guard let resolved = try? environment.inspectModel(id, offline: true), resolved.isDownloaded else { return false }
+        let roots = Set(environment.externalUrls)
         return requiredFiles.allSatisfy { name in
             roots.contains { root in
                 let file = root.appendingPathComponent(name, isDirectory: false)
@@ -201,8 +204,22 @@ struct StudioImageDetails: Codable, Sendable {
     var favorite = false
 }
 
+enum StudioImageRoute: String, CaseIterable, Identifiable {
+    case automatic, phone, pc
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .automatic: "Auto"
+        case .phone: "Telefon"
+        case .pc: "PC"
+        }
+    }
+}
+
 struct StudioImageRequest {
     let model: String
+    let route: StudioImageRoute
     let prompt: String
     let negative: String
     let lora: String
@@ -213,6 +230,11 @@ struct StudioImageRequest {
     let autoSave: Bool
     let botID: UUID?
     let allowPCFallback: Bool
+
+    var supportsPC: Bool {
+        !isPrivate && sourceImage == nil && seed == nil && count == 1
+            && prompt.count <= 1_000 && negative.isEmpty && lora.isEmpty
+    }
 }
 
 struct StudioSessionPreferences {

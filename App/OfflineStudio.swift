@@ -15,6 +15,7 @@ struct OfflineStudio: View {
     let ephemeralOnly: Bool
     @State var studioPage: Page
     @State var imagePrompt: String
+    @State var studioImageRoute: StudioImageRoute = .automatic
     @State var pendingBotID: UUID?
     @FocusState var imagePromptFocused: Bool
     @State private var loadingModel = false

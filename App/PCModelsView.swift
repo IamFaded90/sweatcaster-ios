@@ -265,3 +265,229 @@ struct PCModelsView: View {
         }
     }
 }
+
+// Searchable single-selection model groups, following shadcn's Model Selector pattern.
+private struct ChatModelOption: Identifiable {
+    let source: ChatView.ReplySource
+    let modelID: String?
+    let title: String
+    var available = true
+
+    var id: String { "\(source.rawValue):\(modelID ?? "")" }
+
+    func matches(_ query: String) -> Bool {
+        let key = [title, source.rawValue, modelID ?? ""].joined(separator: " ")
+        return query.prefix(120).split(whereSeparator: \.isWhitespace)
+            .allSatisfy { key.localizedStandardContains(String($0)) }
+    }
+}
+
+private struct ChatModelSelectionButton: View {
+    private enum Setup { case phone, pc }
+
+    @Environment(\.fadedPalette) private var palette
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @State private var showing = false
+    @State private var query = ""
+    @State private var setupAfterDismiss: Setup? = nil
+
+    let current: ChatModelOption
+    let options: [ChatModelOption]
+    let blocked: Bool
+    let pcHint: String?
+    let resetTitle: String?
+    let pcSetupTitle: String
+    let onOpen: () -> Void
+    let onChoose: (ChatModelOption) -> Void
+    let onReset: () -> Void
+    let onPhoneSetup: () -> Void
+    let onPCSetup: (() -> Void)?
+
+    var body: some View {
+        Button {
+            query = ""
+            onOpen()
+            showing = true
+        } label: {
+            HStack(spacing: FadedSpacing.xs) {
+                Image(systemName: current.available ? current.source.icon : "exclamationmark.circle")
+                    .foregroundStyle(palette.isDark ? accent(current.source) : palette.text)
+                Text(current.title).lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                Image(systemName: "chevron.down")
+            }
+            .font(.caption.bold())
+            .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(blocked)
+        .accessibilityLabel("Model for næste besked")
+        .accessibilityValue("\(current.source.rawValue), \(current.title)" + (current.available ? "" : ", ikke klar"))
+        .sheet(isPresented: $showing, onDismiss: finishSetup) { selectionSheet }
+    }
+
+    private var selectionSheet: some View {
+        let emptyQuery = query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let results = options.filter { $0.matches(query) }
+        return NavigationStack {
+            List {
+                if let resetTitle, emptyQuery {
+                    Button(resetTitle, systemImage: "arrow.uturn.backward") {
+                        onReset()
+                        showing = false
+                    }.frame(minHeight: 44).listRowBackground(palette.card)
+                }
+                if !emptyQuery && results.isEmpty {
+                    FadedEmptyState(icon: "magnifyingglass", title: "Ingen modeller matcher",
+                                    detail: "Prøv et modelnavn, Telefon, PC eller Grok.",
+                                    actionTitle: "Ryd søgning") { query = "" }
+                        .listRowBackground(Color.clear)
+                }
+                ForEach(ChatView.ReplySource.allCases, id: \.self) { source in
+                    let rows = results.filter { $0.source == source }
+                    if !rows.isEmpty || (emptyQuery && source != .grok) {
+                        Section {
+                            ForEach(rows) { row in optionRow(row) }
+                            if emptyQuery { sourceActions(source) }
+                        } header: {
+                            Label(source.rawValue, systemImage: source.icon)
+                                .foregroundStyle(palette.isDark ? accent(source) : palette.secondary)
+                        }
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .foregroundStyle(palette.text)
+            .background { FadedBackground() }
+            .navigationTitle("Vælg model")
+            .navigationBarTitleDisplayMode(.inline)
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Søg modeller")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Luk") { showing = false } }
+            }
+        }
+    }
+
+    private func optionRow(_ row: ChatModelOption) -> some View {
+        let selected = row.id == current.id
+        return Button {
+            onChoose(row)
+            showing = false
+        } label: {
+            HStack(spacing: FadedSpacing.s) {
+                VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                    Text(row.title).font(FadedTypography.action)
+                    if !row.available { FadedDetailText("Ikke klar") }
+                }
+                Spacer(minLength: 8)
+                if selected {
+                    Image(systemName: "checkmark")
+                        .foregroundStyle(palette.isDark ? accent(row.source) : palette.text)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!row.available || blocked)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .listRowBackground(palette.card)
+    }
+
+    @ViewBuilder private func sourceActions(_ source: ChatView.ReplySource) -> some View {
+        switch source {
+        case .phone:
+            Button("Lokale modeller", systemImage: "arrow.down.circle") {
+                setupAfterDismiss = .phone
+                showing = false
+            }.frame(minHeight: 44).listRowBackground(palette.card)
+        case .pc:
+            if let pcHint { FadedDetailText(pcHint).listRowBackground(palette.card) }
+            if onPCSetup != nil {
+                Button(pcSetupTitle, systemImage: "desktopcomputer") {
+                    setupAfterDismiss = .pc
+                    showing = false
+                }.frame(minHeight: 44).listRowBackground(palette.card)
+            }
+        case .grok:
+            EmptyView()
+        }
+    }
+
+    private func finishSetup() {
+        guard let setupAfterDismiss else { return }
+        self.setupAfterDismiss = nil
+        switch setupAfterDismiss {
+        case .phone: onPhoneSetup()
+        case .pc: onPCSetup?()
+        }
+    }
+
+    private func accent(_ source: ChatView.ReplySource) -> Color {
+        switch source {
+        case .phone: palette.green
+        case .pc: palette.cyan
+        case .grok: palette.purple
+        }
+    }
+}
+
+extension ChatView {
+    @ViewBuilder var chatModelSelectionButton: some View {
+        if !demo {
+            let route = resolvedRoute
+            let current = chatModelCurrentOption(route)
+            let hasPCCatalog = api is LiveAPI && !legacyChat
+            let pcSetup: (() -> Void)? = hasPCCatalog ? { showPCModelSetup = true } : (api == nil ? reconnectPC : nil)
+            ChatModelSelectionButton(
+                current: current, options: chatModelOptions, blocked: task != nil,
+                pcHint: modelsLoading ? "Henter PC’ens modeller…" : pcEngineOffline ? pcEngineOfflineMessage : modelsError,
+                resetTitle: manualRoute == nil ? nil : autoRouterEnabled ? "Brug Auto igen" : "Brug mit normale valg",
+                pcSetupTitle: hasPCCatalog ? "Se hele PC-kataloget" : "Forbind til PC",
+                onOpen: { composerFocused = false },
+                onChoose: { chooseModelForNextMessage($0.source, modelID: $0.modelID) },
+                onReset: { manualRoute = nil }, onPhoneSetup: { showPhoneModelSetup = true }, onPCSetup: pcSetup
+            )
+        }
+    }
+
+    private var chatModelOptions: [ChatModelOption] {
+        var options = phoneRoutingCandidates.map { ChatModelOption(source: .phone, modelID: $0.id, title: $0.name) }
+        let phone = PhoneModels.effectiveModelID(phoneModel)
+        if !options.contains(where: { $0.modelID == phone }) {
+            options.append(ChatModelOption(source: .phone, modelID: phone, title: phoneModelLabel(for: phone),
+                                           available: PhoneModels.isReady(phone)))
+        }
+        if legacyChat || !(api is LiveAPI) {
+            options.append(ChatModelOption(source: .pc, modelID: nil, title: "PC’ens standardmodel",
+                                           available: api != nil || canQueuePC))
+        } else {
+            options.append(contentsOf: models.map {
+                ChatModelOption(source: .pc, modelID: $0.id, title: $0.label,
+                                available: !pcEngineOffline && !modelsLoading && PCModelSelection.usable($0))
+            })
+        }
+        if cloudKeyAvailable {
+            options.append(ChatModelOption(source: .grok, modelID: nil, title: GrokAPI.requestedModelID))
+        }
+        return options
+    }
+
+    private func chatModelCurrentOption(_ route: ResolvedRoute) -> ChatModelOption {
+        switch route.source {
+        case .phone:
+            let id = route.modelID ?? PhoneModels.effectiveModelID(phoneModel)
+            return ChatModelOption(source: .phone, modelID: id, title: phoneModelLabel(for: id), available: PhoneModels.isReady(id))
+        case .pc:
+            let entry = models.first { $0.id == route.modelID }
+            let title = entry?.label ?? route.modelID ?? "PC’ens standardmodel"
+            let catalogReady = legacyChat || !(api is LiveAPI) || (route.modelID == nil ? !models.isEmpty : entry != nil)
+            return ChatModelOption(source: .pc, modelID: route.modelID, title: title,
+                                   available: api != nil && !modelsLoading && !pcEngineOffline && catalogReady)
+        case .grok:
+            return ChatModelOption(source: .grok, modelID: nil, title: GrokAPI.requestedModelID, available: cloudKeyAvailable)
+        }
+    }
+}

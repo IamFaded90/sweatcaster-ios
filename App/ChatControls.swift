@@ -81,7 +81,6 @@ extension ChatView {
     }
 
     var effectiveReplySource: ReplySource { resolvedRoute.source }
-    var effectivePCModelID: String? { effectiveReplySource == .pc ? resolvedRoute.modelID : nil }
 
     var phoneRoutingCandidates: [ModelRouter.Candidate] {
         let favorites = Set(phoneFavorites.split(separator: "|").map(String.init))
@@ -485,13 +484,6 @@ extension ChatView {
             }
         }
         if legacyChat { Text("Chat bruger PC’ens standardmodel via v1.").font(.caption) }
-        if !models.isEmpty {
-            Picker("AI-model", selection: Binding(get: { effectivePCModelID ?? "" }, set: { chooseSource(.pc, modelID: $0) })) {
-                ForEach(models) { model in
-                    Text(model.label).tag(model.id)
-                }
-            }.disabled(task != nil || modelsLoading).frame(minHeight: 48)
-        }
         if let live = api as? LiveAPI, !legacyChat {
             NavigationLink {
                 PCModelsView(api: live)

@@ -79,6 +79,7 @@ struct ChatView: View {
     @State var turns: [ChatTurn] = []
     @State var status: String?
     @State var streamedText = ""
+    @State var responseDuration: (turnID: UUID, seconds: Int)?
     @State var task: Task<Void, Never>?
     @State var busyPCTurn: UUID?
     @State var searchSteps: [String] = []
@@ -292,6 +293,9 @@ struct ChatView: View {
                 if turns.isEmpty && task == nil {
                     FadedEmptyState(icon: "bubble.left", title: "Start en samtale", detail: "Vælg en kilde, og skriv din besked.",
                                     actionTitle: "Skriv en besked") { composerFocused = true }
+                    if draft.isEmpty && stagedPhoto == nil && attachedNote == nil && attachedQuote == nil {
+                        chatSuggestions
+                    }
                 } else if favoritesOnly && !turns.contains(where: { $0.favorite == true }) && task == nil {
                     FadedEmptyState(icon: "star", title: "Ingen favoritter i samtalen",
                                     detail: "Markér et svar som favorit via menuen ved svaret.",
