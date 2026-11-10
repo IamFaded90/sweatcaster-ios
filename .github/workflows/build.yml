@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-26
+    runs-on: macos-26-intel
     timeout-minutes: 60
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
@@ -39,7 +39,7 @@ jobs:
           ')"
           xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
             -destination "platform=iOS Simulator,id=$simulator" \
-            -parallel-testing-enabled NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test \
+            -parallel-testing-enabled NO ARCHS=x86_64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test \
             2>&1 | tee "$RUNNER_TEMP/FadedAI-XCTest.log"
       - name: Build for iPhone without signing
         run: |
