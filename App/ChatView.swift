@@ -280,40 +280,50 @@ struct ChatView: View {
 
     private func chatContent(userBubbleWidth: CGFloat, wide: Bool) -> some View {
         ScrollViewReader { proxy in
-            VStack(spacing: 0) {
-                chatHeading(wide: wide) {
-                    withAnimation(reduceMotion || calmMotion ? nil : .easeOut(duration: 0.2)) {
-                        proxy.scrollTo("chat-outbox", anchor: .top)
+            let column = chatColumn(userBubbleWidth: userBubbleWidth, wide: wide, proxy: proxy)
+            observeChatEvents(column, proxy: proxy)
+        }
+    }
+
+    private func transcriptScroll(userBubbleWidth: CGFloat) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
+                if !outboxEntries.isEmpty { outboxPanel.id("chat-outbox") }
+                if turns.isEmpty && task == nil {
+                    FadedEmptyState(icon: "bubble.left", title: "Start en samtale", detail: "Vælg en kilde, og skriv din besked.",
+                                    actionTitle: "Skriv en besked") { composerFocused = true }
+                } else if favoritesOnly && !turns.contains(where: { $0.favorite == true }) && task == nil {
+                    FadedEmptyState(icon: "star", title: "Ingen favoritter i samtalen",
+                                    detail: "Markér et svar som favorit via menuen ved svaret.",
+                                    actionTitle: "Vis alle beskeder") { favoritesOnly = false }
+                }
+                transcriptRows(userBubbleWidth: userBubbleWidth)
+                chatAgentActivity
+                if let sourceExcerpt {
+                    DisclosureGroup("Lokal reference · Notes") {
+                        Text(sourceExcerpt)
+                        Text("Fundet på telefonen. Referencen blev ikke sendt til PC’en.").font(.caption)
                     }
                 }
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
-                        if !outboxEntries.isEmpty { outboxPanel.id("chat-outbox") }
-                        if turns.isEmpty && task == nil {
-                            FadedEmptyState(icon: "bubble.left", title: "Start en samtale", detail: "Vælg en kilde, og skriv din besked.",
-                                            actionTitle: "Skriv en besked") { composerFocused = true }
-                        } else if favoritesOnly && !turns.contains(where: { $0.favorite == true }) && task == nil {
-                            FadedEmptyState(icon: "star", title: "Ingen favoritter i samtalen",
-                                            detail: "Markér et svar som favorit via menuen ved svaret.",
-                                            actionTitle: "Vis alle beskeder") { favoritesOnly = false }
-                        }
-                        transcriptRows(userBubbleWidth: userBubbleWidth)
-                        chatAgentActivity
-                        if let sourceExcerpt {
-                            DisclosureGroup("Lokal reference · Notes") {
-                                Text(sourceExcerpt)
-                                Text("Fundet på telefonen. Referencen blev ikke sendt til PC’en.")
-                                    .font(.caption)
-                            }
-                        }
-                        Color.clear.frame(height: 1).id("chat-bottom")
-                    }
-                    .padding(FadedSpacing.edge)
-                }
-                .scrollDismissesKeyboard(.interactively)
-                .defaultScrollAnchor(.bottom)
-                composer.layoutPriority(1)
+                Color.clear.frame(height: 1).id("chat-bottom")
             }
+            .padding(FadedSpacing.edge)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .defaultScrollAnchor(.bottom)
+    }
+
+    private func chatColumn(userBubbleWidth: CGFloat, wide: Bool, proxy: ScrollViewProxy) -> some View {
+        let column = VStack(spacing: 0) {
+            chatHeading(wide: wide) {
+                withAnimation(reduceMotion || calmMotion ? nil : .easeOut(duration: 0.2)) {
+                    proxy.scrollTo("chat-outbox", anchor: .top)
+                }
+            }
+            transcriptScroll(userBubbleWidth: userBubbleWidth)
+            composer.layoutPriority(1)
+        }
+        return column
             .onChange(of: composerFocused) { _, focused in
                 onComposerFocusChange?(focused)
                 if focused { scrollChat(proxy) }
@@ -330,6 +340,10 @@ struct ChatView: View {
                 }
                 messageJumpID = nil
             }
+    }
+
+    private func observeChatEvents<Content: View>(_ content: Content, proxy: ScrollViewProxy) -> some View {
+        let lifecycle = content
             .onChange(of: effectiveReplySource) {
                 if noteDestination != effectiveReplySource { attachedNote = nil }
                 if quoteDestination != effectiveReplySource { attachedQuote = nil }
@@ -348,6 +362,7 @@ struct ChatView: View {
                 dictation.stop()
                 speechBox.stop()
             }
+        let notifications = lifecycle
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in
                 phoneBatteryLevel = UIDevice.current.batteryLevel
             }
@@ -361,6 +376,7 @@ struct ChatView: View {
                 if phase == .background { speechBox.stop() }
             }
             .onReceive(NotificationCenter.default.publisher(for: PCChatOutbox.didChange)) { _ in reloadOutbox() }
+        return notifications
             .onChange(of: pcQueueTargetID) { reloadOutbox() }
             .onChange(of: newConversationRequest) { consumeEntryRequests() }
             .onChange(of: initialSearch) { consumeEntryRequests() }
@@ -370,7 +386,6 @@ struct ChatView: View {
             }
             .task(id: (api as? LiveAPI)?.queueTargetID) { await loadModels() }
             .sensoryFeedback(.success, trigger: completedReplies)
-        }
     }
 
     private func prepareConversation() {
