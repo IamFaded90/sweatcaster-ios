@@ -1,4 +1,4 @@
-// Owns the fixed chat input surface, staged attachments and send/stop controls.
+// Owns the fixed chat input surface, attachments, send/stop controls and model menu.
 
 import Foundation
 import SwiftUI
@@ -18,6 +18,50 @@ struct ChatComposer<Content: View>: View {
 }
 
 extension ChatView {
+    @ViewBuilder var quickModelPicker: some View {
+        if !demo {
+            Menu {
+                if manualRoute != nil {
+                    Button(autoRouterEnabled ? "Brug Auto igen" : "Brug mit normale valg", systemImage: "arrow.uturn.backward") {
+                        manualRoute = nil
+                    }
+                }
+                Menu("Telefon", systemImage: "iphone") {
+                    Button("Min telefonmodel") { chooseModelForNextMessage(.phone) }
+                    ForEach(phoneRoutingCandidates, id: \.id) { entry in
+                        Button(entry.name) { chooseModelForNextMessage(.phone, modelID: entry.id) }
+                    }
+                    Button("Lokale modeller", systemImage: "arrow.down.circle") { showPhoneModelSetup = true }
+                }
+                Menu("PC", systemImage: "desktopcomputer") {
+                    Button("Valgt PC-model") { chooseModelForNextMessage(.pc) }
+                    ForEach(models) { entry in
+                        Button(entry.label) { chooseModelForNextMessage(.pc, modelID: entry.id) }
+                    }
+                }
+                if cloudKeyAvailable {
+                    Button("Grok · Cloud", systemImage: "cloud") { chooseModelForNextMessage(.grok) }
+                }
+            } label: {
+                Label(nextMessageModelName, systemImage: "chevron.down")
+                    .font(.caption.bold()).lineLimit(chatTypeSize.isAccessibilitySize ? nil : 1)
+                    .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+            }
+            .disabled(task != nil)
+            .accessibilityLabel("Model for næste besked")
+            .accessibilityValue(nextMessageModelName)
+        }
+    }
+
+    private var nextMessageModelName: String {
+        let route = resolvedRoute
+        switch route.source {
+        case .phone: return phoneModelLabel(for: route.modelID ?? phoneModel)
+        case .pc: return models.first { $0.id == route.modelID }?.label ?? route.modelID ?? "PC’ens standardmodel"
+        case .grok: return GrokAPI.requestedModelID
+        }
+    }
+
     var composer: some View {
         VStack(alignment: .leading, spacing: 6) {
             if let deleted = removedTurns.last, deleted.expiresAt > ContinuousClock.now { undoBar }

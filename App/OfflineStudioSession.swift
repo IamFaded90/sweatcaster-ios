@@ -147,9 +147,16 @@ extension OfflineStudio {
 
     private func configureSessionPreferences() {
         var preferences = StudioSessionPreferences()
-        preferences.imageModel = savedImageModel
+        preferences.imageModel = if StudioImageModel(rawValue: savedImageModel)?.isInstalled == true {
+            savedImageModel
+        } else {
+            StudioImageModel.allCases.first(where: \.isInstalled)?.id ?? savedImageModel
+        }
+        let compact = QwenPhoneRuntime.Variant.compact.modelID
         if PhoneModels.installedDirectory(textModel) != nil {
             preferences.textModel = textModel
+        } else if PhoneModels.installedDirectory(compact) != nil {
+            preferences.textModel = compact
         } else if let available = PhoneModels.catalog.first(where: { PhoneModels.installedDirectory($0.id) != nil }) {
             preferences.textModel = available.id
         } else if PhoneModels.installedDirectory("imported") != nil {

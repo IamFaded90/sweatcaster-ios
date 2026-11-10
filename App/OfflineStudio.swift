@@ -226,7 +226,7 @@ struct OfflineStudio: View {
         studioChrome
             .sheet(isPresented: $showModels, onDismiss: {
                 textContextLimit = contextWindow(for: effectiveTextModel)
-            }) { PhoneModelsView() }
+            }) { PhoneModelsView(allowsImageDownloads: !privateSession) }
             .sheet(isPresented: $showBotBuilder) {
                 VillageBotBuilder(api: privateSession ? nil : api, bot: selectedPrivateBot,
                                   onBack: { showBotBuilder = false })

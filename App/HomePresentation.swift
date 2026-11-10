@@ -282,7 +282,7 @@ extension Home {
 
     var chatSheet: some View { chatContent(embedded: false) }
 
-    func chatContent(embedded: Bool) -> some View {
+    func chatContent(embedded: Bool, onComposerFocusChange: ((Bool) -> Void)? = nil) -> some View {
         let session = model.isDemo ? "demo" : (model.address.isEmpty ? "offline" : model.address)
         let api: (any ChatAPI)? = model.connected || model.isDemo ? model.api as? any ChatAPI : nil
         let status = model.connected ? "Forbundet" : "Ikke forbundet"
@@ -314,7 +314,8 @@ extension Home {
                                 showChat = false
                             }
                         }, onConsumeSearch: { searchChatQuery = "" },
-                        onConsumePhonePreference: { preferPhoneInChat = false })
+                        onConsumePhonePreference: { preferPhoneInChat = false },
+                        onComposerFocusChange: onComposerFocusChange)
             .id(session)
     }
 

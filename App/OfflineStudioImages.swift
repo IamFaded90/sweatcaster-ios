@@ -26,7 +26,6 @@ extension OfflineStudio {
                         .frame(minHeight: 44)
                 }
                 DisclosureGroup("Billedindstillinger") { imageInlineOptions }
-                if privateSession && !canRenderPrivateImages { offlineImageNotice }
             }.padding(FadedSpacing.edge)
         }
         .scrollDismissesKeyboard(.interactively)
@@ -35,7 +34,8 @@ extension OfflineStudio {
     }
 
     private var studioImageComposer: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        let blocker = privateImageBlocker
+        return VStack(alignment: .leading, spacing: 8) {
             Label(privateSession || api == nil || !allowPCFallback ? "Kun telefon" : "Telefon først · PC ved behov",
                   systemImage: "iphone").font(.caption).foregroundStyle(.secondary)
             if imagePromptFocused {
@@ -60,7 +60,8 @@ extension OfflineStudio {
                     }
                 studioEditorButton(forImage: true)
             }
-            imageGenerationButton
+            imageGenerationButton(blocked: blocker != nil)
+            if let blocker { FadedDetailText(blocker).accessibilityAddTraits(.updatesFrequently) }
             if task != nil {
                 FadedSecondaryButton("Stop billedkø", icon: "stop.fill") { stopStudioImageQueue() }
             }
@@ -70,9 +71,11 @@ extension OfflineStudio {
         .padding(.horizontal, 12).padding(.vertical, 6)
     }
 
-    private var offlineImageNotice: some View {
-        Label("Slå Wi-Fi og mobildata fra for at generere billeder privat.", systemImage: "airplane")
-            .font(.footnote).foregroundStyle(palette.secondary)
+    private var privateImageBlocker: String? {
+        guard privateSession else { return nil }
+        if !imageReady { return "Hent billedmodellen under Hjem → ⋯ → Lokale modeller → Billeder." }
+        if !canRenderPrivateImages { return "Slå Wi-Fi og mobildata fra for at lave billedet privat." }
+        return nil
     }
 
     var imageReady: Bool {
@@ -118,11 +121,10 @@ extension OfflineStudio {
     var privateImageSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("Billedmodel", selection: privateSession ? $sessionPreferences.imageModel : $savedImageModel) {
-                Text("Stable Diffusion 1.5").tag("sd_v1.5_f16.ckpt")
-                Text("FLUX.2 Klein 4B").tag("flux_2_klein_4b_q8p.ckpt")
+                ForEach(StudioImageModel.allCases) { model in Text(model.title).tag(model.id) }
             }.disabled(task != nil)
             if privateSession {
-                Text(imageReady ? "Billedmodellen er klar på telefonen." : "Hent billedmodellen uden for den private session.")
+                Text(imageReady ? "Billedmodellen er klar på telefonen." : "Hent billedmodellen under Hjem → ⋯ → Lokale modeller → Billeder.")
                     .font(.caption).foregroundStyle(palette.secondary)
                 let names = importedLoRAs
                 if !names.isEmpty {
@@ -130,7 +132,6 @@ extension OfflineStudio {
                         loraRows(names, selection: $sessionPreferences.lora)
                     }.disabled(task != nil)
                 }
-                if !canRenderPrivateImages { offlineImageNotice }
                 Text("Private billeder kan gemmes i Fotos med din godkendelse.")
                     .font(.caption).foregroundStyle(palette.secondary)
             } else {
@@ -252,10 +253,10 @@ extension OfflineStudio {
         }
     }
 
-    private var imageGenerationButton: some View {
+    private func imageGenerationButton(blocked: Bool) -> some View {
         let label = pendingImages.isEmpty ? "Lav billede" : "Lav billede · I kø (\(pendingImages.count))"
         return FadedPrimaryButton(label, icon: "photo.badge.plus") { generateImage() }
-            .disabled(!canEnqueueImage || loadingBaseImage || pendingImages.count >= 5 || (privateSession && !canRenderPrivateImages)
+            .disabled(blocked || !canEnqueueImage || loadingBaseImage || pendingImages.count >= 5
                 || imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || imagePrompt.count > 2_000 || negativeImagePrompt.count > 1_000)
     }
@@ -410,8 +411,8 @@ extension OfflineStudio {
         let negative = negativeImagePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard studioEnabled, canShowStudio, canEnqueueImage, pendingImages.count < 5,
               !message.isEmpty, message.count <= 2_000, negative.count <= 1_000, !loadingBaseImage else { return }
-        guard !privateSession || canRenderPrivateImages else {
-            status = "Slå Wi-Fi og mobildata fra for at generere billeder privat."
+        if let blocker = privateImageBlocker {
+            status = blocker
             return
         }
         let request = StudioImageRequest(model: imageModel, prompt: message, negative: negative,
@@ -441,6 +442,12 @@ extension OfflineStudio {
                     status = "Slå Wi-Fi og mobildata fra for at generere billeder privat."
                     return
                 } catch is CancellationError { throw CancellationError() }
+                catch LocalComputeError.lowMemory {
+                    AppDiagnostics.record(LocalComputeError.lowMemory)
+                    status = next.model == StudioImageModel.fluxKlein.id
+                        ? "Telefonen har for lidt ledig hukommelse. Prøv Stable Diffusion 1.5 under Billedindstillinger."
+                        : "Telefonen har for lidt ledig hukommelse. Luk andre tunge opgaver, og prøv igen."
+                }
                 catch {
                     AppDiagnostics.record(error)
                     status = pcBusyMessage(error) ?? "Billedopgaven kunne ikke gennemføres. Tjek billedmodel og plads."
@@ -532,17 +539,13 @@ extension OfflineStudio {
     }
 
     private func downloadImageModel() {
-        guard !privateSession else { return }
-        let selected = imageModel
-        let reserve: Int64 = selected.hasPrefix("flux") ? 8_000_000_000 : 4_000_000_000
-        guard PhoneModels.hasDownloadSpace(bytes: reserve) else { status = "Frigør mere plads før download."; return }
+        guard !privateSession, let selected = StudioImageModel(rawValue: imageModel) else { return }
+        guard PhoneModels.hasDownloadSpace(bytes: selected.minimumFreeBytes) else { status = "Frigør mere plads før download."; return }
         run("Henter billedmodel…") {
             defer { downloadProgress = nil }
-            _ = try await MediaGenerationEnvironment.default.ensure(selected) { state in
-                if case .downloading(_, let index, let count, let written, let total) = state,
-                   count > 0, total > 0 {
-                    let part = min(1, Double(written) / Double(total))
-                    Task { @MainActor in downloadProgress = min(1, (Double(max(0, index - 1)) + part) / Double(count)) }
+            try await selected.ensure { value in
+                Task { @MainActor in
+                    if task != nil { downloadProgress = value }
                 }
             }
             try Task.checkCancellation()

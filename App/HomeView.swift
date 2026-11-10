@@ -112,6 +112,7 @@ struct Home: View {
     @State var diagnosticsError = false
     @State var media: Media?
     @State var showChat = false
+    @State private var chatComposerFocused = false
     @State var newChatRequest: UUID?
     @State var preferPhoneInChat = false
     @State private var tabHistory: [TabDestination] = []
@@ -207,6 +208,37 @@ struct Home: View {
     }
 
     var homeContent: some View {
+        VStack(spacing: 0) {
+            homeTabs
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            if currentDestination != .fixed(.notes) || !chatComposerFocused {
+                spacesBar
+            }
+        }
+        .onChange(of: showJobs) {
+            navigate(to: .video(.jobs))
+        }
+        .task(id: "\(model.isDemo):\(model.address):\((model.api as? LiveAPI)?.queueTargetID ?? ""):\(phase == .active && !privateStudioPresented)") {
+            if phase == .active && !privateStudioPresented { await loadModuleTabs() }
+        }
+        .onChange(of: space) { _, value in
+            if value == .brain { refreshDashboard() }
+            if rememberLastSpace { lastSpace = value.rawValue }
+            if autoRefreshTabs && !model.isDemo && !privateStudioPresented { Task { await model.refresh() } }
+        }
+        .onChange(of: keepScreenAwake) { UIApplication.shared.isIdleTimerDisabled = keepScreenAwake }
+        .onAppear {
+            if !restoredNavigation {
+                restoredNavigation = true
+                if tabHistory.isEmpty, rememberLastSpace, let saved = Space(rawValue: lastSpace) { space = saved }
+            }
+            refreshDashboard()
+            UIApplication.shared.isIdleTimerDisabled = keepScreenAwake
+        }
+        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+
+    private var homeTabs: some View {
         TabView(selection: Binding(get: {
             if case .module(let selection, _) = currentDestination { return selection }
             return space.rawValue
@@ -244,28 +276,6 @@ struct Home: View {
             }
         }
         .toolbarVisibility(.hidden, for: .tabBar)
-        .safeAreaInset(edge: .bottom, spacing: 0) { spacesBar }
-        .onChange(of: showJobs) {
-            navigate(to: .video(.jobs))
-        }
-        .task(id: "\(model.isDemo):\(model.address):\((model.api as? LiveAPI)?.queueTargetID ?? ""):\(phase == .active && !privateStudioPresented)") {
-            if phase == .active && !privateStudioPresented { await loadModuleTabs() }
-        }
-        .onChange(of: space) { _, value in
-            if value == .brain { refreshDashboard() }
-            if rememberLastSpace { lastSpace = value.rawValue }
-            if autoRefreshTabs && !model.isDemo && !privateStudioPresented { Task { await model.refresh() } }
-        }
-        .onChange(of: keepScreenAwake) { UIApplication.shared.isIdleTimerDisabled = keepScreenAwake }
-        .onAppear {
-            if !restoredNavigation {
-                restoredNavigation = true
-                if tabHistory.isEmpty, rememberLastSpace, let saved = Space(rawValue: lastSpace) { space = saved }
-            }
-            refreshDashboard()
-            UIApplication.shared.isIdleTimerDisabled = keepScreenAwake
-        }
-        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
     }
 
     private func loadModuleTabs() async {
@@ -362,7 +372,7 @@ struct Home: View {
     }
 
     private var chatTab: some View {
-        chatContent(embedded: true)
+        chatContent(embedded: true) { chatComposerFocused = $0 }
     }
 
     func selectSpace(_ destination: Space) {

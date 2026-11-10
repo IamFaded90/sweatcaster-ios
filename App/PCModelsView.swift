@@ -61,7 +61,6 @@ struct PCModelsView: View {
                 FadedSignature()
                 FadedDetailText("Vælg din foretrukne model til PC-chat. PC’en indlæser modellen ved brug. Auto kan vælge en anden model til opgaven.")
                 modelContent
-                cloudCard
             }
             .padding(FadedSpacing.edge).frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
@@ -110,6 +109,7 @@ struct PCModelsView: View {
     private func modelCard(_ model: V2Models.Entry, standard: Bool) -> some View {
         let usable = PCModelSelection.usable(model)
         let chosen = usable && selected == model.id
+        let profile = modelProfile(model.id)
         return FadedCard(accent: chosen ? palette.lime : model.loaded ? palette.cyan : nil) {
             VStack(alignment: .leading, spacing: 8) {
                 Label(model.label, systemImage: "cpu").font(FadedTypography.section).accessibilityAddTraits(.isHeader)
@@ -118,7 +118,13 @@ struct PCModelsView: View {
                 if let bytes = model.size_bytes, bytes > 0 {
                     FadedDetailText(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file))
                 }
-                FadedDetailText(modelDetail(model))
+                FadedDetailText(profile?.detail ?? modelDetail(model))
+                if !model.available, let profile {
+                    FadedDetailText("Hent modellen på PC’en, og opdatér derefter listen.")
+                    Text("ollama pull \(profile.tag)")
+                        .font(.system(.footnote, design: .monospaced))
+                        .textSelection(.enabled)
+                }
                 if standard { Text("Standard på PC’en").font(.caption).foregroundStyle(palette.secondary) }
                 if chosen {
                     Label("Foretrukken til PC-chat", systemImage: "checkmark.circle.fill").font(.subheadline)
@@ -131,8 +137,19 @@ struct PCModelsView: View {
         }
     }
 
+    private func modelProfile(_ id: String) -> (tag: String, detail: String)? {
+        switch id {
+        case "qwen35-9b": ("qwen3.5:9b", "Bedst til daglig chat, længere forklaringer og opgaver med flere trin. Brug kortere samtaler, hvis PC’en er presset.")
+        case "qwen25-coder-7b": ("qwen2.5-coder:7b", "Bedst til kode, fejlfinding og forslag til ændringer.")
+        case "dolphin3-8b": ("dolphin3:8b", "Bedst til kreativ dialog, rollespil og forskellige personligheder. Kører på PC’en.")
+        case "qwen25-7b": ("qwen2.5:7b", "God til almindelig chat, dansk tekst og korte opgaver på PC’en.")
+        case "llama31-8b": ("llama3.1:8b", "God til idéudvikling, kreativ skrivning og almindelig chat.")
+        default: nil
+        }
+    }
+
     private func modelDetail(_ model: V2Models.Entry) -> String {
-        if !model.available { return "Kontrollér modellens installation eller opsætning på PC’en." }
+        if !model.available { return "Kontrollér modellens installation på PC’en." }
         if model.supportsImageChat {
             return PCModelSelection.usable(model) ? "Til tekstchat og billedanalyse." : "Brug modellen via Analysér billede i chatten."
         }
@@ -140,15 +157,6 @@ struct PCModelsView: View {
         if model.capabilities.contains(where: { $0 == "code" || $0 == "coding" }) { return "Til tekstchat og kode." }
         if model.capabilities.contains("long_context") { return "Til tekstchat med længere kontekst." }
         return "Til tekstchat på PC’en."
-    }
-
-    private var cloudCard: some View {
-        FadedCard(accent: palette.purple) {
-            VStack(alignment: .leading, spacing: FadedSpacing.s) {
-                FadedSectionHeader("Grok", detail: "Separat cloud-destination via xAI. Vælg Grok direkte i AI-chat.")
-                FadedBadge(CloudModelKey.exists() ? "xAI-nøgle gemt" : "Kræver xAI-nøgle", tone: .info)
-            }.frame(maxWidth: .infinity, alignment: .leading)
-        }
     }
 
     private func refresh() async {

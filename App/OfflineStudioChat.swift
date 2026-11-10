@@ -303,18 +303,17 @@ extension OfflineStudio {
         let model = effectiveTextModel
         let instructions = companionInstructions
         var remaining = chatInputBudget - estimateTokens(message) - 8
-        var context: [String] = []
+        var context: [PhoneModels.ChatExchange] = []
         for turn in currentBotTurns.suffix(8).reversed() where turn.imageName == nil && !turn.reply.isEmpty {
-            let block = "Bruger: \(turn.prompt)\nBot: \(turn.reply)"
-            let cost = estimateTokens(block) + 4
+            let cost = estimateTokens(turn.prompt) + estimateTokens(turn.reply) + 16
             guard cost <= remaining else { break }
-            context.append(block)
+            context.append(.init(prompt: turn.prompt, reply: turn.reply))
             remaining -= cost
         }
-        let request = (Array(context.reversed()) + ["Bruger: " + message]).joined(separator: "\n")
+        let history = Array(context.reversed())
         rememberPrompt(message)
         runPrivateReply(historyPrompt: message, source: "Telefon", progress: "Din bot skriver…") { id in
-            try await PhoneModels.reply(modelID: model, prompt: request, instructions: instructions) {
+            try await PhoneModels.reply(modelID: model, prompt: message, instructions: instructions, history: history) {
                 updateChatReply(id, with: $0)
             }
         }
@@ -380,6 +379,8 @@ extension OfflineStudio {
                         status = "Svaret blev stoppet."
                     } else if case .lowMemory? = error as? LocalComputeError {
                         status = "Telefonen har for lidt ledig hukommelse til modellen lige nu."
+                    } else if case .contextLimit? = error as? PhoneModelError {
+                        status = "Samtalen er for lang til modellen. Forkort beskeden, eller start en ny samtale."
                     } else {
                         status = "Telefonen kunne ikke svare. Tjek din tekstmodel under Private indstillinger."
                     }
@@ -406,7 +407,8 @@ extension OfflineStudio {
 
     static func companionInstructions(for profile: VillageBot?, preset choice: String = "bot") -> String {
         let custom = profile?.prompt.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let base = "Du er \(profile?.name ?? "brugerens private AI-companion"). Du er varm, flirtende og taler naturligt med en voksen bruger. Bevar din personlighed og respekter brugerens grænser."
+        let base = "Du er \(profile?.name ?? "brugerens private AI-companion"). Svar direkte på brugerens seneste besked på samme sprog. Brug tidligere beskeder, når de er relevante. Bevar din personlighed, og respekter brugerens grænser."
+        let tone = profile == nil ? "Brug en varm, naturlig tone. Vær flirtende, når samtalen lægger op til det." : ""
         let preset: String = switch choice {
         case "calm": "Svar kort, roligt og med enkle sætninger."
         case "creative": "Brug fantasi og en let, legende tone."
@@ -415,7 +417,7 @@ extension OfflineStudio {
         }
         let role = profile.map { "Dit speciale er \($0.specialtyTitle)." } ?? ""
         let responsibility = profile?.responsibility?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return [base, role, responsibility.isEmpty ? "" : "Ansvar og grænser: " + String(responsibility.prefix(400)),
+        return [base, tone, role, responsibility.isEmpty ? "" : "Ansvar og grænser: " + String(responsibility.prefix(400)),
                 custom.isEmpty ? "" : "Din personlighed: " + String(custom.prefix(600)), preset]
             .filter { !$0.isEmpty }.joined(separator: " ")
     }
@@ -490,6 +492,7 @@ extension OfflineStudio {
     }
 
     func contextWindow(for model: String) -> Int {
+        if let variant = QwenPhoneRuntime.Variant(modelID: model) { return variant.contextLimit }
         guard let folder = PhoneModels.installedDirectory(model),
               let data = try? LocalFileStore.readBytes(from: folder.appending(path: "model_config.json"), maximumBytes: 65_536),
               let config = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],

@@ -30,7 +30,7 @@ extension ChatView {
     }
 
     private var sourceChips: some View {
-        ForEach(ReplySource.allCases, id: \.self) { source in
+        ForEach([ReplySource.phone, .pc], id: \.self) { source in
             FadedChip(source.rawValue, accent: sourceColor(source),
                       selected: effectiveReplySource == source && (!usesAutomaticRouting || automaticSelection != nil), icon: source.icon) {
                 chooseSource(source)
@@ -58,10 +58,13 @@ extension ChatView {
                                  modelID: automaticSelection.candidate.id.isEmpty ? nil : automaticSelection.candidate.id,
                                  automatic: automaticSelection)
         }
-        let source = manualRoute?.source ?? replySource
+        let requestedSource = manualRoute?.source ?? replySource
+        let source = requestedSource == .grok && !cloudKeyAvailable ? ReplySource.phone : requestedSource
         let modelID: String?
         switch source {
-        case .phone: modelID = manualRoute?.modelID ?? PhoneModels.effectiveModelID(phoneModel)
+        case .phone:
+            let override = manualRoute?.source == .phone ? manualRoute?.modelID : nil
+            modelID = override ?? PhoneModels.effectiveModelID(phoneModel)
         case .pc:
             modelID = manualRoute?.modelID ?? (selectedModel.isEmpty ? nil : selectedModel)
         case .grok: modelID = nil
@@ -99,7 +102,7 @@ extension ChatView {
     }
 
     func chooseSource(_ source: ReplySource, modelID: String? = nil) {
-        guard task == nil else { return }
+        guard task == nil, source != .grok || cloudKeyAvailable else { return }
         if automaticRoutingAvailable {
             manualRoute = ManualRoute(source: source, modelID: modelID)
         } else {
@@ -113,7 +116,7 @@ extension ChatView {
     }
 
     func chooseModelForNextMessage(_ source: ReplySource, modelID: String? = nil) {
-        guard task == nil else { return }
+        guard task == nil, source != .grok || cloudKeyAvailable else { return }
         manualRoute = ManualRoute(source: source, modelID: modelID)
     }
 

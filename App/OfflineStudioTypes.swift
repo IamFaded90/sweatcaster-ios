@@ -4,6 +4,7 @@
 import AVFAudio
 import CoreTransferable
 import ImageIO
+import MediaGenerationKit
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -59,6 +60,115 @@ struct StudioPhotoInput: Transferable {
 }
 
 enum StudioImageInterruption: Error { case heat, battery, network }
+
+enum StudioImageModel: String, CaseIterable, Identifiable {
+    case stableDiffusion = "sd_v1.5_f16.ckpt"
+    case fluxKlein = "flux_2_klein_4b_q8p.ckpt"
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .stableDiffusion: "Stable Diffusion 1.5"
+        case .fluxKlein: "FLUX.2 Klein 4B"
+        }
+    }
+    var minimumFreeBytes: Int64 { self == .fluxKlein ? 8_000_000_000 : 4_000_000_000 }
+    var isInstalled: Bool {
+        (try? MediaGenerationEnvironment.default.inspectModel(rawValue, offline: true))?.isDownloaded == true
+    }
+
+    func ensure(progress: @escaping @Sendable (Double) -> Void) async throws {
+        _ = try await MediaGenerationEnvironment.default.ensure(rawValue) { state in
+            if case .downloading(_, let index, let count, let written, let total) = state, count > 0, total > 0 {
+                let part = min(1, Double(written) / Double(total))
+                progress(min(1, (Double(max(0, index - 1)) + part) / Double(count)))
+            }
+        }
+    }
+}
+
+struct StudioImageDownloadsView: View {
+    @Binding var downloading: StudioImageModel?
+    let canStart: Bool
+    let onDownloaded: () -> Void
+    @State private var task: Task<Void, Never>?
+    @State private var progress: Double?
+    @State private var notice: String?
+    @State private var activeDownload: UUID?
+
+    init(downloading: Binding<StudioImageModel?>, canStart: Bool, onDownloaded: @escaping () -> Void) {
+        _downloading = downloading
+        self.canStart = canStart
+        self.onDownloaded = onDownloaded
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.section) {
+            FadedSectionHeader("Billedmodeller", detail: "Hent modellen her, før du åbner Privat Studio. Hold siden åben under download.")
+            ForEach(StudioImageModel.allCases) { model in
+                FadedCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label(model.title, systemImage: "photo").font(.headline)
+                        FadedDetailText(model == .stableDiffusion
+                                        ? "Start her. Kræver mindst 4 GB ledig plads før download."
+                                        : "Tungere model. Kræver mindst 8 GB ledig plads før download.")
+                        if downloading == model {
+                            if let progress {
+                                ProgressView(value: progress) { Text(progress.formatted(.percent)) }
+                            } else {
+                                ProgressView("Henter billedmodellen…")
+                            }
+                            FadedSecondaryButton("Stop download", icon: "stop.fill") { task?.cancel() }
+                        } else if model.isInstalled {
+                            Label("Klar på telefonen", systemImage: "checkmark.circle")
+                        } else {
+                            FadedSecondaryButton("Hent billedmodel", icon: "arrow.down.circle") { download(model) }
+                                .accessibilityLabel("Hent \(model.title)").disabled(!canStart)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            if let notice { FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently) }
+        }
+        .onDisappear { task?.cancel() }
+    }
+
+    private func download(_ model: StudioImageModel) {
+        guard canStart else { return }
+        guard PhoneModels.hasDownloadSpace(bytes: model.minimumFreeBytes) else {
+            notice = "Der er for lidt ledig plads. Frigør plads, og prøv igen."
+            return
+        }
+        let id = UUID()
+        activeDownload = id
+        downloading = model
+        progress = nil
+        notice = nil
+        task = Task { @MainActor in
+            defer {
+                activeDownload = nil
+                downloading = nil
+                progress = nil
+                task = nil
+            }
+            do {
+                try await model.ensure { value in
+                    Task { @MainActor in
+                        if activeDownload == id { progress = value }
+                    }
+                }
+                try Task.checkCancellation()
+                notice = "\(model.title) er klar på telefonen."
+                onDownloaded()
+            } catch is CancellationError {
+                notice = "Download stoppet."
+            } catch {
+                AppDiagnostics.record(error)
+                notice = "Billedmodellen kunne ikke hentes. Tjek internet og ledig plads, og prøv igen."
+            }
+        }
+    }
+}
 
 struct StudioImageDetails: Codable, Sendable {
     var prompt: String? = nil

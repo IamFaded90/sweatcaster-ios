@@ -45,7 +45,7 @@ struct ChatView: View {
     @Environment(\.fadedPalette) var palette
     @Environment(\.dismiss) var dismiss
     @Environment(\.accessibilityReduceMotion) var reduceMotion
-    @Environment(\.dynamicTypeSize) private var chatTypeSize
+    @Environment(\.dynamicTypeSize) var chatTypeSize
     let api: (any ChatAPI)?
     let demo: Bool
     let initialDraft: String
@@ -66,6 +66,7 @@ struct ChatView: View {
     private let openBots: (() -> Void)?
     private let onConsumeSearch: (() -> Void)?
     private let onConsumePhonePreference: (() -> Void)?
+    private let onComposerFocusChange: ((Bool) -> Void)?
     @Environment(\.horizontalSizeClass) private var chatSizeClass
     @State private var showHistory = false
     @State private var showChatSettings = false
@@ -163,7 +164,8 @@ struct ChatView: View {
          pcConnectionError: APIError? = nil, reconnectPC: (() -> Void)? = nil,
          initialSearch: String = "", openPrivateStudio: (() -> Void)? = nil, preferPhone: Bool = false,
          embedded: Bool = false, newConversationRequest: UUID? = nil, onConsumeNewConversation: (() -> Void)? = nil,
-         openBots: (() -> Void)? = nil, onConsumeSearch: (() -> Void)? = nil, onConsumePhonePreference: (() -> Void)? = nil) {
+         openBots: (() -> Void)? = nil, onConsumeSearch: (() -> Void)? = nil, onConsumePhonePreference: (() -> Void)? = nil,
+         onComposerFocusChange: ((Bool) -> Void)? = nil) {
         self.api = api
         self.demo = demo
         self.initialDraft = initialDraft
@@ -184,6 +186,7 @@ struct ChatView: View {
         self.openBots = openBots
         self.onConsumeSearch = onConsumeSearch
         self.onConsumePhonePreference = onConsumePhonePreference
+        self.onComposerFocusChange = onComposerFocusChange
         _savedDraft = AppStorage(wrappedValue: "", AppStorageKeys.chatDraft(storageKey))
     }
 
@@ -331,7 +334,11 @@ struct ChatView: View {
                 }
                 .scrollDismissesKeyboard(.interactively)
                 .defaultScrollAnchor(.bottom)
-                .safeAreaInset(edge: .bottom) { composer }
+                composer.layoutPriority(1)
+            }
+            .onChange(of: composerFocused) { _, focused in
+                onComposerFocusChange?(focused)
+                if focused { scrollChat(proxy) }
             }
             .onChange(of: turns.count) { scrollChat(proxy) }
             .onChange(of: streamedText) { scrollChat(proxy) }
@@ -348,7 +355,12 @@ struct ChatView: View {
                 consumeEntryRequests()
                 scrollChat(proxy)
             }
-            .onDisappear { stop(); dictation.stop(); speech.stopSpeaking(at: .immediate) }
+            .onDisappear {
+                onComposerFocusChange?(false)
+                stop()
+                dictation.stop()
+                speech.stopSpeaking(at: .immediate)
+            }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in
                 phoneBatteryLevel = UIDevice.current.batteryLevel
             }
@@ -415,41 +427,47 @@ struct ChatView: View {
                 }
                 chatTitle
                 Spacer(minLength: FadedSpacing.xs)
-                if !wide {
-                    headerButton("Samtaler og søgning", icon: "sidebar.left") {
+                if composerFocused {
+                    headerButton("Skjul tastatur", icon: "keyboard.chevron.compact.down") {
                         composerFocused = false
-                        refreshHistorySessions()
-                        showHistory = true
                     }
-                    headerButton("Ny samtale", icon: "square.and.pencil") { newConversation() }
-                        .disabled(task != nil)
-                }
-                headerButton("Chatindstillinger", icon: "slider.horizontal.3") {
-                    composerFocused = false
-                    showChatSettings = true
-                }
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack(spacing: FadedSpacing.s) {
-                    Text(connection).font(.subheadline).foregroundStyle(palette.secondary)
-                    Spacer(minLength: FadedSpacing.xs)
-                    quickModelPicker
-                }
-                VStack(alignment: .leading, spacing: 0) {
-                    Text(connection).font(.subheadline).foregroundStyle(palette.secondary)
-                    quickModelPicker
+                } else {
+                    if !wide {
+                        headerButton("Samtaler og søgning", icon: "sidebar.left") {
+                            refreshHistorySessions()
+                            showHistory = true
+                        }
+                        headerButton("Ny samtale", icon: "square.and.pencil") { newConversation() }
+                            .disabled(task != nil)
+                    }
+                    headerButton("Chatindstillinger", icon: "slider.horizontal.3") {
+                        showChatSettings = true
+                    }
                 }
             }
-            if chatTypeSize.isAccessibilitySize { chatNavigationMenu }
-            else {
-                if !demo { sourcePicker }
-                ScrollView(.horizontal) { HStack(spacing: FadedSpacing.m) { chatShortcuts } }
-                    .scrollIndicators(.hidden)
-            }
-            if !outboxEntries.isEmpty {
-                Button(action: revealOutbox) {
-                    Label("Udbakke · \(outboxEntries.count)", systemImage: "tray")
-                        .font(.subheadline.weight(.semibold)).frame(minHeight: 44)
+            if !composerFocused {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: FadedSpacing.s) {
+                        Text(connection).font(.subheadline).foregroundStyle(palette.secondary)
+                        Spacer(minLength: FadedSpacing.xs)
+                        quickModelPicker
+                    }
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text(connection).font(.subheadline).foregroundStyle(palette.secondary)
+                        quickModelPicker
+                    }
+                }
+                if chatTypeSize.isAccessibilitySize { chatNavigationMenu }
+                else {
+                    if !demo { sourcePicker }
+                    ScrollView(.horizontal) { HStack(spacing: FadedSpacing.m) { chatShortcuts } }
+                        .scrollIndicators(.hidden)
+                }
+                if !outboxEntries.isEmpty {
+                    Button(action: revealOutbox) {
+                        Label("Udbakke · \(outboxEntries.count)", systemImage: "tray")
+                            .font(.subheadline.weight(.semibold)).frame(minHeight: 44)
+                    }
                 }
             }
             FadedSignature()
@@ -462,7 +480,7 @@ struct ChatView: View {
     private var chatNavigationMenu: some View {
         Menu {
             if !demo {
-                ForEach(ReplySource.allCases, id: \.self) { source in
+                ForEach([ReplySource.phone, .pc], id: \.self) { source in
                     Button(source.rawValue, systemImage: source.icon) { chooseSource(source) }.disabled(task != nil)
                 }
             }
@@ -507,7 +525,7 @@ struct ChatView: View {
                 VStack(alignment: .leading, spacing: FadedSpacing.m) {
                     StatsBar(turns: turns.count, streaming: task != nil)
                     if effectiveReplySource == .pc { modelControls }
-                    if effectiveReplySource == .grok && !demo { CloudModelSettings() }
+                    if !demo { CloudModelSettings() }
                     voiceControls
                     aiBoostControls
                     if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
@@ -533,48 +551,6 @@ struct ChatView: View {
 
     private var chatTitle: some View {
         Text("AI-chat").font(.title2.bold()).accessibilityAddTraits(.isHeader)
-    }
-
-    @ViewBuilder private var quickModelPicker: some View {
-        if !demo {
-            Menu {
-                if manualRoute != nil {
-                    Button(autoRouterEnabled ? "Brug Auto igen" : "Brug mit normale valg", systemImage: "arrow.uturn.backward") {
-                        manualRoute = nil
-                    }
-                }
-                Menu("Telefon", systemImage: "iphone") {
-                    Button("Min telefonmodel") { chooseModelForNextMessage(.phone) }
-                    ForEach(phoneRoutingCandidates, id: \.id) { entry in
-                        Button(entry.name) { chooseModelForNextMessage(.phone, modelID: entry.id) }
-                    }
-                    Button("Lokale modeller", systemImage: "arrow.down.circle") { showPhoneModelSetup = true }
-                }
-                Menu("PC", systemImage: "desktopcomputer") {
-                    Button("Valgt PC-model") { chooseModelForNextMessage(.pc) }
-                    ForEach(models) { entry in
-                        Button(entry.label) { chooseModelForNextMessage(.pc, modelID: entry.id) }
-                    }
-                }
-                Button("Grok · Cloud", systemImage: "cloud") { chooseModelForNextMessage(.grok) }
-            } label: {
-                Label(nextMessageModelName, systemImage: "chevron.down")
-                    .font(.caption.bold()).lineLimit(chatTypeSize.isAccessibilitySize ? nil : 1)
-                    .frame(minWidth: 44, minHeight: 44, alignment: .leading)
-            }
-            .disabled(task != nil)
-            .accessibilityLabel("Model for næste besked")
-            .accessibilityValue(nextMessageModelName)
-        }
-    }
-
-    private var nextMessageModelName: String {
-        let route = resolvedRoute
-        switch route.source {
-        case .phone: return phoneModelLabel(for: route.modelID ?? phoneModel)
-        case .pc: return models.first { $0.id == route.modelID }?.label ?? route.modelID ?? "PC’ens standardmodel"
-        case .grok: return GrokAPI.requestedModelID
-        }
     }
 
     func acceptDroppedPhotos(_ items: [StudioPhotoInput]) -> Bool {

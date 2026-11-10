@@ -16,10 +16,24 @@ enum QwenPhoneRuntime {
             }
         }
 
+        var modelID: String {
+            switch self {
+            case .compact: ModelDownloader.ModelInfo.qwen35_08b.id
+            case .vision: ModelDownloader.ModelInfo.qwen3vl_2b.id
+            }
+        }
+
         var chunks: String {
             switch self {
             case .compact: "qwen3_5_0_8b_decode_chunks_mlkv"
             case .vision: "qwen3_vl_2b_decode_chunks"
+            }
+        }
+
+        var contextLimit: Int {
+            switch self {
+            case .compact: 2_048
+            case .vision: 1_024
             }
         }
 
@@ -148,6 +162,7 @@ enum QwenPhoneRuntime {
     }
 
     @MainActor static func generate(_ variant: Variant, folder: URL, prompt: String, instructions: String,
+                                    history: [PhoneModels.ChatExchange] = [],
                                     image: CGImage? = nil, maxTokens: Int, update: @escaping (String) -> Void) async throws -> (text: String, rate: Double) {
         LocalCompute.beginModelLoad()
         let tokenizer = try await AutoTokenizer.from(modelFolder: folder.appending(path: "hf_model"))
@@ -155,11 +170,29 @@ enum QwenPhoneRuntime {
         let end = try token("<|im_end|>", tokenizer: tokenizer)
         let stop = try token("<|endoftext|>", tokenizer: tokenizer)
         let eos: Set<Int32> = [start, end, stop]
-        let body = instructions.isEmpty ? prompt : instructions + "\n\n" + prompt
+        let textExcluded: Set<Int32>
+        if case .vision = variant {
+            textExcluded = try eos.union(["<|vision_start|>", "<|image_pad|>", "<|vision_end|>"].map { try token($0, tokenizer: tokenizer) })
+        } else {
+            textExcluded = eos
+        }
         func encode(_ text: String) -> [Int32] {
             tokenizer.encode(text: text, addSpecialTokens: false).map(Int32.init)
         }
-        var input = [start] + encode("user\n")
+        func message(_ role: String, _ text: String) -> [Int32] {
+            var tokens = [start] + encode(role + "\n")
+            tokens += encode(text).filter { !textExcluded.contains($0) }
+            tokens.append(end)
+            tokens += encode("\n")
+            return tokens
+        }
+        var input: [Int32] = []
+        if !instructions.isEmpty { input += message("system", instructions) }
+        for exchange in history {
+            input += message("user", exchange.prompt)
+            input += message("assistant", exchange.reply)
+        }
+        input += [start] + encode("user\n")
         let (tokens, continuation) = AsyncStream<Int32>.makeStream()
         let delivery = Task { @MainActor in
             var emitted: [Int] = []
@@ -185,9 +218,9 @@ enum QwenPhoneRuntime {
             try await generator.load()
             try Task.checkCancellation()
             LocalCompute.didLoadModel()
-            input += encode(body).filter { !eos.contains($0) } + [end] + encode("\n")
+            input += encode(prompt).filter { !eos.contains($0) } + [end] + encode("\n")
             input += [start] + encode("assistant\n<think>\n\n</think>\n\n")
-            let budget = try outputLimit(context: 2_048, input: input.count, requested: maxTokens)
+            let budget = try outputLimit(context: variant.contextLimit, input: input.count, requested: maxTokens)
             started = .now
             generated = try await generator.generate(inputIds: input, maxNewTokens: budget, eosTokenIds: eos, onToken: emit)
         case .vision:
@@ -210,9 +243,9 @@ enum QwenPhoneRuntime {
             }
             try Task.checkCancellation()
             LocalCompute.didLoadModel()
-            input += encode(body).filter { !eos.contains($0) && $0 != imagePad } + [end] + encode("\n")
+            input += encode(prompt).filter { !textExcluded.contains($0) } + [end] + encode("\n")
             input += [start] + encode("assistant\n")
-            let budget = try outputLimit(context: 1_024, input: input.count, requested: maxTokens)
+            let budget = try outputLimit(context: variant.contextLimit, input: input.count, requested: maxTokens)
             started = .now
             generated = try await generator.generate(inputIds: input, maxNewTokens: budget, eosTokenIds: eos,
                                                      visionFeatures: features, imagePadTokenId: imagePad, onToken: emit)

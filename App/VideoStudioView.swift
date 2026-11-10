@@ -34,10 +34,6 @@ extension Home {
             guard let server = videoFolderScope, videoFolderServer != server else { return }
             await loadGameFolders(for: server)
         }
-        .task(id: "\(videoFolderScope ?? ""):\(selectedGameFolder ?? "")") {
-            guard let id = selectedGameFolder, let server = videoFolderScope else { return }
-            await loadFolderPage(id, for: server)
-        }
     }
 
     @ViewBuilder private var videoPageContent: some View {
@@ -78,6 +74,7 @@ extension Home {
             }
             .padding(FadedSpacing.edge).frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private var videoPageBar: some View {
@@ -274,9 +271,9 @@ extension Home {
     @ViewBuilder private func videoFolders(onDone: @escaping () -> Void) -> some View {
         if model.isDemo {
             clipFolder(id: "demo", title: "Testklip", subtitle: nil, onDone: onDone)
-        } else if catalogLoading != nil || (videoFolderServer != model.address && folderNotice == nil) {
+        } else if catalogLoading != nil || (videoFolderServer != videoFolderScope && folderNotice == nil) {
             LoadingSkeleton(label: "Henter spilmapper…")
-        } else if videoFolderServer == model.address {
+        } else if let server = videoFolderScope, videoFolderServer == server {
             if legacyClipCatalog {
                 clipFolder(id: "legacy", title: "PC’ens V1-klipliste", subtitle: "Ældre server uden spilmapper", onDone: onDone)
             } else {
@@ -313,19 +310,38 @@ extension Home {
             if expanded {
                 if id == "demo" {
                     clipList(model.clips, onDone: onDone)
-                } else if pageLoading != nil {
-                    LoadingSkeleton(label: "Henter klip i mappen…")
-                } else if let clips = folderPages[id] {
-                    clipList(clips, onDone: onDone)
-                }
-                if let notice = folderPageNotices[id] {
-                    Text(notice).font(.caption).foregroundStyle(palette.secondary)
-                    FadedSecondaryButton("Opdatér mappen", icon: "arrow.clockwise") {
-                        guard let server = videoFolderScope else { return }
-                        Task { await loadFolderPage(id, for: server, force: true) }
-                    }
+                } else {
+                    expandedClipFolder(id, onDone: onDone)
+                        .id(id)
                 }
             }
+        }
+    }
+
+    private func expandedClipFolder(_ id: String, onDone: @escaping () -> Void) -> some View {
+        let clips = folderPages[id] ?? []
+        return VStack(alignment: .leading, spacing: 8) {
+            if !clips.isEmpty {
+                clipList(clips, onDone: onDone)
+            }
+            if pageLoading != nil {
+                LoadingSkeleton(label: "Henter klip i mappen…")
+            } else if let notice = folderPageNotices[id] {
+                FadedDetailText(notice)
+            } else if clips.isEmpty {
+                FadedDetailText(folderPages[id] == nil ? "Klip er endnu ikke hentet." :
+                                "PC’en har ingen klip klar til valg i denne mappe. Klip må højst vare tre minutter.")
+            }
+            if clips.isEmpty || folderPageNotices[id] != nil {
+                FadedSecondaryButton("Opdatér mappen", icon: "arrow.clockwise") {
+                    guard let server = videoFolderScope else { return }
+                    Task { await loadFolderPage(id, for: server, force: true) }
+                }.disabled(pageLoading != nil)
+            }
+        }
+        .task(id: videoFolderScope) {
+            guard let server = videoFolderScope else { return }
+            await loadFolderPage(id, for: server)
         }
     }
 
@@ -439,7 +455,7 @@ extension Home {
     var videoFolderScope: String? {
         guard !privateStudioPresented else { return nil }
         guard phase == .active, space == .gallery, videoPage == .clips, selectedModuleTab == nil, model.connected else { return nil }
-        return model.isDemo ? "demo" : model.address
+        return model.isDemo ? "demo" : (model.api as? LiveAPI)?.queueTargetID
     }
 
     func refreshVideoStudio() async {
@@ -494,9 +510,9 @@ extension Home {
     }
 
     func loadFolderPage(_ id: String, for server: String, force: Bool = false) async {
-        guard videoFolderScope == server, videoFolderServer == server, !model.isDemo,
+        guard videoFolderScope == server, videoFolderServer == server, selectedGameFolder == id, !model.isDemo,
               let api = model.api as? LiveAPI,
-              force || folderPages[id] == nil || folderPageNotices[id] != nil else { return }
+              force || folderPages[id]?.isEmpty != false || folderPageNotices[id] != nil else { return }
         let ticket = UUID()
         pageLoading = ticket
         defer { if pageLoading == ticket { pageLoading = nil } }
@@ -523,9 +539,9 @@ extension Home {
             folderPageNotices[id] = notice
             model.includeFolderClips(pageClips, folderID: id)
         } catch {
-            AppDiagnostics.record(error)
             guard !Task.isCancelled, videoFolderScope == server, selectedGameFolder == id, pageLoading == ticket else { return }
-            folderPageNotices[id] = "Klip i denne mappe kunne ikke hentes."
+            AppDiagnostics.record(error)
+            folderPageNotices[id] = "Klip i denne mappe kunne ikke hentes. Tjek PC-forbindelsen, og opdatér mappen."
         }
     }
 }

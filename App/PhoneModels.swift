@@ -18,6 +18,11 @@ enum PhoneModels {
     static let liteBatteryKey = AppStorageKeys.phoneModelLiteBattery
     static let downloadedRoot = URL.documentsDirectory.appending(path: "Models", directoryHint: .isDirectory)
 
+    struct ChatExchange {
+        let prompt: String
+        let reply: String
+    }
+
     struct Entry: Identifiable {
         let id, name, description: String
         let bestFor: String
@@ -182,13 +187,15 @@ enum PhoneModels {
         }
     }
 
-    @MainActor static func reply(modelID: String, prompt: String, instructions: String = "", update: @escaping (String) -> Void) async throws {
+    @MainActor static func reply(modelID: String, prompt: String, instructions: String = "",
+                                 history: [ChatExchange] = [], update: @escaping (String) -> Void) async throws {
         try await LocalCompute.run(minimumMiB: minimumMemory(for: modelID)) {
-            try await streamReply(modelID: modelID, prompt: prompt, instructions: instructions, update: update)
+            try await streamReply(modelID: modelID, prompt: prompt, instructions: instructions, history: history, update: update)
         }
     }
 
     @MainActor private static func streamReply(modelID: String, prompt: String, instructions: String,
+                                              history: [ChatExchange],
                                               update: @escaping (String) -> Void) async throws {
         var answer = ""
         if modelID == "apple" {
@@ -205,15 +212,20 @@ enum PhoneModels {
             guard let folder = installedDirectory(modelID) else { throw PhoneModelError.unavailable }
             if let variant = QwenPhoneRuntime.Variant(modelID: modelID) {
                 _ = try await QwenPhoneRuntime.generate(variant, folder: folder, prompt: prompt, instructions: instructions,
-                                                       maxTokens: 384, update: update)
+                                                       history: history, maxTokens: 384, update: update)
                 return
             }
             LocalCompute.beginModelLoad()
             let model = try await CoreMLLLM.load(from: folder, computeUnits: .cpuAndNeuralEngine)
             try Task.checkCancellation()
             LocalCompute.didLoadModel()
-            let user = CoreMLLLM.Message(role: .user, content: prompt)
-            let messages = instructions.isEmpty ? [user] : [.init(role: .system, content: instructions), user]
+            var messages: [CoreMLLLM.Message] = []
+            if !instructions.isEmpty { messages.append(.init(role: .system, content: instructions)) }
+            for exchange in history {
+                messages.append(.init(role: .user, content: exchange.prompt))
+                messages.append(.init(role: .assistant, content: exchange.reply))
+            }
+            messages.append(.init(role: .user, content: prompt))
             for await token in try await model.stream(messages, maxTokens: 384) {
                 try Task.checkCancellation()
                 answer += token

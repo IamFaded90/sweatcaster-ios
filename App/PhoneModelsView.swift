@@ -95,6 +95,8 @@ private enum ModelDiskStorage {
 }
 
 struct PhoneModelsView: View {
+    let allowsImageDownloads: Bool
+    init(allowsImageDownloads: Bool = true) { self.allowsImageDownloads = allowsImageDownloads }
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
     @AppStorage(AppStorageKeys.phoneModel) private var selected = "apple"
@@ -102,6 +104,7 @@ struct PhoneModelsView: View {
     @AppStorage(AppStorageKeys.phoneModelFavorites) private var favoriteModels = ""
     @State private var downloadConfirmation: PhoneModels.Entry?
     @State private var requestedDownloadID: String?
+    @State private var imageDownload: StudioImageModel?
     @State private var importing = false
     @State private var working = false
     @State private var notice: String?
@@ -116,6 +119,7 @@ struct PhoneModelsView: View {
 
     private enum Page: String, CaseIterable {
         case models = "Modeller"
+        case images = "Billeder"
         case storage = "Lagerplads"
         case performance = "Hastighed"
     }
@@ -134,7 +138,7 @@ struct PhoneModelsView: View {
 
     private var downloader: ModelDownloader { .shared }
     private var mutationBusy: Bool {
-        working || benchmarkRunning || requestedDownloadID != nil || downloader.isDownloading || PhoneModelDownloads.shared.preparingModelID != nil
+        working || benchmarkRunning || imageDownload != nil || requestedDownloadID != nil || downloader.isDownloading || PhoneModelDownloads.shared.preparingModelID != nil
     }
     private var favorites: Set<String> { Set(favoriteModels.split(separator: "|").map(String.init)) }
     private var orderedCatalog: [PhoneModels.Entry] {
@@ -157,8 +161,8 @@ struct PhoneModelsView: View {
             .tint(palette.isDark ? palette.lime : palette.text)
             .navigationTitle("Lokale modeller")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Luk") { dismiss() }.disabled(working) }
-            .interactiveDismissDisabled(working)
+            .toolbar { Button("Luk") { dismiss() }.disabled(working || imageDownload != nil) }
+            .interactiveDismissDisabled(working || imageDownload != nil)
             .task(id: storageRevision) { await refreshStorage() }
             .onChange(of: downloader.isDownloading) { _, isDownloading in
                 if !isDownloading { storageRevision += 1 }
@@ -202,6 +206,8 @@ struct PhoneModelsView: View {
             appleCard
             favoriteSection
             importSection
+        case .images:
+            StudioImageDownloadsView(downloading: $imageDownload, canStart: !mutationBusy) { storageRevision += 1 }
         case .storage:
             storageSection
             imageFilesSection
@@ -212,8 +218,8 @@ struct PhoneModelsView: View {
 
     private var pagePicker: some View {
         Picker("Sektion", selection: $page) {
-            ForEach(Page.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-        }
+            ForEach(Page.allCases.filter { allowsImageDownloads || $0 != .images }, id: \.self) { Text($0.rawValue).tag($0) }
+        }.disabled(imageDownload != nil)
     }
 
     @ViewBuilder private var favoriteSection: some View {
