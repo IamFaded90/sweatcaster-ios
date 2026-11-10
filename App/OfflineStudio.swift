@@ -60,6 +60,7 @@ struct OfflineStudio: View {
     @State var answer = ""
     @State var status = ""
     @State var imageURL: URL?
+    @State var imageComparisonSource: StudioImageComparisonSource?
     @State var task: Task<Void, Never>?
     @AppStorage(AppStorageKeys.offlineStudioImageModel) var savedImageModel = "sd_v1.5_f16.ckpt"
     @AppStorage(AppStorageKeys.studioImagesAutoSavePhotos) var autoSaveStudioPhotos = false

@@ -80,6 +80,7 @@ struct Home: View {
     @State var settingsPath: [SettingsCategory] = []
     @State var showConnections = false
     @State var showTeam = false
+    @State var teamSidebarCompact = false
     @State var dashboardApproval: DashboardApproval?
     @Environment(\.horizontalSizeClass) var horizontalSizeClass
     var teamPinned: Bool { UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular }
@@ -337,7 +338,7 @@ struct Home: View {
                             .accessibilityAddTraits(.isHeader)
                     } else {
                         HStack(spacing: 4) {
-                            Button("Holdet", systemImage: "person.2") { showTeam = true }
+                            Button("Holdet", systemImage: "person.2", action: openTeam)
                                 .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                             Text("FadedAI").font(FadedTypography.title).tracking(-0.5)
                                 .accessibilityAddTraits(.isHeader)
@@ -351,7 +352,7 @@ struct Home: View {
                     Menu {
                         Button("Noter", systemImage: "note.text") { showNotes = true }
                         if !teamPinned {
-                            Button("Holdet", systemImage: "person.2") { showTeam = true }
+                            Button("Holdet", systemImage: "person.2", action: openTeam)
                         }
                         Button("Indstillinger", systemImage: "gearshape") { showSettings = true }
                         Button("PC-status", systemImage: "stethoscope") { showPCStatus = true }

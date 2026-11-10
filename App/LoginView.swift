@@ -54,6 +54,7 @@ struct LoginView: View {
     @State private var address: String
     @State private var token = ""
     @State private var scannedPairing: PairingQRCode?
+    @State private var testedQRAddress: String?
     @State private var qrError: String?
     @State private var manualError: (field: ManualField, text: String)?
     @State private var pingNotice: String?
@@ -116,8 +117,9 @@ struct LoginView: View {
         FadedCard(size: .hero) {
             VStack(alignment: .leading, spacing: FadedSpacing.s) {
                 FadedSectionHeader("QR fra din PC", detail: "Åbn forbindelseskoden på din PC, og scan den her.")
+                if !manualExpanded { qrStages }
                 if let pairing = scannedPairing, !manualExpanded {
-                    FadedDetailText("QR læst. Bekræft forbindelsen til \(pairing.address).")
+                    FadedDetailText("Bekræft forbindelsen til \(pairing.address).")
                     FadedPrimaryButton(connecting ? "Tester forbindelsen…" : "Test og forbind", icon: "network") {
                         Task { await connect(pairing) }
                     }
@@ -137,6 +139,23 @@ struct LoginView: View {
             }
         }
         .disabled(connectionBusy)
+    }
+
+    private var qrStages: some View {
+        let verified = model.connected && !model.isDemo && testedQRAddress == model.address
+        let scanned = scannedPairing != nil || verified
+        return ViewThatFits(in: .horizontal) {
+            HStack(spacing: FadedSpacing.xs) { qrStageBadges(scanned: scanned, verified: verified) }
+            VStack(alignment: .leading, spacing: FadedSpacing.xs) { qrStageBadges(scanned: scanned, verified: verified) }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder private func qrStageBadges(scanned: Bool, verified: Bool) -> some View {
+        FadedBadge(scanned ? "QR læst" : "1. Scan", tone: scanned ? .success : .info)
+        FadedBadge(scanned ? "Adresse klar" : "2. Adresse", tone: scanned ? .success : .info)
+        FadedBadge(verified ? "PC forbundet" : connecting ? "Tester PC" : "3. Test",
+                   tone: verified ? .success : .info)
     }
 
     private var manualSection: some View {
@@ -248,6 +267,7 @@ struct LoginView: View {
     private func finishScan(_ result: Result<String, Error>) {
         scanning = false
         scannedPairing = nil
+        testedQRAddress = nil
         qrError = nil
         pingNotice = nil
         do {
@@ -308,6 +328,7 @@ struct LoginView: View {
             return
         }
         if model.connected && !model.isDemo {
+            if pairing != nil && model.address == server.address { testedQRAddress = server.address }
             token = ""
             scannedPairing = nil
             close?()

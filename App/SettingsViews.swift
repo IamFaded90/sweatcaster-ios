@@ -56,11 +56,15 @@ private struct VideoCleanupSettings: View {
 
 private struct PersonalVoiceSettings: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.dynamicTypeSize) private var typeSize
     @AppStorage(AppStorageKeys.chatVoiceIdentifier) private var voiceID = ""
     @AppStorage(AppStorageKeys.chatVoiceBot) private var voiceBotID = ""
+    @AppStorage(AppStorageKeys.chatVoiceRate) private var voiceRate = 1.0
     @State private var authorization = AVSpeechSynthesizer.personalVoiceAuthorizationStatus
     @State private var voices: [AVSpeechSynthesisVoice] = []
     @State private var requesting = false
+    @State private var previewVoiceID: String?
+    @StateObject private var previewSpeech = SpeechBox()
 
     var body: some View {
         Section("Personlig stemme") {
@@ -69,18 +73,9 @@ private struct PersonalVoiceSettings: View {
                 if voices.isEmpty {
                     FadedDetailText("Opret eller færdiggør din stemme i iPhones Indstillinger → Tilgængelighed → Personlig stemme.")
                 }
-                ForEach(voices, id: \.identifier) { voice in
-                    let selected = voiceBotID.isEmpty && voiceID == voice.identifier
-                    Button {
-                        voiceBotID = ""
-                        voiceID = voice.identifier
-                    } label: {
-                        Label(LocalSpeechVoice.label(voice), systemImage: selected ? "checkmark.circle.fill" : "waveform")
-                    }
-                    .accessibilityAddTraits(selected ? [.isSelected] : [])
-                }
+                ForEach(voices, id: \.identifier, content: voiceRow)
                 if !voices.isEmpty {
-                    FadedDetailText("Tryk på en stemme til chatten. Vælg svar på samme sprog i chatindstillingerne for at høre den.")
+                    FadedDetailText("Tryk på stemmenavnet for at vælge det til chatten. Brug Afspil prøve for at høre stemmen.")
                 }
             case .notDetermined:
                 Button("Tillad personlig stemme", systemImage: "waveform") { requestAccess() }
@@ -96,10 +91,71 @@ private struct PersonalVoiceSettings: View {
             FadedDetailText("Personlig stemme følger optagelsens sprog. Vælg en dansk systemstemme til dansk oplæsning.")
         }
         .onAppear(perform: refresh)
-        .onChange(of: scenePhase) { _, phase in if phase == .active { refresh() } }
+        .onDisappear(perform: stopPreview)
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { refresh() }
+            else { stopPreview() }
+        }
+        .onChange(of: previewSpeech.playback) { _, playback in
+            if playback == nil { previewVoiceID = nil }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { notification in
+            guard let type = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: type) == .began else { return }
+            stopPreview()
+        }
         .onReceive(NotificationCenter.default.publisher(for: AVSpeechSynthesizer.availableVoicesDidChangeNotification)) { _ in
             Task { @MainActor in refresh() }
         }
+    }
+
+    private func voiceRow(_ voice: AVSpeechSynthesisVoice) -> some View {
+        let selected = voiceBotID.isEmpty && voiceID == voice.identifier
+        let previewing = previewVoiceID == voice.identifier && previewSpeech.playback == .preview
+        let layout = typeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: FadedSpacing.xs))
+            : AnyLayout(HStackLayout(spacing: FadedSpacing.s))
+        return VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            layout {
+                Button {
+                    voiceBotID = ""
+                    voiceID = voice.identifier
+                } label: {
+                    Label(LocalSpeechVoice.label(voice), systemImage: selected ? "checkmark.circle.fill" : "waveform")
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityAddTraits(selected ? [.isSelected] : [])
+
+                Button {
+                    if previewing { stopPreview() }
+                    else { playPreview(voice) }
+                } label: {
+                    Label(previewing ? "Stop prøve" : "Afspil prøve", systemImage: previewing ? "stop.circle" : "play.circle")
+                        .font(.subheadline)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel(previewing ? "Stop prøve med \(voice.name)" : "Afspil prøve med \(voice.name)")
+            }
+            if previewing {
+                FadedDetailText(previewSpeech.isSpeaking ? "Afspiller stemmeprøven" : "Klargør stemmeprøven…")
+            }
+        }
+    }
+
+    private func playPreview(_ voice: AVSpeechSynthesisVoice) {
+        guard scenePhase == .active, authorization == .authorized else { return }
+        let utterance = AVSpeechUtterance(string: LocalSpeechVoice.previewSentence(language: voice.language))
+        utterance.voice = voice
+        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(voiceRate.isFinite ? min(1.3, max(0.7, voiceRate)) : 1)
+        previewVoiceID = voice.identifier
+        previewSpeech.play(utterance, as: .preview)
+    }
+
+    private func stopPreview() {
+        previewVoiceID = nil
+        if previewSpeech.playback != nil { previewSpeech.stop() }
     }
 
     private func requestAccess() {
@@ -114,6 +170,7 @@ private struct PersonalVoiceSettings: View {
     private func refresh() {
         authorization = AVSpeechSynthesizer.personalVoiceAuthorizationStatus
         voices = LocalSpeechVoice.personalVoices
+        if let previewVoiceID, !voices.contains(where: { $0.identifier == previewVoiceID }) { stopPreview() }
     }
 }
 

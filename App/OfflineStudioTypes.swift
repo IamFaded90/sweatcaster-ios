@@ -300,6 +300,80 @@ func studioImageSource(_ file: URL, privateImages: [URL: Data]) -> CGImageSource
     return CGImageSourceCreateWithURL(file as CFURL, nil)
 }
 
+struct StudioImageComparisonSource {
+    let result: URL
+    let bytes: Data
+
+    init?(result: URL, bytes: Data?) {
+        // The generation input has already been downsampled by StudioPhotoInput.
+        guard let bytes, (1...2_000_000).contains(bytes.count) else { return nil }
+        self.result = result
+        self.bytes = bytes
+    }
+}
+
+struct StudioImageComparison: View {
+    let source: StudioImageComparisonSource
+    let result: UIImage
+    @State private var expanded = false
+
+    var body: some View {
+        DisclosureGroup("Sammenlign med basebilledet", isExpanded: $expanded) {
+            if expanded {
+                if let base = UIImage(data: source.bytes) {
+                    StudioImageComparisonCanvas(base: base, result: result)
+                        .padding(.top, FadedSpacing.s)
+                } else {
+                    FadedDetailText("Basebilledet kunne ikke vises.")
+                }
+            }
+        }
+        .frame(minHeight: 44)
+    }
+}
+
+private struct StudioImageComparisonCanvas: View {
+    let base: UIImage
+    let result: UIImage
+    @Environment(\.fadedPalette) private var palette
+    @State private var reveal = 0.5
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.s) {
+            GeometryReader { geometry in
+                let edge = geometry.size.width * CGFloat(1 - reveal)
+                ZStack {
+                    palette.background
+                    fittedImage(result, in: geometry.size)
+                    fittedImage(base, in: geometry.size)
+                        .background(palette.background)
+                        .mask(alignment: .leading) { Rectangle().frame(width: edge) }
+                    if reveal > 0, reveal < 1 {
+                        Rectangle().fill(FadedColors.lime).frame(width: 2)
+                            .position(x: edge, y: geometry.size.height / 2)
+                    }
+                }
+            }
+            .aspectRatio(1, contentMode: .fit)
+            .clipShape(.rect(cornerRadius: FadedRadius.small))
+            .accessibilityHidden(true)
+            HStack {
+                FadedDetailText("Basebillede")
+                Spacer()
+                FadedDetailText("Resultat")
+            }
+            Slider(value: $reveal, in: 0...1)
+                .frame(minHeight: 44)
+                .accessibilityLabel("Vis mere af basebilledet eller resultatet")
+                .accessibilityValue("\(reveal.formatted(.percent.precision(.fractionLength(0)))) resultat")
+        }
+    }
+
+    private func fittedImage(_ image: UIImage, in size: CGSize) -> some View {
+        Image(uiImage: image).resizable().scaledToFit().frame(width: size.width, height: size.height)
+    }
+}
+
 enum LocalSpeechVoice {
     static var personalVoices: [AVSpeechSynthesisVoice] {
         guard AVSpeechSynthesizer.personalVoiceAuthorizationStatus == .authorized else { return [] }

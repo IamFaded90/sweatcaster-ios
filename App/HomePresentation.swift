@@ -45,7 +45,7 @@ extension Home {
             if !model.needsPairing {
                 homeFeedback
                     .safeAreaInset(edge: .leading, spacing: 0) {
-                        if teamPinned { teamRoster(close: nil).frame(width: 300) }
+                        if teamPinned { teamRoster(close: nil).frame(width: teamSidebarCompact ? 64 : 300) }
                     }
                     .accessibilityHidden(showTeam && !teamPinned)
                 if showTeam && !teamPinned {
@@ -103,8 +103,14 @@ extension Home {
 
     private func teamRoster(close: (() -> Void)?) -> some View {
         TeamRoster(api: studioAPI, studioUnlocked: $nsfwSessionUnlocked,
-                   onPrivateSessionEnded: showPrivateSessionNotice, connectPC: { showLogin = true }, close: close)
+                   onPrivateSessionEnded: showPrivateSessionNotice, connectPC: { showLogin = true }, close: close,
+                   compact: close == nil ? $teamSidebarCompact : .constant(false))
             .id(studioAPI?.queueTargetID ?? "phone")
+    }
+
+    func openTeam() {
+        if teamPinned { teamSidebarCompact = false }
+        else { showTeam = true }
     }
 
     private var homeNotices: some View {
@@ -494,5 +500,48 @@ extension Home {
         case .offline?, .transport(_)?, nil: true
         default: false
         }
+    }
+}
+
+struct TeamSidebarRail: View {
+    let page: TeamRoster.Page
+    let approvals: Int
+    let open: (TeamRoster.Page?) -> Void
+    @Environment(\.fadedPalette) private var palette
+
+    var body: some View {
+        VStack(spacing: FadedSpacing.s) {
+            Button("Udvid Holdet", systemImage: "sidebar.left") { open(nil) }
+                .labelStyle(.iconOnly).frame(width: 44, height: 44)
+            shortcut(.roster, icon: "person.2")
+            shortcut(.approvals, icon: "checkmark.seal", count: approvals)
+            shortcut(.workflows, icon: "list.bullet")
+        }
+        .padding(.top, FadedSpacing.s)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+
+    private func shortcut(_ target: TeamRoster.Page, icon: String, count: Int = 0) -> some View {
+        let selected = page == target
+        return Button { open(target) } label: {
+            Image(systemName: icon)
+                .foregroundStyle(selected ? FadedColors.deep : palette.text)
+                .frame(width: 44, height: 44)
+                .background(selected ? palette.lime : Color.clear, in: .rect(cornerRadius: FadedRadius.small))
+                .overlay(alignment: .topTrailing) {
+                    if count > 0 {
+                        Text(count > 9 ? "9+" : "\(count)")
+                            .font(.caption2.monospacedDigit())
+                            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+                            .foregroundStyle(FadedColors.deep)
+                            .padding(.horizontal, FadedSpacing.xs)
+                            .background(palette.lime, in: Capsule())
+                    }
+                }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(target.rawValue)
+        .accessibilityValue(count > 0 ? "\(count) forslag" : "")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }

@@ -31,9 +31,10 @@ struct ChatView: View {
         let modelID: String?
     }
 
-    private struct DroppedPhoto: Identifiable {
+    struct DroppedPhoto: Identifiable {
         let id = UUID()
         let data: Data
+        let preview: UIImage
     }
 
     struct ResolvedRoute {
@@ -113,9 +114,11 @@ struct ChatView: View {
     @State var archivedSessions: [SavedAgentSession] = []
     @State var favoritesOnly = false
     @State var scrollRequest = 0
+    @State private var messageJumpID: UUID?
     @State var showComposerTools = false
     @State var showPhoneModelSetup = false
     @State var showPCModelSetup = false
+    @State var stagedPhoto: DroppedPhoto?
     @State private var droppedPhoto: DroppedPhoto?
     @State var choosingNote = false
     @State var newNote = ""
@@ -226,6 +229,7 @@ struct ChatView: View {
         .sheet(item: $droppedPhoto) { photo in
             LocalImageAnalysisView(data: photo.data, onChooseNote: attachPhotoExcerpt, api: api as? LiveAPI)
         }
+        .onChange(of: sessionID) { stagedPhoto = nil; messageJumpID = nil }
         .task(id: removedTurns.last?.turn.id) { await expireUndo() }
     }
 
@@ -260,12 +264,17 @@ struct ChatView: View {
     }
 
     private var historySidebar: some View {
-        ChatSidebarView(query: $chatSearch, sessions: historySessions, selectedID: sessionID, isBusy: task != nil) {
+        ChatSidebarView(query: $chatSearch, sessions: historySessions, selectedID: sessionID,
+                        isBusy: task != nil, activeTurns: turns) {
             let previous = sessionID
             newConversation()
             if sessionID != previous { showHistory = false }
         } select: { session in
             if openConversation(session) { showHistory = false }
+        } jumpToTurn: { id in
+            favoritesOnly = false
+            showHistory = false
+            messageJumpID = id
         }
     }
 
@@ -312,6 +321,15 @@ struct ChatView: View {
             .onChange(of: turns.count) { scrollChat(proxy) }
             .onChange(of: streamedText) { scrollChat(proxy) }
             .onChange(of: scrollRequest) { scrollChat(proxy) }
+            .task(id: messageJumpID) {
+                guard let id = messageJumpID else { return }
+                await Task.yield()
+                guard !Task.isCancelled, messageJumpID == id else { return }
+                withAnimation(reduceMotion || calmMotion ? nil : .easeOut(duration: 0.2)) {
+                    proxy.scrollTo(id, anchor: .top)
+                }
+                messageJumpID = nil
+            }
             .onChange(of: effectiveReplySource) {
                 if noteDestination != effectiveReplySource { attachedNote = nil }
                 if quoteDestination != effectiveReplySource { attachedQuote = nil }
@@ -526,15 +544,22 @@ struct ChatView: View {
     }
 
     func acceptDroppedPhotos(_ items: [StudioPhotoInput]) -> Bool {
-        guard task == nil, droppedPhoto == nil else { return false }
-        guard items.count == 1, let photo = items.first else {
+        guard task == nil, droppedPhoto == nil, stagedPhoto == nil else { return false }
+        guard items.count == 1, let photo = items.first, let preview = UIImage(data: photo.data) else {
             if items.count > 1 { chatNotice = "Træk ét billede ad gangen." }
             return false
         }
         dictation.stop()
         composerFocused = false
-        droppedPhoto = DroppedPhoto(data: photo.data)
+        stagedPhoto = DroppedPhoto(data: photo.data, preview: preview)
         return true
+    }
+
+    func analyzeStagedPhoto() {
+        guard task == nil, let stagedPhoto else { return }
+        composerFocused = false
+        droppedPhoto = stagedPhoto
+        self.stagedPhoto = nil
     }
 
     private func attachPhotoExcerpt(_ excerpt: String) {

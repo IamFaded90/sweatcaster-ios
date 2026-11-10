@@ -14,6 +14,7 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
     let icon: String
     let showsTime: Bool
     let showsWordCount: Bool
+    let readAlong: SpeechBox.WordProgress?
     let copyPrompt: () -> Void
     let replyActions: () -> ReplyActions
     let noticeActions: () -> NoticeActions
@@ -36,6 +37,7 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
                 VStack(alignment: .leading, spacing: FadedSpacing.s) {
                     messageHeading(attribution, icon: icon, accent: palette.isDark ? accent : palette.text)
                     ChatTranscriptView(reply: turn.reply)
+                    if let readAlong { ChatReadAlong(progress: readAlong) }
                     if showsWordCount {
                         FadedDetailText("\(turn.reply.split(whereSeparator: \.isWhitespace).count) ord")
                     }
@@ -77,6 +79,43 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
     }
 }
 
+private struct ChatReadAlong: View {
+    @Environment(\.fadedPalette) private var palette
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @ObservedObject var progress: SpeechBox.WordProgress
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            Label("Følg oplæsningen", systemImage: "speaker.wave.2")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(palette.secondary)
+            Text(highlightedExcerpt)
+                .font(.subheadline)
+                .lineLimit(2, reservesSpace: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(FadedSpacing.s)
+        .background(palette.raised, in: RoundedRectangle(cornerRadius: 12))
+        .accessibilityHidden(true)
+    }
+
+    private var highlightedExcerpt: AttributedString {
+        guard let position = progress.position, let range = Range(position.range, in: position.text),
+              !range.isEmpty else { return AttributedString("…") }
+        let text = position.text
+        let context = typeSize.isAccessibilitySize ? 8 : 24
+        let before = text[..<range.lowerBound].suffix(context + 1)
+        let after = text[range.upperBound...].prefix(context + 1)
+        var excerpt = AttributedString((before.count > context ? "…" : "") + String(before.suffix(context)))
+        var word = AttributedString(String(text[range]))
+        word.backgroundColor = palette.lime
+        word.foregroundColor = FadedColors.deep
+        excerpt.append(word)
+        excerpt.append(AttributedString(String(after.prefix(context)) + (after.count > context ? "…" : "")))
+        return excerpt
+    }
+}
+
 extension ChatView {
     func scrollChat(_ proxy: ScrollViewProxy) {
         Task { @MainActor in
@@ -92,7 +131,9 @@ extension ChatView {
             ChatMessageRow(
                 turn: turn, userBubbleWidth: userBubbleWidth, accent: replyColor(turn.source),
                 attribution: replyAttribution(for: turn), icon: sourceIcon(turn.source),
-                showsTime: aiTimestamps, showsWordCount: aiWordCount, copyPrompt: { copyText(turn.prompt) },
+                showsTime: aiTimestamps, showsWordCount: aiWordCount,
+                readAlong: speechBox.playback == .reply(turn.id) ? speechBox.wordProgress : nil,
+                copyPrompt: { copyText(turn.prompt) },
                 replyActions: { replyActions(turn) }, noticeActions: { noticeActions(turn) }
             )
             .contextMenu {

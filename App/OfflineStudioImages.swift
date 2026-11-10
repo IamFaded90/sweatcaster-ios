@@ -345,6 +345,9 @@ extension OfflineStudio {
             Button { imageViewer = StudioImageSheet(url: imageURL) } label: {
                 Image(uiImage: thumbnail).resizable().scaledToFit().accessibilityLabel("Valgt billede")
             }.buttonStyle(.plain)
+            if !privateSession, !generatingImages, let comparison = imageComparisonSource, comparison.result == imageURL {
+                StudioImageComparison(source: comparison, result: thumbnail).id(imageURL)
+            }
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) { resultImageActions(imageURL) }
                 VStack(alignment: .leading, spacing: 4) { resultImageActions(imageURL) }
@@ -540,6 +543,9 @@ extension OfflineStudio {
                 batchTurnID = turn.id
                 turns.append(turn)
                 imageURL = destination
+                if !request.isPrivate {
+                    imageComparisonSource = StudioImageComparisonSource(result: destination, bytes: request.sourceImage)
+                }
             }
             batchImageURLs = created
             savePrivateConversation()

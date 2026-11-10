@@ -9,6 +9,7 @@ struct PCStatusView: View {
     @Environment(\.fadedPalette) private var palette
     @State private var refreshCount = 0
     @State private var snapshot: Snapshot?
+    @State private var samples: [ConnectionSample] = []
 
     private struct Request: Equatable {
         let targetID: String?
@@ -20,6 +21,15 @@ struct PCStatusView: View {
         let request: Request
         let checkedAt: Date
         let rows: [PCFeatureCheck.Row]
+    }
+
+    private struct ConnectionSample: Identifiable, Sendable {
+        let id = UUID()
+        let profile: ConnectionProfile
+        let checkedAt = Date.now
+        let milliseconds: Int?
+
+        var status: String { milliseconds.map { "Svar på \($0) ms" } ?? "Intet svar" }
     }
 
     private var request: Request {
@@ -35,6 +45,7 @@ struct PCStatusView: View {
                     FadedEmptyState(icon: "desktopcomputer", title: "Ingen parret PC",
                                     detail: "Forbind til din PC under Indstillinger → Forbindelse. Demo har ingen PC-status.")
                 } else if let snapshot, snapshot.request == request {
+                    if let latest = samples.first { connectionRow(latest) }
                     ForEach(snapshot.rows) { row in featureRow(row) }
                     Text("Tjekket \(snapshot.checkedAt.formatted(date: .omitted, time: .shortened))")
                         .font(.caption).foregroundStyle(palette.secondary)
@@ -56,6 +67,23 @@ struct PCStatusView: View {
         .task(id: request) { await refresh() }
     }
 
+    private func connectionRow(_ latest: ConnectionSample) -> some View {
+        FadedCard(size: .compact, accent: latest.milliseconds == nil ? palette.coral : palette.cyan) {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                Label("Forbindelse · \(latest.profile.route)", systemImage: "network").font(FadedTypography.action)
+                FadedBadge(latest.status, tone: latest.milliseconds == nil ? .warning : .success)
+                if samples.count > 1 {
+                    DisclosureGroup("Seneste målinger") {
+                        ForEach(samples) { sample in
+                            Text("\(sample.checkedAt.formatted(date: .omitted, time: .shortened)) · \(sample.status)")
+                                .font(.footnote).foregroundStyle(palette.secondary)
+                        }
+                    }.frame(minHeight: 44, alignment: .leading)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
     private func featureRow(_ row: PCFeatureCheck.Row) -> some View {
         FadedCard(size: .compact, accent: row.tone.color(in: palette)) {
             DisclosureGroup {
@@ -75,9 +103,22 @@ struct PCStatusView: View {
     @MainActor private func refresh() async {
         let requested = request
         guard let api, api.queueTargetID == requested.targetID else { return }
-        let rows = await PCFeatureCheck.measure(api: api, commentaryEnabled: requested.commentaryEnabled)
+        async let rows = PCFeatureCheck.measure(api: api, commentaryEnabled: requested.commentaryEnabled)
+        async let sample = measureConnection(api.server)
+        let (measuredRows, measuredConnection) = await (rows, sample)
         guard !Task.isCancelled, requested == request else { return }
-        snapshot = .init(request: requested, checkedAt: .now, rows: rows)
+        if snapshot?.request.targetID != requested.targetID { samples.removeAll() }
+        samples = [measuredConnection] + Array(samples.prefix(4))
+        snapshot = .init(request: requested, checkedAt: .now, rows: measuredRows)
+    }
+
+    @MainActor private func measureConnection(_ server: Server) async -> ConnectionSample {
+        do {
+            return .init(profile: server.profile, milliseconds: try await Model.probe(server))
+        } catch {
+            if !Task.isCancelled { AppDiagnostics.record(error) }
+            return .init(profile: server.profile, milliseconds: nil)
+        }
     }
 }
 

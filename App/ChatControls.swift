@@ -189,32 +189,38 @@ extension ChatView {
         pcQueueTargetID != nil && entry.targetID == pcQueueTargetID
     }
 
+    private enum OutboxStage: String, CaseIterable {
+        case review = "Kræver gennemgang"
+        case waiting = "Venter"
+        case sending = "Sender"
+    }
+
+    private func outboxStage(_ entry: PCChatOutbox.Entry) -> OutboxStage {
+        if activeOutboxIDs.contains(entry.id) { return .sending }
+        if entry.state == .waiting && matchesQueueTarget(entry) { return .waiting }
+        return .review
+    }
+
     var outboxPanel: some View {
-        FadedCard(accent: palette.cyan) {
+        let sections = Dictionary(grouping: outboxEntries) { outboxStage($0) }
+        return FadedCard(accent: sections[.review] == nil ? palette.cyan : palette.coral) {
             VStack(alignment: .leading, spacing: 8) {
                 FadedSectionLabel("Udbakke til PC")
-                ForEach(outboxEntries) { entry in
-                    let inFlight = activeOutboxIDs.contains(entry.id)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(entry.prompt).lineLimit(2)
-                        Text(outboxStatus(entry, inFlight: inFlight))
-                            .font(.caption).foregroundStyle(palette.secondary)
-                        if !inFlight {
-                            Menu("Udbakkehandlinger", systemImage: "ellipsis.circle") {
-                                Button("Kopiér besked", systemImage: "doc.on.doc") { copyText(entry.prompt) }
-                                if entry.needsReview && matchesQueueTarget(entry) {
-                                    Button("Send igen", systemImage: "paperplane") { outboxRetryID = entry.id }
-                                }
-                                Button("Fjern fra udbakken", systemImage: "trash", role: .destructive) {
-                                    removeFromOutbox(entry)
-                                }
-                            }.frame(minHeight: 44)
+                ForEach(OutboxStage.allCases, id: \.self) { stage in
+                    if let entries = sections[stage] {
+                        VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                            Text("\(stage.rawValue) · \(entries.count)")
+                                .font(.subheadline.weight(.semibold))
+                                .accessibilityAddTraits(.isHeader)
+                            ForEach(entries) { entry in
+                                outboxRow(entry, sending: stage == .sending)
+                            }
                         }
-                    }.padding(.vertical, 3)
+                    }
                 }
                 if api == nil, let reconnectPC {
                     FadedSecondaryButton("Tjek forbindelse", icon: "arrow.clockwise", action: reconnectPC)
-                } else if let live = api as? LiveAPI, outboxEntries.contains(where: { $0.state == .waiting && matchesQueueTarget($0) }) {
+                } else if let live = api as? LiveAPI, sections[.waiting] != nil {
                     FadedSecondaryButton("Send ventende", icon: "paperplane") {
                         Task { await PCChatOutbox().deliverReady(using: live) }
                     }.disabled(!activeOutboxIDs.isEmpty || task != nil)
@@ -230,6 +236,30 @@ extension ChatView {
         }
     }
 
+    private func outboxRow(_ entry: PCChatOutbox.Entry, sending: Bool) -> some View {
+        HStack(spacing: FadedSpacing.s) {
+            VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                Text(entry.prompt).lineLimit(2)
+                FadedDetailText(outboxStatus(entry, inFlight: sending))
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if !sending {
+                Menu {
+                    Button("Kopiér besked", systemImage: "doc.on.doc") { copyText(entry.prompt) }
+                    if entry.needsReview && matchesQueueTarget(entry) {
+                        Button("Send igen", systemImage: "paperplane") { outboxRetryID = entry.id }
+                    }
+                    Button("Fjern fra udbakken", systemImage: "trash", role: .destructive) {
+                        removeFromOutbox(entry)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }.accessibilityLabel("Udbakkehandlinger")
+            }
+        }.padding(.vertical, 3)
+    }
+
     private func retryOutbox(_ id: UUID) {
         guard let address = pcTargetAddress, let target = pcQueueTargetID else { return }
         do {
@@ -242,9 +272,10 @@ extension ChatView {
     }
 
     private func outboxStatus(_ entry: PCChatOutbox.Entry, inFlight: Bool) -> String {
+        if inFlight { return "PC-beskeden behandles…" }
         if !matchesQueueTarget(entry) { return "PC-forbindelsen er ændret. Beskeden sendes ikke." }
-        if entry.state == .waiting { return "Sendes, når denne PC er tilbage." }
-        return inFlight ? "PC-beskeden behandles…" : "Kræver gennemgang. Vælg Send igen eller fjern beskeden."
+        if entry.state == .waiting { return api is LiveAPI ? "Klar til afsendelse." : "Sendes, når denne PC er tilbage." }
+        return "Kræver gennemgang. Vælg Send igen eller fjern beskeden."
     }
 
     func reloadOutbox() {

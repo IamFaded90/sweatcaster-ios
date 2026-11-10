@@ -1,6 +1,8 @@
 // Loading and retry feedback shared by the app screens.
 
 import SwiftUI
+import UIKit
+import UniformTypeIdentifiers
 
 struct LoadingSkeleton: View {
     let label: String
@@ -53,6 +55,28 @@ struct FadedToast: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.updatesFrequently)
+    }
+}
+
+struct FadedCopyErrorButton: View {
+    let title: String
+    @State private var copied = false
+
+    var body: some View {
+        FadedSecondaryButton(copied ? "Fejl kopieret" : "Kopiér fejl",
+                             icon: copied ? "checkmark" : "doc.on.doc") {
+            UIPasteboard.general.setItems([[UTType.utf8PlainText.identifier: title]], options: [.localOnly: true])
+            copied = true
+            UIAccessibility.post(notification: .announcement, argument: "Fejl kopieret.")
+        }
+        .onChange(of: title) { _, _ in copied = false }
+        .task(id: copied) {
+            guard copied else { return }
+            do {
+                try await Task.sleep(for: .seconds(2))
+                copied = false
+            } catch { return }
+        }
     }
 }
 

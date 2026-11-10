@@ -9,8 +9,10 @@ struct ChatSidebarView: View {
     let sessions: [SavedAgentSession]
     let selectedID: UUID
     let isBusy: Bool
+    let activeTurns: [ChatTurn]
     let newChat: () -> Void
     let select: (SavedAgentSession) -> Void
+    let jumpToTurn: (UUID) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.m) {
@@ -35,6 +37,7 @@ struct ChatSidebarView: View {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: FadedSpacing.s) {
                         if searchText.isEmpty {
+                            messageIndex
                             let favorites = rows.filter { $0.turns.contains { $0.favorite == true } }
                             let other = rows.filter { !$0.turns.contains { $0.favorite == true } }
                             section("Favoritter", sessions: favorites)
@@ -57,6 +60,19 @@ struct ChatSidebarView: View {
     private enum Age: Equatable { case today, week, earlier }
 
     private var searchText: String { query.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    @ViewBuilder private var messageIndex: some View {
+        if activeTurns.count > 1 {
+            DisclosureGroup("Hop til en besked") {
+                ForEach(Array(activeTurns.suffix(FadedSearchIndex.limit))) { turn in
+                    Button { jumpToTurn(turn.id) } label: {
+                        Label(turn.prompt, systemImage: "arrow.turn.down.right")
+                            .lineLimit(2).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }.buttonStyle(.plain).disabled(isBusy)
+                }
+            }.frame(minHeight: 44, alignment: .leading)
+        }
+    }
 
     private var visibleSessions: [SavedAgentSession] {
         let sorted = sessions.sorted {

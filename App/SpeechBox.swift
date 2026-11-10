@@ -9,8 +9,19 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         case reply(UUID), preview
     }
 
+    final class WordProgress: ObservableObject {
+        struct Position {
+            let text: String
+            let range: NSRange
+        }
+
+        @Published fileprivate(set) var position: Position?
+    }
+
     private let synthesizer = AVSpeechSynthesizer()
     @Published private(set) var playback: Playback?
+    @Published private(set) var isSpeaking = false
+    let wordProgress = WordProgress()
     private var currentUtterance: AVSpeechUtterance?
 
     override init() {
@@ -27,9 +38,26 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     @MainActor func stop() {
-        currentUtterance = nil
-        if playback != nil { playback = nil }
+        clearPlayback()
         synthesizer.stopSpeaking(at: .immediate)
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        let identifier = ObjectIdentifier(utterance)
+        Task { @MainActor [weak self] in
+            guard let self, let currentUtterance, ObjectIdentifier(currentUtterance) == identifier else { return }
+            isSpeaking = true
+        }
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString characterRange: NSRange,
+                           utterance: AVSpeechUtterance) {
+        let identifier = ObjectIdentifier(utterance)
+        Task { @MainActor [weak self] in
+            guard let self, let currentUtterance, ObjectIdentifier(currentUtterance) == identifier,
+                  case .reply(_)? = playback else { return }
+            wordProgress.position = .init(text: currentUtterance.speechString, range: characterRange)
+        }
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
@@ -44,8 +72,14 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         let identifier = ObjectIdentifier(utterance)
         Task { @MainActor [weak self] in
             guard let self, let currentUtterance, ObjectIdentifier(currentUtterance) == identifier else { return }
-            self.currentUtterance = nil
-            self.playback = nil
+            clearPlayback()
         }
+    }
+
+    @MainActor private func clearPlayback() {
+        currentUtterance = nil
+        if wordProgress.position != nil { wordProgress.position = nil }
+        if isSpeaking { isSpeaking = false }
+        if playback != nil { playback = nil }
     }
 }

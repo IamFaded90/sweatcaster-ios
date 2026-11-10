@@ -86,7 +86,7 @@ struct PCModelsView: View {
             FadedEmptyState(icon: "desktopcomputer", title: "Ingen PC-forbindelse",
                             detail: "Gå tilbage til Indstillinger, og forbind til PC’en for at se dens modeller.")
         } else if loadedTargetID != api?.queueTargetID {
-            LoadingSkeleton(label: "Henter modeller fra PC’en…")
+            catalogLoading
         } else if let notice {
             FadedCard(accent: palette.coral) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -129,7 +129,23 @@ struct PCModelsView: View {
                 }
             }
         } else {
-            LoadingSkeleton(label: "Henter modeller fra PC’en…")
+            catalogLoading
+        }
+    }
+
+    private var catalogLoading: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.s) {
+            FadedDetailText("Henter modeller fra PC’en…")
+            ForEach(0..<3, id: \.self) { _ in
+                FadedCard(size: .compact) {
+                    VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                        Capsule().fill(palette.secondary.opacity(0.24)).frame(width: 144, height: 12)
+                        Capsule().fill(palette.secondary.opacity(0.16)).frame(width: 84, height: 10)
+                        RoundedRectangle(cornerRadius: FadedRadius.small)
+                            .fill(palette.secondary.opacity(0.12)).frame(maxWidth: 280).frame(height: 10)
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.accessibilityHidden(true)
+            }
         }
     }
 

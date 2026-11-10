@@ -183,6 +183,7 @@ extension OfflineStudio {
 
     func newPrivateConversation() {
         speech.stop()
+        imageComparisonSource = nil
         if privateSession {
             removeTemporaryStudioImages()
             sessionNote = ""
@@ -199,6 +200,7 @@ extension OfflineStudio {
     }
 
     func closeChatSession() {
+        imageComparisonSource = nil
         studioAuthentication?.invalidate()
         studioAuthentication = nil
         authenticating = false

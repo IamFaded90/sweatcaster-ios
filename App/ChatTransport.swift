@@ -53,6 +53,10 @@ extension ChatView {
     }
 
     func send() {
+        guard stagedPhoto == nil else {
+            chatNotice = "Analysér eller fjern billedet, før du sender."
+            return
+        }
         dictation.stop()
         let originalDraft = draft
         let message = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)

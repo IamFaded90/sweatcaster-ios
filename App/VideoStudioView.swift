@@ -88,7 +88,23 @@ extension Home {
 
     private var videoPagePicker: some View {
         Picker("Sektion i Video Studio", selection: $videoPage) {
-            ForEach(VideoPage.allCases) { page in Text(page.rawValue).tag(page) }
+            ForEach(VideoPage.allCases) { page in
+                let title = videoPageTitle(page)
+                Text(title.visible).accessibilityLabel(title.spoken).tag(page)
+            }
+        }
+    }
+
+    private func videoPageTitle(_ page: VideoPage) -> (visible: String, spoken: String) {
+        switch page {
+        case .clips where !model.selected.isEmpty:
+            let count = model.selected.count
+            return ("Klip (\(count))", "Klip, \(count) valgt")
+        case .jobs where model.connected || model.isDemo:
+            let count = model.jobs.lazy.filter { $0.status.active }.count
+            return count > 0 ? ("Jobs (\(count))", "Jobs, \(count) aktive") : (page.rawValue, page.rawValue)
+        default:
+            return (page.rawValue, page.rawValue)
         }
     }
 

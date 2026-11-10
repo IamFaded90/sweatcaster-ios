@@ -123,7 +123,6 @@ struct PhoneModelsView: View {
         case storage = "Lagerplads"
         case performance = "Hastighed"
     }
-
     private enum DeleteTarget {
         case text(id: String, name: String)
         case image(ModelDiskStorage.Item)
@@ -135,7 +134,6 @@ struct PhoneModelsView: View {
             }
         }
     }
-
     private var downloader: ModelDownloader { .shared }
     private var mutationBusy: Bool {
         working || benchmarkRunning || imageDownload != nil || requestedDownloadID != nil || downloader.isDownloading || PhoneModelDownloads.shared.preparingModelID != nil
@@ -144,7 +142,6 @@ struct PhoneModelsView: View {
     private var orderedCatalog: [PhoneModels.Entry] {
         PhoneModels.catalog.filter { favorites.contains($0.id) } + PhoneModels.catalog.filter { !favorites.contains($0.id) }
     }
-
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -198,7 +195,6 @@ struct PhoneModelsView: View {
             } message: { _ in Text("Du kan hente eller importere filen igen.") }
         }
     }
-
     @ViewBuilder private var modelPage: some View {
         switch page {
         case .models:
@@ -210,12 +206,16 @@ struct PhoneModelsView: View {
             StudioImageDownloadsView(downloading: $imageDownload, canStart: !mutationBusy) { storageRevision += 1 }
         case .storage:
             storageSection
+            if storage?.text.isEmpty == true {
+                FadedEmptyState(icon: "arrow.down.circle", title: "Ingen gemte tekstmodeller",
+                                detail: "Hent en model nu, så du kan chatte uden internet.",
+                                actionTitle: "Se telefonmodeller") { page = .models }
+            }
             imageFilesSection
         case .performance:
             benchmarkSection
         }
     }
-
     private var pagePicker: some View {
         Picker("Sektion", selection: $page) {
             ForEach(Page.allCases.filter { allowsImageDownloads || $0 != .images }, id: \.self) { Text($0.rawValue).tag($0) }

@@ -54,24 +54,29 @@ private struct StudioGalleryThumbnail: View {
 extension OfflineStudio {
     @ViewBuilder
     var studioGalleryPage: some View {
-        let gallery = ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                studioImageHistory
-                DisclosureGroup("Indstillinger") {
-                    DisclosureGroup("Chat og stemme") {
-                        if privateSession { sessionChatSettings.padding(.top, 10) }
-                        else { privateSettings.padding(.top, 10) }
-                    }.padding(.top, 10)
-                    DisclosureGroup("Billedmodel og LoRA") { privateImageSettings.padding(.top, 10) }
-                    StudioRAMStatus()
-                    FadedSecondaryButton("Slet studiets indhold og modeller", icon: "trash", role: .destructive) {
-                        panicDeletesDownloads = true
-                        confirmStudioPanic = true
-                    }.disabled(task != nil)
-                }
-            }.padding(16)
+        let gallery = ScrollViewReader { scroll in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    studioImageHistory
+                    DisclosureGroup("Indstillinger") {
+                        DisclosureGroup("Chat og stemme") {
+                            if privateSession { sessionChatSettings.padding(.top, 10) }
+                            else { privateSettings.padding(.top, 10) }
+                        }.padding(.top, 10)
+                        DisclosureGroup("Billedmodel og LoRA") { privateImageSettings.padding(.top, 10) }
+                        StudioRAMStatus()
+                        FadedSecondaryButton("Slet studiets indhold og modeller", icon: "trash", role: .destructive) {
+                            panicDeletesDownloads = true
+                            confirmStudioPanic = true
+                        }.disabled(task != nil)
+                    }
+                }.padding(16)
+            }
+            .onChange(of: imageViewer?.url) { opened, current in
+                if current == nil, let opened, filteredImageHistory.contains(opened) { scroll.scrollTo(opened) }
+            }
+            .onScrollPhaseChange { _, phase in if phase == .interacting { resetIdleTimer() } }
         }
-        .onScrollPhaseChange { _, phase in if phase == .interacting { resetIdleTimer() } }
         if privateSession { gallery } else { gallery.refreshable { await refreshPublicGallery() } }
     }
 
@@ -167,6 +172,7 @@ extension OfflineStudio {
             rebuildGalleryCache()
             selectedGalleryImages.remove(file)
             batchImageURLs.removeAll { $0 == file }
+            if imageComparisonSource?.result == file { imageComparisonSource = nil }
             if imageURL == file {
                 imageURL = nil
                 if let first = batchImageURLs.first { selectBatchImage(first) }
@@ -278,7 +284,7 @@ extension OfflineStudio {
             }
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10), count: studioTypeSize.isAccessibilitySize ? 1 : 2),
                       alignment: .leading, spacing: 12) {
-                ForEach(files, id: \.self) { file in galleryImageCard(file) }
+                ForEach(files, id: \.self) { file in galleryImageCard(file).id(file) }
             }
         }
         .onChange(of: galleryFilter) { _, _ in selectedGalleryImages.removeAll() }

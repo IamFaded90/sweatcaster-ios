@@ -9,6 +9,7 @@ struct TeamRoster: View {
     let onPrivateSessionEnded: () -> Void
     let connectPC: () -> Void
     let close: (() -> Void)?
+    @Binding var compact: Bool
 
     @Environment(\.scenePhase) private var phase
     @Environment(\.fadedPalette) private var palette
@@ -27,8 +28,7 @@ struct TeamRoster: View {
     @State private var refresh = 0
     @State private var query = ""
     @State private var page: Page = .roster
-
-    private enum Page: String, CaseIterable {
+    enum Page: String, CaseIterable {
         case roster = "Bots"
         case approvals = "Godkend"
         case workflows = "Opgaver"
@@ -69,13 +69,16 @@ struct TeamRoster: View {
         (hub?.agents ?? []).filter { matches($0.name, $0.room_id, isChief($0) ? "Chief Stabschef" : "") }
     }
 
-    var body: some View {
+    private var expandedSidebar: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.section) {
             HStack {
                 Text("Holdet").font(FadedTypography.title).accessibilityAddTraits(.isHeader)
                 Spacer()
                 if let close {
                     Button("Luk Holdet", systemImage: "xmark", action: close)
+                        .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                } else {
+                    Button("Fold Holdet sammen", systemImage: "sidebar.left") { compact = true }
                         .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                 }
             }
@@ -103,7 +106,17 @@ struct TeamRoster: View {
             .id(page)
             .refreshable { await reload() }
         }
-        .padding(FadedSpacing.edge)
+    }
+
+    var body: some View {
+        Group {
+            if close == nil && compact {
+                TeamSidebarRail(page: page, approvals: approvals?.count ?? 0) { destination in
+                    if let destination { page = destination }
+                    compact = false
+                }
+            } else { expandedSidebar.padding(FadedSpacing.edge) }
+        }
         .background { FadedBackground() }
         .background(.ultraThinMaterial)
         .overlay(alignment: .trailing) { Rectangle().fill(palette.border).frame(width: 1).accessibilityHidden(true) }

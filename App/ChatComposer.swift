@@ -21,6 +21,8 @@ struct ChatComposer<Content: View>: View {
 extension ChatView {
     @ViewBuilder var quickModelPicker: some View {
         if !demo {
+            let source = effectiveReplySource
+            let unavailablePC = source == .pc && (api == nil || pcEngineOffline)
             Menu {
                 if manualRoute != nil {
                     Button(autoRouterEnabled ? "Brug Auto igen" : "Brug mit normale valg", systemImage: "arrow.uturn.backward") {
@@ -48,13 +50,16 @@ extension ChatView {
                     Button("Grok · Cloud", systemImage: "cloud") { chooseModelForNextMessage(.grok) }
                 }
             } label: {
-                Label(nextMessageModelName, systemImage: "chevron.down")
-                    .font(.caption.bold()).lineLimit(chatTypeSize.isAccessibilitySize ? nil : 1)
-                    .frame(minWidth: 44, minHeight: 44, alignment: .leading)
+                HStack(spacing: FadedSpacing.xs) {
+                    Image(systemName: unavailablePC ? "exclamationmark.circle" : source.icon)
+                        .foregroundStyle(palette.isDark ? sourceColor(source) : palette.text)
+                    Text(nextMessageModelName).lineLimit(chatTypeSize.isAccessibilitySize ? nil : 1)
+                    Image(systemName: "chevron.down")
+                }.font(.caption.bold()).frame(minWidth: 44, minHeight: 44, alignment: .leading)
             }
             .disabled(task != nil)
             .accessibilityLabel("Model for næste besked")
-            .accessibilityValue(nextMessageModelName)
+            .accessibilityValue(unavailablePC ? "PC-chat utilgængelig. \(nextMessageModelName)" : "\(source.rawValue), \(nextMessageModelName)")
         }
     }
 
@@ -80,6 +85,18 @@ extension ChatView {
                 }
             }
             ChatComposer {
+                if let photo = stagedPhoto {
+                    HStack(spacing: FadedSpacing.s) {
+                        Image(uiImage: photo.preview).resizable().scaledToFill()
+                            .frame(width: 36, height: 36).clipped().clipShape(.rect(cornerRadius: FadedRadius.small))
+                            .accessibilityHidden(true)
+                        Button("Analysér billede", action: analyzeStagedPhoto)
+                            .frame(minHeight: 44).disabled(task != nil)
+                        Spacer(minLength: 0)
+                        Button("Fjern billede", systemImage: "xmark") { stagedPhoto = nil }
+                            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                    }
+                }
                 if let attachedNote {
                     HStack {
                         Label("Note: \(String(attachedNote.prefix(80)))", systemImage: "note.text")
@@ -134,15 +151,31 @@ extension ChatView {
                 FadedSecondaryButton("Åbn lokale modeller", icon: "iphone") { showPhoneModelSetup = true }
                     .disabled(task != nil)
             }
-            if let sourceNote { Text(sourceNote).font(.caption).foregroundStyle(palette.secondary) }
+            if let sourceNote {
+                Text(sourceNote).font(.caption).foregroundStyle(palette.secondary)
+                pcRecoveryAction
+            }
         }
         .padding(.horizontal, FadedSpacing.m).padding(.vertical, 6)
         .background(palette.background)
     }
 
+    @ViewBuilder private var pcRecoveryAction: some View {
+        if effectiveReplySource == .pc, !modelsLoading, task == nil {
+            if (api == nil || pcEngineOffline), PhoneModels.isReady(PhoneModels.effectiveModelID(phoneModel)) {
+                FadedSecondaryButton("Brug Telefon imens", icon: "iphone") { chooseModelForNextMessage(.phone) }
+            } else if !canSendToSource, api is LiveAPI, !legacyChat {
+                FadedSecondaryButton("Åbn PC-modeller", icon: "desktopcomputer") {
+                    composerFocused = false
+                    showPCModelSetup = true
+                }
+            }
+        }
+    }
+
     private var sendControl: some View {
         let sending = task != nil
-        let allowed = sending || (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let allowed = sending || (stagedPhoto == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && transportMessage.unicodeScalars.count <= 2000 && canSendToSource)
         return Button {
             if sending { stop() }

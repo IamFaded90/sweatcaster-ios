@@ -134,7 +134,7 @@ extension Home {
                     }
                 }
                 action(error.fixAction.title) { fixDashboardError(error.fixAction) }.disabled(switchDisabled)
-                FadedSecondaryButton("Kopiér fejl", icon: "doc.on.doc") { UIPasteboard.general.string = error.title }
+                FadedCopyErrorButton(title: error.title)
             }
         }
     }
@@ -148,7 +148,7 @@ extension Home {
                     if !model.refreshing, let error = model.errorPresentation {
                         FadedSecondaryButton("Brug Telefon", icon: "iphone", action: openPhoneChat)
                         FadedSecondaryButton(error.fixAction.title, icon: "arrow.clockwise") { fixDashboardError(error.fixAction) }
-                        FadedSecondaryButton("Kopiér fejl", icon: "doc.on.doc") { UIPasteboard.general.string = error.title }
+                        FadedCopyErrorButton(title: error.title)
                     }
                 }
             }
@@ -171,9 +171,9 @@ extension Home {
     @ViewBuilder private var dashboardQueueNotice: some View {
         let videos = model.videoOutbox.count
         if !model.isDemo && (model.requiresVideoReview || queuedChatCount + chatReviewCount + videos > 0) {
-            FadedCard(accent: chatReviewCount > 0 ? palette.coral : palette.cyan) {
+            FadedCard(accent: dashboardQueueNeedsAttention ? palette.coral : palette.cyan) {
                 VStack(alignment: .leading, spacing: 8) {
-                    FadedSectionLabel("I kø")
+                    FadedSectionLabel("Udbakke")
                     if queuedChatCount > 0 {
                         FadedSecondaryButton("Chat i kø · \(queuedChatCount)", icon: "bubble.left", action: openChat)
                     }
@@ -291,10 +291,35 @@ extension Home {
         }.buttonStyle(.plain)
     }
 
+    private var dashboardQueueNeedsAttention: Bool {
+        chatReviewCount > 0 || model.requiresVideoReview || model.videoOutbox.contains {
+            $0.state == .rejected || ($0.state == .attempted && !model.checkingVideoOutbox)
+        }
+    }
+
+    private var dashboardActivitySummary: String {
+        guard !model.isDemo else { return "" }
+        let waiting = queuedChatCount + model.videoOutbox.filter { $0.state == .waiting }.count
+        let statuses: [String?] = [
+            dashboardQueueNeedsAttention ? "Afsendelse til gennemgang" : nil,
+            dashboardApprovalJob != nil ? "Kodeforslag klar" : nil,
+            model.connected && dashboardActiveVideo != nil ? "Video i gang" : nil,
+            waiting > 0 ? "\(waiting) i kø" : nil
+        ]
+        return statuses.compactMap { $0 }.joined(separator: " · ")
+    }
+
     private var dashboardActivity: some View {
-        NavigationLink { dashboardActivityPage } label: {
-            Label("Seneste aktivitet", systemImage: "clock")
-                .frame(maxWidth: .infinity, alignment: .leading)
+        let summary = dashboardActivitySummary
+        return NavigationLink { dashboardActivityPage } label: {
+            VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                Label("Seneste aktivitet", systemImage: summary.isEmpty ? "clock" : "tray")
+                if !summary.isEmpty {
+                    Text(summary).font(.caption).foregroundStyle(palette.secondary)
+                }
+            }
+            .padding(.vertical, summary.isEmpty ? 0 : FadedSpacing.s)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }.buttonStyle(FadedButtonStyle(kind: .secondary))
     }
 

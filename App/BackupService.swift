@@ -53,7 +53,7 @@ import Foundation
     private static let preferenceKinds: [String: PreferenceKind] = {
         let flags = [
             AppStorageKeys.aiActions, AppStorageKeys.aiAssumptions, AppStorageKeys.aiBullets,
-            AppStorageKeys.aiCitations, AppStorageKeys.aiClarify, AppStorageKeys.aiCodeComments,
+            AppStorageKeys.aiClarify, AppStorageKeys.aiCodeComments,
             AppStorageKeys.aiCounterpoint, AppStorageKeys.aiEmojis, AppStorageKeys.aiExamples,
             AppStorageKeys.aiHeadings, AppStorageKeys.aiNoJargon, AppStorageKeys.aiPreserveNames,
             AppStorageKeys.aiProsCons, AppStorageKeys.aiRecapQuestion, AppStorageKeys.aiRisks,
