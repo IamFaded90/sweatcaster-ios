@@ -30,6 +30,9 @@ struct OfflineStudio: View {
     @State var privatePathMonitor: NWPathMonitor?
     @State var privateImageRendering = false
     @State var sessionPreferences = StudioSessionPreferences()
+    @State var privateModelDownload: Task<Void, Never>?
+    @State var privateModelProgress = 0.0
+    @State var privateModelProblem: String?
     @State var showSessionNote = false
     @State var sessionNote = ""
     @State var dictation = ChatDictation()
@@ -233,7 +236,6 @@ struct OfflineStudio: View {
                         Menu("Samtale", systemImage: "ellipsis.circle") {
                             Button("Ny samtale", systemImage: "square.and.pencil") { newPrivateConversation() }
                             if privateSession {
-                                sessionModelPicker
                                 Button("Galleri og indstillinger", systemImage: "gearshape") { studioPage = .gallery }
                             }
                         }

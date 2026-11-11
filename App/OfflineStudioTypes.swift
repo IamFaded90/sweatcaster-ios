@@ -238,10 +238,8 @@ struct StudioImageRequest {
 }
 
 struct StudioSessionPreferences {
-    var textModel = ""
     var imageModel = "sd_v1.5_f16.ckpt"
     var lora = ""
-    var personality = "bot"
     var voiceLanguage = "da-DK"
     var danishVoice = ""
     var englishVoice = ""

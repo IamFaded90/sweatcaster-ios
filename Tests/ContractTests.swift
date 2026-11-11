@@ -7,6 +7,7 @@ extension ContractTests {
         let pc = try LiveAPI(server: Server("192.168.1.20"), token: "fixture")
         let studio = OfflineStudio(api: pc, sessionUnlocked: .constant(false), ephemeralOnly: true)
         XCTAssertNil(studio.api)
+        XCTAssertEqual(studio.effectiveTextModel, DolphinPhoneRuntime.modelID)
         XCTAssertEqual(OfflineStudio.Page.allCases, [.chat, .images, .gallery])
     }
 
@@ -41,15 +42,16 @@ extension ContractTests {
         let temporary = root.appendingPathComponent("Temp", isDirectory: true)
         defer { try? files.removeItem(at: root) }
         let model = documents.appendingPathComponent("Models", isDirectory: true)
+        let privateModels = support.appendingPathComponent(DolphinPhoneRuntime.storageRoot.lastPathComponent, isDirectory: true)
         let saved = support.appendingPathComponent("SavedVideos", isDirectory: true)
         let keep = support.appendingPathComponent("OtherTool", isDirectory: true)
         let scratch = temporary.appendingPathComponent(StudioScratch.prefix + UUID().uuidString, isDirectory: true)
-        for folder in [model, saved, keep, scratch] { try files.createDirectory(at: folder, withIntermediateDirectories: true) }
+        for folder in [model, privateModels, saved, keep, scratch] { try files.createDirectory(at: folder, withIntermediateDirectories: true) }
         let personal = documents.appendingPathComponent("Personlig.txt")
         let unrelatedPreview = temporary.appendingPathComponent("Sweat-min-fil.mp4")
         for file in [personal, unrelatedPreview] { try Data("behold".utf8).write(to: file) }
         try AppLocalReset.deleteOwnedData(documents: documents, support: support, temporary: temporary)
-        for removed in [model, saved, scratch] { XCTAssertFalse(files.fileExists(atPath: removed.path)) }
+        for removed in [model, privateModels, saved, scratch] { XCTAssertFalse(files.fileExists(atPath: removed.path)) }
         for retained in [personal, unrelatedPreview, keep] { XCTAssertTrue(files.fileExists(atPath: retained.path)) }
     }
 }

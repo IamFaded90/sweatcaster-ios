@@ -180,8 +180,8 @@ extension OfflineStudio {
             }
             if let problem = dictation.problem, !dictation.active {
                 Text(problem).font(.footnote).foregroundStyle(palette.secondary)
-            } else if !textReady {
-                Text("Vælg en lokal tekstmodel under Galleri og indstillinger.").font(.footnote).foregroundStyle(palette.secondary)
+            } else if !textReady || privateModelDownload != nil {
+                privateTextModelSetup
             } else if hasPrompt && !messageFitsContext {
                 Text("Beskeden er for lang til den valgte model.").font(.footnote).foregroundStyle(palette.secondary)
             } else if !promptFocused {
@@ -191,7 +191,7 @@ extension OfflineStudio {
             HStack(alignment: .bottom, spacing: 4) {
                 sessionPlusMenu
                 TextField("Skriv til din private bot…", text: $prompt, axis: .vertical)
-                    .lineLimit(1...5).frame(minHeight: 44).focused($promptFocused)
+                        .lineLimit(1...5).frame(minHeight: 44).focused($promptFocused)
                 Button(action: toggleSessionDictation) {
                     Image(systemName: dictation.active ? "stop.fill" : "mic")
                         .frame(width: 44, height: 44).contentShape(Rectangle())
@@ -330,7 +330,7 @@ extension OfflineStudio {
         let history = Array(context.reversed())
         rememberPrompt(message)
         runPrivateReply(historyPrompt: message, source: "Telefon · \(studioTextModelName(model))", progress: "Din bot skriver…") { id in
-            try await PhoneModels.reply(modelID: model, prompt: message, instructions: instructions, history: history) {
+            try await replyInStudio(model: model, prompt: message, instructions: instructions, history: history) {
                 updateChatReply(id, with: $0)
             }
         }
@@ -350,7 +350,7 @@ extension OfflineStudio {
         runPrivateReply(historyPrompt: "Lokal opsummering", source: "Telefon · Resumé", progress: "Opsummerer på telefonen…") { id in
             let chunks = splitDocument(document, budget: inputBudget)
             if chunks.count == 1 {
-                try await PhoneModels.reply(modelID: model, prompt: document, instructions: instructions) {
+                try await replyInStudio(model: model, prompt: document, instructions: instructions) {
                     updateChatReply(id, with: $0)
                 }
                 return
@@ -362,14 +362,23 @@ extension OfflineStudio {
                 guard chatWorkID == id else { throw CancellationError() }
                 status = "Opsummerer del \(index + 1) af \(chunks.count)…"
                 var summary = ""
-                try await PhoneModels.reply(modelID: model, prompt: chunk, instructions: instructions + " Brug højst 35 ord.") { summary = $0 }
+                try await replyInStudio(model: model, prompt: chunk, instructions: instructions + " Brug højst 35 ord.") { summary = $0 }
                 summaries.append(splitDocument(summary, budget: partBudget).first ?? "")
             }
             try Task.checkCancellation()
             status = "Samler resuméet…"
-            try await PhoneModels.reply(modelID: model, prompt: summaries.joined(separator: "\n\n"), instructions: instructions) {
+            try await replyInStudio(model: model, prompt: summaries.joined(separator: "\n\n"), instructions: instructions) {
                 updateChatReply(id, with: $0)
             }
+        }
+    }
+
+    private func replyInStudio(model: String, prompt: String, instructions: String,
+                               history: [PhoneModels.ChatExchange] = [], update: @escaping (String) -> Void) async throws {
+        if privateSession {
+            try await DolphinPhoneRuntime.stream(prompt: prompt, instructions: instructions, history: history, update: update)
+        } else {
+            try await PhoneModels.reply(modelID: model, prompt: prompt, instructions: instructions, history: history, update: update)
         }
     }
 
@@ -398,11 +407,13 @@ extension OfflineStudio {
                     } else if case .busy? = error as? LocalComputeError {
                         issue = "Telefonen kører allerede en AI-opgave. Prøv igen om lidt."
                     } else if case .lowMemory? = error as? LocalComputeError {
-                        issue = "Telefonen har for lidt ledig hukommelse. Prøv en mindre lokal model."
+                        issue = privateSession ? "Dolphin mangler ledig hukommelse. Luk andre tunge apps, og prøv igen."
+                            : "Telefonen har for lidt ledig hukommelse. Prøv en mindre lokal model."
                     } else if case .contextLimit? = error as? PhoneModelError {
                         issue = "Samtalen er for lang til modellen. Forkort beskeden, eller start en ny samtale."
                     } else {
-                        issue = "Telefonen kunne ikke svare. Prøv igen, eller skift lokal tekstmodel."
+                        issue = privateSession ? "Dolphin kunne ikke svare. Prøv igen, eller start en ny samtale."
+                            : "Telefonen kunne ikke svare. Prøv igen, eller skift lokal tekstmodel."
                     }
                     if privateSession {
                         status = ""
@@ -428,10 +439,14 @@ extension OfflineStudio {
     }
 
     private var companionInstructions: String {
-        Self.companionInstructions(for: selectedPrivateBot, preset: privateSession ? sessionPreferences.personality : personalityPreset)
+        if privateSession {
+            return "Svar direkte på brugerens seneste besked og på samme sprog. Skriv naturligt. Ved rollespil mellem voksne følger du scenen med en konkret replik. Brug lun, fræk humor eller drilsk flirt, når brugeren lægger op til det. Hold et almindeligt spørgsmål almindeligt. Brug kun relevante fakta fra samtalen."
+        }
+        return Self.companionInstructions(for: selectedPrivateBot, preset: personalityPreset)
     }
 
     private func studioTextModelName(_ id: String) -> String {
+        if id == DolphinPhoneRuntime.modelID { return DolphinPhoneRuntime.modelName }
         if id == "imported" { return "Importeret model" }
         return PhoneModels.catalog.first { $0.id == id }?.name ?? id
     }
@@ -517,12 +532,13 @@ extension OfflineStudio {
     }
 
     var effectiveTextModel: String {
-        let selected = privateSession ? sessionPreferences.textModel : textModel
-        guard liteBatteryEnabled, privateBatteryLevel >= 0, privateBatteryLevel < 0.20 else { return selected }
-        return PhoneModels.effectiveModelID(selected)
+        if privateSession { return DolphinPhoneRuntime.modelID }
+        guard liteBatteryEnabled, privateBatteryLevel >= 0, privateBatteryLevel < 0.20 else { return textModel }
+        return PhoneModels.effectiveModelID(textModel)
     }
 
     func contextWindow(for model: String) -> Int {
+        if model == DolphinPhoneRuntime.modelID { return DolphinPhoneRuntime.contextLimit }
         if let variant = QwenPhoneRuntime.Variant(modelID: model) { return variant.contextLimit }
         guard let folder = PhoneModels.installedDirectory(model),
               let data = try? LocalFileStore.readBytes(from: folder.appending(path: "model_config.json"), maximumBytes: 65_536),
@@ -544,5 +560,8 @@ extension OfflineStudio {
     }
 
     private var hasPrompt: Bool { !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-    var textReady: Bool { effectiveTextModel != "apple" && PhoneModels.installedDirectory(effectiveTextModel) != nil }
+    var textReady: Bool {
+        if privateSession { return privateModelDownload == nil && DolphinPhoneRuntime.isInstalled }
+        return effectiveTextModel != "apple" && PhoneModels.installedDirectory(effectiveTextModel) != nil
+    }
 }

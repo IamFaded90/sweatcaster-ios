@@ -505,7 +505,7 @@ struct ResourceMonitor: View {
 
 @MainActor enum AppLocalReset {
     static func wipe() throws {
-        guard !LocalCompute.isRunning else { throw LocalComputeError.busy }
+        guard !LocalCompute.isRunning, !DolphinPhoneRuntime.isInstalling else { throw LocalComputeError.busy }
         LocalCompute.suspend()
         defer { LocalCompute.resume() }
         PhoneModelDownloads.shared.cancel()
@@ -526,7 +526,7 @@ struct ResourceMonitor: View {
         let roots = [
             (documents, ["Models"]),
             (support, ["FadedAI", "ImportedPhoneModels", "PCChatOutbox", "SavedVideos", "StudioImages",
-                       "StudioLoRAPreviews", "VideoStudio"]),
+                       "StudioLoRAPreviews", "VideoStudio", DolphinPhoneRuntime.storageRoot.lastPathComponent]),
             (temporary, ["FadedAI-diagnostics", BackupService.exportDirectory])
         ]
         for (root, names) in roots where manager.fileExists(atPath: root.path) {

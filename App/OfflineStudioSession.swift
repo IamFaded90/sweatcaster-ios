@@ -71,7 +71,7 @@ extension OfflineStudio {
             wipeExpiredPrivateSession()
             return
         }
-        guard task == nil, !LocalCompute.isRunning else {
+        guard task == nil, !LocalCompute.isRunning, !DolphinPhoneRuntime.isInstalling else {
             status = "Vent til den lokale opgave er færdig, før du rydder studiet."
             return
         }
@@ -86,7 +86,8 @@ extension OfflineStudio {
         catch { AppDiagnostics.record(error); finished = false }
 
         let previews = URL.applicationSupportDirectory.appending(path: "StudioLoRAPreviews", directoryHint: .isDirectory)
-        for directory in [historyFolder, previews, PhoneModels.importedFolder, PhoneModels.downloadedRoot] {
+        for directory in [historyFolder, previews, PhoneModels.importedFolder, PhoneModels.downloadedRoot,
+                          DolphinPhoneRuntime.storageRoot] {
             do { try FileManager.default.removeItem(at: directory) }
             catch let error where LocalFileStore.isMissing(error) { continue }
             catch { AppDiagnostics.record(error); finished = false }
@@ -156,16 +157,6 @@ extension OfflineStudio {
         } else {
             StudioImageModel.allCases.first(where: \.isInstalled)?.id ?? savedImageModel
         }
-        let compact = QwenPhoneRuntime.Variant.compact.modelID
-        if PhoneModels.installedDirectory(textModel) != nil {
-            preferences.textModel = textModel
-        } else if PhoneModels.installedDirectory(compact) != nil {
-            preferences.textModel = compact
-        } else if let available = PhoneModels.catalog.first(where: { PhoneModels.installedDirectory($0.id) != nil }) {
-            preferences.textModel = available.id
-        } else if PhoneModels.installedDirectory("imported") != nil {
-            preferences.textModel = "imported"
-        }
         sessionPreferences = preferences
         privateDeadline = nil
         resetIdleTimer()
@@ -215,6 +206,8 @@ extension OfflineStudio {
         }
         let wasPrivate = privateSession && loaded
         if privateSession {
+            privateModelDownload?.cancel()
+            privateModelProblem = nil
             removeTemporaryStudioImages()
             privateDeadline = nil
             sessionPreferences = StudioSessionPreferences()
@@ -360,16 +353,9 @@ extension OfflineStudio {
 
     var sessionChatSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sessionModelPicker
-            if effectiveTextModel == QwenPhoneRuntime.Variant.compact.modelID {
-                FadedDetailText("Qwen3.5 0.8B er en lille model. Hvis den misforstår dig, kan du prøve en anden installeret tekstmodel.")
-            }
-            Picker("Systemprompt", selection: $sessionPreferences.personality) {
-                Text("Standard").tag("bot")
-                Text("Kort og rolig").tag("calm")
-                Text("Kreativ og legende").tag("creative")
-                Text("Direkte og konkret").tag("direct")
-            }.disabled(task != nil)
+            privateTextModelSetup
+            Link("Built with Llama · Model og licens", destination: DolphinPhoneRuntime.modelCardURL)
+                .font(.footnote).frame(minHeight: 44, alignment: .leading)
             Picker("Oplæsningssprog", selection: $sessionPreferences.voiceLanguage) {
                 Text("Dansk").tag("da-DK")
                 Text("Engelsk (US)").tag("en-US")
@@ -400,19 +386,52 @@ extension OfflineStudio {
         }
     }
 
-    var sessionModelPicker: some View {
-        let models = PhoneModels.catalog.filter { PhoneModels.installedDirectory($0.id) != nil }
-        let imported = PhoneModels.installedDirectory("imported") != nil
-        return Group {
-            if models.isEmpty && !imported {
-                Text("Hent en Core ML-model under Lokale modeller, inden du åbner en privat session.")
-                    .font(.caption).foregroundStyle(palette.secondary)
+    var privateTextModelSetup: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.s) {
+            Label(DolphinPhoneRuntime.modelName, systemImage: "iphone")
+                .font(.caption.weight(.semibold)).foregroundStyle(palette.secondary)
+            if privateModelDownload != nil {
+                ProgressView(value: privateModelProgress) {
+                    Text(privateModelProgress < 0.97 ? "Henter modellen…" : "Gør modellen klar på iPhone…")
+                }
+                Button("Stop hentning", role: .cancel) { privateModelDownload?.cancel() }.frame(minHeight: 44)
+            } else if !textReady {
+                FadedDetailText(privateModelProblem ?? "Hent modellen én gang med internet. Derefter kan du chatte offline.")
+                FadedSecondaryButton(privateModelProblem == nil ? "Hent Dolphin · ca. 1,8 GB" : "Prøv at hente igen",
+                                     icon: "arrow.down.circle", action: downloadPrivateTextModel)
             } else {
-                Picker("Lokal tekstmodel", selection: $sessionPreferences.textModel) {
-                    if sessionPreferences.textModel.isEmpty { Text("Vælg lokal model").tag("") }
-                    ForEach(models) { model in Text(model.name).tag(model.id) }
-                    if imported { Text("Importeret model").tag("imported") }
-                }.disabled(task != nil)
+                FadedDetailText("Klar til lokal chat.")
+            }
+        }
+    }
+
+    private func downloadPrivateTextModel() {
+        guard privateSession, sessionUnlocked, privateModelDownload == nil, !textReady else { return }
+        guard PhoneModels.hasDownloadSpace(bytes: DolphinPhoneRuntime.minimumFreeBytes) else {
+            privateModelProblem = "Frigør mindst 5 GB på iPhone, og prøv at hente Dolphin igen."
+            return
+        }
+        promptFocused = false
+        privateModelProblem = nil
+        privateModelProgress = 0
+        resetIdleTimer()
+        privateModelDownload = Task { @MainActor in
+            defer { privateModelDownload = nil }
+            do {
+                try await DolphinPhoneRuntime.install { value in
+                    guard sessionUnlocked, !Task.isCancelled, value > privateModelProgress else { return }
+                    guard value - privateModelProgress >= 0.01 || value >= 0.97 else { return }
+                    privateModelProgress = value
+                    resetIdleTimer()
+                }
+            } catch is CancellationError {
+                return
+            } catch PhoneModelError.downloadBusy {
+                privateModelProblem = "Telefonen afslutter en anden hentning. Prøv igen om lidt."
+            } catch {
+                guard !Task.isCancelled else { return }
+                AppDiagnostics.record(error)
+                privateModelProblem = "Dolphin kunne ikke hentes. Tjek internetforbindelsen og at der er mindst 5 GB ledig plads."
             }
         }
     }
