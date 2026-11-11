@@ -333,16 +333,12 @@ struct Home: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
-                    if teamPinned {
-                        Text("FadedAI").font(FadedTypography.title).tracking(-0.5)
-                            .accessibilityAddTraits(.isHeader)
-                    } else {
-                        HStack(spacing: 4) {
+                    HStack(spacing: FadedSpacing.xs) {
+                        if !teamPinned {
                             Button("Holdet", systemImage: "person.2", action: openTeam)
                                 .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                            Text("FadedAI").font(FadedTypography.title).tracking(-0.5)
-                                .accessibilityAddTraits(.isHeader)
                         }
+                        dashboardWordmark
                     }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
@@ -372,6 +368,18 @@ struct Home: View {
                 }
             }
             .toolbarBackground(palette.background, for: .navigationBar)
+        }
+    }
+
+    private var dashboardWordmark: some View {
+        HStack(spacing: FadedSpacing.s) {
+            Text("f.").font(.system(.headline, design: .rounded).bold())
+                .foregroundStyle(FadedColors.deep).padding(FadedSpacing.xs)
+                .frame(minWidth: 28, minHeight: 28)
+                .background(FadedBrand.gradient, in: Circle())
+                .accessibilityHidden(true)
+            Text("fadedai").font(FadedTypography.title).tracking(-0.5)
+                .accessibilityLabel("FadedAI").accessibilityAddTraits(.isHeader)
         }
     }
 
@@ -473,9 +481,10 @@ struct Home: View {
                         Text(spaceTitle(item)).font(.caption2.bold()).fixedSize(horizontal: true, vertical: false)
                     }
                     .padding(.horizontal, 4)
-                    .foregroundStyle(selected ? FadedColors.deep : palette.secondary)
+                    .foregroundStyle(selected ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
                     .frame(minWidth: 44, maxWidth: .infinity, minHeight: 48)
-                    .background(selected ? palette.lime : Color.clear, in: RoundedRectangle(cornerRadius: FadedRadius.small))
+                    .background(selected ? FadedBrand.mint.opacity(palette.isDark ? 0.14 : 0.24) : Color.clear,
+                                in: RoundedRectangle(cornerRadius: FadedRadius.medium))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -497,8 +506,9 @@ struct Home: View {
                 Text("Mere").font(.caption2.bold())
             }
             .frame(minWidth: 44, minHeight: 48)
-            .foregroundStyle(selectedModuleTab != nil ? FadedColors.deep : palette.secondary)
-            .background(selectedModuleTab != nil ? palette.lime : Color.clear, in: RoundedRectangle(cornerRadius: FadedRadius.small))
+            .foregroundStyle(selectedModuleTab != nil ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
+            .background(selectedModuleTab != nil ? FadedBrand.mint.opacity(palette.isDark ? 0.14 : 0.24) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: FadedRadius.medium))
         }
         .accessibilityLabel("Flere faner")
     }

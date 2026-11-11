@@ -2,8 +2,13 @@ import SwiftUI
 import UIKit
 
 struct FadedSignature: View {
+    @Environment(\.fadedPalette) private var palette
+
     var body: some View {
-        LinearGradient(colors: [FadedColors.lime, FadedColors.cyan, FadedColors.purple],
+        let colors = palette.theme == .faded
+            ? [FadedBrand.mint, FadedBrand.blue, FadedColors.purple]
+            : [FadedColors.lime, FadedColors.cyan, FadedColors.purple]
+        LinearGradient(colors: colors,
                        startPoint: .leading, endPoint: .trailing)
             .frame(height: 2)
             .opacity(0.6)
@@ -86,7 +91,10 @@ struct FadedButtonStyle: ButtonStyle {
             .padding(.horizontal, 12)
             .frame(minHeight: primary ? 52 : 44)
             .foregroundStyle(text)
-            .background(fill, in: shape)
+            .background {
+                if enabled && primary && palette.theme == .faded { shape.fill(FadedBrand.gradient) }
+                else { shape.fill(fill) }
+            }
             .overlay { shape.strokeBorder(destructive && enabled ? palette.coral : palette.border, lineWidth: primary && enabled ? 0 : 1) }
             .shadow(color: enabled && primary ? palette.lime.opacity(0.25) : .clear, radius: 12, y: 4)
             .scaleEffect(enabled && configuration.isPressed && !reduceMotion && !calmMotion ? 0.97 : 1)
@@ -182,7 +190,8 @@ struct FadedCard<Content: View>: View {
             }
             .clipShape(shape)
             .overlay { shape.strokeBorder(palette.border, lineWidth: 1).allowsHitTesting(false) }
-            .shadow(color: .black.opacity(palette.isDark ? 0.35 : 0.08), radius: 12, y: 6)
+            .shadow(color: .black.opacity(palette.theme == .faded ? 0.18 : palette.isDark ? 0.35 : 0.08),
+                    radius: 10, y: 4)
     }
 }
 

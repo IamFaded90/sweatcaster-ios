@@ -357,6 +357,49 @@ struct CloudModelSettings: View {
 }
 
 extension ChatView {
+    var chatBrand: some View {
+        HStack(spacing: FadedSpacing.s) {
+            chatBrandMark(large: false)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("FadedAI").font(FadedTypography.section)
+                    .accessibilityAddTraits(.isHeader)
+                Text("AI-chat").font(.caption).foregroundStyle(palette.secondary)
+            }
+            .lineLimit(1)
+        }
+        .layoutPriority(1)
+        .accessibilityElement(children: .combine)
+    }
+
+    var chatWelcome: some View {
+        VStack(spacing: FadedSpacing.m) {
+            chatBrandMark(large: true)
+            Text("Hvad tænker du på?")
+                .font(FadedTypography.title)
+                .foregroundStyle(palette.text)
+                .accessibilityAddTraits(.isHeader)
+            Text("Stil et spørgsmål, eller brug et forslag til at komme i gang.")
+                .font(.subheadline)
+                .foregroundStyle(palette.secondary)
+            if draft.isEmpty && stagedPhoto == nil && attachedNote == nil && attachedQuote == nil {
+                chatSuggestions
+            }
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, FadedSpacing.xl)
+    }
+
+    private func chatBrandMark(large: Bool) -> some View {
+        Text("F")
+            .font(.system(large ? .largeTitle : .headline, design: .rounded).bold())
+            .foregroundStyle(FadedColors.deep)
+            .frame(width: large ? 64 : 32, height: large ? 64 : 32)
+            .background(FadedBrand.mint, in: RoundedRectangle(cornerRadius: large ? FadedRadius.card : FadedRadius.small))
+            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+            .accessibilityHidden(true)
+    }
+
     @ViewBuilder var chatAgentActivity: some View {
         let steps = aiShowTools ? searchSteps : []
         if task != nil {
@@ -373,26 +416,35 @@ extension ChatView {
         }
     }
 
-    var chatSuggestions: some View {
-        ScrollView(.horizontal) {
-            HStack(spacing: FadedSpacing.s) {
-                chatSuggestion("Opsummér", icon: "text.alignleft", prompt: "Opsummér denne tekst i tre korte punkter:\n")
-                chatSuggestion("Brainstorm", icon: "lightbulb", prompt: "Giv mig fem idéer til ")
-                chatSuggestion("FPS-highlights", icon: "gamecontroller",
-                               prompt: "Hjælp mig med at vurdere, hvad der gør et FPS-klip til et godt highlight.")
+    private var chatSuggestions: some View {
+        VStack(spacing: FadedSpacing.xs) {
+            chatSuggestion("Find det bedste i et FPS-klip", icon: "gamecontroller",
+                           prompt: "Hjælp mig med at vurdere, hvad der gør et FPS-klip til et godt highlight.")
+            Menu("Flere forslag", systemImage: "ellipsis") {
+                Button("Opsummér", systemImage: "text.alignleft") {
+                    useChatSuggestion("Opsummér denne tekst i tre korte punkter:\n")
+                }
+                Button("Brainstorm", systemImage: "lightbulb") {
+                    useChatSuggestion("Giv mig fem idéer til ")
+                }
             }
+            .font(.caption)
+            .foregroundStyle(palette.secondary)
+            .frame(minHeight: 44)
         }
-        .scrollIndicators(.hidden)
-        .accessibilityLabel("Forslag til at starte en samtale")
     }
 
     private func chatSuggestion(_ title: String, icon: String, prompt: String) -> some View {
         FadedChip(title, accent: palette.lime, selected: false, icon: icon) {
-            guard draft.isEmpty, task == nil else { return }
-            draft = prompt
-            composerFocused = true
+            useChatSuggestion(prompt)
         }
         .accessibilityHint("Sætter et forslag ind i beskedfeltet")
+    }
+
+    private func useChatSuggestion(_ prompt: String) {
+        guard draft.isEmpty, task == nil else { return }
+        draft = prompt
+        composerFocused = true
     }
 
     var conversationText: String {

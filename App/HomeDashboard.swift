@@ -47,18 +47,55 @@ struct DashboardVideoCard: View {
     }
 }
 
+private struct DashboardWelcome: View {
+    let enterVillage: () -> Void
+    @Environment(\.fadedPalette) private var palette
+
+    var body: some View {
+        VStack(spacing: FadedSpacing.m) {
+            Image("V0AIWorld").resizable().scaledToFit()
+                .frame(maxWidth: 480, maxHeight: 190)
+                .accessibilityHidden(true)
+            VStack(spacing: FadedSpacing.xs) {
+                Text("Store idéer.")
+                if palette.isDark { Text("Dit lille univers.").foregroundStyle(FadedBrand.gradient) }
+                else { Text("Dit lille univers.") }
+            }
+            .font(.system(.largeTitle, design: .rounded).weight(.heavy))
+            .multilineTextAlignment(.center)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            Button(action: enterVillage) {
+                Label("Træd ind i din verden", systemImage: "arrow.right")
+                    .font(FadedTypography.action)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, FadedSpacing.m)
+                    .padding(.vertical, FadedSpacing.s)
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .foregroundStyle(FadedColors.deep)
+                    .background(FadedBrand.gradient, in: RoundedRectangle(cornerRadius: FadedRadius.primary))
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Åbner Landsbyen")
+        }
+        .frame(maxWidth: .infinity)
+    }
+}
+
 extension Home {
     @ViewBuilder var header: some View {
-        FadedPrimaryButton("Ny chat", icon: "square.and.pencil", action: openNewChat)
+        DashboardWelcome {
+            if appHaptics { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
+            openDashboardVillage()
+        }
+        dashboardMainActions
         quickActions
         if model.isDemo {
             FadedBadge("Demo · Kun testdata", tone: .info)
         }
         dashboardStatus
-        VillageLiveRow(work: experimentalVillageWork) {
-            UserDefaults.standard.set(false, forKey: AppStorageKeys.villageShowOffice)
-            selectSpace(.tasks)
-        }
+        VillageLiveRow(work: experimentalVillageWork, open: openDashboardVillage)
         dashboardActivity
         if !onboarded {
             FadedCard {
@@ -71,6 +108,11 @@ extension Home {
                 }
             }
         }
+    }
+
+    private func openDashboardVillage() {
+        UserDefaults.standard.set(false, forKey: AppStorageKeys.villageShowOffice)
+        selectSpace(.tasks)
     }
 
     var experimentalVillageWork: ExperimentalVillageWork {
@@ -255,6 +297,15 @@ extension Home {
                 FadedDetailText(detail)
                 FadedSecondaryButton(actionTitle, action: action)
             }
+        }
+    }
+
+    private var dashboardMainActions: some View {
+        let columns = Array(repeating: GridItem(.flexible(), spacing: FadedSpacing.s),
+                            count: videoTypeSize.isAccessibilitySize ? 1 : 2)
+        return LazyVGrid(columns: columns, spacing: FadedSpacing.s) {
+            quickAction("Start en samtale", icon: "bubble.left", accent: palette.lime, action: openNewChat)
+            quickAction("Mød din Code Bot", icon: "terminal", accent: palette.green) { selectSpace(.library) }
         }
     }
 

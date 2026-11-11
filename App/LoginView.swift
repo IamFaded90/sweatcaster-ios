@@ -83,22 +83,24 @@ struct LoginView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: FadedSpacing.section) {
+                    loginHeading
                     if manualExpanded {
                         manualSection
                     } else {
                         qrSection
-                        FadedSecondaryButton("Indtast IP og token manuelt", icon: "keyboard") { manualExpanded = true }
-                            .disabled(connectionBusy)
+                        manualShortcut
                     }
                     if close == nil { phoneSection }
                     diagnosticsSection
                 }
                 .padding(FadedSpacing.edge)
+                .frame(maxWidth: 480)
+                .frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
             .background(FadedBackground())
             .onChange(of: manualExpanded) { _, _ in pingNotice = nil }
-            .navigationTitle("Forbind til PC")
+            .toolbar(close == nil ? .hidden : .visible, for: .navigationBar)
             .sheet(isPresented: $scanning) {
                 NavigationStack {
                     PairingQRScanner { result in finishScan(result) }
@@ -110,6 +112,51 @@ struct LoginView: View {
                 if let close { Button("Luk", action: close).disabled(connecting || pinging) }
             }
         }
+    }
+
+    private var loginHeading: some View {
+        VStack(spacing: FadedSpacing.s) {
+            Text("f.")
+                .font(.title2.weight(.heavy))
+                .foregroundStyle(FadedColors.deep)
+                .padding(FadedSpacing.s)
+                .frame(minWidth: 48, minHeight: 48)
+                .background(FadedBrand.gradient, in: RoundedRectangle(cornerRadius: FadedRadius.card))
+                .accessibilityHidden(true)
+            Text("Forbind til din PC")
+                .font(FadedTypography.title)
+                .foregroundStyle(palette.text)
+                .accessibilityAddTraits(.isHeader)
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, FadedSpacing.s)
+    }
+
+    private var manualShortcut: some View {
+        Button {
+            manualExpanded = true
+        } label: {
+            FadedCard(size: .compact) {
+                HStack(spacing: FadedSpacing.m) {
+                    Image(systemName: "keyboard")
+                        .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
+                        .accessibilityHidden(true)
+                    Text("Indtast IP og token manuelt")
+                        .font(FadedTypography.action)
+                        .foregroundStyle(palette.text)
+                    Spacer(minLength: FadedSpacing.xs)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(palette.secondary)
+                        .accessibilityHidden(true)
+                }
+                .frame(minHeight: 44)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(connectionBusy)
+        .opacity(connectionBusy ? 0.55 : 1)
     }
 
     private var connectionBusy: Bool {
@@ -163,7 +210,7 @@ struct LoginView: View {
     }
 
     private var manualSection: some View {
-        FadedCard {
+        FadedCard(size: .hero) {
             VStack(alignment: .leading, spacing: FadedSpacing.section) {
                 manualHeader
                 manualFields
@@ -174,7 +221,7 @@ struct LoginView: View {
     }
 
     private var manualHeader: some View {
-        let title = Text("Forbind manuelt").font(FadedTypography.title).accessibilityAddTraits(.isHeader)
+        let title = Text("Manuel forbindelse").font(FadedTypography.section).accessibilityAddTraits(.isHeader)
         let scan = Button("Scan QR", systemImage: "qrcode.viewfinder") {
             manualExpanded = false
             scanQR()
@@ -182,7 +229,7 @@ struct LoginView: View {
         return VStack(alignment: .leading, spacing: FadedSpacing.xs) {
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: FadedSpacing.s) {
-                    title.fixedSize()
+                    title.fixedSize(horizontal: true, vertical: false)
                     Spacer(minLength: FadedSpacing.s)
                     scan.fixedSize(horizontal: true, vertical: false)
                 }
@@ -211,8 +258,8 @@ struct LoginView: View {
                 FadedFieldLabel("PC’ens IP-adresse")
                 TextField("PC’ens IP-adresse", text: $address)
                     .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                    .padding(.horizontal, FadedSpacing.s).frame(minHeight: 44)
-                    .background(palette.raised, in: RoundedRectangle(cornerRadius: FadedRadius.small))
+                    .padding(.horizontal, FadedSpacing.m).frame(minHeight: 46)
+                    .background(manualFieldSurface)
                     .onChange(of: address) { _, _ in manualError = nil; pingNotice = nil }
                 if let error = manualError, error.field == .address { pairingError(error.text) }
             }
@@ -220,8 +267,8 @@ struct LoginView: View {
                 FadedFieldLabel("Token fra PC’en")
                 SecureField("Token fra PC’en", text: $token)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
-                    .padding(.horizontal, FadedSpacing.s).frame(minHeight: 44)
-                    .background(palette.raised, in: RoundedRectangle(cornerRadius: FadedRadius.small))
+                    .padding(.horizontal, FadedSpacing.m).frame(minHeight: 46)
+                    .background(manualFieldSurface)
                     .onChange(of: token) { _, _ in manualError = nil }
                 if let error = manualError, error.field == .token {
                     pairingError(error.text)
@@ -231,6 +278,11 @@ struct LoginView: View {
                 }
             }
         }
+    }
+
+    private var manualFieldSurface: some View {
+        let shape = RoundedRectangle(cornerRadius: FadedRadius.medium)
+        return shape.fill(palette.background).overlay { shape.strokeBorder(palette.border) }
     }
 
     private var manualFooter: some View {

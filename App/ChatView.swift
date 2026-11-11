@@ -291,11 +291,7 @@ struct ChatView: View {
             LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
                 if !outboxEntries.isEmpty { outboxPanel.id("chat-outbox") }
                 if turns.isEmpty && task == nil {
-                    FadedEmptyState(icon: "bubble.left", title: "Start en samtale", detail: "Vælg en kilde, og skriv din besked.",
-                                    actionTitle: "Skriv en besked") { composerFocused = true }
-                    if draft.isEmpty && stagedPhoto == nil && attachedNote == nil && attachedQuote == nil {
-                        chatSuggestions
-                    }
+                    chatWelcome
                 } else if favoritesOnly && !turns.contains(where: { $0.favorite == true }) && task == nil {
                     FadedEmptyState(icon: "star", title: "Ingen favoritter i samtalen",
                                     detail: "Markér et svar som favorit via menuen ved svaret.",
@@ -315,6 +311,7 @@ struct ChatView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .defaultScrollAnchor(.bottom)
+        .defaultScrollAnchor(turns.isEmpty && task == nil ? .center : .bottom, for: .alignment)
     }
 
     private func chatColumn(userBubbleWidth: CGFloat, wide: Bool, proxy: ScrollViewProxy) -> some View {
@@ -433,14 +430,25 @@ struct ChatView: View {
             HStack(spacing: FadedSpacing.xs) {
                 if !embedded || onBack != nil {
                     headerButton("Tilbage", icon: "chevron.left", action: goBack)
+                        .background(palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.medium))
+                        .overlay { RoundedRectangle(cornerRadius: FadedRadius.medium)
+                            .strokeBorder(palette.border).allowsHitTesting(false) }
                 }
-                chatTitle
+                chatBrand
                 Spacer(minLength: FadedSpacing.xs)
                 if composerFocused {
                     headerButton("Skjul tastatur", icon: "keyboard.chevron.compact.down") {
                         composerFocused = false
                     }
-                } else {
+                } else if !chatTypeSize.isAccessibilitySize {
+                    quickModelPicker
+                }
+            }
+            if !composerFocused {
+                if chatTypeSize.isAccessibilitySize { quickModelPicker }
+                HStack(spacing: FadedSpacing.xs) {
+                    Text(connection).font(.caption).foregroundStyle(palette.secondary)
+                    Spacer(minLength: FadedSpacing.xs)
                     if !wide {
                         headerButton("Samtaler og søgning", icon: "sidebar.left") {
                             refreshHistorySessions()
@@ -451,19 +459,6 @@ struct ChatView: View {
                     }
                     headerButton("Chatindstillinger", icon: "slider.horizontal.3") {
                         showChatSettings = true
-                    }
-                }
-            }
-            if !composerFocused {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: FadedSpacing.s) {
-                        Text(connection).font(.subheadline).foregroundStyle(palette.secondary)
-                        Spacer(minLength: FadedSpacing.xs)
-                        quickModelPicker
-                    }
-                    VStack(alignment: .leading, spacing: 0) {
-                        Text(connection).font(.subheadline).foregroundStyle(palette.secondary)
-                        quickModelPicker
                     }
                 }
                 if chatTypeSize.isAccessibilitySize { chatNavigationMenu }
@@ -556,10 +551,6 @@ struct ChatView: View {
                 }
             }
         }
-    }
-
-    private var chatTitle: some View {
-        Text("AI-chat").font(.title2.bold()).accessibilityAddTraits(.isHeader)
     }
 
     func acceptDroppedPhotos(_ items: [StudioPhotoInput]) -> Bool {

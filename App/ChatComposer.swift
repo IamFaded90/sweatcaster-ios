@@ -11,10 +11,11 @@ struct ChatComposer<Content: View>: View {
     init(@ViewBuilder content: () -> Content) { self.content = content() }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) { content }
-            .padding(.horizontal, FadedSpacing.s).padding(.vertical, 5)
-            .background(palette.card, in: RoundedRectangle(cornerRadius: 22))
-            .overlay { RoundedRectangle(cornerRadius: 22).strokeBorder(palette.border).allowsHitTesting(false) }
+        let shape = RoundedRectangle(cornerRadius: FadedRadius.card)
+        VStack(alignment: .leading, spacing: FadedSpacing.xs) { content }
+            .padding(.horizontal, FadedSpacing.s).padding(.vertical, FadedSpacing.xs)
+            .background(palette.card, in: shape)
+            .overlay { shape.strokeBorder(palette.border).allowsHitTesting(false) }
     }
 }
 
@@ -135,8 +136,9 @@ extension ChatView {
             else { send() }
         } label: {
             Image(systemName: sending ? "stop.fill" : (effectiveReplySource == .pc && canQueuePC ? "tray.and.arrow.down" : "arrow.up"))
-                .font(.body.weight(.bold)).foregroundStyle(Color.black)
-                .frame(width: 40, height: 40).background(palette.lime.opacity(allowed ? 1 : 0.45), in: Circle())
+                .font(.body.weight(.bold)).foregroundStyle(allowed ? FadedColors.deep : palette.secondary)
+                .frame(width: 38, height: 38)
+                .background(allowed ? palette.lime : palette.raised, in: RoundedRectangle(cornerRadius: FadedRadius.medium))
                 .frame(width: 44, height: 44).contentShape(Rectangle())
         }
         .buttonStyle(.plain)

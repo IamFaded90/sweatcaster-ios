@@ -80,10 +80,16 @@ enum FadedColors {
 struct FadedPalette {
     var theme: FadedTheme = .faded
     var isDark: Bool { theme != .day }
-    var background: Color { theme == .oled ? .black : isDark ? FadedColors.deep : FadedColors.text }
-    var card: Color { isDark ? FadedColors.card : FadedColors.dayCard }
-    var raised: Color { isDark ? FadedColors.raised : FadedColors.dayRaised }
-    var border: Color { isDark ? FadedColors.border : FadedColors.dayBorder }
+    var background: Color {
+        switch theme {
+        case .faded: FadedBrand.canvas
+        case .oled: .black
+        case .day: FadedColors.text
+        }
+    }
+    var card: Color { theme == .faded ? FadedBrand.panel : isDark ? FadedColors.card : FadedColors.dayCard }
+    var raised: Color { theme == .faded ? FadedBrand.raised : isDark ? FadedColors.raised : FadedColors.dayRaised }
+    var border: Color { theme == .faded ? FadedBrand.border : isDark ? FadedColors.border : FadedColors.dayBorder }
     var text: Color { isDark ? FadedColors.text : FadedColors.deep }
     var secondary: Color { isDark ? FadedColors.secondary : FadedColors.daySecondary }
     var muted: Color { FadedColors.muted }
@@ -93,6 +99,17 @@ struct FadedPalette {
     var green: Color { FadedColors.green }
     var coral: Color { FadedColors.coral }
     var coralText: Color { isDark ? coral : FadedColors.dayCoralText }
+}
+
+enum FadedBrand {
+    static let canvas = Color(red: 10 / 255, green: 12 / 255, blue: 15 / 255)
+    static let panel = Color(red: 19 / 255, green: 23 / 255, blue: 27 / 255)
+    static let raised = Color(red: 26 / 255, green: 31 / 255, blue: 36 / 255)
+    static let border = Color(red: 43 / 255, green: 51 / 255, blue: 59 / 255)
+    static let mint = Color(red: 87 / 255, green: 242 / 255, blue: 204 / 255)
+    static let blue = Color(red: 69 / 255, green: 150 / 255, blue: 251 / 255)
+
+    static let gradient = LinearGradient(colors: [mint, blue], startPoint: .leading, endPoint: .trailing)
 }
 
 private struct FadedPaletteKey: EnvironmentKey {
@@ -124,16 +141,16 @@ enum FadedSpacing {
 enum FadedRadius {
     static let small: CGFloat = 8
     static let medium: CGFloat = 12
-    static let card: CGFloat = 16
-    static let hero: CGFloat = 20
+    static let card: CGFloat = 18
+    static let hero: CGFloat = 22
     static let media = hero
     static let primary: CGFloat = 14
 }
 
 enum FadedTypography {
-    static let title = Font.system(.title2, design: .rounded).bold()
-    static let section = Font.system(.headline, design: .rounded).weight(.semibold)
-    static let action = Font.system(.headline, design: .rounded).weight(.semibold)
+    static let title = Font.system(.title2).bold()
+    static let section = Font.system(.headline).weight(.semibold)
+    static let action = Font.system(.headline).weight(.semibold)
     static let body = Font.system(.body, design: .default)
     static let code = Font.system(.footnote, design: .monospaced)
     static let number = Font.system(.body, design: .monospaced).monospacedDigit()
@@ -151,7 +168,7 @@ struct FadedBackground: View {
         }
         if palette.theme == .oled { return [palette.background, palette.background] }
         switch variant {
-        case .standard: return [FadedColors.deep, FadedColors.gradientEnd]
+        case .standard: return [FadedBrand.canvas, FadedBrand.panel]
         case .privateChat: return [FadedColors.deep, FadedColors.privateGlow]
         case .village: return [FadedColors.sunset, FadedColors.deep]
         case .terminal: return [FadedColors.deep, FadedColors.terminal]
@@ -160,7 +177,14 @@ struct FadedBackground: View {
 
     var body: some View {
         LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
-            .overlay { if palette.theme != .oled { texture } }
+            .overlay(alignment: .top) {
+                if palette.theme == .faded && variant == .standard {
+                    LinearGradient(colors: [FadedBrand.mint.opacity(0.05), .clear],
+                                   startPoint: .top, endPoint: .bottom)
+                        .frame(height: 240)
+                }
+            }
+            .overlay { if palette.theme != .oled && variant != .standard { texture } }
             .ignoresSafeArea()
             .allowsHitTesting(false)
             .accessibilityHidden(true)

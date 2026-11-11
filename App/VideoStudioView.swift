@@ -80,7 +80,23 @@ extension Home {
     private var videoPageBar: some View {
         Group {
             if videoTypeSize.isAccessibilitySize { videoPagePicker.pickerStyle(.menu).frame(minHeight: 44) }
-            else { videoPagePicker.pickerStyle(.segmented) }
+            else {
+                HStack(spacing: FadedSpacing.xs) {
+                    ForEach(VideoPage.allCases) { page in
+                        let title = videoPageTitle(page)
+                        Button { videoPage = page } label: {
+                            Text(title.visible).font(.subheadline.weight(.semibold))
+                                .foregroundStyle(videoPage == page && palette.isDark ? FadedBrand.mint : palette.text)
+                                .frame(maxWidth: .infinity, minHeight: 44)
+                                .background(videoPage == page ? FadedBrand.mint.opacity(0.15) : .clear,
+                                            in: RoundedRectangle(cornerRadius: FadedRadius.medium))
+                        }
+                        .buttonStyle(.plain).accessibilityLabel(title.spoken)
+                        .accessibilityAddTraits(videoPage == page ? .isSelected : [])
+                    }
+                }
+                .padding(FadedSpacing.xs).background(palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.card))
+            }
         }
         .frame(maxWidth: 640).padding(FadedSpacing.edge).frame(maxWidth: .infinity)
         .background(palette.background)
@@ -132,11 +148,8 @@ extension Home {
     private var videoStudioHeader: some View {
         VStack(alignment: .leading, spacing: 8) {
             FadedSignature()
-            FadedSectionLabel("Video Studio")
-            Text("Skab noget, der rammer.").font(.largeTitle.bold())
+            Label("Dine klip", systemImage: "film").font(FadedTypography.title)
                 .foregroundStyle(palette.text).accessibilityAddTraits(.isHeader)
-            Text("Vælg dine klip. Din agent klarer resten.")
-                .font(.body).foregroundStyle(palette.secondary)
             FadedSecondaryButton(model.isDemo ? "Opdatér testklip" : "Opdatér spilmapper", icon: "arrow.clockwise") {
                 Task { await refreshVideoStudio() }
             }.disabled(switchDisabled || catalogLoading != nil || pageLoading != nil)

@@ -93,17 +93,35 @@ struct AgentHub: View {
     private var hubHeader: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.s) {
             FadedSignature()
-            Text("Agent-Hub").font(FadedTypography.title).accessibilityAddTraits(.isHeader)
             if hubTypeSize.isAccessibilitySize {
                 hubViewPicker.pickerStyle(.menu).frame(minHeight: 44)
             } else {
-                hubViewPicker.pickerStyle(.segmented)
+                HStack(spacing: FadedSpacing.xs) {
+                    hubTab("Kontoret", icon: "building.2", office: true)
+                    hubTab("Landsbyen", icon: "house.lodge", office: false)
+                }
+                .padding(FadedSpacing.xs)
+                .background(palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.card))
             }
         }
         .padding(.horizontal, FadedSpacing.edge)
         .padding(.top, FadedSpacing.s)
         .frame(maxWidth: 640)
         .frame(maxWidth: .infinity)
+    }
+
+    private func hubTab(_ title: String, icon: String, office: Bool) -> some View {
+        let selected = showOffice == office
+        return Button { showOffice = office } label: {
+            Label(title, systemImage: icon)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(selected && palette.isDark ? FadedBrand.mint : palette.text)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background(selected ? FadedBrand.mint.opacity(0.15) : .clear,
+                            in: RoundedRectangle(cornerRadius: FadedRadius.medium))
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private var hubContent: some View {

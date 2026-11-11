@@ -194,7 +194,10 @@ extension Home {
                         NavigationLink(value: category) { settingsRow(category) }
                             .buttonStyle(.plain)
                     }
-                }.padding(FadedSpacing.edge)
+                }
+                .padding(FadedSpacing.edge)
+                .frame(maxWidth: 560)
+                .frame(maxWidth: .infinity)
             }
             .background(FadedBackground())
             .navigationTitle("Indstillinger")
@@ -219,20 +222,27 @@ extension Home {
         let accent: Color = switch category {
         case .connection: palette.cyan
         case .models: palette.purple
-        case .appearance: palette.lime
+        case .appearance: FadedBrand.mint
         case .diagnostics: palette.secondary
         }
         return FadedCard {
-            HStack(spacing: 12) {
-                Image(systemName: category.icon).foregroundStyle(FadedColors.deep)
-                    .frame(width: 34, height: 34).background(accent, in: Circle()).accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    FadedSectionLabel(category.rawValue)
+            HStack(spacing: FadedSpacing.m) {
+                Image(systemName: category.icon)
+                    .foregroundStyle(palette.isDark ? accent : palette.text)
+                    .frame(width: 38, height: 38)
+                    .background(accent.opacity(0.15), in: RoundedRectangle(cornerRadius: FadedRadius.medium))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                    Text(category.rawValue).font(FadedTypography.action).foregroundStyle(palette.text)
                     Text(category.detail).font(.subheadline).foregroundStyle(palette.secondary)
                 }
-                Spacer()
-                Image(systemName: "chevron.right").foregroundStyle(palette.secondary).accessibilityHidden(true)
+                Spacer(minLength: FadedSpacing.xs)
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(palette.secondary)
+                    .accessibilityHidden(true)
             }
+            .frame(minHeight: 44)
         }
     }
 
