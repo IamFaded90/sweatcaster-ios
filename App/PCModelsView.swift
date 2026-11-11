@@ -221,7 +221,7 @@ struct PCModelsView: View {
             ("qwen2.5-coder:7b", "4,7 GB", "Til kode, fejlfinding og forslag til ændringer. Det er den specialiserede kodemodel.",
              "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF")
         case "dolphin3-8b":
-            ("dolphin3:8b", "4,9 GB", "Til rollespil for voksne og kreativ dialog. Køres lokalt på PC’en.",
+            ("dolphin3:8b", "4,9 GB", "Til kreativ dialog og legende rollespil for voksne. Køres lokalt på PC’en. Svarene varierer med det, du skriver.",
              "dphn/Dolphin3.0-Llama3.1-8B")
         case "qwen25-7b":
             ("qwen2.5:7b", "4,7 GB", "Til hverdagschat, dansk tekst og korte opgaver.",

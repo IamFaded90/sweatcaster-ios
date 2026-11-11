@@ -204,7 +204,7 @@ extension Home {
             OfflineStudio(api: studioAPI, sessionUnlocked: $nsfwSessionUnlocked,
                           onPrivateSessionEnded: showPrivateSessionNotice,
                           initialPage: studioPage == .chat ? nil : studioPage, initialImagePrompt: studioImagePrompt,
-                          ephemeralOnly: studioPage == .chat)
+                          ephemeralOnly: studioPage == .chat, imageOnly: studioPage == .images)
         }
         .sheet(isPresented: $showBots) {
             VillageBotLibrary(api: studioAPI, studioUnlocked: $nsfwSessionUnlocked,

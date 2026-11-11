@@ -14,9 +14,10 @@ struct OfflineStudio: View {
     @State private var privateSessionOpen = true
     let onPrivateSessionEnded: () -> Void
     let ephemeralOnly: Bool
+    let imageOnly: Bool
     @State var studioPage: Page
     @State var imagePrompt: String
-    @State var studioImageRoute: StudioImageRoute = .automatic
+    @State var studioImageRoute: StudioImageRoute
     @State var pendingBotID: UUID?
     @FocusState var imagePromptFocused: Bool
     @State private var loadingModel = false
@@ -131,32 +132,35 @@ struct OfflineStudio: View {
 
     init(api: LiveAPI?, sessionUnlocked: Binding<Bool>, onPrivateSessionEnded: @escaping () -> Void = {},
          initialPage: Page? = nil, initialImagePrompt: String = "", initialBotID: UUID? = nil,
-         ephemeralOnly: Bool = false) {
+         ephemeralOnly: Bool = false, imageOnly: Bool = false) {
         self.api = ephemeralOnly ? nil : api
         _regularStudioUnlocked = sessionUnlocked
         self.onPrivateSessionEnded = onPrivateSessionEnded
         self.ephemeralOnly = ephemeralOnly
-        _studioPage = State(initialValue: initialPage ?? .chat)
+        let presentsOnlyImages = imageOnly && !ephemeralOnly
+        self.imageOnly = presentsOnlyImages
+        _studioPage = State(initialValue: presentsOnlyImages ? .images : initialPage ?? .chat)
+        _studioImageRoute = State(initialValue: presentsOnlyImages && api != nil ? .pc : .automatic)
         _imagePrompt = State(initialValue: String(initialImagePrompt.prefix(2_000)))
         _pendingBotID = State(initialValue: initialBotID)
     }
 
     var privateSession: Bool { ephemeralOnly }
     var sessionUnlocked: Bool {
-        get { privateSession ? privateSessionOpen : regularStudioUnlocked }
+        get { privateSession ? privateSessionOpen : imageOnly || regularStudioUnlocked }
         nonmutating set {
             if privateSession { privateSessionOpen = newValue }
-            else { regularStudioUnlocked = newValue }
+            else if !imageOnly { regularStudioUnlocked = newValue }
         }
     }
-    var studioEnabled: Bool { privateSession || enabled }
+    var studioEnabled: Bool { privateSession || imageOnly || enabled }
     var imageModel: String { privateSession ? sessionPreferences.imageModel : savedImageModel }
     var sessionExpired: Bool { privateDeadline.map { $0 <= .now } ?? false }
     var canRenderPrivateImages: Bool {
         privateNetworkOffline == true && privatePathMonitor?.currentPath.status == .unsatisfied
     }
     var privateImageOfflineInstructions: String {
-        "Slå flytilstand til og Wi-Fi fra, og gå tilbage til Billeder."
+        "Åbn Kontrolcenter, slå flytilstand til og Wi-Fi fra. Gå tilbage hertil, og tryk Lav billede."
     }
 
     var historyFolder: URL { URL.applicationSupportDirectory.appending(path: "StudioImages", directoryHint: .isDirectory) }
@@ -165,7 +169,7 @@ struct OfflineStudio: View {
     }
     var privateBots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: botData)) ?? [] }
     var selectedPrivateBot: VillageBot? {
-        if ephemeralOnly { return nil }
+        if ephemeralOnly || imageOnly { return nil }
         return privateBots.first { $0.id.uuidString == privateBotID } ?? privateBots.first
     }
 
@@ -344,7 +348,7 @@ struct OfflineStudio: View {
             .onChange(of: imagePrompt) { _, _ in resetIdleTimer() }
             .onChange(of: prompt) { _, text in
                 resetIdleTimer()
-                guard loaded, sessionUnlocked, !privateSession else { return }
+                guard loaded, sessionUnlocked, !privateSession, !imageOnly else { return }
                 do { try MigratedAppData.shared.saveRegularStudioDraft(text) }
                 catch { AppDiagnostics.record(error); status = "Kladde kunne ikke gemmes." }
             }
@@ -409,7 +413,7 @@ struct OfflineStudio: View {
     }
 
     private var studioPageContent: AnyView {
-        switch studioPage {
+        switch imageOnly && studioPage == .chat ? .images : studioPage {
         case .chat:
             return AnyView(studioChatPage)
         case .images:
@@ -433,8 +437,8 @@ struct OfflineStudio: View {
     }
 
     private var studioPicker: some View {
-        Picker("Visning i Privat Studio", selection: $studioPage) {
-            ForEach(Page.allCases) { page in
+        Picker(imageOnly ? "Visning i Billeder" : "Visning i Privat Studio", selection: $studioPage) {
+            ForEach(Page.allCases.filter { !imageOnly || $0 != .chat }) { page in
                 Text(page == .gallery && !studioTypeSize.isAccessibilitySize ? "Galleri" : page.rawValue).tag(page)
                     .accessibilityLabel(page.rawValue)
             }

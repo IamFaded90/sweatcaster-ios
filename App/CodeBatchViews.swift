@@ -25,6 +25,9 @@ struct BatchReviewView: View {
     @State private var busy = false
     @State private var loadingJobs = false
     @State private var loadedJobs = false
+    @State private var projectToClone: String?
+
+    private var projectName: String { repo.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     private var batchFiles: [String] {
         paths.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
@@ -32,34 +35,38 @@ struct BatchReviewView: View {
 
     private var batchBlocker: String? {
         if busy { return "Vent på PC’en." }
-        if repo.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
-            goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || batchFiles.isEmpty {
-            return "Udfyld repo, opgave og filstier."
-        }
+        if projectName.isEmpty { return "Skriv projektets navn på GitHub." }
+        if goal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Beskriv, hvad du vil have ændret." }
+        if batchFiles.isEmpty { return "Skriv stien til mindst én fil i projektet." }
         if batchFiles.count > 5 { return "Vælg højst fem filstier." }
         return nil
     }
 
     var body: some View {
         Form {
-            Section("Ny opgave") {
-                TextField("Repo (ejer/projekt)", text: $repo).textInputAutocapitalization(.never).autocorrectionDisabled()
-                Button("Klon GitHub-repo til PC’en") { Task { await clone() } }
-                    .disabled(busy || repo.trimmingCharacters(in: .whitespaces).isEmpty)
-                TextField("Hvad skal ændres?", text: $goal, axis: .vertical)
-                TextField("Op til fem filstier, én pr. linje", text: $paths, axis: .vertical)
+            Section("1. Vælg et GitHub-projekt") {
+                TextField("ejer/projekt", text: $repo).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .accessibilityLabel("GitHub-projekt")
+                FadedDetailText("Skriv navnet som på GitHub. Hent projektet, hvis det mangler på PC’en.")
+                Button("Hent projekt til PC’en") { projectToClone = projectName }
+                    .disabled(busy || projectName.isEmpty)
+            }
+            Section("2. Beskriv ændringen og vælg filer") {
+                TextField("Hvad vil du have ændret?", text: $goal, axis: .vertical)
+                TextField("Skriv én filsti pr. linje", text: $paths, axis: .vertical)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
-                FadedPrimaryButton("Sæt i kø", icon: "terminal") { Task { await enqueue() } }
+                FadedDetailText("En filsti er fx App/Settings.swift. Du kan vælge op til fem filer.")
+                FadedPrimaryButton("Bed om et forslag", icon: "terminal") { Task { await enqueue() } }
                     .disabled(batchBlocker != nil)
                 if let batchBlocker { FadedDetailText(batchBlocker) }
             }
-            Section("Kodejob") {
+            Section("3. Åbn forslaget til gennemgang") {
                 if let failure { Text(failure) }
                 Button("Opdatér liste") { Task { await reload() } }.disabled(loadingJobs)
                 if loadingJobs && jobs.isEmpty {
                     LoadingSkeleton(label: "Henter kodejob…")
                 } else if loadedJobs && jobs.isEmpty {
-                    FadedDetailText("Ingen kodejob endnu. Sæt en opgave i kø ovenfor.")
+                    FadedDetailText("Dine forslag vises her. Tryk Bed om et forslag ovenfor for at begynde.")
                 }
                 ForEach(jobs) { job in
                     NavigationLink {
@@ -76,6 +83,14 @@ struct BatchReviewView: View {
         .scrollContentBackground(.hidden)
         .background(FadedBackground(variant: .terminal))
         .navigationTitle("Forslag til flere filer")
+        .confirmationDialog("Hent projekt fra GitHub?", isPresented: Binding(
+            get: { projectToClone != nil }, set: { if !$0 { projectToClone = nil } }
+        ), titleVisibility: .visible, presenting: projectToClone) { project in
+            Button("Hent projektet") { Task { await clone(project) } }
+            Button("Annuller", role: .cancel) { }
+        } message: { project in
+            Text("PC’en henter \(project) til Agent Workspace.")
+        }
         .task { await reload() }
         .refreshable { await reload() }
     }
@@ -99,18 +114,18 @@ struct BatchReviewView: View {
         busy = true
         defer { busy = false }
         do {
-            try await api.enqueueCodeBatch(repo: repo.trimmingCharacters(in: .whitespaces), goal: goal, files: batchFiles)
+            try await api.enqueueCodeBatch(repo: projectName, goal: goal, files: batchFiles)
             goal = ""
             await reload()
         } catch { AppDiagnostics.record(error); failure = pcBusyMessage(error) ?? "Opgaven kunne ikke sættes i kø. Tjek repo og filstier." }
     }
 
-    private func clone() async {
-        guard !busy else { return }
+    private func clone(_ project: String) async {
+        guard !busy, !project.isEmpty else { return }
         busy = true
         defer { busy = false }
         do {
-            try await api.cloneCodeRepository(repo.trimmingCharacters(in: .whitespaces))
+            try await api.cloneCodeRepository(project)
             failure = nil
         } catch { AppDiagnostics.record(error); failure = pcBusyMessage(error) ?? "Repoet kunne ikke klones. Tjek navnet og PC’ens adgang til GitHub." }
     }
@@ -192,8 +207,9 @@ struct BatchProposalView: View {
         }
         .interactiveDismissDisabled(busy)
         .task { await reload() }
-        .confirmationDialog("Godkend ændringerne?", isPresented: $confirm) {
-            Button("Opret lokal Git-gren") { Task { await approve() } }
+        .confirmationDialog("Gem ændringerne på PC’en?", isPresented: $confirm, titleVisibility: .visible) {
+            Button("Gem på en separat gren") { Task { await approve() } }
+            Button("Annuller", role: .cancel) { }
         } message: {
             if let changedPaths {
                 Text("\(fileScope(changedPaths.count)). Forslaget gemmes på en separat gren i Agent Workspace på PC’en.")
@@ -250,7 +266,7 @@ struct BatchProposalView: View {
     private var approvalBar: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.s) {
             if let approvalBlocker { FadedDetailText(approvalBlocker) }
-            else { FadedDetailText("Luk uden godkendelse for at lade forslaget blive i PC’ens kø.") }
+            else { FadedDetailText("4. Bekræft, hvis du vil gemme ændringerne på PC’en.") }
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: FadedSpacing.s) { approvalActions }
                 VStack(spacing: FadedSpacing.s) { approvalActions }

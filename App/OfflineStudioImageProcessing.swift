@@ -87,10 +87,10 @@ extension OfflineStudio {
     }
 
     func generateQueuedImages(_ request: StudioImageRequest) async throws {
+        guard request.isPrivate == privateSession else { throw CancellationError() }
         let sessionID = temporaryImagesID
         let folder = request.isPrivate ? privateImageFolder : historyFolder
         if request.isPrivate && !canRenderPrivateImages { throw StudioImageInterruption.network }
-        guard let model = StudioImageModel(rawValue: request.model) else { throw PhoneModelError.unavailable }
         let pcAllowed = request.supportsPC && !privateSession && api != nil
         let canFallBack = request.route == .automatic && request.allowPCFallback && pcAllowed
         try Task.checkCancellation()
@@ -109,6 +109,7 @@ extension OfflineStudio {
                 source = "PC"
             } else {
                 do {
+                    guard let model = StudioImageModel(rawValue: request.model) else { throw PhoneModelError.unavailable }
                     try await renderStudioImageOnPhone(request, model: model, seed: seed, index: index,
                                                       variation: variation, sessionID: sessionID,
                                                       destination: destination, folder: folder)
@@ -128,10 +129,12 @@ extension OfflineStudio {
             created.append(destination)
             if request.isPrivate { created.removeAll { privateImages[$0] == nil } }
             if index == 0 {
-                let turn = PrivateChatTurn(prompt: request.prompt, reply: "Billede klar.",
-                                           imageName: destination.lastPathComponent, source: source, botID: request.botID)
-                batchTurnID = turn.id
-                turns.append(turn)
+                if !imageOnly {
+                    let turn = PrivateChatTurn(prompt: request.prompt, reply: "Billede klar.",
+                                               imageName: destination.lastPathComponent, source: source, botID: request.botID)
+                    batchTurnID = turn.id
+                    turns.append(turn)
+                }
                 imageURL = destination
                 if !request.isPrivate {
                     imageComparisonSource = StudioImageComparisonSource(result: destination, bytes: request.sourceImage)
@@ -180,17 +183,21 @@ extension OfflineStudio {
     }
 
     func studioImageErrorMessage(_ error: Error, model: String) -> String {
-        if let failure = error as? V2Failure, case .http(_, let code, let message) = failure, code == "DEPENDENCY_MISSING" {
-            if message?.contains("Stable Diffusion") == true {
-                return "PC’en mangler sin Stable Diffusion-billedmodel. Tjek modellen i ComfyUI."
+        if let failure = error as? V2Failure, case .http(let status, let code, let message) = failure {
+            if status == 401 { return "PC’en afviste forbindelsen. Forbind til PC’en igen fra Hjem." }
+            if status == 404 { return "Denne PC-installation mangler billedgenerering. Vælg Telefon, eller opdatér FadedAI på PC’en." }
+            if code == "DEPENDENCY_MISSING" {
+                if message?.contains("Stable Diffusion") == true {
+                    return "PC’en mangler sin Stable Diffusion-billedmodel. Tjek modellen i ComfyUI."
+                }
+                if message?.contains("lang tid") == true {
+                    return "PC’en nåede ikke at lave billedet. Vent på den, og prøv igen."
+                }
+                if message?.contains("fejlede") == true || message?.contains("gyldigt PNG") == true {
+                    return "Billedmotoren gav intet brugbart billede. Tjek ComfyUI, og prøv igen."
+                }
+                return "Tjek, at ComfyUI kører på PC’en, og prøv igen."
             }
-            if message?.contains("lang tid") == true {
-                return "PC’en nåede ikke at lave billedet. Vent på den, og prøv igen."
-            }
-            if message?.contains("fejlede") == true || message?.contains("gyldigt PNG") == true {
-                return "Billedmotoren gav intet brugbart billede. Tjek ComfyUI, og prøv igen."
-            }
-            return "Tjek, at ComfyUI kører på PC’en, og prøv igen."
         }
         if error is APIError || error is URLError {
             return "Forbindelsen til PC’en blev afbrudt. Tjek forbindelsen, og prøv igen."

@@ -259,22 +259,14 @@ extension Home {
     }
 
     private var quickActions: some View {
-        Group {
-            if videoTypeSize.isAccessibilitySize {
-                VStack(spacing: FadedSpacing.section) { quickActionCards }
-            } else {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 8) { quickActionCards }
-                    VStack(spacing: 8) { quickActionCards }
-                }
-            }
+        let columns = videoTypeSize.isAccessibilitySize ? [GridItem(.flexible())]
+            : [GridItem(.adaptive(minimum: 130), spacing: 8)]
+        return LazyVGrid(columns: columns, spacing: 8) {
+            quickAction("Video Studio", icon: "video", accent: palette.cyan, action: openVideoClips)
+            quickAction("Billeder", icon: "photo", accent: palette.cyan) { openStudio(.images) }
+            quickAction("Ny bot", icon: "person.crop.circle.badge.plus", accent: palette.purple) { showNewBot = true }
+            quickAction("Privat Studio", icon: "lock.shield", accent: palette.purple) { openStudio(.chat) }
         }
-    }
-
-    @ViewBuilder private var quickActionCards: some View {
-        quickAction("Video Studio", icon: "video", accent: palette.cyan, action: openVideoClips)
-        quickAction("Ny bot", icon: "person.crop.circle.badge.plus", accent: palette.purple) { showNewBot = true }
-        quickAction("Privat Studio", icon: "lock.shield", accent: palette.purple) { openStudio(.chat) }
     }
 
     private func quickAction(_ title: String, icon: String, accent: Color,
@@ -285,8 +277,9 @@ extension Home {
                     Image(systemName: icon).foregroundStyle(FadedColors.deep).frame(width: 32, height: 32)
                         .background(accent, in: Circle()).accessibilityHidden(true)
                     Text(title).font(FadedTypography.action)
-                        .fixedSize(horizontal: !videoTypeSize.isAccessibilitySize, vertical: true)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }.buttonStyle(.plain)
     }

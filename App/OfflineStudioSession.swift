@@ -66,6 +66,7 @@ extension OfflineStudio {
     }
 
     func clearStudioContent(includingModels: Bool) {
+        guard !imageOnly else { return }
         if !includingModels {
             wipeExpiredPrivateSession()
             return
@@ -138,9 +139,10 @@ extension OfflineStudio {
         guard sessionUnlocked, !loaded else { return }
         loaded = true
         if privateSession { configureSessionPreferences() }
-        else { enabled = true }
+        else if !imageOnly { enabled = true }
         UIDevice.current.isBatteryMonitoringEnabled = true
         privateBatteryLevel = UIDevice.current.batteryLevel
+        guard !imageOnly else { return }
         if !ephemeralOnly, let id = pendingBotID, privateBots.contains(where: { $0.id == id }) { privateBotID = id.uuidString }
         pendingBotID = nil
         loadPrivateConversation()
@@ -170,13 +172,13 @@ extension OfflineStudio {
     }
 
     private func loadPrivateConversation() {
-        guard !privateSession else { return }
+        guard !privateSession, !imageOnly else { return }
         turns = MigratedAppData.shared.regularStudioTurns()
         prompt = MigratedAppData.shared.regularStudioDraft()
     }
 
     func savePrivateConversation() {
-        guard !privateSession, loaded else { return }
+        guard !privateSession, !imageOnly, loaded else { return }
         do { try MigratedAppData.shared.saveRegularStudioTurns(turns) }
         catch { AppDiagnostics.record(error); status = "Samtalen kunne ikke gemmes." }
     }
@@ -218,7 +220,7 @@ extension OfflineStudio {
             sessionPreferences = StudioSessionPreferences()
             sessionNote = ""
             voiceLanguages.removeAll()
-        } else if loaded {
+        } else if loaded && !imageOnly {
             savePrivateConversation()
             do { try MigratedAppData.shared.saveRegularStudioDraft(prompt) }
             catch { AppDiagnostics.record(error) }
@@ -236,7 +238,7 @@ extension OfflineStudio {
     }
 
     func authenticate() {
-        guard !privateSession, !authenticating else { return }
+        guard !privateSession, !imageOnly, !authenticating else { return }
         let context = LAContext()
         guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) else {
             status = "Slå Face ID eller Touch ID til på telefonen for at åbne studiet."

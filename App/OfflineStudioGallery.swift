@@ -59,16 +59,20 @@ extension OfflineStudio {
                 VStack(alignment: .leading, spacing: 14) {
                     studioImageHistory
                     DisclosureGroup("Indstillinger") {
-                        DisclosureGroup("Chat og stemme") {
-                            if privateSession { sessionChatSettings.padding(.top, 10) }
-                            else { privateSettings.padding(.top, 10) }
-                        }.padding(.top, 10)
+                        if !imageOnly {
+                            DisclosureGroup("Chat og stemme") {
+                                if privateSession { sessionChatSettings.padding(.top, 10) }
+                                else { privateSettings.padding(.top, 10) }
+                            }.padding(.top, 10)
+                        }
                         DisclosureGroup("Billedmodel og LoRA") { privateImageSettings.padding(.top, 10) }
                         StudioRAMStatus()
-                        FadedSecondaryButton("Slet studiets indhold og modeller", icon: "trash", role: .destructive) {
-                            panicDeletesDownloads = true
-                            confirmStudioPanic = true
-                        }.disabled(task != nil)
+                        if !imageOnly {
+                            FadedSecondaryButton("Slet studiets indhold og modeller", icon: "trash", role: .destructive) {
+                                panicDeletesDownloads = true
+                                confirmStudioPanic = true
+                            }.disabled(task != nil)
+                        }
                     }
                 }.padding(16)
             }
@@ -419,6 +423,7 @@ extension OfflineStudio {
     private func continueStudioImage(_ file: URL) {
         guard let data = studioThumbnail(file, maxPixelSize: 768)?.jpegData(compressionQuality: 0.9),
               acceptStudioImageDrop([data]) else { return }
+        if !privateSession { studioImageRoute = .phone }
         studioPage = .images
         Task { @MainActor in
             await Task.yield()

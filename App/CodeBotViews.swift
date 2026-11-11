@@ -57,6 +57,7 @@ struct CodeWorkspaceView: View {
     @State private var unverifiedApprovalID: String?
     @State private var loading = false
     @State private var workspaceLoaded = false
+    @State private var fileListRequested = false
     @State private var workspaceError: String?
     @State private var contextError: String?
     @State private var workspaceRequest: UUID?
@@ -71,32 +72,26 @@ struct CodeWorkspaceView: View {
     @State private var showFileDetails = false
     @State private var showBatchReview = false
     @State private var openedFile: String?
+    @State private var fileToOpen: String?
+    @State private var advancedExpanded = false
+    @State private var customFeaturePath: String?
 
     var body: some View {
         GeometryReader { geometry in
-            if sizeClass == .regular && geometry.size.width >= 740 {
-                NavigationSplitView {
-                    fileNavigation(useSplit: true)
-                        .navigationSplitViewColumnWidth(min: 280, ideal: 330, max: 400)
-                } detail: {
-                    workspaceDetail.navigationTitle("Arbejdsområde")
-                }
-                .navigationSplitViewStyle(.balanced)
-            } else {
-                NavigationStack { fileNavigation(useSplit: false) }
-                    .sheet(isPresented: $showFileDetails) {
-                        NavigationStack {
-                            workspaceDetail.navigationTitle("Filændring")
-                                .navigationBarTitleDisplayMode(.inline)
-                                .toolbar {
-                                    ToolbarItem(placement: .cancellationAction) {
-                                        Button("Tilbage til filer") { showFileDetails = false }.disabled(loading)
-                                    }
-                                }
+            let useSplit = sizeClass == .regular && geometry.size.width >= 740
+            workspaceLayout(useSplit: useSplit)
+                .confirmationDialog("Hent fil fra PC’en?", isPresented: Binding(
+                    get: { fileToOpen != nil }, set: { if !$0 { fileToOpen = nil } }
+                ), titleVisibility: .visible, presenting: fileToOpen) { file in
+                    Button("Hent og åbn") {
+                        Task {
+                            if await open(file), !useSplit { showFileDetails = true }
                         }
-                        .interactiveDismissDisabled(loading)
                     }
-            }
+                    Button("Annuller", role: .cancel) { }
+                } message: { file in
+                    Text("Code Bot læser \(file) fra Agent Workspace på PC’en. Filen bliver først ændret, hvis du godkender et forslag.")
+                }
         }
         .task(id: api?.queueTargetID) {
             let scope = api?.queueTargetID
@@ -104,6 +99,7 @@ struct CodeWorkspaceView: View {
                 workspaceScope = scope
                 files = []
                 workspaceLoaded = false
+                fileListRequested = false
                 workspaceRequest = nil
                 loading = false
                 proposal = nil
@@ -119,14 +115,38 @@ struct CodeWorkspaceView: View {
                 openedFile = nil
                 showFileDetails = false
                 showBatchReview = false
+                fileToOpen = nil
+                advancedExpanded = false
+                customFeaturePath = nil
             }
             restoreContext()
-            await load()
-            if !Task.isCancelled, api != nil, let initialPath {
-                path = initialPath
-                showFileDetails = true
-                await open(initialPath)
+            if api != nil, let initialPath { fileToOpen = initialPath }
+        }
+    }
+
+    @ViewBuilder private func workspaceLayout(useSplit: Bool) -> some View {
+        if useSplit {
+            NavigationSplitView {
+                fileNavigation(useSplit: true)
+                    .navigationSplitViewColumnWidth(min: 280, ideal: 330, max: 400)
+            } detail: {
+                workspaceDetail.navigationTitle("Arbejdsområde")
             }
+            .navigationSplitViewStyle(.balanced)
+        } else {
+            NavigationStack { fileNavigation(useSplit: false) }
+                .sheet(isPresented: $showFileDetails) {
+                    NavigationStack {
+                        workspaceDetail.navigationTitle("Filændring")
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbar {
+                                ToolbarItem(placement: .cancellationAction) {
+                                    Button("Tilbage til filer") { showFileDetails = false }.disabled(loading)
+                                }
+                            }
+                    }
+                    .interactiveDismissDisabled(loading)
+                }
         }
     }
 
@@ -134,17 +154,30 @@ struct CodeWorkspaceView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
                 if let api {
-                    FadedDetailText("Åbn en fil, eller markér den til din arbejdskontekst.")
-                    if !useSplit {
-                        if currentProposal != nil {
-                            FadedSecondaryButton("Gennemgå åbent forslag", icon: "checklist") { showFileDetails = true }
-                        }
-                        FadedSecondaryButton("Ny eller manuel ændring", icon: "square.and.pencil") { showFileDetails = true }
+                    FadedSectionHeader("1. Vælg en fil", detail: "Find filen på PC’en. Derefter beskriver du ændringen og gennemgår forslaget, før du godkender.")
+                    if !useSplit, currentProposal != nil {
+                        FadedSecondaryButton("Gennemgå åbent forslag", icon: "checklist") { showFileDetails = true }
                     }
-                    FadedSecondaryButton("Forslag til flere filer", icon: "square.stack") { showBatchReview = true }
-                        .sheet(isPresented: $showBatchReview) { BatchReviewSheet(api: api).id(api.queueTargetID) }
+                    if !fileListRequested {
+                        FadedPrimaryButton("Hent fillisten fra PC’en", icon: "folder") { Task { await load() } }
+                            .disabled(loading)
+                    } else {
+                        fileCards
+                    }
+                    if !useSplit, let message { FadedDetailText(message) }
                     if let contextError { FadedDetailText(contextError) }
-                    fileCards(useSplit: useSplit)
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                            FadedSecondaryButton("Ny eller manuel ændring", icon: "square.and.pencil") {
+                                advancedExpanded = true
+                                if !useSplit { showFileDetails = true }
+                            }
+                            FadedSecondaryButton("Forslag til flere filer", icon: "square.stack") { showBatchReview = true }
+                        }
+                        .padding(.top, FadedSpacing.s)
+                        .disabled(loading)
+                    } label: { FadedSectionLabel("Avanceret") }
+                    .sheet(isPresented: $showBatchReview) { BatchReviewSheet(api: api).id(api.queueTargetID) }
                 } else {
                     FadedEmptyState(icon: "desktopcomputer", title: "Forbind til din PC",
                                     detail: "Åbn Forbindelser på Hjem for at se filerne i Agent Workspace.",
@@ -160,7 +193,7 @@ struct CodeWorkspaceView: View {
                 Button("Tilbage", systemImage: "chevron.left", action: onBack)
             }
         }
-        .refreshable { await load() }
+        .refreshable { if fileListRequested { await load() } }
     }
 
     private var workspaceDetail: some View {
@@ -176,10 +209,20 @@ struct CodeWorkspaceView: View {
                         if let message {
                             FadedCard(accent: palette.cyan) { Text(message).font(FadedTypography.body) }
                         }
-                        FadedSectionHeader("Agent Workspace", detail: openedFile ?? "Vælg en fil, eller angiv en ny filsti i Ret fil manuelt.")
-                        autonomyCard
-                        featureCard
-                        manualCard
+                        if currentProposal == nil {
+                            if featureTarget != nil {
+                                featureCard
+                            } else {
+                                FadedSectionHeader("Vælg en fil for at fortsætte", detail: "Tryk på et filnavn og derefter Hent og åbn.")
+                            }
+                            DisclosureGroup(isExpanded: $advancedExpanded) {
+                                VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                                    manualCard
+                                    autonomyCard
+                                }
+                                .padding(.top, FadedSpacing.s)
+                            } label: { FadedSectionLabel("Avancerede indstillinger") }
+                        }
                     }
                 }
                 .padding(FadedSpacing.edge).frame(maxWidth: 680).frame(maxWidth: .infinity)
@@ -194,8 +237,9 @@ struct CodeWorkspaceView: View {
             }
         }
         .background(FadedBackground(variant: .terminal))
-        .confirmationDialog("Godkend filændringen?", isPresented: $approval, presenting: currentProposal) { item in
-            Button("Skriv filen", role: .destructive) { Task { await apply(item) } }
+        .confirmationDialog("Skriv ændringen til PC’en?", isPresented: $approval, titleVisibility: .visible, presenting: currentProposal) { item in
+            Button("Skriv filen på PC’en") { Task { await apply(item) } }
+            Button("Annuller", role: .cancel) { }
         } message: { item in
             Text("Kun \(item.path) i Agent Workspace bliver ændret.")
         }
@@ -228,8 +272,8 @@ struct CodeWorkspaceView: View {
         }
     }
 
-    @ViewBuilder private func fileCards(useSplit: Bool) -> some View {
-        FadedSectionHeader("Aktive filer")
+    @ViewBuilder private var fileCards: some View {
+        FadedSectionHeader("Filer i Agent Workspace", detail: "Tryk på et filnavn for at vælge det.")
         if let workspaceError {
             RetryNotice(message: workspaceError) { Task { await load() } }
         } else if !workspaceLoaded || workspaceRequest != nil {
@@ -244,23 +288,11 @@ struct CodeWorkspaceView: View {
             FadedCard(accent: openedFile == file.path ? palette.cyan : nil) {
                 HStack(spacing: FadedSpacing.s) {
                     Button {
-                        if isSelected { selected.remove(file.path) }
-                        else { selected.insert(file.path) }
-                        persistContext()
-                    } label: {
-                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(isSelected && palette.isDark ? palette.lime : palette.secondary)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel(isSelected ? "Fjern \(file.path) fra kontekst" : "Tilføj \(file.path) til kontekst")
-                    .accessibilityAddTraits(isSelected ? .isSelected : [])
-                    Button {
-                        if !useSplit { showFileDetails = true }
-                        Task { await open(file.path) }
+                        fileToOpen = file.path
                     } label: {
                         HStack {
+                            Image(systemName: isSelected ? "bookmark.fill" : "doc.text")
+                                .foregroundStyle(palette.secondary).accessibilityHidden(true)
                             VStack(alignment: .leading) {
                                 Text(file.path).font(FadedTypography.code)
                                 Text(ByteCountFormatter.string(fromByteCount: Int64(file.size), countStyle: .file))
@@ -274,16 +306,30 @@ struct CodeWorkspaceView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Åbn \(file.path)")
+                    .contextMenu {
+                        Button(isSelected ? "Fjern fra arbejdskontekst" : "Gem i arbejdskontekst",
+                               systemImage: isSelected ? "bookmark.slash" : "bookmark") {
+                            if isSelected { selected.remove(file.path) }
+                            else { selected.insert(file.path) }
+                            persistContext()
+                        }
+                    }
                 }
             }
-            .disabled(loading)
+            .disabled(loading || currentProposal != nil)
         }
+    }
+
+    private var featureTarget: String? {
+        let target = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty, target == openedFile || target == customFeaturePath else { return nil }
+        return target
     }
 
     private var featureBlocker: String? {
         if api == nil { return "Forbind til PC’en først." }
         if loading { return "Vent på PC’en." }
-        if path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Vælg en fil." }
+        if featureTarget == nil { return "Vælg en fil." }
         if featureRequest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return "Beskriv ændringen først." }
         return nil
     }
@@ -291,19 +337,15 @@ struct CodeWorkspaceView: View {
     private var featureCard: some View {
         FadedCard {
             VStack(alignment: .leading, spacing: 10) {
-                FadedSectionHeader("Byg en funktion", detail: "Vælg en fil og beskriv én ændring. Brug startlinjen, hvis filen er lang.")
+                FadedSectionHeader("2. Beskriv ændringen", detail: "Skriv med dine egne ord. Code Bot forbereder et forslag, du kan læse først.")
+                if let featureTarget { Label(featureTarget, systemImage: "doc.text").font(FadedTypography.code) }
                 FadedFieldLabel("Hvad skal ændres?")
-                TextField("Hvad skal ændres?", text: $featureRequest, axis: .vertical)
+                TextField("Fx: Gør fejlbeskeden nemmere at forstå", text: $featureRequest, axis: .vertical)
                     .lineLimit(2...6).textFieldStyle(.roundedBorder).frame(minHeight: 44).disabled(loading)
-                LabeledContent("Startlinje i filen") {
-                    TextField("Startlinje", text: $firstEditLine).keyboardType(.numberPad)
-                        .font(FadedTypography.number).multilineTextAlignment(.trailing).frame(minHeight: 44).disabled(loading)
-                }
-                Button { Task { await generateFeature() } } label: {
-                    Label("Forbered forslag", systemImage: "terminal").frame(maxWidth: .infinity)
-                }
-                .buttonStyle(FadedButtonStyle(kind: currentProposal == nil ? .primary : .secondary))
-                .disabled(featureBlocker != nil)
+                    .accessibilityLabel("Beskriv ændringen")
+                FadedPrimaryButton(loading ? "Forbereder forslag…" : "Lav et forslag", icon: "sparkles") {
+                    Task { await generateFeature() }
+                }.disabled(featureBlocker != nil)
                 if let featureBlocker { Text(featureBlocker).font(.caption).foregroundStyle(palette.secondary) }
                 if !codeStatus.isEmpty { Text(codeStatus).font(.caption).foregroundStyle(palette.secondary) }
             }
@@ -316,6 +358,16 @@ struct CodeWorkspaceView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     TextField("Relativ filsti", text: $path).textInputAutocapitalization(.never)
                         .autocorrectionDisabled().textFieldStyle(.roundedBorder).disabled(loading)
+                    LabeledContent("Startlinje til AI-forslag") {
+                        TextField("Startlinje", text: $firstEditLine).keyboardType(.numberPad)
+                            .font(FadedTypography.number).multilineTextAlignment(.trailing).frame(minHeight: 44)
+                            .disabled(loading)
+                    }
+                    FadedSecondaryButton("Brug filstien til AI-forslag") {
+                        customFeaturePath = path.trimmingCharacters(in: .whitespacesAndNewlines)
+                        advancedExpanded = false
+                    }
+                    .disabled(loading || path.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     TextEditor(text: $content).font(FadedTypography.code).frame(minHeight: 180)
                         .overlay { RoundedRectangle(cornerRadius: FadedRadius.small).strokeBorder(palette.border) }
                         .accessibilityLabel("Nyt filindhold").disabled(loading)
@@ -329,11 +381,11 @@ struct CodeWorkspaceView: View {
     private func proposalCard(_ proposal: V2CodeProposal) -> some View {
         FadedCard(accent: palette.cyan) {
             VStack(alignment: .leading, spacing: 10) {
-                Label("Dit tjek. Din godkendelse.", systemImage: "lock.shield").font(FadedTypography.action)
+                FadedSectionHeader("3. Gennemgå forslaget", detail: "Linjer med plus tilføjes. Linjer med minus fjernes.")
                 Text(proposal.path).font(FadedTypography.code)
                 FadedDiff(diff: proposal.diff)
                 if !testPlan.isEmpty {
-                    FadedSectionLabel("Testplan")
+                    FadedSectionLabel("Sådan kan du teste ændringen")
                     ForEach(Array(testPlan.enumerated()), id: \.offset) { item in Text("\(item.offset + 1). \(item.element)") }
                 }
             }
@@ -343,7 +395,13 @@ struct CodeWorkspaceView: View {
     private func workspaceApprovalBar(_ proposal: V2CodeProposal) -> some View {
         VStack(spacing: FadedSpacing.s) {
             if loading { FadedDetailText("Vent på PC’en.") }
-            else if unverifiedApprovalID == proposal.change_id { FadedDetailText("Åbn filen igen, og tjek den, før du opretter et nyt forslag.") }
+            else if unverifiedApprovalID == proposal.change_id {
+                FadedDetailText("Hent filen igen for at se, om ændringen blev skrevet.")
+                FadedSecondaryButton("Genindlæs filen fra PC’en", icon: "arrow.clockwise") {
+                    Task { await reloadUnconfirmedProposal(proposal) }
+                }
+            }
+            else { FadedDetailText("4. Bekræft, hvis du vil gemme ændringen på PC’en.") }
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: FadedSpacing.s) { workspaceApprovalActions(proposal) }
                 VStack(spacing: FadedSpacing.s) { workspaceApprovalActions(proposal) }
@@ -359,8 +417,19 @@ struct CodeWorkspaceView: View {
             .disabled(unverifiedApprovalID == proposal.change_id)
     }
 
+    private func reloadUnconfirmedProposal(_ item: V2CodeProposal) async {
+        guard await open(item.path), currentProposal?.change_id == item.change_id else { return }
+        proposal = nil
+        proposalTargetID = nil
+        generatedProposal = nil
+        testPlan = []
+        advancedExpanded = true
+        message = "Filen er hentet. Se dens aktuelle indhold under Ret fil manuelt."
+    }
+
     private func load() async {
         guard let api, !loading || workspaceRequest != nil else { return }
+        fileListRequested = true
         let request = UUID()
         workspaceRequest = request
         workspaceError = nil
@@ -385,27 +454,34 @@ struct CodeWorkspaceView: View {
     }
 
     private func reloadFiles(_ api: LiveAPI) async throws {
+        guard fileListRequested else { return }
         let refreshed = try await api.v2CodeWorkspace().files
         if workspaceScope == api.queueTargetID { files = refreshed }
     }
 
-    private func open(_ file: String) async {
-        guard let api, workspaceScope == api.queueTargetID, !loading else { return }
+    private func open(_ file: String) async -> Bool {
+        guard let api, workspaceScope == api.queueTargetID, !loading else { return false }
         loading = true
         message = nil
         defer { if workspaceScope == api.queueTargetID { loading = false } }
         do {
             let found = try await api.v2CodeFile(path: file)
-            guard workspaceScope == api.queueTargetID else { return }
+            try Task.checkCancellation()
+            guard workspaceScope == api.queueTargetID else { return false }
             guard found.path == file else { throw V2Failure.invalidResponse }
             openedFile = found.path
             path = found.path
             content = found.content
             firstEditLine = "1"
+            customFeaturePath = nil
+            codeStatus = ""
+            return true
         }
         catch {
+            guard !Task.isCancelled else { return false }
             AppDiagnostics.record(error)
             if workspaceScope == api.queueTargetID { message = "Filen kunne ikke åbnes sikkert. Vælg den igen i fillisten." }
+            return false
         }
     }
 
@@ -435,8 +511,7 @@ struct CodeWorkspaceView: View {
     private func generateFeature() async {
         guard let api, workspaceScope == api.queueTargetID, !loading else { return }
         let brief = featureRequest.trimmingCharacters(in: .whitespacesAndNewlines)
-        let target = path.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !brief.isEmpty, !target.isEmpty else { return }
+        guard !brief.isEmpty, let target = featureTarget else { return }
         guard let firstLine = Int(firstEditLine.trimmingCharacters(in: .whitespacesAndNewlines)), firstLine > 0 else {
             codeStatus = "Indtast en gyldig startlinje."
             return
@@ -450,6 +525,7 @@ struct CodeWorkspaceView: View {
         do {
             let original = try await workspaceSource(api, path: target)
             guard workspaceScope == api.queueTargetID else { return }
+            if target == openedFile, original == nil { throw WorkspacePatch.Failure.stale }
             let source = original ?? ""
             let context = try WorkspacePatch.context(goal: brief, path: target, source: source, firstLine: firstLine)
             let request = try V2ChatRequest(message: context.prompt)

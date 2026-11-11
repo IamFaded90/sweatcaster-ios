@@ -62,6 +62,7 @@ struct V2ChatRequest: Encodable, Sendable {
     let model_id: String?
     let request_id: UUID
     let image: Image?
+    let system_prompt: String?
 
     init(message: String, sessionID: String? = nil, modelID: String? = nil, requestID: UUID = UUID(), image: Image? = nil) throws {
         let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -74,6 +75,11 @@ struct V2ChatRequest: Encodable, Sendable {
         model_id = modelID
         request_id = requestID
         self.image = image
+        if modelID == "dolphin3-8b", image == nil {
+            system_prompt = "Ved kreativ dialog og rollespil mellem voksne, svar som figuren på naturligt dansk. Brug gerne lune, fræk humor og drilsk flirt, når brugeren lægger op til det. Fortsæt scenen med en konkret replik. Svar almindeligt på faktuelle spørgsmål, og hold dig til den tone, brugeren beder om."
+        } else {
+            system_prompt = nil
+        }
     }
 }
 

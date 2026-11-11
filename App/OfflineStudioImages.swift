@@ -21,16 +21,18 @@ extension OfflineStudio {
                                         detail: "Beskriv motivet nedenfor, og tryk Lav billede.")
                     }
                 }
-                if batchTurnID != nil {
+                if batchTurnID != nil && !imageOnly {
                     Button("Se billedet i chatten", systemImage: "bubble.left") { studioPage = .chat }
                         .frame(minHeight: 44)
                 }
-                DisclosureGroup("Billedindstillinger") { imageInlineOptions }
+                if privateSession || studioImageRoute != .pc {
+                    DisclosureGroup("Billedindstillinger") { AnyView(imageInlineOptions) }
+                }
             }.padding(FadedSpacing.edge)
         }
         .scrollDismissesKeyboard(.interactively)
         .onScrollPhaseChange { _, phase in if phase == .interacting { resetIdleTimer() } }
-        .safeAreaInset(edge: .bottom) { studioImageComposer }
+        .safeAreaInset(edge: .bottom) { AnyView(studioImageComposer) }
     }
 
     private var studioImageComposer: some View {
@@ -38,12 +40,16 @@ extension OfflineStudio {
         let blocker = imageBlocker(for: request)
         return VStack(alignment: .leading, spacing: 8) {
             if privateSession {
-                Label(blocker == nil ? "Kun telefon · Klar til billeder" : "Kun telefon",
-                      systemImage: "iphone").font(.caption).foregroundStyle(.secondary)
+                Label("Privat billede på telefonen", systemImage: "lock.shield")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                if blocker == nil, let model = StudioImageModel(rawValue: request.model) {
+                    FadedDetailText("\(model.title) er klar. Billedet bliver i denne session.")
+                }
             } else {
                 Picker("Lav billedet på", selection: $studioImageRoute) {
                     ForEach(StudioImageRoute.allCases) { route in Text(route.title).tag(route) }
                 }.pickerStyle(.segmented)
+                FadedDetailText(imageRouteDetail(for: request))
             }
             if imagePromptFocused {
                 ScrollView(.horizontal) {
@@ -63,7 +69,8 @@ extension OfflineStudio {
                 TextField("Beskriv dit billede…", text: $imagePrompt, axis: .vertical)
                     .lineLimit(1...5).frame(minHeight: 44).focused($imagePromptFocused)
                     .dropDestination(for: StudioPhotoInput.self) { items, _ in
-                        acceptStudioImageDrop(items.map(\.data))
+                        guard request.route != .pc else { return false }
+                        return acceptStudioImageDrop(items.map(\.data))
                     }
                 studioEditorButton(forImage: true)
             }
@@ -80,7 +87,7 @@ extension OfflineStudio {
 
     private func imageBlocker(for request: StudioImageRequest) -> String? {
         if request.isPrivate {
-            if !imageReady { return "Hent billedmodellen under Hjem → ⋯ → Lokale modeller → Billeder." }
+            if !imageReady { return "Hent en telefonmodel under Hjem → Billeder → Telefon → Billedindstillinger. Åbn derefter Privat Studio igen." }
             if privateNetworkOffline == nil { return "Tjekker, om telefonen er offline…" }
             if !canRenderPrivateImages { return privateImageOfflineInstructions }
         } else if request.route == .pc {
@@ -88,9 +95,22 @@ extension OfflineStudio {
             if request.prompt.count > 1_000 { return "PC’en tager højst 1.000 tegn. Forkort teksten, eller vælg Telefon." }
             if !request.supportsPC { return "PC’en tager én almindelig prompt. Vælg Telefon for ekstra billedindstillinger." }
         } else if !imageReady && (request.route == .phone || api == nil || !request.allowPCFallback || !request.supportsPC) {
-            return "Hent billedmodellen under Hjem → ⋯ → Lokale modeller → Billeder."
+            return "Åbn Billedindstillinger og hent en telefonmodel, eller vælg PC."
         }
         return nil
+    }
+
+    private func imageRouteDetail(for request: StudioImageRequest) -> String {
+        switch request.route {
+        case .pc:
+            "Din PC laver ét billede med sin ComfyUI-model. Den får kun din billedbeskrivelse."
+        case .phone:
+            "Telefonen bruger din hentede billedmodel og de ekstra billedindstillinger."
+        case .automatic:
+            request.allowPCFallback && api != nil
+                ? "Prøver telefonen først. PC’en kan overtage en enkel billedbeskrivelse."
+                : "Prøver telefonen først. Vælg PC, hvis du vil bruge dens billedmotor."
+        }
     }
 
     var imageReady: Bool {
@@ -223,6 +243,10 @@ extension OfflineStudio {
     private var imageInlineOptions: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.section) {
             if api != nil && !privateSession { Toggle("Tillad PC som reserve", isOn: $allowPCFallback) }
+            if !imageReady || privateSession {
+                FadedFieldLabel("Billedmodel på telefonen")
+                AnyView(privateImageSettings)
+            }
             FadedFieldLabel("Negativ prompt")
             TextField("Negativ prompt", text: $negativeImagePrompt, axis: .vertical)
                 .textFieldStyle(.roundedBorder).lineLimit(1...3).frame(minHeight: 44)
@@ -273,9 +297,11 @@ extension OfflineStudio {
     }
 
     private func imageGenerationButton(_ request: StudioImageRequest, blocked: Bool) -> some View {
-        let label = pendingImages.isEmpty ? "Lav billede" : "Lav billede · I kø (\(pendingImages.count))"
+        let action = request.route == .pc ? "Lav billede på PC" : "Lav billede"
+        let label = pendingImages.isEmpty ? action : "\(action) · I kø (\(pendingImages.count))"
+        let waitingForBase = request.route != .pc && loadingBaseImage
         return FadedPrimaryButton(label, icon: "photo.badge.plus") { generateImage(request) }
-            .disabled(blocked || !canEnqueueImage || loadingBaseImage || pendingImages.count >= 5
+            .disabled(blocked || !canEnqueueImage || waitingForBase || pendingImages.count >= 5
                 || request.prompt.isEmpty || request.prompt.count > 2_000 || request.negative.count > 1_000)
     }
 
@@ -436,18 +462,23 @@ extension OfflineStudio {
     }
 
     private var studioImageRequest: StudioImageRequest {
-        StudioImageRequest(model: imageModel, route: privateSession ? .phone : studioImageRoute,
-                           prompt: imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
-                           negative: negativeImagePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
-                           lora: privateSession || useLoRA ? installedLoRA ?? "" : "", count: makeFourImages ? 4 : 1,
-                           seed: studioSeed, sourceImage: baseImage, isPrivate: privateSession,
-                           autoSave: autoSaveStudioPhotos && !privateSession,
-                           botID: selectedPrivateBot?.id, allowPCFallback: !privateSession && allowPCFallback)
+        let route: StudioImageRoute = privateSession ? .phone : studioImageRoute
+        let usesPhoneOptions = route != .pc
+        let negative = usesPhoneOptions ? negativeImagePrompt.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        let lora = usesPhoneOptions && (privateSession || useLoRA) ? installedLoRA ?? "" : ""
+        return StudioImageRequest(
+            model: imageModel, route: route, prompt: imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            negative: negative, lora: lora, count: usesPhoneOptions && makeFourImages ? 4 : 1,
+            seed: usesPhoneOptions ? studioSeed : nil, sourceImage: usesPhoneOptions ? baseImage : nil,
+            isPrivate: privateSession, autoSave: autoSaveStudioPhotos && !privateSession,
+            botID: selectedPrivateBot?.id, allowPCFallback: !privateSession && allowPCFallback
+        )
     }
 
     private func generateImage(_ request: StudioImageRequest) {
         guard studioEnabled, canShowStudio, canEnqueueImage, pendingImages.count < 5,
-              !request.prompt.isEmpty, request.prompt.count <= 2_000, request.negative.count <= 1_000, !loadingBaseImage else { return }
+              !request.prompt.isEmpty, request.prompt.count <= 2_000, request.negative.count <= 1_000,
+              request.route == .pc || !loadingBaseImage else { return }
         if let blocker = imageBlocker(for: request) {
             status = blocker
             return
