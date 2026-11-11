@@ -2,6 +2,12 @@ import Foundation
 import SwiftUI
 
 enum PCModelSelection {
+    static let adultRoleplayLabel = "18+ rollespil"
+
+    static func isAdultRoleplayModel(_ id: String?) -> Bool {
+        id == "dolphin3-8b"
+    }
+
     static func key(for api: LiveAPI?) -> String {
         AppStorageKeys.pcModel(api?.queueTargetID)
     }
@@ -156,6 +162,9 @@ struct PCModelsView: View {
         return FadedCard(accent: chosen ? palette.lime : model.loaded ? palette.cyan : nil) {
             VStack(alignment: .leading, spacing: 8) {
                 Label(model.label, systemImage: "cpu").font(FadedTypography.section).accessibilityAddTraits(.isHeader)
+                if PCModelSelection.isAdultRoleplayModel(model.id) {
+                    FadedBadge(PCModelSelection.adultRoleplayLabel, tone: .info)
+                }
                 if model.available {
                     FadedBadge(usable ? (model.loaded ? "Indlæst på PC" : "Klar til chat") : "Installeret på PC",
                                tone: usable ? .success : .info)
@@ -212,7 +221,7 @@ struct PCModelsView: View {
             ("qwen2.5-coder:7b", "4,7 GB", "Til kode, fejlfinding og forslag til ændringer. Det er den specialiserede kodemodel.",
              "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF")
         case "dolphin3-8b":
-            ("dolphin3:8b", "4,9 GB", "Til kreativ dialog, rollespil og forskellige personligheder. Kører på PC’en.",
+            ("dolphin3:8b", "4,9 GB", "Til rollespil for voksne og kreativ dialog. Køres lokalt på PC’en.",
              "dphn/Dolphin3.0-Llama3.1-8B")
         case "qwen25-7b":
             ("qwen2.5:7b", "4,7 GB", "Til hverdagschat, dansk tekst og korte opgaver.",
@@ -274,9 +283,12 @@ private struct ChatModelOption: Identifiable {
     var available = true
 
     var id: String { "\(source.rawValue):\(modelID ?? "")" }
+    var isAdultRoleplay: Bool { source == .pc && PCModelSelection.isAdultRoleplayModel(modelID) }
 
     func matches(_ query: String) -> Bool {
-        let key = [title, source.rawValue, modelID ?? ""].joined(separator: " ")
+        var terms = [title, source.rawValue, modelID ?? ""]
+        if isAdultRoleplay { terms.append(PCModelSelection.adultRoleplayLabel) }
+        let key = terms.joined(separator: " ")
         return query.prefix(120).split(whereSeparator: \.isWhitespace)
             .allSatisfy { key.localizedStandardContains(String($0)) }
     }
@@ -339,7 +351,7 @@ private struct ChatModelSelectionButton: View {
                 }
                 if !emptyQuery && results.isEmpty {
                     FadedEmptyState(icon: "magnifyingglass", title: "Ingen modeller matcher",
-                                    detail: "Prøv et modelnavn, Telefon, PC eller Grok.",
+                                    detail: "Prøv et modelnavn, Telefon, PC, Grok eller 18+.",
                                     actionTitle: "Ryd søgning") { query = "" }
                         .listRowBackground(Color.clear)
                 }
@@ -378,6 +390,9 @@ private struct ChatModelSelectionButton: View {
             HStack(spacing: FadedSpacing.s) {
                 VStack(alignment: .leading, spacing: FadedSpacing.xs) {
                     Text(row.title).font(FadedTypography.action)
+                    if row.isAdultRoleplay {
+                        FadedBadge(PCModelSelection.adultRoleplayLabel, tone: .info)
+                    }
                     if !row.available { FadedDetailText("Ikke klar") }
                 }
                 Spacer(minLength: 8)
