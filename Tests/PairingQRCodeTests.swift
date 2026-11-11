@@ -72,15 +72,32 @@ final class PairingQRCodeTests: XCTestCase {
         let root = Home(model: model) { screen in
             if seen.insert(screen).inserted { screens[screen]?.fulfill() }
         }
-        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive })
-        let previousWindow = scene.windows.first { $0.isKeyWindow }
-        let window = UIWindow(windowScene: scene)
-        window.frame = scene.coordinateSpace.bounds
-        window.rootViewController = UIHostingController(rootView: root.defaultAppStorage(defaults))
-        window.makeKeyAndVisible()
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        let usesSystemAppearance = scene?.activationState == .foregroundActive
+        let previousWindow = scene?.windows.first { $0.isKeyWindow }
+        let frame = scene?.coordinateSpace.bounds ?? CGRect(x: 0, y: 0, width: 440, height: 956)
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: frame)
+        let hosting = UIHostingController(rootView: root.defaultAppStorage(defaults))
+        window.frame = frame
+        window.rootViewController = hosting
+        if usesSystemAppearance {
+            window.makeKeyAndVisible()
+        } else {
+            // Hosted XCTest may start without a foreground scene to forward appearance.
+            hosting.loadViewIfNeeded()
+            hosting.beginAppearanceTransition(true, animated: false)
+            if hosting.view.superview == nil { window.addSubview(hosting.view) }
+            window.isHidden = false
+            hosting.view.frame = window.bounds
+            hosting.view.layoutIfNeeded()
+            hosting.endAppearanceTransition()
+        }
         defer {
+            if !usesSystemAppearance {
+                hosting.beginAppearanceTransition(false, animated: false)
+                hosting.endAppearanceTransition()
+            }
             window.isHidden = true
             window.rootViewController = nil
             previousWindow?.makeKey()
