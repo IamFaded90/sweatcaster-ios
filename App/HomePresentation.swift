@@ -63,6 +63,7 @@ extension Home {
                     openQRLogin: { showLogin = true },
                     enterLocally: { enteredWithoutPC = true }
                 )
+                .onAppear { onScreenAppeared?(.landing) }
             }
         }
         .fontDesign(design)

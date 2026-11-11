@@ -4,6 +4,15 @@ import SwiftUI
 import UIKit
 
 struct Home: View {
+    enum InitialScreen: Hashable { case landing, dashboard, videoClips }
+
+    let onScreenAppeared: ((InitialScreen) -> Void)?
+
+    @MainActor init(model: Model? = nil, onScreenAppeared: ((InitialScreen) -> Void)? = nil) {
+        _model = State(initialValue: model ?? Model())
+        self.onScreenAppeared = onScreenAppeared
+    }
+
     enum SettingsCategory: String, CaseIterable, Hashable, Sendable {
         case connection = "Forbindelse", models = "AI-modeller", appearance = "Udseende", diagnostics = "Fejlfinding"
 
@@ -72,7 +81,7 @@ struct Home: View {
     }
 
     @Environment(\.scenePhase) var phase
-    @State var model = Model()
+    @State var model: Model
     @State var showLogin = false
     @State var enteredWithoutPC = false
     @State var showSettings = false
@@ -252,12 +261,16 @@ struct Home: View {
             else { selectModule(value) }
         })) {
             homeTab
+                .onAppear { if space == .brain { onScreenAppeared?(.dashboard) } }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Hjem", systemImage: "house.fill") }.tag(Space.brain.rawValue)
             chatTab
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Chat", systemImage: "bubble.left.fill") }.tag(Space.notes.rawValue)
             videoStudio
+                .onAppear {
+                    if space == .gallery && videoPage == .clips { onScreenAppeared?(.videoClips) }
+                }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Video", systemImage: "film.fill") }.tag(Space.gallery.rawValue)
             AgentHub(api: studioAPI, isVisible: space == .tasks && selectedModuleTab == nil,

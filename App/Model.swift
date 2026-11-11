@@ -5,6 +5,8 @@ import Observation
 @MainActor @Observable final class Model {
     private(set) var api: any SweatAPI
     private let demo = MockAPI()
+    private let makePairingAPI: (Server, String) throws -> LiveAPI
+    private let storePairingToken: (String, String) throws -> Void
     let defaults: UserDefaults
     let videoStateDirectory: URL
     // Shared state for the video and outbox extensions.
@@ -54,9 +56,13 @@ import Observation
         return AppErrorPresentation(error)
     }
     init(api: (any SweatAPI)? = nil, defaults: UserDefaults = .standard,
-         videoStateDirectory: URL = URL.applicationSupportDirectory.appending(path: "VideoStudio", directoryHint: .isDirectory)) {
+         videoStateDirectory: URL = URL.applicationSupportDirectory.appending(path: "VideoStudio", directoryHint: .isDirectory),
+         makePairingAPI: @escaping (Server, String) throws -> LiveAPI = { try LiveAPI(server: $0, token: $1) },
+         storePairingToken: @escaping (String, String) throws -> Void = { try Pairing.save($0, for: $1) }) {
         self.defaults = defaults
         self.videoStateDirectory = videoStateDirectory
+        self.makePairingAPI = makePairingAPI
+        self.storePairingToken = storePairingToken
         self.api = api ?? UnpairedAPI()
         if defaults === UserDefaults.standard { MigratedAppData.shared.migrateUserDefaultsToFilesIfNeeded() }
         needsPairing = api == nil
@@ -139,10 +145,10 @@ import Observation
             if input.isEmpty {
                 token = try Pairing.load(server.address)
             } else { token = input.trimmingCharacters(in: .whitespacesAndNewlines) }
-            let live = try LiveAPI(server: server, token: token)
+            let live = try makePairingAPI(server, token)
             if activateBeforeTest { activate(live) }
             let result = try await initial(live, pairingExpiresAt: pairingExpiresAt)
-            try Pairing.save(token, for: server.address)
+            try storePairingToken(token, server.address)
             savedAddresses[server.profile] = server.address
             defaults.set(server.address, forKey: server.profile.storageKey)
             if !activateBeforeTest { activate(live) }
