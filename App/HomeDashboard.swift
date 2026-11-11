@@ -47,48 +47,8 @@ struct DashboardVideoCard: View {
     }
 }
 
-private struct DashboardWelcome: View {
-    let enterVillage: () -> Void
-    @Environment(\.fadedPalette) private var palette
-
-    var body: some View {
-        VStack(spacing: FadedSpacing.m) {
-            Image("V0AIWorld").resizable().scaledToFit()
-                .frame(maxWidth: 480, maxHeight: 190)
-                .accessibilityHidden(true)
-            VStack(spacing: FadedSpacing.xs) {
-                Text("Store idéer.")
-                if palette.isDark { Text("Dit lille univers.").foregroundStyle(FadedBrand.gradient) }
-                else { Text("Dit lille univers.") }
-            }
-            .font(.system(.largeTitle, design: .rounded).weight(.heavy))
-            .multilineTextAlignment(.center)
-            .fixedSize(horizontal: false, vertical: true)
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
-            Button(action: enterVillage) {
-                Label("Træd ind i din verden", systemImage: "arrow.right")
-                    .font(FadedTypography.action)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, FadedSpacing.m)
-                    .padding(.vertical, FadedSpacing.s)
-                    .frame(maxWidth: .infinity, minHeight: 52)
-                    .foregroundStyle(FadedColors.deep)
-                    .background(FadedBrand.gradient, in: RoundedRectangle(cornerRadius: FadedRadius.primary))
-            }
-            .buttonStyle(.plain)
-            .accessibilityHint("Åbner Landsbyen")
-        }
-        .frame(maxWidth: .infinity)
-    }
-}
-
 extension Home {
     @ViewBuilder var header: some View {
-        DashboardWelcome {
-            if appHaptics { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
-            openDashboardVillage()
-        }
         dashboardMainActions
         quickActions
         if model.isDemo {

@@ -42,7 +42,7 @@ extension Home {
             (font == "Monospace" ? .monospaced : .default)
         return ZStack {
             homeBackground
-            if !model.needsPairing {
+            if !model.needsPairing || enteredWithoutPC {
                 homeFeedback
                     .safeAreaInset(edge: .leading, spacing: 0) {
                         if teamPinned { teamRoster(close: nil).frame(width: teamSidebarCompact ? 64 : 300) }
@@ -59,9 +59,10 @@ extension Home {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
-                LoginView(model: model, openLocalChat: openPhoneChat,
-                          openLocalStudio: { openStudio(.chat) }, openLocalBots: { showBots = true },
-                          exportDiagnostics: exportDiagnostics)
+                FadedLandingView(
+                    openQRLogin: { showLogin = true },
+                    enterLocally: { enteredWithoutPC = true }
+                )
             }
         }
         .fontDesign(design)
@@ -127,7 +128,11 @@ extension Home {
             do { try await Task.sleep(for: .seconds(4)) } catch { return }
             if studioToast?.id == id { studioToast = nil }
         }
-        .sheet(isPresented: $showLogin) { LoginView(model: model, close: { showLogin = false }) }
+        .sheet(isPresented: $showLogin) {
+            LoginView(model: model, close: { showLogin = false })
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+        }
         .sheet(isPresented: $showSettings, onDismiss: openSettingsFollowup) { settingsSheet }
         .sheet(isPresented: $showPCStatus) {
             NavigationStack {

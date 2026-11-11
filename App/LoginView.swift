@@ -459,23 +459,39 @@ private struct PairingQRScanner: UIViewRepresentable {
         let queue = DispatchQueue(label: "dk.fadedai.pairing-camera")
         let finish: (Result<String, Error>) -> Void
         private var delivered = false
+        private var started = false
 
         init(finish: @escaping (Result<String, Error>) -> Void) { self.finish = finish }
 
         func start() {
             queue.async {
                 do {
+                    guard !self.started else { return }
+                    self.started = true
                     guard let camera = AVCaptureDevice.default(for: .video) else { throw APIError.input }
                     let input = try AVCaptureDeviceInput(device: camera)
                     let output = AVCaptureMetadataOutput()
-                    guard self.session.canAddInput(input), self.session.canAddOutput(output) else { throw APIError.input }
+
+                    self.session.beginConfiguration()
+                    var configurationOpen = true
+                    defer { if configurationOpen { self.session.commitConfiguration() } }
+                    self.session.sessionPreset = .high
+                    guard self.session.canAddInput(input) else { throw APIError.input }
                     self.session.addInput(input)
+                    guard self.session.canAddOutput(output) else { throw APIError.input }
                     self.session.addOutput(output)
-                    guard output.availableMetadataObjectTypes.contains(.qr) else { throw APIError.input }
                     output.setMetadataObjectsDelegate(self, queue: .main)
+                    self.session.commitConfiguration()
+                    configurationOpen = false
+                    guard output.availableMetadataObjectTypes.contains(.qr) else { throw APIError.input }
                     output.metadataObjectTypes = [.qr]
+                    guard !self.session.isRunning else { return }
                     self.session.startRunning()
-                } catch { AppDiagnostics.record(error); DispatchQueue.main.async { self.deliver(.failure(error)) } }
+                } catch {
+                    if self.session.isRunning { self.session.stopRunning() }
+                    AppDiagnostics.record(error)
+                    DispatchQueue.main.async { self.deliver(.failure(error)) }
+                }
             }
         }
 

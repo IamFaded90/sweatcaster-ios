@@ -74,6 +74,7 @@ struct Home: View {
     @Environment(\.scenePhase) var phase
     @State var model = Model()
     @State var showLogin = false
+    @State var enteredWithoutPC = false
     @State var showSettings = false
     @State var showPCStatus = false
     @State var showingBackupTools = false
