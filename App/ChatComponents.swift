@@ -276,42 +276,47 @@ private struct ChatAgentActivity: View {
     let running: Bool
     let liveStatus: String?
     let steps: [String]
+    @State private var expanded = false
+    @Environment(\.fadedPalette) private var palette
 
     var body: some View {
-        FadedCard(size: .compact) {
-            VStack(alignment: .leading, spacing: FadedSpacing.s) {
-                if !steps.isEmpty {
-                    DisclosureGroup {
-                        VStack(alignment: .leading, spacing: FadedSpacing.s) {
-                            ForEach(steps.indices, id: \.self) { index in
-                                Label {
-                                    Text(verbatim: steps[index])
-                                } icon: {
-                                    Image(systemName: "circle").accessibilityHidden(true)
-                                }
-                                .font(.footnote)
+        Group {
+            if steps.isEmpty {
+                heading
+            } else {
+                DisclosureGroup(isExpanded: $expanded) {
+                    VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                        ForEach(steps.indices, id: \.self) { index in
+                            Label {
+                                Text(verbatim: steps[index])
+                            } icon: {
+                                Image(systemName: "circle").font(.system(size: 6)).accessibilityHidden(true)
                             }
-                        }.padding(.top, FadedSpacing.xs)
-                    } label: {
-                        heading.frame(minHeight: 44)
-                            .accessibilityHint("Viser \(steps.count) statusopdateringer")
+                        }
                     }
-                } else {
-                    heading
+                    .font(.caption)
+                    .foregroundStyle(palette.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.leading, FadedSpacing.edge)
+                    .padding(.bottom, FadedSpacing.s)
+                } label: {
+                    heading.frame(minHeight: 44)
+                        .accessibilityHint("Viser \(steps.count) statusopdateringer")
                 }
-            }.frame(maxWidth: .infinity, alignment: .leading)
+                .tint(palette.secondary)
+            }
         }
+        .padding(.horizontal, FadedSpacing.s)
     }
 
     private var heading: some View {
-        HStack(alignment: .center, spacing: FadedSpacing.s) {
+        HStack(spacing: FadedSpacing.s) {
             if running { AgentToolWave(status: title).accessibilityHidden(true) }
             else { Image(systemName: "clock").accessibilityHidden(true) }
-            VStack(alignment: .leading, spacing: FadedSpacing.xs) {
-                Text(title).font(FadedTypography.action)
-                if let liveStatus { FadedDetailText(liveStatus) }
-            }
+            Text(liveStatus ?? title)
         }
+        .font(.footnote.weight(.medium))
+        .foregroundStyle(palette.secondary)
     }
 }
 

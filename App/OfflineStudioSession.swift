@@ -236,6 +236,7 @@ extension OfflineStudio {
     }
 
     func authenticate() {
+        guard !privateSession, !authenticating else { return }
         let context = LAContext()
         guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) else {
             status = "Slå Face ID eller Touch ID til på telefonen for at åbne studiet."

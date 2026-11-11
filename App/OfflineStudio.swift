@@ -10,7 +10,8 @@ import UniformTypeIdentifiers
 
 struct OfflineStudio: View {
     let api: LiveAPI?
-    @Binding var sessionUnlocked: Bool
+    @Binding private var regularStudioUnlocked: Bool
+    @State private var privateSessionOpen = true
     let onPrivateSessionEnded: () -> Void
     let ephemeralOnly: Bool
     @State var studioPage: Page
@@ -132,7 +133,7 @@ struct OfflineStudio: View {
          initialPage: Page? = nil, initialImagePrompt: String = "", initialBotID: UUID? = nil,
          ephemeralOnly: Bool = false) {
         self.api = ephemeralOnly ? nil : api
-        _sessionUnlocked = sessionUnlocked
+        _regularStudioUnlocked = sessionUnlocked
         self.onPrivateSessionEnded = onPrivateSessionEnded
         self.ephemeralOnly = ephemeralOnly
         _studioPage = State(initialValue: initialPage ?? .chat)
@@ -141,6 +142,13 @@ struct OfflineStudio: View {
     }
 
     var privateSession: Bool { ephemeralOnly }
+    var sessionUnlocked: Bool {
+        get { privateSession ? privateSessionOpen : regularStudioUnlocked }
+        nonmutating set {
+            if privateSession { privateSessionOpen = newValue }
+            else { regularStudioUnlocked = newValue }
+        }
+    }
     var studioEnabled: Bool { privateSession || enabled }
     var imageModel: String { privateSession ? sessionPreferences.imageModel : savedImageModel }
     var sessionExpired: Bool { privateDeadline.map { $0 <= .now } ?? false }
@@ -285,7 +293,9 @@ struct OfflineStudio: View {
             }
             .confirmationDialog(panicDeletesDownloads ? "Slet studiets indhold og lokale modeller?" : "Ryd denne private session?",
                                 isPresented: $confirmStudioPanic, titleVisibility: .visible) {
-                Button("Ryd og lås", role: .destructive) { clearStudioContent(includingModels: panicDeletesDownloads) }
+                Button(privateSession ? "Ryd og afslut session" : "Ryd og lås", role: .destructive) {
+                    clearStudioContent(includingModels: panicDeletesDownloads)
+                }
             } message: {
                 Text(panicDeletesDownloads ? "Studiets gemte samtaler og billeder slettes også uden for den private session. Downloadede tekst- og billedmodeller samt LoRA fjernes. Kopier i Fotos og Apples systemmodel bevares."
                                           : "Samtaler, noter og billeder fra sessionen forsvinder. Modeller på telefonen og kopier i Fotos bliver liggende.")
@@ -380,13 +390,21 @@ struct OfflineStudio: View {
                 }
             }
             .simultaneousGesture(TapGesture().onEnded { _ in resetIdleTimer() })
+        } else if privateSession {
+            VStack(spacing: 18) {
+                Image(systemName: "lock.shield").font(.largeTitle).foregroundStyle(palette.purple)
+                    .accessibilityHidden(true)
+                Text(status.isEmpty ? "Privat session afsluttet." : status)
+                    .font(.callout).multilineTextAlignment(.center).foregroundStyle(palette.secondary)
+                FadedPrimaryButton("Start ny privat session", icon: "lock.open") { sessionUnlocked = true }
+            }.padding(24)
         } else {
             VStack(spacing: 18) {
                 Image(systemName: "faceid").font(.system(size: 56)).foregroundStyle(palette.purple)
                     .accessibilityHidden(true)
-                Text(ephemeralOnly ? "NSFW · Privat chat" : "Privat Studio").font(.largeTitle.bold())
+                Text("Privat Studio").font(.largeTitle.bold())
                     .foregroundStyle(palette.text)
-                Text(ephemeralOnly ? "Kun på din telefon. Lås op med Face ID eller Touch ID." : "Lås op én gang pr. session.")
+                Text("Lås op én gang pr. session.")
                     .multilineTextAlignment(.center).foregroundStyle(palette.secondary)
                 FadedPrimaryButton("Lås op", icon: "faceid") { authenticate() }
                     .disabled(authenticating || studioPhase != .active)
