@@ -290,7 +290,7 @@ struct TeamRoster: View {
         let active = specialists.filter { $0.status != .offline }
         let sleeping = specialists.filter { $0.status == .offline }
         return Group {
-            FadedSectionLabel("Aktive på PC")
+            FadedSectionHeader("Agenter på din PC", detail: "De arbejder på den samme tilsluttede PC.")
             if active.isEmpty { FadedDetailText("Ingen aktive PC-agenter i listen.") }
             ForEach(active) { agent in agentRow(agent) }
             DisclosureGroup("Sovende", isExpanded: $sleepingOpen) {

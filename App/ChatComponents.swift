@@ -313,7 +313,10 @@ private struct ChatAgentActivity: View {
         HStack(spacing: FadedSpacing.s) {
             if running { AgentToolWave(status: title).accessibilityHidden(true) }
             else { Image(systemName: "clock").accessibilityHidden(true) }
-            Text(liveStatus ?? title)
+            VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                Text(title)
+                if let liveStatus, liveStatus != title { Text(liveStatus).font(.caption) }
+            }
         }
         .font(.footnote.weight(.medium))
         .foregroundStyle(palette.secondary)
@@ -358,7 +361,8 @@ extension ChatView {
         let steps = aiShowTools ? searchSteps : []
         if task != nil {
             let waiting = turns.last?.reply.isEmpty != false
-            ChatAgentActivity(title: waiting ? "AI’en tænker…" : "Skriver svar…", running: true,
+            let model = chatRouteModelTitle ?? "AI’en"
+            ChatAgentActivity(title: waiting ? "\(model) gør svaret klar…" : "\(model) skriver…", running: true,
                               liveStatus: waiting && aiShowTools ? status : nil, steps: steps)
         } else if let responseDuration, responseDuration.turnID == turns.last?.id, responseDuration.seconds > 0 {
             ChatAgentActivity(title: "Svar klar · \(responseDuration.seconds) sek.", running: false,

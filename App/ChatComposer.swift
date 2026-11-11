@@ -84,8 +84,11 @@ extension ChatView {
             }
 
             HStack(alignment: .firstTextBaseline) {
-                Label("Sendes til: \(demo ? "Demo" : effectiveReplySource.rawValue)", systemImage: demo ? "testtube.2" : effectiveReplySource.icon)
+                let destination = demo ? "Demo" : effectiveReplySource.rawValue
+                let routeLabel = chatRouteModelTitle.map { "\(destination) · \($0)" } ?? destination
+                Label(routeLabel, systemImage: demo ? "testtube.2" : effectiveReplySource.icon)
                     .font(.caption.weight(.semibold)).foregroundStyle(demo || !palette.isDark ? palette.secondary : sourceColor(effectiveReplySource))
+                    .accessibilityLabel("Sendes til \(routeLabel)")
                 if effectiveReplySource == .phone, phoneBatteryLevel >= 0, phoneBatteryLevel < 0.20,
                    PhoneModels.liteModeActive(for: phoneModel), resolvedRoute.modelID == PhoneModels.effectiveModelID(phoneModel) {
                     Label("Lite Mode", systemImage: "battery.25percent").font(.caption).foregroundStyle(palette.secondary)
@@ -93,6 +96,7 @@ extension ChatView {
                 Spacer(minLength: 4)
                 Text("\(transportMessage.unicodeScalars.count) / 2.000").font(.caption.monospacedDigit())
                     .foregroundStyle(transportMessage.unicodeScalars.count > 2000 ? palette.coralText : palette.secondary)
+                    .fixedSize()
             }
             if let modelRoutingNotice { FadedDetailText(modelRoutingNotice) }
             if !demo, effectiveReplySource == .phone, !PhoneModels.isReady(resolvedRoute.modelID ?? phoneModel) {

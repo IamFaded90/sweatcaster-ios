@@ -467,6 +467,11 @@ private struct ChatModelSelectionButton: View {
 }
 
 extension ChatView {
+    var chatRouteModelTitle: String? {
+        guard !demo else { return nil }
+        return chatModelCurrentOption(resolvedRoute).title
+    }
+
     @ViewBuilder var chatModelSelectionButton: some View {
         if !demo {
             let route = resolvedRoute
