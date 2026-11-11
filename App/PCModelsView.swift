@@ -275,7 +275,7 @@ struct PCModelsView: View {
     }
 }
 
-// Searchable single-selection model groups, following shadcn's Model Selector pattern.
+// Searchable model groups with Alwurts' Model Selector icon pattern.
 private struct ChatModelOption: Identifiable {
     let source: ChatView.ReplySource
     let modelID: String?
@@ -322,9 +322,11 @@ private struct ChatModelSelectionButton: View {
             showing = true
         } label: {
             HStack(spacing: FadedSpacing.xs) {
-                Image(systemName: current.available ? current.source.icon : "exclamationmark.circle")
-                    .foregroundStyle(palette.isDark ? accent(current.source) : palette.text)
+                modelIcon(current)
                 Text(current.title).lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                if current.isAdultRoleplay {
+                    Text("18+").fixedSize().foregroundStyle(palette.secondary)
+                }
                 Image(systemName: "chevron.down")
             }
             .font(.caption.bold())
@@ -334,8 +336,15 @@ private struct ChatModelSelectionButton: View {
         .buttonStyle(.plain)
         .disabled(blocked)
         .accessibilityLabel("Model for næste besked")
-        .accessibilityValue("\(current.source.rawValue), \(current.title)" + (current.available ? "" : ", ikke klar"))
+        .accessibilityValue(currentAccessibilityValue)
         .sheet(isPresented: $showing, onDismiss: finishSetup) { selectionSheet }
+    }
+
+    private var currentAccessibilityValue: String {
+        var parts = [current.source.rawValue, current.title]
+        if current.isAdultRoleplay { parts.append(PCModelSelection.adultRoleplayLabel) }
+        if !current.available { parts.append("ikke klar") }
+        return parts.joined(separator: ", ")
     }
 
     private var selectionSheet: some View {
@@ -388,6 +397,8 @@ private struct ChatModelSelectionButton: View {
             showing = false
         } label: {
             HStack(spacing: FadedSpacing.s) {
+                modelIcon(row)
+                    .font(.body)
                 VStack(alignment: .leading, spacing: FadedSpacing.xs) {
                     Text(row.title).font(FadedTypography.action)
                     if row.isAdultRoleplay {
@@ -409,6 +420,12 @@ private struct ChatModelSelectionButton: View {
         .disabled(!row.available || blocked)
         .accessibilityAddTraits(selected ? .isSelected : [])
         .listRowBackground(palette.card)
+    }
+
+    private func modelIcon(_ option: ChatModelOption) -> some View {
+        Image(systemName: option.available ? option.source.icon : "exclamationmark.circle")
+            .foregroundStyle(palette.isDark ? accent(option.source) : palette.text)
+            .accessibilityHidden(true)
     }
 
     @ViewBuilder private func sourceActions(_ source: ChatView.ReplySource) -> some View {
