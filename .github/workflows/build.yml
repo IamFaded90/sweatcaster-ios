@@ -17,13 +17,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Verify unchanged source for the packaging-only retry
-        if: ${{ github.ref_name == 'codex/ipa-bus-package-65e772a' }}
+        if: ${{ github.ref_name == 'codex/ipa-v0-ui-package' }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin 65e772a0c609c1e55b83f368a718ffe0a1e09989
+          git fetch --no-tags --depth=1 origin 67510d8f341b6ce41d5b281276b951b4d4b05e9c
           git diff --exit-code FETCH_HEAD HEAD -- . ':(exclude).github/workflows/build.yml'
       - name: Run XCTest on an iPhone simulator
-        if: ${{ github.ref_name != 'codex/ipa-bus-package-65e772a' }}
+        if: ${{ github.ref_name != 'codex/ipa-v0-ui-package' }}
         run: |
           set -o pipefail
           xcodebuild -version
