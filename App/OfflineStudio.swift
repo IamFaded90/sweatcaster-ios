@@ -187,7 +187,9 @@ struct OfflineStudio: View {
     }
 
     private var studioChrome: some View {
-        studioContent
+        // Keep concrete view types shallow at presentation boundaries. Building the
+        // full nested type here exhausted the Swift runtime stack on iPhone.
+        AnyView(studioContent)
             .background { FadedBackground(variant: privateSession ? .privateChat : .standard) }
             .navigationTitle(ephemeralOnly ? "NSFW" : (sessionUnlocked ? studioPage.rawValue : "Privat område"))
             .overlay(alignment: .top) {
@@ -238,7 +240,7 @@ struct OfflineStudio: View {
     }
 
     private var studioPresentations: some View {
-        studioChrome
+        AnyView(studioChrome)
             .sheet(isPresented: $showModels, onDismiss: {
                 textContextLimit = contextWindow(for: effectiveTextModel)
             }) { PhoneModelsView(allowsImageDownloads: !privateSession) }
@@ -278,7 +280,7 @@ struct OfflineStudio: View {
     }
 
     private var studioPrivacyControls: some View {
-        studioPresentations
+        AnyView(studioPresentations)
             .sheet(isPresented: $showSessionNote) { sessionNoteSheet }
             .fileImporter(isPresented: $importChatText, allowedContentTypes: [.plainText]) { result in
                 if case .success(let url) = result { loadPromptFile(url, intoImages: false) }
@@ -303,7 +305,7 @@ struct OfflineStudio: View {
     }
 
     private var studioSessionLifecycle: some View {
-        studioPrivacyControls
+        AnyView(studioPrivacyControls)
             .onAppear { activateChatIfNeeded(); resetIdleTimer() }
             .onChange(of: sessionUnlocked) { _, unlocked in
                 if unlocked { activateChatIfNeeded() }
@@ -334,7 +336,7 @@ struct OfflineStudio: View {
     }
 
     private var studioNavigation: some View {
-        studioSessionLifecycle
+        AnyView(studioSessionLifecycle)
             .onChange(of: task != nil) { _, _ in resetIdleTimer(extendPrivacy: false) }
             .onChange(of: autoSleepMinutes) { _, _ in resetIdleTimer() }
             .onChange(of: sessionPreferences.idleMinutes) { _, _ in resetIdleTimer() }
@@ -380,14 +382,7 @@ struct OfflineStudio: View {
                 }
                 .padding(.horizontal, 16).padding(.vertical, 8)
                 studioOperationStatus
-                switch studioPage {
-                case .chat: studioChatPage
-                case .images: studioImagesPage
-                case .gallery:
-                    studioGalleryPage.safeAreaInset(edge: .bottom, spacing: 0) {
-                        if privateSession { privateSessionFooter }
-                    }
-                }
+                studioPageContent
             }
             .simultaneousGesture(TapGesture().onEnded { _ in resetIdleTimer() })
         } else if privateSession {
@@ -410,6 +405,19 @@ struct OfflineStudio: View {
                     .disabled(authenticating || studioPhase != .active)
                 if !status.isEmpty && !sessionUnlocked { Text(status).font(.callout).foregroundStyle(palette.secondary) }
             }.padding(24)
+        }
+    }
+
+    private var studioPageContent: AnyView {
+        switch studioPage {
+        case .chat:
+            return AnyView(studioChatPage)
+        case .images:
+            return AnyView(studioImagesPage)
+        case .gallery:
+            return AnyView(studioGalleryPage.safeAreaInset(edge: .bottom, spacing: 0) {
+                if privateSession { privateSessionFooter }
+            })
         }
     }
 

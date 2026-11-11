@@ -221,7 +221,7 @@ struct Home: View {
         .onChange(of: showJobs) {
             navigate(to: .video(.jobs))
         }
-        .task(id: "\(model.isDemo):\(model.address):\((model.api as? LiveAPI)?.queueTargetID ?? ""):\(phase == .active && !privateStudioPresented)") {
+        .task(id: "\(model.isDemo):\(model.address):\((model.api as? LiveAPI)?.queueTargetID ?? ""):\(model.connected):\(phase == .active && !privateStudioPresented)") {
             if phase == .active && !privateStudioPresented { await loadModuleTabs() }
         }
         .onChange(of: space) { _, value in
@@ -278,7 +278,6 @@ struct Home: View {
                 }
             }
         }
-        .toolbarVisibility(.hidden, for: .tabBar)
     }
 
     private func loadModuleTabs() async {
@@ -294,8 +293,9 @@ struct Home: View {
             selectedModuleTab = nil
             return
         }
+        guard model.connected, !Task.isCancelled else { return }
         guard let manifest = try? await api.moduleManifest(), manifest.version == 1,
-              !Task.isCancelled, !model.isDemo, !privateStudioPresented, model.address == address,
+              !Task.isCancelled, model.connected, !model.isDemo, !privateStudioPresented, model.address == address,
               (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
         var seen = Set<String>()
         moduleAddress = address

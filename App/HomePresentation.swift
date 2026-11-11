@@ -497,7 +497,7 @@ extension Home {
 
     private var shouldRecoverPC: Bool {
         switch model.error {
-        case .offline?, .transport(_)?, nil: true
+        case .offline?, .localNetwork?, .transport(_)?, nil: true
         default: false
         }
     }
