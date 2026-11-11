@@ -1,6 +1,6 @@
 workflows:
   sweatcaster-ios:
-    name: SweatCaster iOS tests and unsigned IPA
+    name: FadedAI iOS tests and unsigned IPA
     instance_type: mac_mini_m2
     max_build_duration: 30
     environment:
@@ -21,14 +21,14 @@ workflows:
             -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
             -derivedDataPath "$output/derived" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
-          app="$output/derived/Build/Products/Release-iphoneos/SweatCaster.app"
-          test -x "$app/SweatCaster"
+          app="$output/derived/Build/Products/Release-iphoneos/FadedAI.app"
+          test -x "$app/FadedAI"
           test ! -e "$app/_CodeSignature"
           staging="$(mktemp -d)"
           mkdir "$staging/Payload"
-          ditto "$app" "$staging/Payload/SweatCaster.app"
+          ditto "$app" "$staging/Payload/FadedAI.app"
           cd "$staging"
-          zip -qr "$output/SweatCaster-unsigned.ipa" Payload
-          unzip -tq "$output/SweatCaster-unsigned.ipa"
+          zip -qr "$output/FadedAI-unsigned.ipa" Payload
+          unzip -tq "$output/FadedAI-unsigned.ipa"
     artifacts:
-      - build/SweatCaster-unsigned.ipa
+      - build/FadedAI-unsigned.ipa

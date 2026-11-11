@@ -316,26 +316,27 @@ extension Home {
         .id("clips")
     }
 
-    @ViewBuilder private func videoFolders(onDone: @escaping () -> Void) -> some View {
+    // Keep SwiftUI from expanding the same nested clip hierarchy for every folder branch.
+    private func videoFolders(onDone: @escaping () -> Void) -> AnyView {
         if model.isDemo {
-            clipFolder(id: "demo", title: "Testklip", subtitle: nil, onDone: onDone)
-        } else if catalogLoading != nil || (videoFolderServer != videoFolderScope && folderNotice == nil) {
-            LoadingSkeleton(label: "Henter spilmapper…")
-        } else if let server = videoFolderScope, videoFolderServer == server {
-            if legacyClipCatalog {
-                clipFolder(id: "legacy", title: "PC’ens V1-klipliste", subtitle: "Ældre server uden spilmapper", onDone: onDone)
-            } else {
-                ForEach(clipRoots) { root in
-                    let subtitle = root.indexing || !root.ready ? "PC’en indekserer klip" : "\(root.file_count) filer på PC’en"
-                    clipFolder(id: root.id, title: root.label, subtitle: subtitle, onDone: onDone)
-                }
-            }
+            return clipFolder(id: "demo", title: "Testklip", subtitle: nil, onDone: onDone)
         }
+        if catalogLoading != nil || (videoFolderServer != videoFolderScope && folderNotice == nil) {
+            return AnyView(LoadingSkeleton(label: "Henter spilmapper…"))
+        }
+        guard let server = videoFolderScope, videoFolderServer == server else { return AnyView(EmptyView()) }
+        if legacyClipCatalog {
+            return clipFolder(id: "legacy", title: "PC’ens V1-klipliste", subtitle: "Ældre server uden spilmapper", onDone: onDone)
+        }
+        return AnyView(ForEach(clipRoots) { root in
+            let subtitle = root.indexing || !root.ready ? "PC’en indekserer klip" : "\(root.file_count) filer på PC’en"
+            clipFolder(id: root.id, title: root.label, subtitle: subtitle, onDone: onDone)
+        })
     }
 
-    private func clipFolder(id: String, title: String, subtitle: String?, onDone: @escaping () -> Void) -> some View {
+    private func clipFolder(id: String, title: String, subtitle: String?, onDone: @escaping () -> Void) -> AnyView {
         let expanded = selectedGameFolder == id
-        return VStack(alignment: .leading, spacing: 8) {
+        return AnyView(VStack(alignment: .leading, spacing: 8) {
             Button {
                 selectedGameFolder = expanded ? nil : id
                 if !expanded { model.rememberVideoFolder(id) }
@@ -363,12 +364,12 @@ extension Home {
                         .id(id)
                 }
             }
-        }
+        })
     }
 
-    private func expandedClipFolder(_ id: String, onDone: @escaping () -> Void) -> some View {
+    private func expandedClipFolder(_ id: String, onDone: @escaping () -> Void) -> AnyView {
         let clips = folderPages[id] ?? []
-        return VStack(alignment: .leading, spacing: 8) {
+        return AnyView(VStack(alignment: .leading, spacing: 8) {
             if !clips.isEmpty {
                 clipList(clips, onDone: onDone)
             }
@@ -390,12 +391,12 @@ extension Home {
         .task(id: videoFolderScope) {
             guard let server = videoFolderScope else { return }
             await loadFolderPage(id, for: server)
-        }
+        })
     }
 
-    private func clipList(_ clips: [Clip], onDone: @escaping () -> Void) -> some View {
+    private func clipList(_ clips: [Clip], onDone: @escaping () -> Void) -> AnyView {
         let filtered = filteredClips(clips)
-        return VStack(alignment: .leading, spacing: FadedSpacing.section) {
+        return AnyView(VStack(alignment: .leading, spacing: FadedSpacing.section) {
             DisclosureGroup("Filtrér klip") {
                 TextField("Søg i filnavn", text: $clipGame).textFieldStyle(.roundedBorder).frame(minHeight: 44)
                 Toggle("Under ét minut", isOn: $shortClips)
@@ -427,7 +428,7 @@ extension Home {
                     ForEach(filtered) { clip in videoClipCard(clip) }
                 }
             }
-        }
+        })
     }
 
     @ViewBuilder private func clipListActions(_ clips: [Clip], onDone: @escaping () -> Void) -> some View {

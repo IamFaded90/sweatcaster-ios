@@ -91,13 +91,13 @@ jobs:
       - name: Package IPA
         run: |
           set -euxo pipefail
-          app="$RUNNER_TEMP/SweatCasterBuild/Build/Products/Release-iphoneos/SweatCaster.app"
-          test -x "$app/SweatCaster"
-          xcrun lipo "$app/SweatCaster" -verify_arch arm64
+          app="$RUNNER_TEMP/SweatCasterBuild/Build/Products/Release-iphoneos/FadedAI.app"
+          test -x "$app/FadedAI"
+          xcrun lipo "$app/FadedAI" -verify_arch arm64
           test ! -e "$app/_CodeSignature"
           staging="$(mktemp -d)"
           mkdir "$staging/Payload"
-          ditto "$app" "$staging/Payload/SweatCaster.app"
+          ditto "$app" "$staging/Payload/FadedAI.app"
           cd "$staging"
           zip -qr "$RUNNER_TEMP/FadedAI-unsigned.ipa" Payload
           unzip -tq "$RUNNER_TEMP/FadedAI-unsigned.ipa"
