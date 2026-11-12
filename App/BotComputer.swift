@@ -115,6 +115,7 @@ struct BotComputerOffice: Equatable {
     var tasks: [BotComputerTask] = []
     var files: [BotComputerFile] = []
     var deliveredKeys: Set<String> = []
+    var pendingCancelIDs: Set<String> = []
     var link: BotComputerLink = .pcOffline
 
     static func validToken(_ value: String) -> Bool {
@@ -188,6 +189,10 @@ struct BotComputerOffice: Equatable {
     }
 
     mutating func adopt(_ task: BotComputerTask) {
+        if let index = tasks.firstIndex(where: { $0.idempotencyKey == task.idempotencyKey || $0.id == task.id }),
+           tasks[index].status == .cancelled, task.status != .cancelled {
+            return
+        }
         if task.status == .done, let path = task.resultPath, let text = task.resultText {
             try? writeFile(ownerID: task.botID, ownerName: task.botName, path: path, text: text)
         }
@@ -245,6 +250,55 @@ struct BotComputerRecord: Codable, Equatable {
     var files: [BotComputerFile]
     var deliveredKeys: [String]
     var link: BotComputerLink
+    var pendingCancelIDs: [String]
+
+    init(tasks: [BotComputerTask], files: [BotComputerFile], deliveredKeys: [String], link: BotComputerLink, pendingCancelIDs: [String]) {
+        self.tasks = tasks
+        self.files = files
+        self.deliveredKeys = deliveredKeys
+        self.link = link
+        self.pendingCancelIDs = pendingCancelIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        tasks = try container.decode([BotComputerTask].self, forKey: .tasks)
+        files = try container.decode([BotComputerFile].self, forKey: .files)
+        deliveredKeys = try container.decode([String].self, forKey: .deliveredKeys)
+        link = try container.decode(BotComputerLink.self, forKey: .link)
+        pendingCancelIDs = try container.decodeIfPresent([String].self, forKey: .pendingCancelIDs) ?? []
+    }
+}
+
+enum BotComputerPointer {
+    /// Maps a tap onto the visible picture. Letterbox bars and the padding around a fitted image return nil.
+    static func normalized(tapX: Double, tapY: Double, viewWidth: Double, viewHeight: Double,
+                           imageWidth: Double, imageHeight: Double, padding: Double = 8) -> (x: Double, y: Double)? {
+        guard viewWidth > padding * 2, viewHeight > padding * 2, imageWidth > 0, imageHeight > 0 else { return nil }
+        let minX = padding
+        let minY = padding
+        let width = viewWidth - padding * 2
+        let height = viewHeight - padding * 2
+        let aspect = imageWidth / imageHeight
+        let fittedX: Double
+        let fittedY: Double
+        let fittedWidth: Double
+        let fittedHeight: Double
+        if width / height > aspect {
+            fittedHeight = height
+            fittedWidth = height * aspect
+            fittedX = minX + (width - fittedWidth) / 2
+            fittedY = minY
+        } else {
+            fittedWidth = width
+            fittedHeight = width / aspect
+            fittedX = minX
+            fittedY = minY + (height - fittedHeight) / 2
+        }
+        guard tapX >= fittedX, tapY >= fittedY, tapX <= fittedX + fittedWidth, tapY <= fittedY + fittedHeight,
+              fittedWidth > 0, fittedHeight > 0 else { return nil }
+        return ((tapX - fittedX) / fittedWidth, (tapY - fittedY) / fittedHeight)
+    }
 }
 
 enum BotComputerDisk {
@@ -260,13 +314,15 @@ enum BotComputerDisk {
             return BotComputerOffice()
         }
         return BotComputerOffice(tasks: record.tasks, files: record.files,
-                                 deliveredKeys: Set(record.deliveredKeys), link: record.link)
+                                 deliveredKeys: Set(record.deliveredKeys),
+                                 pendingCancelIDs: Set(record.pendingCancelIDs), link: record.link)
     }
 
     static func save(_ office: BotComputerOffice, to directory: URL) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let record = BotComputerRecord(tasks: office.tasks, files: office.files,
-                                       deliveredKeys: Array(office.deliveredKeys).sorted(), link: office.link)
+                                       deliveredKeys: Array(office.deliveredKeys).sorted(), link: office.link,
+                                       pendingCancelIDs: Array(office.pendingCancelIDs).sorted())
         let data = try JSONEncoder().encode(record)
         guard data.count <= 2_000_000 else { throw BotComputerFailure.rejected("Computerens arkiv er for stort.") }
         let url = directory.appending(path: "computer.json")
@@ -349,6 +405,7 @@ enum BotComputerDisk {
             }
             inFlight.remove(task.idempotencyKey)
         }
+        await deliverCancels()
         if let remote = try? await transport.tasks(botID: botID) {
             office.merge(remote.filter { $0.botID == botID })
         }
@@ -363,14 +420,27 @@ enum BotComputerDisk {
         catch { return .failure(.rejected("Opgaven kunne ikke annulleres.")) }
         persist()
         if before == .cancelled { return .success(updated) }
-        if office.link == .online, let current = office.task(id: id), office.deliveredKeys.contains(current.idempotencyKey) {
-            if let remote = try? await transport.cancel(botID: current.botID, id: current.id) {
-                office.adopt(remote)
-                persist()
-                return .success(office.task(id: id) ?? remote)
-            }
+        guard let current = office.task(id: id), office.deliveredKeys.contains(current.idempotencyKey) else {
+            return .success(office.task(id: id) ?? updated)
         }
-        return .success(office.task(id: id) ?? updated)
+        let reachable = office.link == .online || office.link == .dockerOffline
+        guard reachable else {
+            office.pendingCancelIDs.insert(id)
+            persist()
+            return .success(office.task(id: id) ?? updated)
+        }
+        do {
+            let remote = try await transport.cancel(botID: current.botID, id: current.id)
+            office.pendingCancelIDs.remove(id)
+            office.adopt(remote)
+            persist()
+            return .success(office.task(id: id) ?? remote)
+        } catch {
+            office.pendingCancelIDs.insert(id)
+            office.link = Self.link(for: error)
+            persist()
+            return .success(office.task(id: id) ?? updated)
+        }
     }
 
     func retry(id: String, retryKey: String) async -> Result<BotComputerTask, BotComputerFailure> {
@@ -442,6 +512,23 @@ enum BotComputerDisk {
         persist()
     }
 
+    private func deliverCancels() async {
+        for id in office.pendingCancelIDs {
+            guard let task = office.task(id: id) else {
+                office.pendingCancelIDs.remove(id)
+                continue
+            }
+            do {
+                let remote = try await transport.cancel(botID: task.botID, id: task.id)
+                office.pendingCancelIDs.remove(id)
+                office.adopt(remote)
+            } catch {
+                office.link = Self.link(for: error)
+                return
+            }
+        }
+    }
+
     private func refreshLink() async {
         do { office.link = try await transport.health() }
         catch { office.link = Self.link(for: error) }
@@ -460,10 +547,20 @@ enum BotComputerDisk {
         }
     }
 
-    static func link(forHTTPStatus status: Int) -> BotComputerLink? {
+    static func failure(forHTTPStatus status: Int) -> BotComputerFailure? {
         switch status {
+        case 403: .isolated
         case 404: .moduleMissing
         case 503: .dockerOffline
+        default: nil
+        }
+    }
+
+    static func link(forHTTPStatus status: Int) -> BotComputerLink? {
+        switch failure(forHTTPStatus: status) {
+        case .dockerOffline: .dockerOffline
+        case .moduleMissing: .moduleMissing
+        case .pcOffline: .pcOffline
         default: nil
         }
     }

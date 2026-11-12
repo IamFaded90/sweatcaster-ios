@@ -95,6 +95,11 @@ import UIKit
         catch { notice = "Styringen nåede ikke skrivebordet." }
     }
 
+    func pollTasks() async {
+        await session.refresh(botID: bot.id.uuidString.lowercased())
+        reload()
+    }
+
     func stopLive() { live = false }
 
     private func sessionStart() async throws -> BotComputerLink {
@@ -228,7 +233,14 @@ import UIKit
                 }
             }
         }
-        .task { await model.appear() }
+        .task {
+            await model.appear()
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                if Task.isCancelled { break }
+                await model.pollTasks()
+            }
+        }
         .task(id: model.live) {
             guard model.live else { return }
             while !Task.isCancelled && model.live {
@@ -275,10 +287,12 @@ import UIKit
             .clipShape(RoundedRectangle(cornerRadius: FadedRadius.media))
             .contentShape(Rectangle())
             .gesture(SpatialTapGesture().onEnded { value in
-                guard model.control, panel == nil, geometry.size.width > 0, geometry.size.height > 0 else { return }
-                let x = min(1, max(0, value.location.x / geometry.size.width))
-                let y = min(1, max(0, value.location.y / geometry.size.height))
-                Task { await model.click(x: x, y: y) }
+                guard model.control, panel == nil, let image = model.frame.flatMap(UIImage.init(data:)) else { return }
+                guard let point = BotComputerPointer.normalized(
+                    tapX: value.location.x, tapY: value.location.y,
+                    viewWidth: geometry.size.width, viewHeight: geometry.size.height,
+                    imageWidth: image.size.width, imageHeight: image.size.height) else { return }
+                Task { await model.click(x: point.x, y: point.y) }
             })
         }
         .padding(FadedSpacing.edge)

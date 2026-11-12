@@ -9,11 +9,13 @@ from sweatcaster.bot_computers import (
     ApprovalError,
     BotComputerError,
     BotComputerOffice,
+    ComposeControl,
     IsolationError,
     MemoryDocker,
     local_report,
     logic_proof,
     main,
+    setting_value,
 )
 
 
@@ -137,6 +139,33 @@ def test_installer_refuses_the_running_checkpoint(tmp_path):
     target = tmp_path / "fadedai-checkpoint-20261107"
     with pytest.raises(SystemExit, match="kørende installation"):
         main(["prove", "--root", str(target)])
+
+
+def test_desk_write_replaces_a_symlink_instead_of_following_it(tmp_path):
+    desk, _ = office(tmp_path)
+    outside = tmp_path / "secret.txt"
+    outside.write_text("hemmelig", encoding="utf-8")
+    folder = tmp_path / "desks" / "adam" / "files"
+    folder.mkdir(parents=True)
+    link = folder / "rapport.txt"
+    link.symlink_to(outside)
+    desk.write_file(ADAM, "Adam", "rapport.txt", "Adams rapport")
+    assert outside.read_text(encoding="utf-8") == "hemmelig"
+    assert link.is_symlink() is False
+    assert link.read_text(encoding="utf-8") == "Adams rapport"
+
+
+def test_container_key_is_read_from_the_data_folder(tmp_path, monkeypatch):
+    monkeypatch.delenv("ADAM_AIO_KEY", raising=False)
+    monkeypatch.delenv("FADEDAI_OLLAMA_MODEL", raising=False)
+    (tmp_path / ".env").write_text(
+        "ADAM_AIO_KEY=adam-key\nEVA_AIO_KEY=eva-key\nFADEDAI_OLLAMA_MODEL=qwen\n",
+        encoding="utf-8",
+    )
+    control = ComposeControl(tmp_path / "compose.yaml", tmp_path)
+    assert control.credential("adam") == "adam-key"
+    assert control.credential("eva") == "eva-key"
+    assert setting_value("FADEDAI_OLLAMA_MODEL", {"FADEDAI_OLLAMA_MODEL": "qwen"}) == "qwen"
 
 
 def test_takeover_records_only_an_approved_click(tmp_path):

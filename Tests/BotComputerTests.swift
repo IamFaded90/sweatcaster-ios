@@ -135,6 +135,54 @@ import XCTest
         XCTAssertEqual(own.text, "Adams rapport")
     }
 
+    func testLetterboxTapUsesThePictureNotTheBars() {
+        let topBar = BotComputerPointer.normalized(tapX: 100, tapY: 10, viewWidth: 200, viewHeight: 200,
+                                                   imageWidth: 1920, imageHeight: 1080)
+        XCTAssertNil(topBar)
+        let center = BotComputerPointer.normalized(tapX: 100, tapY: 100, viewWidth: 200, viewHeight: 200,
+                                                   imageWidth: 1920, imageHeight: 1080)
+        XCTAssertEqual(center?.x ?? -1, 0.5, accuracy: 0.02)
+        XCTAssertEqual(center?.y ?? -1, 0.5, accuracy: 0.02)
+    }
+
+    func testCancelWhileDockerIsOfflineStillReachesThePC() async throws {
+        let transport = ScriptedComputer()
+        transport.healthLink = .dockerOffline
+        let session = try makeSession(transport)
+        let task = try await give(session, key: "key-adam-cancel")
+        let cancelled = try await result(session.cancel(id: task.id))
+        XCTAssertEqual(cancelled.status, .cancelled)
+        XCTAssertEqual(transport.cancels, 1)
+        transport.healthLink = .online
+        await session.refresh(botID: adam)
+        XCTAssertEqual(session.office.task(id: task.id)?.status, .cancelled)
+    }
+
+    func testLocalCancelIsNotReplacedByARemoteWaitingTask() {
+        var office = BotComputerOffice()
+        let task = BotComputerTask(id: "task-cancel", botID: adam, botName: "Adam", idempotencyKey: "key-cancel",
+                                   retryKey: nil, instruction: "Skriv", inputPath: nil, status: .cancelled,
+                                   resultText: nil, resultPath: nil, error: nil, attempt: 1, created: 1, updated: 2)
+        office.tasks = [task]
+        var remote = task
+        remote.status = .running
+        office.adopt(remote)
+        XCTAssertEqual(office.tasks.first?.status, .cancelled)
+    }
+
+    func testServerIsolationDoesNotLookLikeAnOfflinePC() async throws {
+        let transport = ScriptedComputer()
+        transport.isolateReads = true
+        let session = try makeSession(transport)
+        session.office.link = .online
+        try session.writeFile(ownerID: adam, ownerName: "Adam", path: "rapport.txt", text: "Adams rapport")
+        do {
+            _ = try await session.openFile(readerID: eva, ownerID: adam, path: "rapport.txt")
+            XCTFail("Eva åbnede Adams rapport")
+        } catch BotComputerFailure.isolated {}
+        XCTAssertEqual(session.office.link, .online)
+    }
+
     func testWireStatusAndHTTPCodes() throws {
         let json = """
         {"id":"task-1","bot_id":"\(adam)","bot_name":"Adam","idempotency_key":"key-adam-9","retry_key":null,"instruction":"Skriv en rapport","input_path":"kilde.txt","status":"waiting","result_text":null,"result_path":null,"error":null,"attempt":1,"created":1,"updated":1}
@@ -143,6 +191,7 @@ import XCTest
         XCTAssertEqual(task.status, .waiting)
         XCTAssertEqual(task.botName, "Adam")
         XCTAssertNil(task.resultText)
+        XCTAssertEqual(BotComputerSession.failure(forHTTPStatus: 403), .isolated)
         XCTAssertEqual(BotComputerSession.link(forHTTPStatus: 404), .moduleMissing)
         XCTAssertEqual(BotComputerSession.link(forHTTPStatus: 503), .dockerOffline)
         XCTAssertNil(BotComputerSession.link(forHTTPStatus: 401))
@@ -179,6 +228,8 @@ import XCTest
     var cancels = 0
     var retries = 0
     var failSubmit = false
+    var failCancel = false
+    var isolateReads = false
     var leaveWaiting = false
     var delay = false
     private var sent: [String: BotComputerTask] = [:]
@@ -214,6 +265,7 @@ import XCTest
 
     func cancel(botID: String, id: String) async throws -> BotComputerTask {
         cancels += 1
+        if failCancel { throw BotComputerFailure.pcOffline }
         guard var task = sent.values.first(where: { $0.id == id }) else { throw BotComputerFailure.rejected("Opgaven findes ikke.") }
         task.status = .cancelled
         sent[task.idempotencyKey] = task
@@ -233,7 +285,10 @@ import XCTest
     }
 
     func tasks(botID: String) async throws -> [BotComputerTask] { Array(sent.values) }
-    func read(botID: String, ownerID: String, path: String) async throws -> BotComputerFile { throw BotComputerFailure.pcOffline }
+    func read(botID: String, ownerID: String, path: String) async throws -> BotComputerFile {
+        if isolateReads { throw BotComputerFailure.isolated }
+        throw BotComputerFailure.pcOffline
+    }
     func share(ownerID: String, path: String, with botID: String, approved: Bool) async throws -> BotComputerFile { throw BotComputerFailure.pcOffline }
     func startDesktop(botID: String, name: String) async throws -> BotComputerLink { healthLink }
     func frame(botID: String, name: String) async throws -> Data { Data([0x89, 0x50, 0x4E, 0x47]) }

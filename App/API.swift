@@ -239,12 +239,8 @@ struct LiveAPI: SweatAPI, ChatAPI {
     private static func botFailure(_ error: Error) -> Error {
         guard let error = error as? APIError else { return error }
         if case .offline = error { return BotComputerFailure.pcOffline }
-        if case .http(let status, _) = error, let link = BotComputerSession.link(forHTTPStatus: status) {
-            switch link {
-            case .dockerOffline: return BotComputerFailure.dockerOffline
-            case .moduleMissing: return BotComputerFailure.moduleMissing
-            default: return error
-            }
+        if case .http(let status, _) = error, let failure = BotComputerSession.failure(forHTTPStatus: status) {
+            return failure
         }
         return error
     }

@@ -37,6 +37,28 @@ class ApprovalError(BotComputerError):
     pass
 
 
+def read_env_file(path: Path) -> dict[str, str]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    values = {}
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            values[key] = value.strip()
+    return values
+
+
+def setting_value(name: str, file_values: dict[str, str]) -> str:
+    current = os.environ.get(name, "").strip()
+    return current or file_values.get(name, "").strip()
+
+
 def slug_for(name: str) -> str | None:
     key = name.strip().casefold()
     if key in {"adam", "eva"}:
@@ -158,10 +180,13 @@ class ComposeControl:
         command = ["docker", "compose", "--env-file", str(env_file), "-f", str(self.compose_file), *args]
         subprocess.run(command, check=True, cwd=self.compose_file.parent, timeout=timeout)
 
+    def credential(self, slug: str) -> str:
+        key_name = "ADAM_AIO_KEY" if slug == "adam" else "EVA_AIO_KEY"
+        return setting_value(key_name, read_env_file(self.root / ".env"))
+
     def _api(self, slug: str, method: str, path: str, payload: dict | None) -> bytes:
         port = 8091 if slug == "adam" else 8092
-        key_name = "ADAM_AIO_KEY" if slug == "adam" else "EVA_AIO_KEY"
-        key = os.environ.get(key_name, "")
+        key = self.credential(slug)
         if not key:
             raise BotComputerError("Computerens nøgle mangler i data-mappen.")
         data = None if payload is None else json.dumps(payload).encode()
@@ -306,7 +331,7 @@ class BotComputerOffice:
                 "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?)",
                 (owner_id, owner_name, path, text, shared),
             )
-        self._disk(owner_name, path).write_text(text, encoding="utf-8")
+        self._write_desk(owner_name, path, text)
         return self._file_row(owner_id, path)
 
     def open_file(self, reader_id: str, owner_id: str, path: str) -> dict:
@@ -335,7 +360,7 @@ class BotComputerOffice:
             reader = db.execute("SELECT bot_name FROM tasks WHERE bot_id=? LIMIT 1", (reader_id,)).fetchone()
         reader_name = reader["bot_name"] if reader else ""
         if slug_for(reader_name):
-            self._disk(reader_name, copy_name).write_text(row["text"], encoding="utf-8")
+            self._write_desk(reader_name, copy_name, row["text"])
         updated = self._file_row(owner_id, path)
         updated["shared_with"] = shared
         return updated
@@ -434,23 +459,50 @@ class BotComputerOffice:
             row = db.execute("SELECT owner_name FROM files WHERE owner_id=? AND path=?", (owner_id, path)).fetchone()
             db.execute("DELETE FROM files WHERE owner_id=? AND path=?", (owner_id, path))
         if row:
-            disk = self._disk(row["owner_name"], path)
-            if disk.exists():
+            disk = self._desk_folder(row["owner_name"]) / path
+            if disk.is_symlink() or disk.exists():
                 disk.unlink()
 
-    def _disk(self, owner_name: str, path: str) -> Path:
+    def _desk_folder(self, owner_name: str) -> Path:
         slug = slug_for(owner_name) or _check_token(owner_name)
-        folder = self.root / "desks" / slug / "files"
+        desk = self.root / "desks" / slug
+        if desk.is_symlink():
+            raise BotComputerError("Computerens mappe er ikke sikker.")
+        folder = desk / "files"
+        if folder.is_symlink():
+            raise BotComputerError("Computerens mappe er ikke sikker.")
         folder.mkdir(parents=True, exist_ok=True)
-        return folder / path
+        if not folder.resolve().is_relative_to(self.root.resolve()):
+            raise BotComputerError("Computerens mappe er ikke sikker.")
+        return folder
+
+    def _write_desk(self, owner_name: str, path: str, text: str) -> None:
+        folder = self._desk_folder(owner_name)
+        target = folder / path
+        if target.is_symlink():
+            target.unlink()
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            handle = os.open(target, flags, 0o600)
+        except OSError as exc:
+            raise BotComputerError("Filen peger uden for computerens mappe.") from exc
+        try:
+            os.write(handle, text.encode("utf-8"))
+        finally:
+            os.close(handle)
+        if target.is_symlink() or not target.resolve().is_relative_to(folder.resolve()):
+            raise BotComputerError("Filen peger uden for computerens mappe.")
+
+    def _disk(self, owner_name: str, path: str) -> Path:
+        return self._desk_folder(owner_name) / path
 
 
 def local_report(instruction: str, source: str) -> str:
     return f"Rapport\n\n{instruction.strip()}\n\n{source}"
 
 
-def ollama_complete(instruction: str, source: str) -> str:
-    model = os.environ.get("FADEDAI_OLLAMA_MODEL", "").strip()
+def ollama_complete(instruction: str, source: str, model: str | None = None) -> str:
+    model = (model if model is not None else os.environ.get("FADEDAI_OLLAMA_MODEL", "")).strip()
     if not model:
         raise BotComputerError("Sæt FADEDAI_OLLAMA_MODEL til en model, Ollama allerede har. Der hentes ikke en ny model.")
     body = json.dumps({
@@ -553,9 +605,28 @@ def register_bot_computers(app, settings, authorize) -> None:
     from sweatcaster.dto import ApiError
 
     root = Path(os.environ.get("FADEDAI_BOT_ROOT", str(Path(settings.output_root) / "bot-computers")))
-    compose = os.environ.get("FADEDAI_BOT_COMPOSE")
+    file_env = read_env_file(root / ".env")
+    if not os.environ.get("FADEDAI_BOT_ROOT") and file_env.get("FADEDAI_BOT_ROOT"):
+        root = Path(file_env["FADEDAI_BOT_ROOT"])
+        file_env = read_env_file(root / ".env")
+    compose = setting_value("FADEDAI_BOT_COMPOSE", file_env)
+    documented = Path("D:/FadedAIData/bot-computers")
+    if not compose and (documented / ".env").is_file():
+        root = documented
+        file_env = read_env_file(root / ".env")
+        pointed = file_env.get("FADEDAI_BOT_ROOT", "").strip()
+        if pointed:
+            root = Path(pointed)
+            file_env = read_env_file(root / ".env")
+        compose = setting_value("FADEDAI_BOT_COMPOSE", file_env)
     docker = ComposeControl(Path(compose), root) if compose else UnavailableDocker()
-    complete = local_report if os.environ.get("FADEDAI_BOT_COMPLETE") == "local" else ollama_complete
+    if setting_value("FADEDAI_BOT_COMPLETE", file_env) == "local":
+        complete = local_report
+    else:
+        model = setting_value("FADEDAI_OLLAMA_MODEL", file_env)
+
+        def complete(instruction, source, chosen=model):
+            return ollama_complete(instruction, source, model=chosen)
     office = BotComputerOffice(root, docker=docker, complete=complete)
     worker = BotComputerWorker(office)
     worker.start()
@@ -680,10 +751,16 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     if any(marker in str(root) for marker in LIVE_MARKERS):
         raise SystemExit("Den mappe er den kørende installation. Vælg en anden mappe.")
+    file_env = read_env_file(root / ".env")
     if args.command == "work":
-        compose = args.compose or os.environ.get("FADEDAI_BOT_COMPOSE")
+        compose = str(args.compose) if args.compose else setting_value("FADEDAI_BOT_COMPOSE", file_env)
         docker = ComposeControl(Path(compose), root) if compose else UnavailableDocker()
-        complete = local_report if os.environ.get("FADEDAI_BOT_COMPLETE") == "local" else ollama_complete
+        model = setting_value("FADEDAI_OLLAMA_MODEL", file_env)
+        if setting_value("FADEDAI_BOT_COMPLETE", file_env) == "local":
+            complete = local_report
+        else:
+            def complete(instruction, source, chosen=model):
+                return ollama_complete(instruction, source, model=chosen)
         BotComputerOffice(root, docker=docker, complete=complete).work_once()
         return 0
     lines = logic_proof(root)
