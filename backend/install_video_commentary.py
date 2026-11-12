@@ -45,6 +45,40 @@ BEAT_EDITS = {
     ],
     "sweatcaster/commentary.py": [
         (
+            '    r"\\b(?:you|the player) (?:(?:were|was|got) (?:eliminated|killed|knocked out)|went down)\\b"\n',
+            '    r"\\b(?:you|the player) (?:just )?(?:(?:were|was|got) (?:eliminated|killed|knocked out|wiped|taken out)|went down)\\b"\n',
+        ),
+        (
+            '    r"|\\b(?:eliminated|killed|knocked out) (?:you|the player)\\b", re.I\n',
+            '    r"|\\b(?:eliminated|killed|knocked out) (?:you|the player)\\b"\n'
+            '    r"|\\b(?:being|getting) (?:eliminated|killed|knocked out) yourself\\b", re.I\n',
+        ),
+        (
+            '_THINK_RE = re.compile(r"<think>.*?</think>", re.I | re.S)\n',
+            '_UNVERIFIED_DETAIL_RE = re.compile(\n'
+            '    r"\\b(?:headshots?|ace|(?:double|triple|quadruple)[ -]kill|"\n'
+            '    r"(?:whole|entire) (?:team|squad)|squad wipe)\\b", re.I\n'
+            ')\n'
+            '_PLAYER_SHOT_RE = re.compile(\n'
+            '    r"\\b(?:(?:nice|great|clean|good|lovely|beautiful) shot|"\n'
+            '    r"you (?:shot|hit|tagged|took out|dropped))\\b", re.I\n'
+            ')\n'
+            '_SEQUENCE_RE = re.compile(r"\\b(?:right after|right before|that same (?:opponent|rival|enemy))\\b", re.I)\n'
+            '_THINK_RE = re.compile(r"<think>.*?</think>", re.I | re.S)\n',
+        ),
+        (
+            '        if cited and all(event.kind == "audio_spike" for event in cited):\n',
+            '        details = {normalize_reaction(match.group()) for match in _UNVERIFIED_DETAIL_RE.finditer(text)}\n'
+            '        if any(not any(detail in normalize_reaction(event.text or "") for event in cited) for detail in details):\n'
+            '            raise CommentaryError("Leave out headshots, multikills and team wipes unless the cited evidence confirms them.")\n'
+            '        if (any(event.kind == "death" for event in cited)\n'
+            '                and not any(event.kind == "kill" for event in cited) and _PLAYER_SHOT_RE.search(text)):\n'
+            '            raise CommentaryError("The player was eliminated. React to their setback without praising their shot.")\n'
+            '        if len(set(ids)) == 1 and _SEQUENCE_RE.search(text):\n'
+            '            raise CommentaryError("React to the cited moment without claiming a second action or opponent identity.")\n'
+            '        if cited and all(event.kind == "audio_spike" for event in cited):\n',
+        ),
+        (
             '    highlights = [event for event in observed if event.kind == "kill" or (\n'
             '        event.kind == "objective" and re.search(r"\\b(?:victory|defeat|captured)\\b", event.text or "", re.I)\n'
             '    )]\n'
@@ -55,6 +89,16 @@ BEAT_EDITS = {
             '        )\n'
             '    )]\n'
             '    candidates = confirmed or [event for event in events if event.kind == "visual_observation"]\n',
+        ),
+        (
+            '        "focus_event_id": focus.id if focus else None,\n',
+            '        "focus_event_id": focus.id if focus else None,\n'
+            '        "focus_event_kind": focus.kind if focus else None,\n',
+        ),
+        (
+            '                {"t_start": 0.0, "text": "One English sentence.", "event_ids": ["e1"], "meme_cue": None}\n',
+            '                {"t_start": round(focus.t_start, 3) if focus else 0.0, "text": "Your reaction here.",\n'
+            '                 "event_ids": [focus.id] if focus else [], "meme_cue": None}\n',
         ),
         (
             '    r"(?:image|screenshot|frame) (?:shows|depicts|contains)|"\n',
@@ -72,14 +116,47 @@ BEAT_EDITS = {
         (
             '        if _REPORTING_RE.search(text) or repeats_visual_caption(text, events):\n'
             '            raise CommentaryError("React in your own words. Leave frame captions and detector reports out of speech.")\n',
-            '        if _REPORTING_RE.search(text) or repeats_evidence_text(text, events):\n'
+            '        if (_REPORTING_RE.search(text) or repeats_evidence_text(text, events)\n'
+            '                or normalize_reaction(text) in {"your reaction here", "one english sentence"}):\n'
             '            raise CommentaryError("React in your own words. Leave screen text, captions and detector reports out of speech.")\n',
         ),
         (
             '        "React to that beat with an opinion or a playful comparison. Use one line unless a separate, "\n',
             '        "React to that beat with an opinion or a playful comparison. Nearby picture and sound can supply context. "\n'
+            '        "A death means the player went down. React to the setback. A kill means one player elimination. "\n'
+            '        "If the HUD is the only evidence, avoid guesses about weapons, distance, tactics or opponent identity. "\n'
+            '        "Use the exact focus event ID in the JSON example and replace its placeholder text. "\n'
             '        "When a distinct confirmed elimination and player death both matter, give each its own line and cite them separately. "\n'
             '        "Use one line unless a separate, "\n',
+        ),
+        (
+            '    for attempt in range(2):\n'
+            '        raw = ollama.chat(system, attempt_user, 0.55 if attempt == 0 else 0.40)\n',
+            '    for attempt in range(3 if focus else 2):\n'
+            '        attempt_events = events\n'
+            '        if attempt == 2 and focus:\n'
+            '            # A small local model can confuse an earlier kill with the final player death.\n'
+            '            # Give it one verified beat without the competing timeline on the final try.\n'
+            '            attempt_events = [focus]\n'
+            '            attempt_user = build_user_prompt(\n'
+            '                mood=mood, events=attempt_events, duration=duration, allowlist=allowlist, recent=recent,\n'
+            '            ) + "\\nWrite one reaction to this single event. Do not describe any other moment or action."\n'
+            '        raw = ollama.chat(system, attempt_user, 0.55 if attempt == 0 else 0.40)\n',
+        ),
+        (
+            '                last_error = CommentaryError("The model repeated its rejected output.")\n'
+            '                break\n',
+            '                raise CommentaryError("The model repeated its rejected output.")\n',
+        ),
+        (
+            '            payload = {"lines": parse_json_object(raw).get("lines")}\n'
+            '            lines, gaps, warnings = validate_commentary(\n'
+            '                payload,\n'
+            '                events=events,\n',
+            '            payload = {"lines": parse_json_object(raw).get("lines")}\n'
+            '            lines, gaps, warnings = validate_commentary(\n'
+            '                payload,\n'
+            '                events=attempt_events,\n',
         ),
     ],
 }

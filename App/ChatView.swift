@@ -256,7 +256,8 @@ struct ChatView: View {
                     historySidebar.frame(width: sidebarWidth)
                     Divider()
                 }
-                chatContent(userBubbleWidth: max(1, (width - 32) * 0.8), wide: wide)
+                chatContent(userBubbleWidth: max(1, (width - 32) * 0.8), wide: wide,
+                            compactHeight: geometry.size.height < 360)
             }
             .sheet(isPresented: Binding(
                 get: { showHistory && !wide }, set: { showHistory = $0 }
@@ -294,9 +295,10 @@ struct ChatView: View {
         }
     }
 
-    private func chatContent(userBubbleWidth: CGFloat, wide: Bool) -> some View {
+    private func chatContent(userBubbleWidth: CGFloat, wide: Bool, compactHeight: Bool) -> some View {
         ScrollViewReader { proxy in
-            let column = chatColumn(userBubbleWidth: userBubbleWidth, wide: wide, proxy: proxy)
+            let column = chatColumn(userBubbleWidth: userBubbleWidth, wide: wide,
+                                    compactHeight: compactHeight, proxy: proxy)
             observeChatEvents(column, proxy: proxy)
         }
     }
@@ -329,16 +331,20 @@ struct ChatView: View {
         .defaultScrollAnchor(turns.isEmpty && task == nil ? .center : .bottom, for: .alignment)
     }
 
-    private func chatColumn(userBubbleWidth: CGFloat, wide: Bool, proxy: ScrollViewProxy) -> some View {
+    private func chatColumn(userBubbleWidth: CGFloat, wide: Bool, compactHeight: Bool,
+                            proxy: ScrollViewProxy) -> some View {
+        let compactEditing = compactHeight && composerFocused
         let column = VStack(spacing: 0) {
-            chatHeading(wide: wide) {
-                withAnimation(reduceMotion || calmMotion ? nil : .easeOut(duration: 0.2)) {
-                    proxy.scrollTo("chat-outbox", anchor: .top)
+            if !compactEditing {
+                chatHeading(wide: wide) {
+                    withAnimation(reduceMotion || calmMotion ? nil : .easeOut(duration: 0.2)) {
+                        proxy.scrollTo("chat-outbox", anchor: .top)
+                    }
                 }
             }
             transcriptScroll(userBubbleWidth: userBubbleWidth)
-            composer.layoutPriority(1)
-            if !composerFocused {
+            composer(compact: compactEditing).layoutPriority(1)
+            if !composerFocused && !compactHeight {
                 chatBrandFooter
             }
         }

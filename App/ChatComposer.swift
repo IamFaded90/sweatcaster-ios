@@ -22,87 +22,112 @@ struct ChatComposer<Content: View>: View {
 extension ChatView {
     var quickModelPicker: some View { chatModelSelectionButton }
 
-    var composer: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let deleted = removedTurns.last, deleted.expiresAt > ContinuousClock.now { undoBar }
-            if let chatNotice { Text(chatNotice).font(.caption).foregroundStyle(palette.secondary) }
-            if case .reply(_)? = speechBox.playback {
-                HStack {
-                    Label("Læser op på telefonen", systemImage: "speaker.wave.2").font(.subheadline)
-                    Spacer(minLength: FadedSpacing.s)
-                    Button("Stop oplæsning", systemImage: "stop.circle") { speechBox.stop() }
-                        .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                }
-            }
+    func composer(compact: Bool) -> some View {
+        let inputLayout = compact
+            ? AnyLayout(HStackLayout(spacing: FadedSpacing.xs))
+            : AnyLayout(VStackLayout(alignment: .leading, spacing: FadedSpacing.xs))
+        return VStack(alignment: .leading, spacing: 6) {
+            if !compact { composerNotices }
             ChatComposer {
-                if let photo = stagedPhoto {
-                    HStack(spacing: FadedSpacing.s) {
-                        Image(uiImage: photo.preview).resizable().scaledToFill()
-                            .frame(width: 36, height: 36).clipped().clipShape(.rect(cornerRadius: FadedRadius.small))
-                            .accessibilityHidden(true)
-                        Button("Analysér billede", action: analyzeStagedPhoto)
-                            .frame(minHeight: 44).disabled(task != nil)
-                        Spacer(minLength: 0)
-                        Button("Fjern billede", systemImage: "xmark") { stagedPhoto = nil }
-                            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                if !compact { composerAttachments }
+                inputLayout {
+                    TextField("Skriv til FadedAI…", text: $draft, axis: .vertical)
+                        .lineLimit(1...(compact ? 1 : 4)).frame(minHeight: 44).focused($composerFocused)
+                        .padding(.horizontal, FadedSpacing.xs)
+                        .dropDestination(for: StudioPhotoInput.self) { items, _ in acceptDroppedPhotos(items) }
+                        .accessibilityHint("Træk et billede hertil for at analysere det")
+                    if compact {
+                        composerIconButton("Skjul tastatur", icon: "keyboard.chevron.compact.down") {
+                            composerFocused = false
+                        }
+                        sendControl
+                    } else {
+                        composerActions
                     }
                 }
-                if let attachedNote {
-                    HStack {
-                        Label("Note: \(String(attachedNote.prefix(80)))", systemImage: "note.text")
-                            .lineLimit(1)
-                            .font(.caption.weight(.semibold)).foregroundStyle(palette.secondary)
-                        Spacer()
-                        Button("Fjern note", systemImage: "xmark") { self.attachedNote = nil }
-                            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                    }
+                if !compact, let problem = dictation.problem {
+                    Text(problem).font(.caption).foregroundStyle(palette.secondary)
                 }
-                if let attachedQuote {
-                    HStack {
-                        Label("Citat: \(String(attachedQuote.prefix(80)))", systemImage: "quote.opening")
-                            .lineLimit(1).font(.caption.weight(.semibold)).foregroundStyle(palette.secondary)
-                        Spacer()
-                        Button("Fjern citat", systemImage: "xmark") { self.attachedQuote = nil }
-                            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                    }
-                }
-                TextField("Skriv til FadedAI…", text: $draft, axis: .vertical)
-                    .lineLimit(1...4).frame(minHeight: 44).focused($composerFocused)
-                    .padding(.horizontal, FadedSpacing.xs)
-                    .dropDestination(for: StudioPhotoInput.self) { items, _ in acceptDroppedPhotos(items) }
-                    .accessibilityHint("Træk et billede hertil for at analysere det")
-                composerActions
-                if let problem = dictation.problem { Text(problem).font(.caption).foregroundStyle(palette.secondary) }
             }
-
-            HStack(alignment: .firstTextBaseline) {
-                let destination = demo ? "Demo" : effectiveReplySource.rawValue
-                let routeLabel = chatRouteModelTitle.map { "\(destination) · \($0)" } ?? destination
-                Label(routeLabel, systemImage: demo ? "testtube.2" : effectiveReplySource.icon)
-                    .font(.caption.weight(.semibold)).foregroundStyle(demo || !palette.isDark ? palette.secondary : sourceColor(effectiveReplySource))
-                    .accessibilityLabel("Sendes til \(routeLabel)")
-                if effectiveReplySource == .phone, phoneBatteryLevel >= 0, phoneBatteryLevel < 0.20,
-                   PhoneModels.liteModeActive(for: phoneModel), resolvedRoute.modelID == PhoneModels.effectiveModelID(phoneModel) {
-                    Label("Lite Mode", systemImage: "battery.25percent").font(.caption).foregroundStyle(palette.secondary)
-                }
-                Spacer(minLength: 4)
-                Text("\(transportMessage.unicodeScalars.count) / 2.000").font(.caption.monospacedDigit())
-                    .foregroundStyle(transportMessage.unicodeScalars.count > 2000 ? palette.coralText : palette.secondary)
-                    .fixedSize()
-            }
-            if let modelRoutingNotice { FadedDetailText(modelRoutingNotice) }
-            if !demo, effectiveReplySource == .phone, !PhoneModels.isReady(resolvedRoute.modelID ?? phoneModel) {
-                FadedDetailText("Telefonmodellen er ikke klar. Din kladde bliver gemt.")
-                FadedSecondaryButton("Åbn lokale modeller", icon: "iphone") { showPhoneModelSetup = true }
-                    .disabled(task != nil)
-            }
-            if let sourceNote {
-                Text(sourceNote).font(.caption).foregroundStyle(palette.secondary)
-                pcRecoveryAction
-            }
+            if !compact { composerStatus }
         }
         .padding(.horizontal, FadedSpacing.m).padding(.vertical, 6)
         .background(palette.background)
+    }
+
+    @ViewBuilder private var composerNotices: some View {
+        if let deleted = removedTurns.last, deleted.expiresAt > ContinuousClock.now { undoBar }
+        if let chatNotice { Text(chatNotice).font(.caption).foregroundStyle(palette.secondary) }
+        if case .reply(_)? = speechBox.playback {
+            HStack {
+                Label("Læser op på telefonen", systemImage: "speaker.wave.2").font(.subheadline)
+                Spacer(minLength: FadedSpacing.s)
+                Button("Stop oplæsning", systemImage: "stop.circle") { speechBox.stop() }
+                    .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+            }
+        }
+    }
+
+    @ViewBuilder private var composerAttachments: some View {
+        if let photo = stagedPhoto {
+            HStack(spacing: FadedSpacing.s) {
+                Image(uiImage: photo.preview).resizable().scaledToFill()
+                    .frame(width: 36, height: 36).clipped().clipShape(.rect(cornerRadius: FadedRadius.small))
+                    .accessibilityHidden(true)
+                Button("Analysér billede", action: analyzeStagedPhoto)
+                    .frame(minHeight: 44).disabled(task != nil)
+                Spacer(minLength: 0)
+                Button("Fjern billede", systemImage: "xmark") { stagedPhoto = nil }
+                    .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+            }
+        }
+        if let attachedNote {
+            HStack {
+                Label("Note: \(String(attachedNote.prefix(80)))", systemImage: "note.text")
+                    .lineLimit(1)
+                    .font(.caption.weight(.semibold)).foregroundStyle(palette.secondary)
+                Spacer()
+                Button("Fjern note", systemImage: "xmark") { self.attachedNote = nil }
+                    .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+            }
+        }
+        if let attachedQuote {
+            HStack {
+                Label("Citat: \(String(attachedQuote.prefix(80)))", systemImage: "quote.opening")
+                    .lineLimit(1).font(.caption.weight(.semibold)).foregroundStyle(palette.secondary)
+                Spacer()
+                Button("Fjern citat", systemImage: "xmark") { self.attachedQuote = nil }
+                    .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+            }
+        }
+    }
+
+    @ViewBuilder private var composerStatus: some View {
+        HStack(alignment: .firstTextBaseline) {
+            let destination = demo ? "Demo" : effectiveReplySource.rawValue
+            let routeLabel = chatRouteModelTitle.map { "\(destination) · \($0)" } ?? destination
+            Label(routeLabel, systemImage: demo ? "testtube.2" : effectiveReplySource.icon)
+                .font(.caption.weight(.semibold)).foregroundStyle(demo || !palette.isDark ? palette.secondary : sourceColor(effectiveReplySource))
+                .accessibilityLabel("Sendes til \(routeLabel)")
+            if effectiveReplySource == .phone, phoneBatteryLevel >= 0, phoneBatteryLevel < 0.20,
+               PhoneModels.liteModeActive(for: phoneModel), resolvedRoute.modelID == PhoneModels.effectiveModelID(phoneModel) {
+                Label("Lite Mode", systemImage: "battery.25percent").font(.caption).foregroundStyle(palette.secondary)
+            }
+            Spacer(minLength: 4)
+            Text("\(transportMessage.unicodeScalars.count) / 2.000").font(.caption.monospacedDigit())
+                .foregroundStyle(transportMessage.unicodeScalars.count > 2000 ? palette.coralText : palette.secondary)
+                .fixedSize()
+        }
+        if let modelRoutingNotice { FadedDetailText(modelRoutingNotice) }
+        if !demo, effectiveReplySource == .phone, !PhoneModels.isReady(resolvedRoute.modelID ?? phoneModel) {
+            FadedDetailText("Telefonmodellen er ikke klar. Din kladde bliver gemt.")
+            FadedSecondaryButton("Åbn lokale modeller", icon: "iphone") { showPhoneModelSetup = true }
+                .disabled(task != nil)
+        }
+        if let sourceNote {
+            Text(sourceNote).font(.caption).foregroundStyle(palette.secondary)
+            pcRecoveryAction
+        }
     }
 
     private var composerActions: some View {

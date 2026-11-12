@@ -144,6 +144,16 @@ def test_player_death_is_not_supported_by_a_confirmed_elimination(staged):
         commentary.validate_commentary(payload, **options)
     payload["lines"][0]["event_ids"] = [death.id]
     assert commentary.validate_commentary(payload, **options)[0][0].event_ids == [death.id]
+    payload["lines"][0]["text"] = "Nice shot!"
+    with pytest.raises(commentary.CommentaryError, match="setback"):
+        commentary.validate_commentary(payload, **options)
+    payload["lines"][0]["text"] = "You went down right after sending that rival flying!"
+    with pytest.raises(commentary.CommentaryError, match="second action"):
+        commentary.validate_commentary(payload, **options)
+    payload["lines"][0] = {"text": "You took out a whole team before getting eliminated yourself!",
+                           "event_ids": [kill.id, death.id]}
+    with pytest.raises(commentary.CommentaryError, match="team wipes"):
+        commentary.validate_commentary(payload, **options)
 
 
 def test_roast_retries_when_it_misses_the_end_and_keeps_kill_and_death_separate(staged):
@@ -164,6 +174,8 @@ def test_roast_retries_when_it_misses_the_end_and_keeps_kill_and_death_separate(
         if len(calls) == 1:
             body = json.loads(user)
             assert body["focus_event_id"] == final_death.id
+            assert body["focus_event_kind"] == "death"
+            assert body["json_shape"]["lines"][0]["event_ids"] == [final_death.id]
             assert "punchline" in body["style"]
             return json.dumps({"lines": [{"text": "Nice elimination!", "event_ids": [early.id]}]})
         assert "React to focus_event_id" in user
@@ -200,6 +212,29 @@ def test_vision_samples_ending_first_then_adds_observations_in_timeline_order(st
     assert all(event.kind == "visual_observation" for event in analysis.events)
     commentary = staged("commentary")
     assert commentary.focus_event(analysis.events).t_start == positions[0]
+
+
+def test_last_retry_limits_the_model_to_the_verified_ending_beat(staged):
+    commentary = staged("commentary")
+    kill = commentary.GameplayEvent(id="early", kind="kill", source="windows_ocr",
+                                    t_start=17, t_end=17, text="ELIMINATED", confidence=0.7)
+    death = commentary.GameplayEvent(id="ending", kind="death", source="windows_ocr",
+                                     t_start=19, t_end=19, text="ELIMINATED BY Rival", confidence=0.7)
+    calls = []
+
+    def chat(_system, prompt, _temperature):
+        calls.append(prompt)
+        if len(calls) < 3:
+            return json.dumps({"lines": [{"text": "You took out a whole team!", "event_ids": [kill.id]}]})
+        body, _instruction = prompt.rsplit("\n", 1)
+        assert [event["id"] for event in json.loads(body)["events"]] == [death.id]
+        return json.dumps({"lines": [{"text": "Oof, that ending had no mercy.", "event_ids": [death.id]}]})
+
+    plan = commentary.write_commentary(settings=SimpleNamespace(commentary_mode="auto", ollama_model="local"),
+                                       clip_id="clip", mood="roast", events=[kill, death], duration=21,
+                                       sounds=SimpleNamespace(allowlist=[]), recent=[], allow_cues=False,
+                                       client=SimpleNamespace(chat=chat))
+    assert len(calls) == 3 and plan.lines[0].event_ids == [death.id]
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg is needed for the synthetic clip.")
