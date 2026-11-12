@@ -186,7 +186,7 @@ extension Home {
         .confirmationDialog("Slet fejlet job fra PC’en?", isPresented: Binding(
             get: { failedJobDeletion != nil }, set: { if !$0 { failedJobDeletion = nil } }
         ), presenting: failedJobDeletion) { target in
-            Button("Slet fejlet job", role: .destructive) {
+            Button("Slet job og video", role: .destructive) {
                 Task {
                     do {
                         try await target.api.deleteFailedJob(target.id)
@@ -195,7 +195,7 @@ extension Home {
                     failedJobDeletion = nil
                 }
             }
-        } message: { _ in Text("Kun den fejlede jobpost slettes. Originalklippet bevares.") }
+        } message: { _ in Text("Sletter jobposten og et eventuelt videoudkast fra PC’en. Originalklippet bevares.") }
         .confirmationDialog("Start videomagi?", isPresented: Binding(
             get: { pendingVideoMood != nil }, set: { if !$0 { pendingVideoMood = nil } }
         ), presenting: pendingVideoMood) { mood in

@@ -23,6 +23,13 @@ import UniformTypeIdentifiers
     private var otherBots: [VillageBot] { roster.filter { $0.id != bot.id } }
     private var cleanPrompt: String { prompt.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var monitorID: String { (api?.queueTargetID ?? "") + ":" + String(scenePhase == .active) }
+    private var desktopTint: Color {
+        switch bot.color {
+        case "Grøn": palette.green
+        case "Lilla": palette.purple
+        default: palette.cyan
+        }
+    }
 
     var body: some View {
         ScrollView {
@@ -38,7 +45,13 @@ import UniformTypeIdentifiers
             .frame(maxWidth: 700)
             .frame(maxWidth: .infinity)
         }
-        .background { FadedBackground() }
+        .background {
+            ZStack {
+                FadedBackground()
+                LinearGradient(colors: [desktopTint.opacity(0.22), .clear],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+            }.ignoresSafeArea()
+        }
         .foregroundStyle(palette.text)
         .navigationTitle("Computer · \(bot.name)")
         .navigationBarTitleDisplayMode(.inline)
@@ -75,10 +88,17 @@ import UniformTypeIdentifiers
     }
 
     private var statusCard: some View {
-        FadedCard {
+        FadedCard(accent: desktopTint) {
             VStack(alignment: .leading, spacing: 10) {
-                Label(bot.name, systemImage: "desktopcomputer")
-                    .font(FadedTypography.section).accessibilityAddTraits(.isHeader)
+                HStack(alignment: .top, spacing: FadedSpacing.m) {
+                    VillageBotAvatar(bot: bot, size: 52, radius: 14)
+                    VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                        Text(bot.name).font(FadedTypography.section).accessibilityAddTraits(.isHeader)
+                        if let specialty = bot.specialty, !specialty.isEmpty {
+                            FadedDetailText(specialty)
+                        }
+                    }
+                }
                 if let status = store.status {
                     Text(status.status.title).font(.subheadline.weight(.semibold))
                     if let message = status.message { Text(message).foregroundStyle(palette.secondary) }

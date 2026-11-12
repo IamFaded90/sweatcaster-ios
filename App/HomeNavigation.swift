@@ -165,7 +165,7 @@ enum FadedMoreDestination {
 }
 
 private struct FadedMoreScreen: View {
-    private enum Page: Hashable { case lookbook, emby, powerHub, atlas, help, creativeStudio, memory, safety }
+    private enum Page: Hashable { case lookbook, emby, powerHub, atlas, help, creativeStudio, memory, safety, vault }
 
     let modules: [ModuleTab]
     let embyAPI: LiveAPI?
@@ -222,6 +222,7 @@ private struct FadedMoreScreen: View {
                     row("Gemte videoer", "Afspil dine færdige videoer", "film.stack", .savedVideos)
                 }
                 Section("Gør det til dit") {
+                    link("Vault", "Gem personlige oplysninger på telefonen", "lock.doc", .vault)
                     link("Hukommelse", "Vælg selv, hvad dine bots skal huske", "brain.head.profile", .memory)
                     link("Emby & bibliotek", "Find film, serier og musik", "play.rectangle", .emby)
                     row("Holdet", "Se dine AI’er og deres roller", "person.2", .team)
@@ -284,6 +285,7 @@ private struct FadedMoreScreen: View {
                 case .creativeStudio:
                     V0CreativeStudioView(openVideo: { open(.video) }, openImages: { open(.imageBrief($0)) })
                 case .memory: FadedMemoryOverview(bots: FadedMoreScreenData.bots)
+                case .vault: PersonalVaultView()
                 case .safety:
                     FadedSafetyOverview(openMemory: { path.append(Page.memory) }, open: open)
                 }

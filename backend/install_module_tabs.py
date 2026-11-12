@@ -39,6 +39,22 @@ def install(root: Path) -> None:
             '            return StreamingResponse(stream_collection(), media_type="text/event-stream")\n'
             '        tag, lease = _admit_chat(settings, coord, body)\n',
         ),
+        "output_cleanup.py": (
+            "def delete_rendered_video(settings: Settings, store: Store, job_id: str) -> dict:\n",
+            "def discard_failed_video(settings: Settings, job_id: str) -> None:\n"
+            "    if not re.fullmatch(r\"[a-f0-9]{32}\", job_id):\n"
+            "        raise ApiError(404, \"NOT_FOUND\", \"Jobbet findes ikke.\")\n"
+            "    folder = settings.output_root.resolve() / \"jobs\" / job_id\n"
+            "    if folder.resolve() != folder:\n"
+            "        raise ApiError(409, \"NOT_READY\", \"Jobmappen er et link.\")\n"
+            "    with _HELD_LOCK:\n"
+            "        if _HELD.get(job_id):\n"
+            "            raise ApiError(409, \"NOT_READY\", \"Luk videoen, og prøv igen.\")\n"
+            "        for name in _FILES:\n"
+            "            _remove_allowlisted(folder, folder / name, unlink=Path.unlink, sleep=time.sleep)\n"
+            "\n\n"
+            "def delete_rendered_video(settings: Settings, store: Store, job_id: str) -> dict:\n"
+        ),
     }
     staged = {}
     for name, (anchor, replacement) in changes.items():
@@ -59,6 +75,21 @@ def install(root: Path) -> None:
         updated = base.replace(anchor, replacement)
         compile(updated, str(path), "exec")
         staged[path] = (original, updated)
+    api = package / "api.py"
+    original = api.read_text(encoding="utf-8")
+    current = staged.get(api, (original, original))[1]
+    failed_delete = "        if not store.delete_failed_job(job_id):\n"
+    failed_cleanup = (
+        "        from sweatcaster.output_cleanup import discard_failed_video\n"
+        "        discard_failed_video(settings, job_id)\n"
+        + failed_delete
+    )
+    if failed_cleanup not in current:
+        if current.count(failed_delete) != 1:
+            raise ValueError("Checkpoint has an unexpected failed video handler; no files were written.")
+        updated = current.replace(failed_delete, failed_cleanup)
+        compile(updated, str(api), "exec")
+        staged[api] = (original, updated)
     modules = {}
     for name in (source.name, "code_batch.py", "repository_library.py", "agent_workflows.py",
                  "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py",

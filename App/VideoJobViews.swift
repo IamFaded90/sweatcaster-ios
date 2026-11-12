@@ -377,7 +377,7 @@ extension Home {
             if recoveryPage != nil { videoJobRetryButton(job) }
             FadedSecondaryButton("Skjul fejlet job på telefonen", icon: "eye.slash") { hiddenJobs.insert(job.id) }
             if !model.isDemo, let api = model.api as? LiveAPI {
-                FadedSecondaryButton("Slet fejlet job fra PC’en", icon: "trash", role: .destructive) {
+                FadedSecondaryButton("Slet fejlet job og video", icon: "trash", role: .destructive) {
                     failedJobDeletion = (job.id, api)
                 }
             }
