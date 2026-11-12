@@ -13,18 +13,16 @@ extension Home {
     var videoStudio: some View {
         NavigationStack {
             videoPageContent
-                .navigationTitle("Video Studio")
+                .navigationTitle(openVideoFolder?.title ?? "Video Studio")
                 .background { FadedBackground(variant: .standard) }
                 .safeAreaInset(edge: .top, spacing: 0) { videoPageBar }
                 .safeAreaInset(edge: .bottom, spacing: 0) { videoBottomBar }
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
-                        Button("Tilbage", systemImage: "chevron.left", action: goBack)
-                    }
-                    if videoPage == .clips && selectedGameFolder != nil {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            Button("Luk mappe", systemImage: "folder") { selectedGameFolder = nil }
-                                .labelStyle(.iconOnly)
+                        if openVideoFolder != nil {
+                            Button("Spilmapper", systemImage: "chevron.left") { selectedGameFolder = nil }
+                        } else {
+                            Button("Tilbage", systemImage: "chevron.left", action: goBack)
                         }
                     }
                 }
@@ -40,8 +38,13 @@ extension Home {
         switch videoPage {
         case .clips:
             videoSection {
-                videoStudioHeader
-                clipSection { openVideoRecipe() }
+                if let folder = openVideoFolder {
+                    clipSelectionSummary
+                    videoFolderScreen(folder)
+                } else {
+                    videoStudioHeader
+                    clipSection
+                }
             }
             .refreshable { await refreshVideoStudio() }
         case .recipe:
@@ -168,10 +171,6 @@ extension Home {
         }
     }
 
-    func clipColor(_ clip: Clip) -> Color {
-        let colors = [palette.green, palette.purple, palette.cyan, palette.coral]
-        return colors[Int(clip.id.hashValue.magnitude % UInt(colors.count))]
-    }
     var availableVideoMood: Mood? {
         let moods = videoMoods
         let preference = model.isDemo ? selectedVideoMood : model.lastVideoMood ?? .hype
@@ -287,21 +286,13 @@ extension Home {
 }
 
 extension Home {
-    func clipSection(onDone: @escaping () -> Void) -> some View {
+    private var clipSection: some View {
         FadedCard {
             VStack(alignment: .leading, spacing: 12) {
                 FadedSectionLabel("Vælg klip")
-                Text(model.capabilities.map { "\(model.selected.count) valgt af maks. \($0.limit)" }
-                     ?? "\(model.selected.count) klip valgt")
-                    .font(.subheadline).foregroundStyle(palette.secondary)
-                if !model.selected.isEmpty {
-                    let seconds = model.clips.filter { model.selected.contains($0.id) }.reduce(0) { $0 + $1.duration_seconds }
-                    Text("Valgt spilletid · \(durationLabel(seconds))").font(.caption.bold())
-                        .foregroundStyle(palette.isDark ? palette.lime : palette.text)
-                    FadedSecondaryButton("Ryd klipvalg", icon: "xmark") { model.clearSelection() }.disabled(model.busy)
-                }
+                clipSelectionSummary
                 if model.connected || model.isDemo {
-                    videoFolders(onDone: onDone)
+                    videoFolderCatalog
                 } else {
                     Text(model.selected.isEmpty ? "PC’en er offline. Forbind igen for at hente klip." :
                             "PC’en er offline. Du kan gemme de valgte klip til senere.")
@@ -316,189 +307,80 @@ extension Home {
         .id("clips")
     }
 
-    // Keep SwiftUI from expanding the same nested clip hierarchy for every folder branch.
-    private func videoFolders(onDone: @escaping () -> Void) -> AnyView {
+    private var clipSelectionSummary: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(model.capabilities.map { "\(model.selected.count) valgt af maks. \($0.limit)" }
+                 ?? "\(model.selected.count) klip valgt")
+                .font(.subheadline).foregroundStyle(palette.secondary)
+            if !model.selected.isEmpty {
+                let seconds = model.clips.filter { model.selected.contains($0.id) }.reduce(0) { $0 + $1.duration_seconds }
+                Text("Valgt spilletid · \(durationLabel(seconds))").font(.caption.bold())
+                    .foregroundStyle(palette.isDark ? palette.lime : palette.text)
+                FadedSecondaryButton("Ryd klipvalg", icon: "xmark") { model.clearSelection() }.disabled(model.busy)
+            }
+        }
+    }
+
+    private var availableVideoFolders: [VideoFolderItem] {
         if model.isDemo {
-            return clipFolder(id: "demo", title: "Testklip", subtitle: nil, onDone: onDone)
+            return [VideoFolderItem(id: "demo", title: "Testklip", subtitle: nil)]
         }
-        if catalogLoading != nil || (videoFolderServer != videoFolderScope && folderNotice == nil) {
-            return AnyView(LoadingSkeleton(label: "Henter spilmapper…"))
-        }
-        guard let server = videoFolderScope, videoFolderServer == server else { return AnyView(EmptyView()) }
+        guard let server = videoFolderScope, videoFolderServer == server else { return [] }
         if legacyClipCatalog {
-            return clipFolder(id: "legacy", title: "PC’ens V1-klipliste", subtitle: "Ældre server uden spilmapper", onDone: onDone)
+            return [VideoFolderItem(id: "legacy", title: "PC’ens V1-klipliste", subtitle: "Ældre server uden spilmapper")]
         }
-        return AnyView(ForEach(clipRoots) { root in
-            let subtitle = root.indexing || !root.ready ? "PC’en indekserer klip" : "\(root.file_count) filer på PC’en"
-            clipFolder(id: root.id, title: root.label, subtitle: subtitle, onDone: onDone)
-        })
-    }
-
-    private func clipFolder(id: String, title: String, subtitle: String?, onDone: @escaping () -> Void) -> AnyView {
-        let expanded = selectedGameFolder == id
-        return AnyView(VStack(alignment: .leading, spacing: 8) {
-            Button {
-                selectedGameFolder = expanded ? nil : id
-                if !expanded { model.rememberVideoFolder(id) }
-            } label: {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Label(title, systemImage: expanded ? "folder.fill" : "folder")
-                            .font(.headline)
-                        if model.lastVideoFolder == id {
-                            Text("Senest åbnet").font(.caption).foregroundStyle(palette.secondary)
-                        }
-                        if let subtitle { Text(subtitle).font(.caption).foregroundStyle(palette.secondary) }
-                    }
-                    Spacer()
-                    Image(systemName: expanded ? "chevron.up" : "chevron.down").accessibilityHidden(true)
-                }.frame(minHeight: 48).contentShape(Rectangle())
-            }
-            .buttonStyle(FadedButtonStyle(kind: .secondary))
-            .accessibilityValue(expanded ? "Åben" : "Lukket")
-            if expanded {
-                if id == "demo" {
-                    clipList(model.clips, onDone: onDone)
-                } else {
-                    expandedClipFolder(id, onDone: onDone)
-                        .id(id)
-                }
-            }
-        })
-    }
-
-    private func expandedClipFolder(_ id: String, onDone: @escaping () -> Void) -> AnyView {
-        let clips = folderPages[id] ?? []
-        return AnyView(VStack(alignment: .leading, spacing: 8) {
-            if !clips.isEmpty {
-                clipList(clips, onDone: onDone)
-            }
-            if pageLoading != nil {
-                LoadingSkeleton(label: "Henter klip i mappen…")
-            } else if let notice = folderPageNotices[id] {
-                FadedDetailText(notice)
-            } else if clips.isEmpty {
-                FadedDetailText(folderPages[id] == nil ? "Klip er endnu ikke hentet." :
-                                "PC’en har ingen klip klar til valg i denne mappe. Klip må højst vare tre minutter.")
-            }
-            if clips.isEmpty || folderPageNotices[id] != nil {
-                FadedSecondaryButton("Opdatér mappen", icon: "arrow.clockwise") {
-                    guard let server = videoFolderScope else { return }
-                    Task { await loadFolderPage(id, for: server, force: true) }
-                }.disabled(pageLoading != nil)
-            }
+        return clipRoots.map { root in
+            VideoFolderItem(id: root.id, title: root.label, subtitle: root.indexing || !root.ready
+                            ? "PC’en indekserer klip" : "\(root.file_count) filer på PC’en")
         }
-        .task(id: videoFolderScope) {
-            guard let server = videoFolderScope else { return }
-            await loadFolderPage(id, for: server)
-        })
     }
 
-    private func clipList(_ clips: [Clip], onDone: @escaping () -> Void) -> AnyView {
-        let filtered = filteredClips(clips)
-        return AnyView(VStack(alignment: .leading, spacing: FadedSpacing.section) {
-            DisclosureGroup("Filtrér klip") {
-                TextField("Søg i filnavn", text: $clipGame).textFieldStyle(.roundedBorder).frame(minHeight: 44)
-                Toggle("Under ét minut", isOn: $shortClips)
-                Toggle("Seneste jobdato først", isOn: $recentJobsFirst)
-                Picker("Jobdato", selection: $clipDateRange) {
-                    Text("Alle datoer").tag(0)
-                    Text("Seneste 7 dage").tag(7)
-                    Text("Seneste 30 dage").tag(30)
-                }
-                Text("Datoen kommer fra tidligere job med klippet.")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-            ViewThatFits(in: .horizontal) {
-                HStack { clipListActions(filtered, onDone: onDone) }
-                VStack(alignment: .leading) { clipListActions(filtered, onDone: onDone) }
-            }
-            if filtered.isEmpty {
-                FadedEmptyState(icon: "film", title: clips.isEmpty ? "Mappen er tom" : "Ingen klip matcher",
-                                detail: clips.isEmpty ? "Tilføj et klip på PC’en, og opdatér mappen." : "Prøv et andet filnavn eller filter.",
-                                actionTitle: clips.isEmpty ? nil : "Ryd filtre") {
-                    clipGame = ""
-                    shortClips = false
-                    recentJobsFirst = false
-                    clipDateRange = 0
-                }
-            } else {
-                Text("PC’en sender klipnavne og varighed.").font(.caption).foregroundStyle(palette.secondary)
-                LazyVGrid(columns: videoClipColumns, spacing: 12) {
-                    ForEach(filtered) { clip in videoClipCard(clip) }
+    private var openVideoFolder: VideoFolderItem? {
+        guard videoPage == .clips, let id = selectedGameFolder else { return nil }
+        return availableVideoFolders.first { $0.id == id }
+    }
+
+    private var videoFolderCatalog: VideoFolderCatalog {
+        VideoFolderCatalog(
+            folders: availableVideoFolders,
+            lastOpened: model.lastVideoFolder,
+            loading: !model.isDemo && (catalogLoading != nil || (videoFolderServer != videoFolderScope && folderNotice == nil)),
+            onOpen: showVideoFolder,
+            onRowAppeared: { id in
+                onScreenAppeared?(.videoFolders)
+                guard onVideoFoldersAppeared?(id) == true else { return }
+                Task { @MainActor in
+                    guard openVideoFolder == nil, availableVideoFolders.contains(where: { $0.id == id }) else { return }
+                    showVideoFolder(id)
                 }
             }
-        })
+        )
     }
 
-    @ViewBuilder private func clipListActions(_ clips: [Clip], onDone: @escaping () -> Void) -> some View {
-        FadedSecondaryButton("Vælg synlige", icon: "checkmark.circle") { model.select(clips) }
-            .disabled(model.busy || clips.isEmpty)
-        FadedSecondaryButton("Færdig med klipvalg", icon: "chevron.up", action: onDone)
+    private func showVideoFolder(_ id: String) {
+        selectedGameFolder = id
+        model.rememberVideoFolder(id)
     }
 
-    private var videoClipColumns: [GridItem] {
-        videoTypeSize.isAccessibilitySize ? [GridItem(.flexible())] : [GridItem(.adaptive(minimum: 132, maximum: 260), spacing: 12)]
-    }
-
-    private func videoClipCard(_ clip: Clip) -> some View {
-        let selected = model.selected.contains(clip.id)
-        let shape = RoundedRectangle(cornerRadius: 14)
-        return Button { model.toggle(clip) } label: {
-            ZStack(alignment: .bottomLeading) {
-                LinearGradient(colors: [clipColor(clip).opacity(0.58), Color.black.opacity(0.88)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing)
-                Image(systemName: "film").font(.title2.weight(.light)).foregroundStyle(.white.opacity(0.72))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity).accessibilityHidden(true)
-                LinearGradient(colors: [.clear, .black.opacity(0.9)], startPoint: .center, endPoint: .bottom)
-                Text(clip.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.96))
-                    .lineLimit(2).padding(10)
-            }
-            .frame(minHeight: compactClipCards ? 86 : 116)
-            .overlay(alignment: .topLeading) {
-                if selected {
-                    Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(palette.lime)
-                        .padding(6).background(.black.opacity(0.9), in: Circle()).padding(8)
-                }
-            }
-            .overlay(alignment: .topTrailing) {
-                if showClipDurations {
-                    Text(durationLabel(clip.duration_seconds)).font(.caption.monospacedDigit())
-                        .foregroundStyle(.white).padding(5).background(.black.opacity(0.9), in: Capsule()).padding(8)
-                }
-            }
-            .clipShape(shape)
-            .overlay { shape.strokeBorder(selected ? palette.lime : palette.border, lineWidth: selected ? 2 : 1) }
-            .contentShape(shape)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("\(clip.name), \(durationLabel(clip.duration_seconds))")
-        .accessibilityValue(selected ? "Valgt" : "Ikke valgt")
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .disabled(model.busy || (!selected && model.selected.count >= (model.capabilities?.limit ?? 0)))
-    }
-
-    private func durationLabel(_ seconds: Double) -> String {
-        let value = max(0, Int(seconds.rounded()))
-        return String(format: "%d:%02d", value / 60, value % 60)
-    }
-
-
-    private func filteredClips(_ source: [Clip]) -> [Clip] {
-        let query = clipGame.trimmingCharacters(in: .whitespacesAndNewlines)
-        let dates = Dictionary(model.jobs.map { ($0.clip_id, $0.created_at) }, uniquingKeysWith: max)
-        let cutoff = Calendar.current.date(byAdding: .day, value: -clipDateRange, to: .now) ?? .distantPast
-        let clips = source.filter {
-            (!shortClips || $0.duration_seconds < 60) &&
-                (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) &&
-                (clipDateRange == 0 || (dates[$0.id] ?? .distantPast) >= cutoff)
-        }
-        guard recentJobsFirst else { return clips }
-        return clips.sorted {
-            let lhs = dates[$0.id] ?? .distantPast
-            let rhs = dates[$1.id] ?? .distantPast
-            return lhs == rhs ? $0.name < $1.name : lhs > rhs
-        }
+    private func videoFolderScreen(_ folder: VideoFolderItem) -> VideoFolderScreen {
+        let server = videoFolderScope
+        let clips = model.isDemo ? model.clips : (folderPages[folder.id] ?? [])
+        let list = !clips.isEmpty || model.isDemo ? VideoClipList(
+            model: model, clips: clips, clipGame: $clipGame, shortClips: $shortClips,
+            recentJobsFirst: $recentJobsFirst, clipDateRange: $clipDateRange,
+            compactClipCards: compactClipCards, showClipDurations: showClipDurations,
+            onDone: openVideoRecipe
+        ) : nil
+        return VideoFolderScreen(
+            folderID: folder.id, server: server, list: list,
+            loading: pageLoading != nil, didLoad: folderPages[folder.id] != nil,
+            notice: folderPageNotices[folder.id],
+            onLoad: { force in
+                guard let server else { return }
+                await loadFolderPage(folder.id, for: server, force: force)
+            },
+            onClipsAppeared: { if !clips.isEmpty { onScreenAppeared?(.videoFolderClips) } }
+        )
     }
 
     var videoFolderScope: String? {
@@ -594,4 +476,215 @@ extension Home {
             folderPageNotices[id] = "Klip i denne mappe kunne ikke hentes. Tjek PC-forbindelsen, og opdatér mappen."
         }
     }
+}
+
+
+private struct VideoFolderItem: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String?
+}
+
+private struct VideoFolderCatalog: View {
+    let folders: [VideoFolderItem]
+    let lastOpened: String?
+    let loading: Bool
+    let onOpen: (String) -> Void
+    let onRowAppeared: (String) -> Void
+
+    var body: some View {
+        if loading {
+            LoadingSkeleton(label: "Henter spilmapper…")
+        } else {
+            ForEach(folders) { folder in
+                VideoFolderRow(folder: folder, lastOpened: lastOpened == folder.id) {
+                    onOpen(folder.id)
+                }
+                .onAppear { onRowAppeared(folder.id) }
+            }
+        }
+    }
+}
+
+private struct VideoFolderRow: View {
+    @Environment(\.fadedPalette) private var palette
+    let folder: VideoFolderItem
+    let lastOpened: Bool
+    let onOpen: () -> Void
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Label(folder.title, systemImage: "folder").font(.headline)
+                    if lastOpened { Text("Senest åbnet").font(.caption).foregroundStyle(palette.secondary) }
+                    if let subtitle = folder.subtitle { Text(subtitle).font(.caption).foregroundStyle(palette.secondary) }
+                }
+                Spacer()
+                Image(systemName: "chevron.right").accessibilityHidden(true)
+            }
+            .frame(minHeight: 48)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(FadedButtonStyle(kind: .secondary))
+    }
+}
+
+private struct VideoFolderScreen: View {
+    let folderID: String
+    let server: String?
+    let list: VideoClipList?
+    let loading: Bool
+    let didLoad: Bool
+    let notice: String?
+    let onLoad: (Bool) async -> Void
+    let onClipsAppeared: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.section) {
+            if let list {
+                list.onAppear(perform: onClipsAppeared)
+            }
+            if loading {
+                LoadingSkeleton(label: "Henter klip i mappen…")
+            } else if let notice {
+                FadedDetailText(notice)
+            } else if list == nil {
+                FadedDetailText(didLoad ? "PC’en har ingen klip klar til valg i denne mappe. Klip må højst vare tre minutter."
+                                        : "Henter klip i mappen…")
+            }
+            if list == nil || notice != nil {
+                FadedSecondaryButton("Opdatér mappen", icon: "arrow.clockwise") {
+                    Task { await onLoad(true) }
+                }.disabled(loading)
+            }
+        }
+        .task(id: server) { await onLoad(false) }
+        .id(folderID)
+    }
+}
+
+private struct VideoClipList: View {
+    @Environment(\.fadedPalette) private var palette
+    @Environment(\.dynamicTypeSize) private var videoTypeSize
+    let model: Model
+    let clips: [Clip]
+    @Binding var clipGame: String
+    @Binding var shortClips: Bool
+    @Binding var recentJobsFirst: Bool
+    @Binding var clipDateRange: Int
+    let compactClipCards: Bool
+    let showClipDurations: Bool
+    let onDone: () -> Void
+
+    var body: some View {
+        let filtered = filteredClips(clips)
+        return VStack(alignment: .leading, spacing: FadedSpacing.section) {
+            DisclosureGroup("Filtrér klip") {
+                TextField("Søg i filnavn", text: $clipGame).textFieldStyle(.roundedBorder).frame(minHeight: 44)
+                Toggle("Under ét minut", isOn: $shortClips)
+                Toggle("Seneste jobdato først", isOn: $recentJobsFirst)
+                Picker("Jobdato", selection: $clipDateRange) {
+                    Text("Alle datoer").tag(0)
+                    Text("Seneste 7 dage").tag(7)
+                    Text("Seneste 30 dage").tag(30)
+                }
+                Text("Datoen kommer fra tidligere job med klippet.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ViewThatFits(in: .horizontal) {
+                HStack { clipListActions(filtered, onDone: onDone) }
+                VStack(alignment: .leading) { clipListActions(filtered, onDone: onDone) }
+            }
+            if filtered.isEmpty {
+                FadedEmptyState(icon: "film", title: clips.isEmpty ? "Mappen er tom" : "Ingen klip matcher",
+                                detail: clips.isEmpty ? "Tilføj et klip på PC’en, og opdatér mappen." : "Prøv et andet filnavn eller filter.",
+                                actionTitle: clips.isEmpty ? nil : "Ryd filtre") {
+                    clipGame = ""
+                    shortClips = false
+                    recentJobsFirst = false
+                    clipDateRange = 0
+                }
+            } else {
+                Text("PC’en sender klipnavne og varighed.").font(.caption).foregroundStyle(palette.secondary)
+                LazyVGrid(columns: videoClipColumns, spacing: 12) {
+                    ForEach(filtered) { clip in videoClipCard(clip) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private func clipListActions(_ clips: [Clip], onDone: @escaping () -> Void) -> some View {
+        FadedSecondaryButton("Vælg synlige", icon: "checkmark.circle") { model.select(clips) }
+            .disabled(model.busy || clips.isEmpty)
+        FadedSecondaryButton("Færdig med klipvalg", icon: "chevron.up", action: onDone)
+    }
+
+    private var videoClipColumns: [GridItem] {
+        videoTypeSize.isAccessibilitySize ? [GridItem(.flexible())] : [GridItem(.adaptive(minimum: 132, maximum: 260), spacing: 12)]
+    }
+
+    private func videoClipCard(_ clip: Clip) -> some View {
+        let selected = model.selected.contains(clip.id)
+        let shape = RoundedRectangle(cornerRadius: 14)
+        return Button { model.toggle(clip) } label: {
+            ZStack(alignment: .bottomLeading) {
+                LinearGradient(colors: [clipColor(clip).opacity(0.58), Color.black.opacity(0.88)],
+                               startPoint: .topLeading, endPoint: .bottomTrailing)
+                Image(systemName: "film").font(.title2.weight(.light)).foregroundStyle(.white.opacity(0.72))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity).accessibilityHidden(true)
+                LinearGradient(colors: [.clear, .black.opacity(0.9)], startPoint: .center, endPoint: .bottom)
+                Text(clip.name).font(.subheadline.weight(.semibold)).foregroundStyle(.white.opacity(0.96))
+                    .lineLimit(2).padding(10)
+            }
+            .frame(minHeight: compactClipCards ? 86 : 116)
+            .overlay(alignment: .topLeading) {
+                if selected {
+                    Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(palette.lime)
+                        .padding(6).background(.black.opacity(0.9), in: Circle()).padding(8)
+                }
+            }
+            .overlay(alignment: .topTrailing) {
+                if showClipDurations {
+                    Text(durationLabel(clip.duration_seconds)).font(.caption.monospacedDigit())
+                        .foregroundStyle(.white).padding(5).background(.black.opacity(0.9), in: Capsule()).padding(8)
+                }
+            }
+            .clipShape(shape)
+            .overlay { shape.strokeBorder(selected ? palette.lime : palette.border, lineWidth: selected ? 2 : 1) }
+            .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(clip.name), \(durationLabel(clip.duration_seconds))")
+        .accessibilityValue(selected ? "Valgt" : "Ikke valgt")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .disabled(model.busy || (!selected && model.selected.count >= (model.capabilities?.limit ?? 0)))
+    }
+
+    private func filteredClips(_ source: [Clip]) -> [Clip] {
+        let query = clipGame.trimmingCharacters(in: .whitespacesAndNewlines)
+        let dates = Dictionary(model.jobs.map { ($0.clip_id, $0.created_at) }, uniquingKeysWith: max)
+        let cutoff = Calendar.current.date(byAdding: .day, value: -clipDateRange, to: .now) ?? .distantPast
+        let clips = source.filter {
+            (!shortClips || $0.duration_seconds < 60) &&
+                (query.isEmpty || $0.name.localizedCaseInsensitiveContains(query)) &&
+                (clipDateRange == 0 || (dates[$0.id] ?? .distantPast) >= cutoff)
+        }
+        guard recentJobsFirst else { return clips }
+        return clips.sorted {
+            let lhs = dates[$0.id] ?? .distantPast
+            let rhs = dates[$1.id] ?? .distantPast
+            return lhs == rhs ? $0.name < $1.name : lhs > rhs
+        }
+    }
+
+    private func clipColor(_ clip: Clip) -> Color {
+        let colors = [palette.green, palette.purple, palette.cyan, palette.coral]
+        return colors[Int(clip.id.hashValue.magnitude % UInt(colors.count))]
+    }
+}
+
+private func durationLabel(_ seconds: Double) -> String {
+    let value = max(0, Int(seconds.rounded()))
+    return String(format: "%d:%02d", value / 60, value % 60)
 }
