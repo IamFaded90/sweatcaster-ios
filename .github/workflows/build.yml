@@ -96,6 +96,10 @@ jobs:
           test -x "$app/FadedAI"
           xcrun lipo "$app/FadedAI" -verify_arch arm64
           test ! -e "$app/_CodeSignature"
+          for bundle in "$app" "$app"/PlugIns/*.appex; do
+            test -d "$bundle" || continue
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$bundle/Info.plist"
+          done
           staging="$(mktemp -d)"
           mkdir "$staging/Payload"
           ditto "$app" "$staging/Payload/FadedAI.app"

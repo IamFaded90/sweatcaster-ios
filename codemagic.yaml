@@ -35,7 +35,10 @@ workflows:
           case "${BUILD_NUMBER:-}" in
             ""|*[!0-9]*) echo "Codemagic build number is unavailable."; exit 1 ;;
           esac
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$app/Info.plist"
+          for bundle in "$app" "$app"/PlugIns/*.appex; do
+            test -d "$bundle" || continue
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$bundle/Info.plist"
+          done
           staging="$(mktemp -d)"
           mkdir "$staging/Payload"
           ditto "$app" "$staging/Payload/FadedAI.app"
