@@ -168,8 +168,11 @@ import Foundation
             drafts[session.id.uuidString] = draft
             if !sessions.contains(where: { $0.id == session.id }) { sessions.append(session) }
         }
-        let botsData = data.villageBots
-        let bots = botsData.isEmpty ? [] : try decoder.decode([VillageBot].self, from: botsData)
+        let bots: [VillageBot]
+        switch data.loadBots() {
+        case .failure(let error): throw error
+        case .success(let loaded): bots = loaded
+        }
         var queue: [String: [VideoOutboxItem]] = [:]
         for address in try videoAddresses() {
             let saved = try readVideoState(address).state.outbox

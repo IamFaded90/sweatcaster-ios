@@ -168,7 +168,7 @@ extension AgentHub {
     }
 
     var localVillageBots: [VillageBot] {
-        (try? JSONDecoder().decode([VillageBot].self, from: localBotsData)) ?? []
+        VillageBot.list(from: localBotsData)
     }
 
     private func villageGround(night: Bool) -> Color {

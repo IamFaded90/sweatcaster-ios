@@ -281,7 +281,9 @@ struct ExperimentalVillageView: View {
         do {
             let store = MigratedAppData.shared
             let data = store.villageBots
-            if !data.isEmpty, !(try JSONDecoder().decode([VillageBot].self, from: data)).isEmpty { return }
+            if !data.isEmpty {
+                guard let existing = try? VillageBot.listRecovering(from: data), existing.isEmpty else { return }
+            }
             let adam = VillageBot(name: "Adam", color: "Blå",
                                   prompt: "Hjælp med kode. Forklar og foreslå ændringer, som brugeren gennemgår.",
                                   personality: "Nysgerrig", specialty: "Kode")

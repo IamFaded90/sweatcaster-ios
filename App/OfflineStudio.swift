@@ -169,7 +169,7 @@ struct OfflineStudio: View {
     var privateImageFolder: URL {
         URL(string: "fadedai-private://studio/\(temporaryImagesID.uuidString)")!
     }
-    var privateBots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: botData)) ?? [] }
+    var privateBots: [VillageBot] { VillageBot.list(from: botData) }
     var selectedPrivateBot: VillageBot? {
         if ephemeralOnly || imageOnly { return nil }
         return privateBots.first { $0.id.uuidString == privateBotID } ?? privateBots.first

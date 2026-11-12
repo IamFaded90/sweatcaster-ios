@@ -201,7 +201,7 @@ extension ChatView {
     }
 
     private var voiceBots: [VillageBot] {
-        (try? JSONDecoder().decode([VillageBot].self, from: MigratedAppData.shared.villageBots)) ?? []
+        VillageBot.list(from: MigratedAppData.shared.villageBots)
     }
 
     var voiceControls: some View {

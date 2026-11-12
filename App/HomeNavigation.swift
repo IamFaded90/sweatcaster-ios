@@ -158,7 +158,7 @@ enum FadedMoreDestination {
 
 @MainActor enum FadedMoreScreenData {
     static var bots: [VillageBot] {
-        (try? JSONDecoder().decode([VillageBot].self, from: MigratedAppData.shared.villageBots)) ?? []
+        VillageBot.list(from: MigratedAppData.shared.villageBots)
     }
 }
 

@@ -106,6 +106,8 @@ enum AppStorageKeys {
     static let teamSleepingExpanded = "team.sleeping.expanded"
     static let videoLastMood = "video.lastMood"
     static let villageBots = "village.bots"
+    static let villageEverInitialized = "village.everInitialized"
+    static let villageSimulation = "village.simulation"
     static let villageExperimentalEnabled = "village.experimental.enabled"
     static let villageExperimentalFounders = "village.experimental.founders"
     static let villageExperimentalJobs = "village.experimental.completed"

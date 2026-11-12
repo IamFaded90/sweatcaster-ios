@@ -6,6 +6,8 @@ import XCTest
 final class AppStorageKeysTests: XCTestCase {
     func testMigrationReadsTheExistingDefaultsKeys() {
         XCTAssertEqual(AppStorageKeys.villageBots, "village.bots")
+        XCTAssertEqual(AppStorageKeys.villageEverInitialized, "village.everInitialized")
+        XCTAssertEqual(AppStorageKeys.villageSimulation, "village.simulation")
         XCTAssertEqual(AppStorageKeys.spacesNotes, "spaces.notes")
         XCTAssertEqual(AppStorageKeys.privateChatTurns, "private.chat.turns")
         XCTAssertEqual(AppStorageKeys.privateChatDraft, "private.chat.draft")

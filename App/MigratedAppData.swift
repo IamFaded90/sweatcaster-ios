@@ -72,6 +72,7 @@ import Observation
     private var cachedBots = Data()
     private var cachedNotes = ""
     private var cachedPreviews = Data()
+    private var botsReadError: Error?
 
     var villageBots: Data {
         migrateUserDefaultsToFilesIfNeeded()
@@ -123,6 +124,19 @@ import Observation
     func saveVillageBots(_ data: Data) throws {
         try persist(data, for: .bots)
         cachedBots = data
+        botsReadError = nil
+    }
+
+    func loadBots() -> Result<[VillageBot], Error> {
+        migrateUserDefaultsToFilesIfNeeded()
+        if let botsReadError { return .failure(botsReadError) }
+        if cachedBots.isEmpty { return .success([]) }
+        do { return .success(try VillageBot.listRecovering(from: cachedBots)) }
+        catch {
+            botsReadError = error
+            AppDiagnostics.record(error)
+            return .failure(error)
+        }
     }
 
     func saveNotes(_ text: String) throws {
@@ -225,6 +239,7 @@ import Observation
         cachedBots = Data()
         cachedNotes = ""
         cachedPreviews = Data()
+        botsReadError = nil
     }
 
     private static func isChatSessionKey(_ key: String) -> Bool {
@@ -296,18 +311,32 @@ import Observation
     }
 
     private func recover(_ field: Field) -> Data? {
+        if field == .bots { botsReadError = nil }
+        var failure: Error?
         do {
             if let data = try storedBytes(field, in: store) { return data }
-        } catch { AppDiagnostics.record(error) }
+        } catch {
+            AppDiagnostics.record(error)
+            failure = error
+        }
         do {
             if let data = try previousBytes(field) { return data }
-        } catch { AppDiagnostics.record(error) }
+        } catch {
+            AppDiagnostics.record(error)
+            failure = failure ?? error
+        }
         do {
-            guard let data = try legacyBytes(field) else { return nil }
+            guard let data = try legacyBytes(field) else {
+                if field == .bots { botsReadError = failure }
+                return nil
+            }
             try validate(data, for: field)
             return data
+        } catch {
+            AppDiagnostics.record(error)
+            if field == .bots { botsReadError = error }
+            return nil
         }
-        catch { AppDiagnostics.record(error); return nil }
     }
 
     private func legacyBytes(_ field: Field) throws -> Data? {
@@ -341,7 +370,7 @@ import Observation
         guard data.count <= min(store.maximumBytes, field.maximumBytes) else { throw LocalFileStore.Failure.tooLarge }
         let decoder = JSONDecoder()
         switch field {
-        case .bots: _ = try decoder.decode([VillageBot].self, from: data)
+        case .bots: _ = try VillageBot.listRecovering(from: data)
         case .turns: _ = try decoder.decode([PrivateChatTurn].self, from: data)
         case .previews: _ = try decoder.decode([ChatTurn].self, from: data)
         case .context: _ = try decoder.decode([String].self, from: data)
@@ -349,5 +378,11 @@ import Observation
             guard let text = String(data: data, encoding: .utf8) else { throw LocalFileStore.Failure.invalidFile }
             guard text.count <= (field == .notes ? 96_000 : 12_000) else { throw LocalFileStore.Failure.tooLarge }
         }
+    }
+}
+
+extension MigratedAppData: VillageBotRepository {
+    func saveBots(_ bots: [VillageBot]) throws {
+        try saveVillageBots(JSONEncoder().encode(bots))
     }
 }
