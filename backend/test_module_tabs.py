@@ -8,7 +8,8 @@ from tests.conftest import make_settings
 from fastapi.testclient import TestClient
 
 from sweatcaster.api import create_app
-from sweatcaster import emby_library
+from sweatcaster import emby_library, module_tabs
+from sweatcaster.bot_computers import BotComputers
 from sweatcaster.dto import ApiError
 from sweatcaster.module_tabs import collection_answer
 
@@ -67,6 +68,73 @@ def test_emby_library_requires_a_paired_client(tmp_path, monkeypatch):
     with pytest.raises(ApiError) as failure:
         endpoint(request, Response(), offset=-1)
     assert failure.value.status_code == 422
+
+
+def test_external_lookups_require_pairing_before_contacting_service(tmp_path, monkeypatch):
+    called = []
+
+    def web_lookup(query):
+        called.append(query)
+        return [{"title": "Example", "url": "https://example.org/", "snippet": ""}]
+
+    def youtube_lookup():
+        called.append("youtube")
+        return {"configured": False, "channels": []}
+
+    monkeypatch.setattr(module_tabs, "search_web", web_lookup)
+    monkeypatch.setattr(module_tabs, "read_channels", youtube_lookup)
+    settings = make_settings(tmp_path)
+    app = create_app(settings)
+    base = "/api/modules/v1/"
+    endpoints = {route.path: route.endpoint for route in app.routes if getattr(route, "path", None)
+                 in {base + "web-search", base + "youtube/channels"}}
+    unpaired = Request({"type": "http", "headers": []})
+    paired = Request({"type": "http", "headers": [(b"authorization", ("Bearer " + settings.token).encode())]})
+    for path, body, expected in (
+        ("web-search", {"body": {"query": "example"}},
+         {"results": [{"title": "Example", "url": "https://example.org/", "snippet": ""}]}),
+        ("youtube/channels", {}, {"configured": False, "channels": []}),
+    ):
+        endpoint = endpoints[base + path]
+        with pytest.raises(ApiError) as failure:
+            endpoint(unpaired, Response(), **body)
+        assert failure.value.status_code == 401
+        response = Response()
+        assert endpoint(paired, response, **body) == expected
+        assert response.headers["Cache-Control"] == "no-store"
+    assert called == ["example", "youtube"]
+
+
+def test_bot_activity_requires_pairing_and_bounds_requested_ids(tmp_path, monkeypatch):
+    requested = []
+
+    def activity(_service, ids):
+        requested.append(ids)
+        return {"bots": [{"id": bot_id, "jobs": []} for bot_id in ids]}
+
+    monkeypatch.setattr(BotComputers, "activity", activity)
+    settings = make_settings(tmp_path)
+    app = create_app(settings)
+    url = "/api/modules/v1/bot-activity"
+    endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", None) == url)
+    unpaired = Request({"type": "http", "headers": []})
+    paired = Request({"type": "http", "headers": [(b"authorization", ("Bearer " + settings.token).encode())]})
+    bot_id = str(uuid4())
+
+    with pytest.raises(ApiError) as rejection:
+        endpoint(unpaired, Response(), body={"botIDs": [bot_id]})
+    assert rejection.value.status_code == 401
+    for bad_ids in (bot_id, ["wrong-id"], [bot_id] * 11):
+        with pytest.raises(ApiError) as rejection:
+            endpoint(paired, Response(), body={"botIDs": bad_ids})
+        assert rejection.value.status_code == 422
+    assert requested == []
+
+    response = Response()
+    result = endpoint(paired, response, body={"botIDs": [bot_id, bot_id.upper()]})
+    assert result == {"bots": [{"id": bot_id, "jobs": []}]}
+    assert response.headers["Cache-Control"] == "no-store"
+    assert requested == [[bot_id]]
 
 
 def test_module_mcp_rejects_untrusted_clients_and_lists_read_tools(tmp_path):

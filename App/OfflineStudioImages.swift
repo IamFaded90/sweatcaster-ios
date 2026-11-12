@@ -86,15 +86,16 @@ extension OfflineStudio {
     }
 
     private func imageBlocker(for request: StudioImageRequest) -> String? {
+        let modelReady = isImageModelReady(request.model)
         if request.isPrivate {
-            if !imageReady { return "Hent en telefonmodel under Hjem → Billeder → Telefon → Billedindstillinger. Åbn derefter Privat Studio igen." }
+            if !modelReady { return "Hent en telefonmodel under Hjem → Billeder → Telefon → Billedindstillinger. Åbn derefter Privat Studio igen." }
             if privateNetworkOffline == nil { return "Tjekker, om telefonen er offline…" }
             if !canRenderPrivateImages { return privateImageOfflineInstructions }
         } else if request.route == .pc {
             if api == nil { return "Forbind til PC’en, eller vælg Telefon." }
             if request.prompt.count > 1_000 { return "PC’en tager højst 1.000 tegn. Forkort teksten, eller vælg Telefon." }
             if !request.supportsPC { return "PC’en tager én almindelig prompt. Vælg Telefon for ekstra billedindstillinger." }
-        } else if !imageReady && (request.route == .phone || api == nil || !request.allowPCFallback || !request.supportsPC) {
+        } else if !modelReady && (request.route == .phone || api == nil || !request.allowPCFallback || !request.supportsPC) {
             return "Åbn Billedindstillinger og hent en telefonmodel, eller vælg PC."
         }
         return nil
@@ -105,7 +106,11 @@ extension OfflineStudio {
         case .pc:
             "Din PC laver ét billede med sin ComfyUI-model. Den får kun din billedbeskrivelse."
         case .phone:
-            "Telefonen bruger din hentede billedmodel og de ekstra billedindstillinger."
+            if let model = StudioImageModel(rawValue: request.model), isImageModelReady(model.id) {
+                "Telefonen bruger \(model.title)."
+            } else {
+                "Telefonen bruger en hentet billedmodel."
+            }
         case .automatic:
             request.allowPCFallback && api != nil
                 ? "Prøver telefonen først. PC’en kan overtage en enkel billedbeskrivelse."
@@ -114,8 +119,12 @@ extension OfflineStudio {
     }
 
     var imageReady: Bool {
-        if StudioImageDownloads.shared.activeModel?.id == imageModel { return false }
-        return StudioImageModel(rawValue: imageModel)?.isInstalled == true
+        isImageModelReady(imageModel)
+    }
+
+    private func isImageModelReady(_ id: String) -> Bool {
+        StudioImageDownloads.shared.activeModel?.id != id &&
+            StudioImageModel(rawValue: id)?.isInstalled == true
     }
 
     private var installedLoRA: String? {
@@ -470,10 +479,13 @@ extension OfflineStudio {
     private var studioImageRequest: StudioImageRequest {
         let route: StudioImageRoute = privateSession ? .phone : studioImageRoute
         let usesPhoneOptions = route != .pc
+        let model = usesPhoneOptions && !imageReady
+            ? StudioImageModel.allCases.first(where: { isImageModelReady($0.id) })?.id ?? imageModel
+            : imageModel
         let negative = usesPhoneOptions ? negativeImagePrompt.trimmingCharacters(in: .whitespacesAndNewlines) : ""
         let lora = usesPhoneOptions && (privateSession || useLoRA) ? installedLoRA ?? "" : ""
         return StudioImageRequest(
-            model: imageModel, route: route, prompt: imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            model: model, route: route, prompt: imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
             negative: negative, lora: lora, count: usesPhoneOptions && makeFourImages ? 4 : 1,
             seed: usesPhoneOptions ? studioSeed : nil, sourceImage: usesPhoneOptions ? baseImage : nil,
             isPrivate: privateSession, autoSave: autoSaveStudioPhotos && !privateSession,

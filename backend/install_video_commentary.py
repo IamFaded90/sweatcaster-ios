@@ -19,6 +19,25 @@ RESULT_SOURCE = '                event.source in {"tesseract", "easyocr", "windo
 REACTION_GROUNDING = "Ground your reaction in one concrete detail from a cited event."
 REACTION_ATTRIBUTION = "Use screen text and speech as supporting evidence without reading it back."
 FOCUS_ATTRIBUTION = "An elimination claim needs its own confirmed kill event ID."
+FULL_CLIP_EDITS = (
+    (
+        '        focus = focus_window(analysis)\n'
+        '        if focus and timed.lines:\n'
+        '            cited = {event_id for line in timed.lines for event_id in line.event_ids}\n'
+        '            cited_before_focus = any(event.id in cited and event.t_start < focus[0]\n'
+        '                                     for event in analysis.events)\n'
+        '            if cited_before_focus or any(line.t_start < focus[0] for line in timed.lines):\n'
+        '                focus = None\n',
+        '        # Commentary uses the original clip timestamps.\n',
+    ),
+    (
+        '        if focus:\n'
+        '            check_cancel(cancel)\n'
+        '            trim_rendered(output, *focus)\n'
+        '            warnings.append("The lead-in was shortened before the last observed kill. The ending was kept.")\n',
+        '        # Keep the entire clip, including play before delayed kill notifications.\n',
+    ),
+)
 PREVIOUS_CLAIM_CHECK = (
     '        if _KILL_RE.search(text) and not any(event.kind == "kill" for event in cited):\n'
     '            raise CommentaryError("The reaction invented a kill. Nothing was kept.")\n'
@@ -128,6 +147,12 @@ BEAT_EDITS = {
             '        "Use the exact focus event ID in the JSON example and replace its placeholder text. "\n'
             '        "When a distinct confirmed elimination and player death both matter, give each its own line and cite them separately. "\n'
             '        "Use one line unless a separate, "\n',
+        ),
+        (
+            '        "If the HUD is the only evidence, avoid guesses about weapons, distance, tactics or opponent identity. "\n',
+            '        "When the footage confirms a double kill, react to one visible detail about how the player got both kills, "\n'
+            '        "such as switching targets or taking a clear angle. Cite the supporting events. "\n'
+            '        "When the HUD is the only evidence, react to the confirmed result without guessing how it happened. "\n',
         ),
         (
             '    for attempt in range(2):\n'
@@ -539,8 +564,9 @@ def install(root: Path, apply: bool = False) -> list[Path]:
         current = path.read_text(encoding="utf-8")
         updated = current
         beat_edits = BEAT_EDITS.get(name, [])
+        full_clip_edits = FULL_CLIP_EDITS if name == "sweatcaster/pipeline.py" else ()
         # Reconcile older compatible checkpoints and make the same update a no-op on rerun.
-        for previous, final in beat_edits:
+        for previous, final in reversed([*beat_edits, *full_clip_edits]):
             if updated.count(final) == 1:
                 updated = updated.replace(final, previous)
         if name == "sweatcaster/commentary.py":
@@ -560,7 +586,7 @@ def install(root: Path, apply: bool = False) -> list[Path]:
             ).replace(
                 PREVIOUS_CLAIM_CHECK, CLAIM_CHECK,
             )
-        for anchor, replacement in [*edits, *beat_edits]:
+        for anchor, replacement in [*edits, *beat_edits, *full_clip_edits]:
             if replacement and replacement in updated:
                 continue
             count = updated.count(anchor)

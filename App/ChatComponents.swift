@@ -390,13 +390,20 @@ extension ChatView {
     }
 
     var chatBrandFooter: some View {
-        VStack(spacing: FadedSpacing.xs) {
-            chatBrandMark
-            Text("FadedAI est 2026")
-                .font(.caption2)
-                .foregroundStyle(palette.secondary)
-                .multilineTextAlignment(.center)
+        Button(action: openHome) {
+            VStack(spacing: FadedSpacing.xs) {
+                chatBrandMark
+                Text("FadedAI est 2026")
+                    .font(.caption2)
+                    .foregroundStyle(palette.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Hjem")
+        .accessibilityIdentifier("chat-home-logo")
         .frame(maxWidth: .infinity)
         .padding(.horizontal, FadedSpacing.edge)
         .padding(.bottom, FadedSpacing.s)

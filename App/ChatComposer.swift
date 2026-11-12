@@ -59,8 +59,14 @@ extension ChatView {
         if let deleted = removedTurns.last, deleted.expiresAt > ContinuousClock.now { undoBar }
         if let chatNotice { Text(chatNotice).font(.caption).foregroundStyle(palette.secondary) }
         if case .reply(_)? = speechBox.playback {
-            HStack {
-                Label("Læser op på telefonen", systemImage: "speaker.wave.2").font(.subheadline)
+            HStack(spacing: FadedSpacing.s) {
+                if speechBox.isSpeaking {
+                    AgentToolWave(status: "Læser op").accessibilityHidden(true)
+                }
+                Text(speechBox.voiceName.map { "Oplæsning · \($0)" } ?? "Oplæsning på iPhone")
+                    .font(.subheadline)
+                    .foregroundStyle(palette.secondary)
+                    .lineLimit(2)
                 Spacer(minLength: FadedSpacing.s)
                 Button("Stop oplæsning", systemImage: "stop.circle") { speechBox.stop() }
                     .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
@@ -232,6 +238,8 @@ extension ChatView {
     var voiceControls: some View {
         let bots = voiceBots
         let hasBotVoice = bots.contains { $0.id.uuidString == voiceBotID }
+        let selectedVoice = chatSpeechVoice.0
+        let effectiveVoice = LocalSpeechVoice.forReply(selectedVoice, language: configuredReplySpeechLanguage)
         return DisclosureGroup("Oplæsning på telefonen") {
             Toggle("Læs færdige svar op", isOn: $voiceMode)
             if !bots.isEmpty {
@@ -244,17 +252,33 @@ extension ChatView {
                 Picker("Oplæsningssprog", selection: $preferredVoiceLanguage) {
                     Text("Dansk").tag("da-DK")
                     Text("Engelsk").tag("en-US")
-                }.onChange(of: preferredVoiceLanguage) { preferredVoiceID = "" }
+                }.onChange(of: preferredVoiceLanguage) {
+                    if selectedVoice?.voiceTraits.contains(.isPersonalVoice) != true { preferredVoiceID = "" }
+                    stopVoicePreview()
+                }
                 chatVoicePicker.id(availableVoiceRevision)
                 Slider(value: $preferredVoiceRate, in: 0.7...1.3, step: 0.05).accessibilityLabel("Talehastighed")
                 FadedDetailText("Tempo · \(preferredVoiceRate.formatted(.number.precision(.fractionLength(2))))×")
             }
-            if let voice = chatSpeechVoice.0, voice.voiceTraits.contains(.isPersonalVoice) {
-                FadedDetailText("Prøven bruger din personlige stemme. Svar på andre sprog læses op med en systemstemme.")
+            if let selectedVoice, let effectiveVoice, selectedVoice.identifier != effectiveVoice.identifier {
+                FadedDetailText("Svar på \(effectiveVoice.language.hasPrefix("da") ? "dansk" : "engelsk") læses op med \(effectiveVoice.name).")
+            } else if let effectiveVoice {
+                FadedDetailText("Oplæsningsstemme · \(LocalSpeechVoice.label(effectiveVoice))")
+            }
+            if selectedVoice?.voiceTraits.contains(.isPersonalVoice) == true {
+                FadedDetailText("Din personlige stemme bruges til svar på stemmens eget sprog.")
             } else if !hasBotVoice, !LocalSpeechVoice.options(language: preferredVoiceLanguage).contains(where: { $0.quality != .default }) {
                 FadedDetailText(LocalSpeechVoice.downloadHint)
             }
-            Button(speechBox.playback == .preview ? "Stop stemmeprøve" : "Prøv stemme",
+            NavigationLink {
+                Form { PersonalVoiceSettings() }
+                    .navigationTitle("Personlig stemme")
+                    .navigationBarTitleDisplayMode(.inline)
+            } label: {
+                Label("Personlig stemme", systemImage: "person.wave.2")
+                    .frame(minHeight: 44)
+            }
+            Button(speechBox.playback == .preview ? "Stop stemmeprøve" : "Prøv oplæsningen",
                    systemImage: speechBox.playback == .preview ? "stop.circle" : "play.circle", action: toggleVoicePreview)
                 .frame(minHeight: 44)
             if case .reply(_)? = speechBox.playback {
@@ -267,12 +291,20 @@ extension ChatView {
     }
 
     private var chatVoicePicker: some View {
-        let voices = LocalSpeechVoice.options(language: preferredVoiceLanguage, includePersonalVoices: true)
-        let selected = Binding(get: { voices.contains { $0.identifier == preferredVoiceID } ? preferredVoiceID : "" },
+        let personal = LocalSpeechVoice.personalVoices
+        let system = LocalSpeechVoice.options(language: preferredVoiceLanguage)
+        let selected = Binding(get: { (personal + system).contains { $0.identifier == preferredVoiceID } ? preferredVoiceID : "" },
                                set: { preferredVoiceID = $0 })
         return Picker("Telefonstemme", selection: selected) {
             Text("Bedste tilgængelige").tag("")
-            ForEach(voices, id: \.identifier) { voice in Text(LocalSpeechVoice.label(voice)).tag(voice.identifier) }
+            if !personal.isEmpty {
+                Section("Personlige stemmer") {
+                    ForEach(personal, id: \.identifier) { voice in Text(LocalSpeechVoice.label(voice)).tag(voice.identifier) }
+                }
+            }
+            Section("Stemmer på iPhone") {
+                ForEach(system, id: \.identifier) { voice in Text(LocalSpeechVoice.label(voice)).tag(voice.identifier) }
+            }
         }
     }
 
@@ -281,11 +313,7 @@ extension ChatView {
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let spoken = LocalSpeechVoice.replyText(text)
         let (voice, rate) = chatSpeechVoice
-        let replyLanguage: String? = switch aiLanguage {
-        case "Dansk": "da-DK"
-        case "Engelsk": "en-US"
-        default: LocalSpeechVoice.detectedReplyLanguage(spoken)
-        }
+        let replyLanguage = configuredReplySpeechLanguage ?? LocalSpeechVoice.detectedReplyLanguage(spoken)
         let playbackVoice = LocalSpeechVoice.forReply(voice, language: replyLanguage)
         playChatSpeech(spoken, voice: playbackVoice, rate: rate, as: .reply(turnID))
     }
@@ -297,12 +325,22 @@ extension ChatView {
         return (voice, bot.map { $0.voiceRate ?? 1 } ?? preferredVoiceRate)
     }
 
+    private var configuredReplySpeechLanguage: String? {
+        switch aiLanguage {
+        case "Dansk": "da-DK"
+        case "Engelsk": "en-US"
+        default: nil
+        }
+    }
+
     private func toggleVoicePreview() {
         if speechBox.playback == .preview { speechBox.stop(); return }
         dictation.stop()
         let (voice, rate) = chatSpeechVoice
-        let sample = LocalSpeechVoice.previewSentence(language: voice?.language ?? preferredVoiceLanguage)
-        playChatSpeech(sample, voice: voice, rate: rate, as: .preview)
+        let playbackVoice = LocalSpeechVoice.forReply(voice, language: configuredReplySpeechLanguage)
+        let sampleLanguage = playbackVoice?.language ?? configuredReplySpeechLanguage ?? preferredVoiceLanguage
+        let sample = LocalSpeechVoice.previewSentence(language: sampleLanguage)
+        playChatSpeech(sample, voice: playbackVoice, rate: rate, as: .preview)
     }
 
     private func stopVoicePreview() {
@@ -372,7 +410,7 @@ private struct ChatPhoneContextButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityHint("Åbner Fotos og Filer.")
+        .accessibilityHint("Åbner Apple-forbindelser, Fotos og Filer.")
         .sheet(isPresented: $presenting) {
             NavigationStack {
                 ConnectionsView(title: "iPhone-kontekst", onChooseNote: chooseAndDismiss)

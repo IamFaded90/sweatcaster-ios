@@ -3,7 +3,7 @@
 import Foundation
 import SwiftUI
 
-struct AgentHub: View {
+@MainActor struct AgentHub: View {
     @Environment(\.scenePhase) var hubPhase
     @Environment(\.fadedPalette) var palette
     let api: LiveAPI?
@@ -20,7 +20,7 @@ struct AgentHub: View {
     @State private var localBot: VillageBot?
     @State private var computerBot: VillageBot?
     @State private var villageChatBot: VillageBot?
-    @State var villagePause = false
+    var villagePause: Bool { simulation.isPaused }
     @State var cinematic = false
     @State var villageZoom: CGFloat = 1
     @State var villageOffset: CGSize = .zero
@@ -52,8 +52,27 @@ struct AgentHub: View {
     @State private var detailAgentID: String?
     @State private var detailRequest: UUID?
     @State private var badgeRequest: UUID?
+    @State private var observedBotTarget: String?
+    @State private var botStatusNotice: String?
+
+    private struct BotActivityRequest: Equatable {
+        let targetID: String?
+        let ids: [UUID]
+        let visible: Bool
+        let attempt: Int
+    }
+
+    private var simulation: SimulationEngine { .shared }
+
+    private var botActivityRequest: BotActivityRequest {
+        let visible = villageVisible && computerBot == nil && localBot == nil && villageChatBot == nil &&
+            !showBuilder && details == nil && !achievements
+        return BotActivityRequest(targetID: api?.queueTargetID, ids: localVillageBots.prefix(10).map(\.id),
+                                  visible: visible, attempt: attempt)
+    }
 
     var body: some View {
+        let request = botActivityRequest
         NavigationStack {
             VStack(spacing: 0) {
                 if !cinematic { hubHeader }
@@ -78,6 +97,7 @@ struct AgentHub: View {
                 resetRemoteIfNeeded()
                 if hubPhase == .active { await followHub() }
             }
+            .task(id: request) { await followBotActivity(request) }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Tilbage", systemImage: "chevron.left", action: onBack)
@@ -122,7 +142,7 @@ struct AgentHub: View {
                                             openWork: onExperimentalAction)
                 }
                 if offline {
-                    Label("PC’en er offline. Botsene hviler.", systemImage: "cloud.rain")
+                    Label("Forbindelsen til PC’en er afbrudt.", systemImage: "cloud.rain")
                         .font(.subheadline).foregroundStyle(palette.secondary)
                 }
                 villageActivity
@@ -143,41 +163,114 @@ struct AgentHub: View {
         FadedCard {
             VStack(alignment: .leading, spacing: 12) {
                 FadedSectionLabel("Aktivitet i landsbyen")
-                Toggle("Lad lokale bots hvile", isOn: $villagePause).tint(palette.lime)
-                if villageVisible {
-                    TimelineView(.periodic(from: .now, by: 60)) { timeline in
-                        villageBotRows(hour: Calendar.current.component(.hour, from: timeline.date))
-                    }
-                } else {
-                    villageBotRows(hour: Calendar.current.component(.hour, from: .now))
+                Toggle("Sæt dagsrytmen på pause", isOn: Binding(
+                    get: { simulation.isPaused }, set: { simulation.setPaused($0) }
+                )).tint(palette.lime)
+                if villagePause {
+                    FadedDetailText("Botternes dagsrytme og behov står stille. PC-opgaver kører videre.")
                 }
+                if let botStatusNotice {
+                    FadedDetailText(botStatusNotice)
+                }
+                villageBotRows
                 FadedSecondaryButton("Mine bots", icon: "person.2") { showBuilder = true }
             }
         }
     }
 
-    @ViewBuilder private func villageBotRows(hour: Int) -> some View {
+    @ViewBuilder private var villageBotRows: some View {
         if localVillageBots.isEmpty {
             Text("Opret en bot under Mine bots, så kan du følge dens hverdag her.")
                 .font(.subheadline).foregroundStyle(palette.secondary)
         }
-        ForEach(Array(localVillageBots.enumerated()), id: \.element.id) { item in
-            let bot = item.element
-            let activity = botActivity(bot, routine: (hour + item.offset) % 3, sleeping: villageBotsSleep(hour: hour))
+        ForEach(localVillageBots) { bot in
+            let activity = residentActivity(bot.id)
+            let state = simulation.states[bot.id]
             Divider().overlay(palette.border)
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 12) {
                     VillageBotAvatar(bot: bot, size: 44, radius: FadedRadius.small)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(bot.name).font(FadedTypography.section)
-                        Text(activity).font(.subheadline).foregroundStyle(palette.secondary)
+                        Label(activity.title, systemImage: activity.symbol)
+                            .font(.subheadline).foregroundStyle(palette.secondary)
                     }
+                }
+                if let state {
+                    villageNeeds(state)
                 }
                 ViewThatFits(in: .horizontal) {
                     HStack { villageBotActions(bot) }
                     VStack(alignment: .leading) { villageBotActions(bot) }
                 }
             }
+        }
+    }
+
+    private func villageNeeds(_ state: BotSimulationState) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Label(state.mood.title, systemImage: state.mood.symbolName)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(state.mood.tint(palette))
+                .accessibilityLabel("Humør: \(state.mood.title)")
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { villageNeedValues(state) }
+                VStack(alignment: .leading, spacing: 4) { villageNeedValues(state) }
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(palette.secondary)
+        }
+    }
+
+    @ViewBuilder private func villageNeedValues(_ state: BotSimulationState) -> some View {
+        Text("Energi \(state.energyDisplay) %")
+        Text("Socialt \(state.socialDisplay) %")
+        Text("Arbejdsglæde \(state.workJoyDisplay) %")
+    }
+
+    func residentActivity(_ id: UUID) -> PixelOfficeWorker.Status {
+        if simulation.activeJobs[id] == .running { return .working }
+        if simulation.chattingBots.contains(id) { return .chatting }
+        if simulation.activeJobs[id] == .queued { return .queued }
+        guard let state = simulation.states[id] else { return .loading }
+        switch state.currentActivity {
+        case .working, .idle: return .ready
+        case .resting: return .resting
+        case .sleeping: return .sleeping
+        }
+    }
+
+    private func followBotActivity(_ request: BotActivityRequest) async {
+        if observedBotTarget != request.targetID {
+            observedBotTarget = request.targetID
+            simulation.clearActiveJobs()
+            botStatusNotice = nil
+        }
+        guard request.visible, let target = request.targetID, let api, !request.ids.isEmpty else { return }
+        let ids = Set(request.ids)
+        var delay = 5
+        while !Task.isCancelled && observedBotTarget == target {
+            do {
+                let activity = try await api.villageBotActivity(ids: request.ids)
+                try Task.checkCancellation()
+                guard observedBotTarget == target else { return }
+                for bot in activity.bots where ids.contains(bot.id) {
+                    simulation.ingestJobs(bot.jobs, for: bot.id, targetID: target)
+                }
+                botStatusNotice = nil
+                delay = 5
+            } catch {
+                guard !Task.isCancelled, observedBotTarget == target else { return }
+                if case .http(404, _)? = error as? APIError {
+                    botStatusNotice = "Opdatér FadedAI på PC’en for at se opgaver her."
+                    return
+                }
+                simulation.clearActiveJobs()
+                botStatusNotice = "Status for PC-opgaver er utilgængelig lige nu."
+                delay = min(30, delay * 2)
+            }
+            do { try await Task.sleep(for: .seconds(delay)) }
+            catch { return }
         }
     }
 

@@ -3,7 +3,7 @@ from email.message import Message
 from io import BytesIO
 from urllib.error import URLError
 from urllib.parse import parse_qs, urlsplit
-from urllib.request import HTTPHandler, build_opener
+from urllib.request import HTTPHandler, HTTPSHandler, build_opener
 from urllib.response import addinfourl
 
 import pytest
@@ -143,3 +143,38 @@ def test_windows_settings_are_used_only_without_primary_environment(monkeypatch)
     monkeypatch.setenv("FADEDAI_EMBY_TOKEN", TOKEN)
     config = emby_library.EmbyConfiguration.from_environment()
     assert config.user_id == "env-user" and config.web_url is None
+
+
+def test_secure_discovery_uses_only_tls_and_never_sends_credentials(monkeypatch):
+    exchanges = []
+
+    class InMemoryHTTPS(HTTPSHandler):
+        def https_open(self, request):
+            exchanges.append(request)
+            headers = Message()
+            if request.host == "emby.example":
+                headers["Location"] = "https://other.example"
+                response = addinfourl(BytesIO(), headers, request.full_url, 302)
+            else:
+                body = b'{"Id":"public-server-id","ServerName":"Films","Version":"4.9.1.0"}'
+                response = addinfourl(BytesIO(body), headers, request.full_url, 200)
+            response.msg = "Emby response"
+            return response
+
+    monkeypatch.setattr(emby_library, "build_opener", lambda *handlers: build_opener(*handlers, InMemoryHTTPS()))
+    assert emby_library.find_secure_server("http://emby.example:8096/media/") == "https://emby.example:8920/media/"
+    assert [request.full_url for request in exchanges] == [
+        "https://emby.example/media/emby/System/Info/Public",
+        "https://emby.example:8920/media/emby/System/Info/Public",
+    ]
+    for request in exchanges:
+        assert request.data is None
+        assert set(dict(request.header_items())) <= {"Accept", "Host", "User-agent"}
+
+    exchanges.clear()
+    assert emby_library.find_secure_server("https://emby.example:9443") == "https://emby.example:9443"
+    assert len(exchanges) == 1
+
+    with pytest.raises(ValueError):
+        emby_library.find_secure_server("http://username:password@emby.example/")
+    assert len(exchanges) == 1

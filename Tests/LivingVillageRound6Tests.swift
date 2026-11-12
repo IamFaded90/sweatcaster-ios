@@ -291,6 +291,80 @@ import XCTest
         XCTAssertFalse(engine.isRunning)
     }
 
+    func testJobHistoryCountsNewResultsOnceAcrossReloadsAndKeepsLiveActivitySeparate() throws {
+        let bot = VillageBot(name: "Nova")
+        let repo = MemoryVillageBots(bots: [bot])
+        let saved = MemorySimulationStore()
+        let defaults = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        let engine = SimulationEngine(repository: repo, defaults: defaults, store: saved, runsLoop: false)
+        engine.handle(.active)
+        let old = VillageBotJobActivity(id: UUID(), status: .completed)
+        let workID = UUID()
+        engine.ingestJobs([.init(id: workID, status: .queued), old], for: bot.id, targetID: "PC1")
+        XCTAssertEqual(engine.activeJobs[bot.id], .queued)
+        XCTAssertEqual(engine.states[bot.id]?.workJoy, 50)
+        engine.ingestJobs([.init(id: workID, status: .running), old], for: bot.id, targetID: "PC1")
+        XCTAssertEqual(engine.activeJobs[bot.id], .running)
+
+        let finished = VillageBotJobActivity(id: workID, status: .completed)
+        let failed = VillageBotJobActivity(id: UUID(), status: .failed)
+        let cancelled = VillageBotJobActivity(id: UUID(), status: .cancelled)
+        let terminal = [cancelled, failed, finished, old]
+        engine.ingestJobs(terminal, for: bot.id, targetID: "PC1")
+        XCTAssertNil(engine.activeJobs[bot.id])
+        XCTAssertEqual(engine.states[bot.id]?.workJoy, 55)
+        engine.ingestJobs(terminal, for: bot.id, targetID: "PC1")
+        XCTAssertEqual(engine.states[bot.id]?.workJoy, 55)
+
+        let reopened = SimulationEngine(repository: repo, defaults: defaults, store: saved, runsLoop: false)
+        reopened.handle(.active)
+        reopened.ingestJobs(terminal, for: bot.id, targetID: "PC1")
+        XCTAssertEqual(reopened.states[bot.id]?.workJoy, 55)
+        reopened.ingestJobs([.init(id: UUID(), status: .failed)], for: bot.id, targetID: "PC2")
+        XCTAssertEqual(reopened.states[bot.id]?.workJoy, 55)
+    }
+
+    func testSocialEventsCountEachBotOnceAndPauseDoesNotAccumulateTime() throws {
+        let adam = VillageBot.founderAdam()
+        let eva = VillageBot.founderEva()
+        let repo = MemoryVillageBots(bots: [adam])
+        let saved = MemorySimulationStore()
+        let defaults = try isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: defaultsSuite) }
+        var time = utcDate(hour: 9)
+        let engine = SimulationEngine(repository: repo, defaults: defaults, store: saved, clock: { time }, runsLoop: false)
+        engine.calendar = utcCalendar
+        engine.handle(.active)
+        repo.bots.append(eva)
+        let event = UUID()
+        engine.beginConversation(event, bots: [adam.id])
+        XCTAssertEqual(engine.chattingBots, [adam.id])
+        engine.beginConversation(event, bots: [eva.id])
+        XCTAssertEqual(engine.chattingBots, [eva.id])
+        engine.endConversation(event)
+        XCTAssertTrue(engine.chattingBots.isEmpty)
+
+        engine.registerChat(with: adam.id, eventID: event)
+        engine.registerChat(with: adam.id, eventID: event)
+        engine.registerBotInteraction(adam.id, eventID: event)
+        engine.registerBotInteraction(eva.id, eventID: event)
+        XCTAssertEqual(engine.states[adam.id]?.social, 58)
+        XCTAssertEqual(engine.states[eva.id]?.social, 53)
+        let reopened = SimulationEngine(repository: repo, defaults: defaults, store: saved, runsLoop: false)
+        reopened.registerBotInteraction(eva.id, eventID: event)
+        XCTAssertEqual(reopened.states[eva.id]?.social, 53)
+
+        engine.setPaused(true)
+        time = time.addingTimeInterval(1800)
+        engine.tick()
+        XCTAssertEqual(engine.states[adam.id]?.energy, 100)
+        engine.setPaused(false)
+        time = time.addingTimeInterval(1800)
+        engine.tick()
+        XCTAssertEqual(engine.states[adam.id]?.energy, 98)
+    }
+
     private func state(afterMinutes minutes: TimeInterval, hour: Int) -> BotSimulationState {
         var time = utcDate(hour: hour)
         let repo = MemoryVillageBots(bots: [])

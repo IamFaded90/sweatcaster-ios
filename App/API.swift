@@ -99,6 +99,20 @@ struct LiveAPI: SweatAPI, ChatAPI {
         return try await moduleJSON("emby/library", query: query)
     }
 
+    func youtubeChannels() async throws -> YouTubeChannels {
+        try await moduleJSON("youtube/channels", timeout: 24)
+    }
+
+    func pcWebSearch(query: String) async throws -> PCWebSearch {
+        let data = try JSONEncoder().encode(["query": query])
+        return try await moduleJSON("web-search", upload: data, timeout: 16)
+    }
+
+    func villageBotActivity(ids: [UUID]) async throws -> VillageBotActivity {
+        let data = try JSONEncoder().encode(["botIDs": ids.map { $0.uuidString.lowercased() }])
+        return try await moduleJSON("bot-activity", upload: data, timeout: 10)
+    }
+
     func moduleCards(_ id: String, upload: Data? = nil) async throws -> ModuleCards {
         guard ModuleTab.validID(id) else { throw V2Failure.invalidInput }
         return try await moduleJSON("tabs/\(id)", upload: upload)

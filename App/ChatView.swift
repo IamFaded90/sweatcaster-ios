@@ -53,6 +53,7 @@ struct ChatView: View {
     let connection: String
     let storageKey: String
     let onBack: (() -> Void)?
+    let openHome: () -> Void
     let openImageStudio: ((String) -> Void)?
     let openPrivateStudio: (() -> Void)?
     let pcTargetAddress: String?
@@ -178,7 +179,7 @@ struct ChatView: View {
     }
 
     init(api: (any ChatAPI)?, demo: Bool, initialDraft: String, connection: String, storageKey: String,
-         onBack: (() -> Void)? = nil, openImageStudio: ((String) -> Void)? = nil,
+         onBack: (() -> Void)? = nil, openHome: @escaping () -> Void, openImageStudio: ((String) -> Void)? = nil,
          pcTargetAddress: String? = nil, pcQueueTargetID: String? = nil,
          pcConnectionError: APIError? = nil, reconnectPC: (() -> Void)? = nil,
          initialSearch: String = "", openPrivateStudio: (() -> Void)? = nil, preferPhone: Bool = false,
@@ -191,6 +192,7 @@ struct ChatView: View {
         self.connection = connection
         self.storageKey = storageKey
         self.onBack = onBack
+        self.openHome = openHome
         self.openImageStudio = openImageStudio
         self.openPrivateStudio = openPrivateStudio
         self.pcTargetAddress = pcTargetAddress

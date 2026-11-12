@@ -6,6 +6,7 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from dataclasses import dataclass
@@ -112,7 +113,7 @@ class SetupWindow:
         self.checkpoint = tk.StringVar(value=default_checkpoint())
 
         root.title("FadedAI – Opdatér PC’en")
-        root.minsize(520, 360)
+        root.minsize(520, 400)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
         frame = ttk.Frame(root, padding=22)
@@ -121,7 +122,7 @@ class SetupWindow:
         ttk.Label(frame, text="Opdatér FadedAI på PC’en", font=("Segoe UI", 17, "bold")).grid(sticky="w")
         ttk.Label(
             frame,
-            text="Klargør AIO-skrivebordet, og opdatér derefter botcomputere, Emby, videokommentarer og stemmer samlet.",
+            text="Opdatér botopgaver, forbindelser, videokommentarer og stemmer. Hent AIO-skrivebordet, hvis du vil åbne botternes egne skriveborde.",
             wraplength=470,
         ).grid(sticky="w", pady=(4, 12))
         ttk.Label(frame, textvariable=self.status, wraplength=470).grid(sticky="w")
@@ -142,6 +143,10 @@ class SetupWindow:
         self.choose_button.grid(row=0, column=1, padx=(8, 0))
         self.install_button = ttk.Button(frame, text="Opdatér FadedAI", command=self.update_checkpoint)
         self.install_button.grid(sticky="w")
+        connections = ttk.Frame(frame)
+        connections.grid(sticky="ew", pady=(12, 0))
+        ttk.Button(connections, text="Forbind Emby", command=lambda: self.open_setup("setup_emby_windows.pyw")).pack(side="left")
+        ttk.Button(connections, text="Forbind YouTube", command=lambda: self.open_setup("setup_youtube_windows.pyw")).pack(side="left", padx=(8, 0))
         ttk.Label(frame, textvariable=self.detail, wraplength=470).grid(sticky="w", pady=(10, 0))
         ttk.Label(frame, text="Lad igangværende FadedAI-opgaver afslutte før opdateringen.",
                   wraplength=470).grid(sticky="w", pady=(4, 0))
@@ -162,8 +167,18 @@ class SetupWindow:
         )
         self.choose_button.configure(state="disabled" if self.busy else "normal")
         self.install_button.configure(
-            state="normal" if not self.busy and self.state.image_ready and self.checkpoint.get() else "disabled"
+            state="normal" if not self.busy and self.checkpoint.get() else "disabled"
         )
+
+    def open_setup(self, name: str) -> None:
+        script = Path(__file__).resolve().with_name(name)
+        interpreter = Path(sys.executable)
+        pythonw = interpreter.with_name("pythonw.exe")
+        try:
+            subprocess.Popen([str(pythonw if pythonw.is_file() else interpreter), str(script)],
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError:
+            self.detail.set("Forbindelsesvinduet kunne ikke åbnes.")
 
     def work(self, message: str, operation: Callable[[], tuple[DockerStatus, str]]) -> None:
         self.busy = True
@@ -226,7 +241,7 @@ class SetupWindow:
         self.update_buttons()
 
     def update_checkpoint(self) -> None:
-        if not self.state.image_ready or self.busy:
+        if self.busy:
             return
         try:
             root = install_root(Path(self.checkpoint.get()))

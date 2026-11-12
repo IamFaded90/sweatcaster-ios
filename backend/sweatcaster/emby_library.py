@@ -16,6 +16,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 PAGE_SIZE = 30
 MAX_OFFSET = 1_000_000
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_PUBLIC_INFO_BYTES = 32 * 1024
 REQUEST_TIMEOUT = 5
 ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{1,128}")
 PRIMARY_ENV = ("FADEDAI_EMBY_URL", "FADEDAI_EMBY_USER_ID", "FADEDAI_EMBY_TOKEN")
@@ -114,6 +115,52 @@ class NoRedirects(HTTPRedirectHandler):
         return None
 
 
+def _read_bounded_json(response, *, limit: int, deadline: float):
+    data = bytearray()
+    while len(data) <= limit:
+        if monotonic() > deadline:
+            raise TimeoutError
+        chunk = response.read1(min(65536, limit + 1 - len(data)))
+        if not chunk:
+            break
+        data.extend(chunk)
+    if len(data) > limit:
+        raise ValueError("Emby response exceeds size limit")
+    return json.loads(data)
+
+
+def find_secure_server(address: str) -> str | None:
+    """Check Emby's public endpoint over HTTPS without a token or a password."""
+    supplied = urlsplit(address)
+    if supplied.scheme == "https":
+        candidates = [parse_configured_url(address, https_only=True).geturl()]
+    elif address[:7].lower() == "http://":
+        # Reuse the configured URL checks without making an HTTP request.
+        secured = parse_configured_url("https" + address[4:], https_only=True)
+        host = secured.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        candidates = [secured._replace(netloc=host).geturl(), secured._replace(netloc=f"{host}:8920").geturl()]
+    else:
+        raise ValueError("Invalid Emby URL")
+
+    opener = build_opener(ProxyHandler({}), NoRedirects())
+    for candidate in candidates:
+        request = Request(f"{emby_api_base(candidate)}/System/Info/Public", headers={"Accept": "application/json"})
+        deadline = monotonic() + REQUEST_TIMEOUT
+        try:
+            with opener.open(request, timeout=REQUEST_TIMEOUT) as response:
+                info = _read_bounded_json(response, limit=MAX_PUBLIC_INFO_BYTES, deadline=deadline)
+            if (isinstance(info, dict) and valid_id(info.get("Id"))
+                    and all(isinstance(info.get(key), str) and info[key].strip() for key in ("ServerName", "Version"))):
+                return candidate
+        except HTTPError as exc:
+            exc.close()
+        except (OSError, ValueError, RecursionError, http.client.HTTPException):
+            continue
+    return None
+
+
 def fetch_emby(config: EmbyConfiguration, resource: str, parameters: dict) -> dict:
     url = f"{config.api_base}/Users/{config.user_id}/{resource}?{urlencode(parameters)}"
     request = Request(url, headers={"Accept": "application/json", "X-Emby-Token": config.token})
@@ -121,17 +168,7 @@ def fetch_emby(config: EmbyConfiguration, resource: str, parameters: dict) -> di
     deadline = monotonic() + REQUEST_TIMEOUT
     try:
         with opener.open(request, timeout=REQUEST_TIMEOUT) as response:
-            data = bytearray()
-            while len(data) <= MAX_RESPONSE_BYTES:
-                if monotonic() > deadline:
-                    raise TimeoutError
-                chunk = response.read1(min(65536, MAX_RESPONSE_BYTES + 1 - len(data)))
-                if not chunk:
-                    break
-                data.extend(chunk)
-            if len(data) > MAX_RESPONSE_BYTES:
-                raise ValueError("Emby response exceeds size limit")
-            result = json.loads(data)
+            result = _read_bounded_json(response, limit=MAX_RESPONSE_BYTES, deadline=deadline)
             if not isinstance(result, dict) or not isinstance(result.get("Items"), list):
                 raise ValueError("Emby response is missing the item list")
             return result

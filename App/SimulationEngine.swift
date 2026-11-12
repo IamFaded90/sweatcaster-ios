@@ -23,15 +23,19 @@ final class UserDefaultsVillageSimulationStore: VillageSimulationStore {
 
 struct VillageSimulationSnapshot: Codable, Equatable {
     var states: [String: BotSimulationState]
+    var jobHistory: [String: [UUID]]?
+    var socialHistory: [String]?
 
-    init(states: [UUID: BotSimulationState]) {
+    init(states: [UUID: BotSimulationState], jobHistory: [String: [UUID]]? = nil, socialHistory: [String]? = nil) {
         self.states = Dictionary(uniqueKeysWithValues: states.map { ($0.key.uuidString, $0.value) })
+        self.jobHistory = jobHistory
+        self.socialHistory = socialHistory
     }
 
     func keyed() -> [UUID: BotSimulationState] {
-        Dictionary(uniqueKeysWithValues: states.compactMap { key, value in
-            UUID(uuidString: key).map { ($0, value) }
-        })
+        states.reduce(into: [:]) { result, entry in
+            if let id = UUID(uuidString: entry.key) { result[id] = entry.value }
+        }
     }
 }
 
@@ -72,6 +76,10 @@ enum VillageSeeder {
 
     private(set) var states: [UUID: BotSimulationState] = [:]
     private(set) var isRunning = false
+    private(set) var isPaused = false
+    private(set) var activeJobs: [UUID: BotComputerJob.State] = [:]
+    private var conversations: [UUID: Set<UUID>] = [:]
+    var chattingBots: Set<UUID> { Set(conversations.values.joined()) }
     var readError: String?
     var tickInterval: Duration = .seconds(60)
     var calendar = Calendar.current
@@ -84,6 +92,9 @@ enum VillageSeeder {
     private var lastTick: Date
     private var completedTicks = 0
     private var loopTask: Task<Void, Never>?
+    private var jobHistory: [String: [UUID]] = [:]
+    private var socialHistory: [String] = []
+    private var jobTargetID: String?
 
     init(repository: any VillageBotRepository, defaults: UserDefaults, store: any VillageSimulationStore,
          clock: @escaping () -> Date = { Date.now }, runsLoop: Bool = true) {
@@ -94,7 +105,12 @@ enum VillageSeeder {
         self.runsLoop = runsLoop
         self.lastTick = clock()
         if let data = store.load() {
-            do { states = try JSONDecoder().decode(VillageSimulationSnapshot.self, from: data).keyed() }
+            do {
+                let snapshot = try JSONDecoder().decode(VillageSimulationSnapshot.self, from: data)
+                states = snapshot.keyed()
+                jobHistory = snapshot.jobHistory ?? [:]
+                socialHistory = Array((snapshot.socialHistory ?? []).suffix(500))
+            }
             catch { AppDiagnostics.record(error) }
         }
     }
@@ -104,16 +120,21 @@ enum VillageSeeder {
         case .background:
             isRunning = false
             stopLoop()
+            clearActiveJobs()
             persist()
         case .inactive:
             isRunning = false
             stopLoop()
+            clearActiveJobs()
         case .active:
             lastTick = clock()
             isRunning = true
             let outcome = VillageSeeder.prepare(repository: repository, defaults: defaults)
             readError = outcome.message
-            if outcome.message == nil { reconcile(outcome.bots.map(\.id)) }
+            if outcome.message == nil {
+                reconcile(outcome.bots.map(\.id))
+                if !isPaused { updateScheduledActivity(at: lastTick, elapsed: 0) }
+            }
             startLoopIfNeeded()
         @unknown default:
             break
@@ -132,19 +153,98 @@ enum VillageSeeder {
             readError = nil
             reconcile(outcome.bots.map(\.id))
         }
-        for id in Array(states.keys) {
-            guard var state = states[id] else { continue }
-            BotSimulationState.apply(elapsed: elapsed, at: now, calendar: calendar, to: &state)
-            states[id] = state
+        if !isPaused {
+            updateScheduledActivity(at: now, elapsed: elapsed)
         }
         completedTicks += 1
         if completedTicks.isMultiple(of: 10) { persist() }
     }
 
-    func registerChat(with botID: UUID) { bump(botID) { $0.social += BotSimulationState.socialChatBonus } }
-    func registerBotInteraction(_ botID: UUID) { bump(botID) { $0.social += BotSimulationState.socialInteractionBonus } }
+    func setPaused(_ paused: Bool) {
+        guard paused != isPaused else { return }
+        lastTick = clock()
+        isPaused = paused
+        if !paused { updateScheduledActivity(at: lastTick, elapsed: 0) }
+    }
+
+    func beginConversation(_ eventID: UUID, bots: [UUID]) {
+        let active = Set(bots)
+        guard conversations[eventID] != active else { return }
+        conversations[eventID] = active
+    }
+
+    func endConversation(_ eventID: UUID) { conversations.removeValue(forKey: eventID) }
+
+    func clearActiveJobs() {
+        if !activeJobs.isEmpty { activeJobs.removeAll() }
+        jobTargetID = nil
+    }
+
+    func ingestJobs(_ jobs: [VillageBotJobActivity], for botID: UUID, targetID: String) {
+        guard isRunning, ensureState(botID) else { return }
+        if jobTargetID != targetID {
+            clearActiveJobs()
+            jobTargetID = targetID
+        }
+        let active: BotComputerJob.State? = jobs.contains { $0.status == .running } ? .running :
+            (jobs.contains { $0.status == .queued } ? .queued : nil)
+        if activeJobs[botID] != active { activeJobs[botID] = active }
+
+        let scope = botID.uuidString + ":" + targetID
+        let previous = jobHistory[scope]
+        var history = previous ?? []
+        var seen = Set(history)
+        for job in jobs.reversed() {
+            guard job.status == .completed || job.status == .failed, seen.insert(job.id).inserted else { continue }
+            history.append(job.id)
+            // On the first connection, remember completed jobs without awarding old activity.
+            if previous != nil {
+                if job.status == .completed { registerJobFinished(botID) }
+                else { registerJobFailed(botID) }
+            }
+        }
+        if previous != history {
+            jobHistory[scope] = Array(history.suffix(160))
+            persist()
+        }
+    }
+
+    func registerChat(with botID: UUID, eventID: UUID? = nil) {
+        registerSocial(botID, eventID: eventID, kind: "chat", bonus: BotSimulationState.socialChatBonus)
+    }
+
+    func registerBotInteraction(_ botID: UUID, eventID: UUID? = nil) {
+        registerSocial(botID, eventID: eventID, kind: "team", bonus: BotSimulationState.socialInteractionBonus)
+    }
+
     func registerJobFinished(_ botID: UUID) { bump(botID) { $0.workJoy += BotSimulationState.workJoyFinishedBonus } }
     func registerJobFailed(_ botID: UUID) { bump(botID) { $0.workJoy += BotSimulationState.workJoyFailedPenalty } }
+
+    private func updateScheduledActivity(at date: Date, elapsed: TimeInterval) {
+        for (id, original) in states {
+            var state = original
+            BotSimulationState.apply(elapsed: elapsed, at: date, calendar: calendar, to: &state)
+            if state != original { states[id] = state }
+        }
+    }
+
+    private func registerSocial(_ id: UUID, eventID: UUID?, kind: String, bonus: Double) {
+        guard ensureState(id) else { return }
+        if let eventID {
+            let key = kind + ":" + id.uuidString + ":" + eventID.uuidString
+            guard !socialHistory.contains(key) else { return }
+            socialHistory = Array((socialHistory + [key]).suffix(500))
+        }
+        bump(id) { $0.social += bonus }
+        if eventID != nil { persist() }
+    }
+
+    private func ensureState(_ id: UUID) -> Bool {
+        if states[id] != nil { return true }
+        guard case .success(let bots) = repository.loadBots(), bots.contains(where: { $0.id == id }) else { return false }
+        reconcile(bots.map(\.id))
+        return true
+    }
 
     private func bump(_ id: UUID, _ change: (inout BotSimulationState) -> Void) {
         guard var state = states[id] else { return }
@@ -160,11 +260,16 @@ enum VillageSeeder {
         let live = Set(ids)
         var next = states.filter { live.contains($0.key) }
         for id in live where next[id] == nil { next[id] = BotSimulationState() }
-        states = next
+        if states != next { states = next }
+        if !activeJobs.keys.allSatisfy(live.contains) { activeJobs = activeJobs.filter { live.contains($0.key) } }
     }
 
     private func persist() {
-        do { store.save(try JSONEncoder().encode(VillageSimulationSnapshot(states: states))) }
+        do {
+            store.save(try JSONEncoder().encode(
+                VillageSimulationSnapshot(states: states, jobHistory: jobHistory, socialHistory: socialHistory)
+            ))
+        }
         catch { AppDiagnostics.record(error) }
     }
 

@@ -17,7 +17,10 @@ from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 from uuid import NAMESPACE_URL, uuid5
 
-from sweatcaster.emby_library import NoRedirects, emby_api_base, parse_configured_url, valid_id, valid_token
+from sweatcaster.emby_library import (
+    EmbyConfiguration, EmbyLibraryError, NoRedirects, emby_api_base, fetch_emby, find_secure_server,
+    parse_configured_url, valid_id, valid_token,
+)
 from sweatcaster.emby_settings import load_local_settings, remove_local_settings, save_local_settings
 
 MAX_LOGIN_BYTES = 256 * 1024
@@ -44,9 +47,9 @@ def connect(address: str, username: str, password: str, browser: str) -> dict[st
         server = parse_configured_url(address)
         web = parse_configured_url(browser, https_only=True) if browser else None
     except ValueError as exc:
-        raise SetupError("Tjek Emby-adressen. Brug en fuld HTTPS-adresse, f.eks. https://emby.eksempel.dk.") from exc
+        raise SetupError("Indtast Emby-serverens HTTPS-adresse, eller brug Find sikker adresse.") from exc
     if server.scheme != "https" and not is_loopback(server.hostname or ""):
-        raise SetupError("Brug HTTPS til login. HTTP virker kun, når Emby kører på denne PC via localhost.")
+        raise SetupError("Brug Find sikker adresse til en server, du normalt åbner med HTTP.")
     if web is not None and not web.path.rstrip("/").endswith("/web/index.html"):
         raise SetupError("Browserlinket skal være den fulde HTTPS-adresse frem til /web/index.html.")
     if not username or len(username) > 256 or len(password) > 2048:
@@ -114,12 +117,17 @@ def revoke(settings: dict[str, str]) -> bool:
         return False
 
 
+def test_library(settings: dict[str, str]) -> None:
+    config = EmbyConfiguration(emby_api_base(settings["url"]), settings["user_id"], settings["token"])
+    fetch_emby(config, "Views", {"IncludeExternalContent": "false"})
+
+
 class SetupWindow:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.result: queue.Queue[tuple[str, str]] = queue.Queue()
         root.title("FadedAI – Forbind Emby")
-        root.minsize(460, 350)
+        root.minsize(520, 385)
         frame = ttk.Frame(root, padding=22)
         frame.grid(sticky="nsew")
         root.columnconfigure(0, weight=1)
@@ -129,7 +137,9 @@ class SetupWindow:
         ttk.Label(frame, text="Forbind Emby", font=("Segoe UI", 17, "bold")).grid(sticky="w")
         ttk.Label(frame, text="Log ind på din Emby-server. FadedAI bruger din brugers biblioteksadgang.",
                   wraplength=420).grid(sticky="w", pady=(4, 14))
-        self.address = self.field(frame, "Emby-server (HTTPS)")
+        self.address = self.field(frame, "Emby-server")
+        self.find_button = ttk.Button(frame, text="Find sikker adresse", command=self.start_find_address)
+        self.find_button.grid(sticky="w", pady=(0, 8))
         self.username = self.field(frame, "Brugernavn")
         self.password = self.field(frame, "Adgangskode", masked=True)
         self.browser = self.field(frame, "HTTPS-link til Emby i browseren (valgfrit, slutter på /web/index.html)")
@@ -139,6 +149,8 @@ class SetupWindow:
         buttons.grid(sticky="ew", pady=(12, 8))
         self.connect_button = ttk.Button(buttons, text="Forbind", command=self.start_connect)
         self.connect_button.pack(side="left")
+        self.test_button = ttk.Button(buttons, text="Test bibliotek", command=self.start_test)
+        self.test_button.pack(side="left", padx=(8, 0))
         self.disconnect_button = ttk.Button(buttons, text="Fjern forbindelse", command=self.start_disconnect)
         self.disconnect_button.pack(side="left", padx=(8, 0))
         ttk.Label(frame, textvariable=self.status, wraplength=420).grid(sticky="w")
@@ -168,7 +180,10 @@ class SetupWindow:
         return entry
 
     def update_buttons(self) -> None:
+        self.address.configure(state="disabled" if self.busy else "normal")
+        self.find_button.configure(state="disabled" if self.busy else "normal")
         self.connect_button.configure(state="disabled" if self.busy else "normal")
+        self.test_button.configure(state="disabled" if self.busy or not self.saved else "normal")
         self.disconnect_button.configure(state="disabled" if self.busy or not self.saved else "normal")
 
     def start_connect(self, _event: object = None) -> None:
@@ -181,6 +196,27 @@ class SetupWindow:
         self.status.set("Forbinder til Emby…")
         threading.Thread(target=self.save_connection, args=args, daemon=True).start()
 
+    def start_find_address(self) -> None:
+        if self.busy:
+            return
+        address = self.address.get().strip()
+        self.busy = True
+        self.update_buttons()
+        self.status.set("Tjekker HTTPS-adressen uden at sende login…")
+        threading.Thread(target=self.check_secure_address, args=(address,), daemon=True).start()
+
+    def check_secure_address(self, address: str) -> None:
+        try:
+            candidate = find_secure_server(address)
+        except ValueError:
+            self.result.put(("error", "Indtast den fulde Emby-adresse, inkl. http:// eller https://."))
+        else:
+            if candidate:
+                self.result.put(("address", candidate))
+            else:
+                self.result.put(("error", "Ingen Emby-forbindelse med gyldigt HTTPS-certifikat svarede. "
+                                 "Brug den HTTPS-adresse, som serverens ejer har angivet."))
+
     def save_connection(self, *args: str) -> None:
         try:
             previous = load_local_settings()
@@ -188,15 +224,45 @@ class SetupWindow:
             previous = None
         try:
             settings = connect(*args)
+            try:
+                test_library(settings)
+            except EmbyLibraryError:
+                if previous is None or previous["token"] != settings["token"]:
+                    revoke(settings)
+                raise
             save_local_settings(settings)
         except SetupError as exc:
             self.result.put(("error", str(exc)))
+        except EmbyLibraryError as exc:
+            self.result.put(("error", f"Login lykkedes, men biblioteket kunne ikke åbnes. {exc}"))
         except (OSError, ValueError):
             self.result.put(("error", "Forbindelsen kunne ikke gemmes for denne Windows-bruger."))
         else:
             if previous is not None and previous["token"] != settings["token"]:
                 revoke(previous)
             self.result.put(("connected", "Forbundet. Åbn Mere → Emby & bibliotek på iPhone, og træk ned for at opdatere."))
+
+    def start_test(self) -> None:
+        if self.busy or not self.saved:
+            return
+        self.busy = True
+        self.update_buttons()
+        self.status.set("Tester biblioteksadgangen…")
+        threading.Thread(target=self.check_saved_connection, daemon=True).start()
+
+    def check_saved_connection(self) -> None:
+        try:
+            settings = load_local_settings()
+            if settings is None:
+                self.result.put(("disconnected", "Der er ingen gemt Emby-forbindelse."))
+                return
+            test_library(settings)
+        except EmbyLibraryError as exc:
+            self.result.put(("error", str(exc)))
+        except (OSError, ValueError):
+            self.result.put(("error", "Den gemte forbindelse kunne ikke læses. Forbind igen."))
+        else:
+            self.result.put(("connected", "Emby-biblioteket svarer. Du kan opdatere det på din iPhone."))
 
     def start_disconnect(self) -> None:
         if self.busy or not self.saved or not messagebox.askyesno("Fjern Emby-forbindelse?", "Fjern forbindelsen fra FadedAI på denne PC?"):
@@ -228,10 +294,15 @@ class SetupWindow:
         except queue.Empty:
             pass
         else:
-            if kind != "error":
+            if kind in ("connected", "disconnected"):
                 self.saved = kind == "connected"
             self.busy = False
             self.update_buttons()
+            if kind == "address":
+                self.address.delete(0, tk.END)
+                self.address.insert(0, message)
+                self.username.focus()
+                message = "Emby svarede over HTTPS. Indtast dit brugernavn og din adgangskode, og tryk Forbind."
             self.status.set(message)
         self.root.after(80, self.poll)
 

@@ -9,7 +9,7 @@ extension AgentHub {
         enum Kind {
             case building(Int)
             case agent(V2Hub.Agent)
-            case bot(VillageBot, routine: Int, sleeping: Bool)
+            case bot(VillageBot, activity: PixelOfficeWorker.Status)
         }
 
         let id: String
@@ -20,11 +20,10 @@ extension AgentHub {
     }
 
     var officeWorkers: [PixelOfficeWorker] {
-        let sleeping = villageBotsSleep(hour: Calendar.current.component(.hour, from: .now))
         let local = localVillageBots.map { bot in
             let id = "bot:\(bot.id.uuidString)"
             return PixelOfficeWorker(id: id, name: bot.name, specialty: bot.specialtyTitle,
-                                     colorIndex: officeColorIndex(id), status: sleeping ? .offline : .ready)
+                                     colorIndex: officeColorIndex(id), status: residentActivity(bot.id))
         }
         let remote = (snapshot?.agents ?? []).map { agent in
             let id = "agent:\(agent.id)"
@@ -55,7 +54,7 @@ extension AgentHub {
     }
 
     var villageVisible: Bool { isVisible && hubPhase == .active }
-    private var villageMotionEnabled: Bool { villageVisible && !reduceMotion && !calmMotion }
+    private var villageMotionEnabled: Bool { villageVisible && !villagePause && !reduceMotion && !calmMotion }
 
     var village: some View {
         Group {
@@ -101,7 +100,7 @@ extension AgentHub {
                 LinearGradient(colors: [night ? FadedColors.sunset : villageGround(night: false), FadedColors.deep],
                                startPoint: .top, endPoint: .bottom)
                 villageTerrain(night: night)
-                ForEach(villagePieces(hour: hour, time: date.timeIntervalSinceReferenceDate, size: geometry.size)) { piece in
+                ForEach(villagePieces(time: date.timeIntervalSinceReferenceDate, size: geometry.size)) { piece in
                     villagePiece(piece, night: night)
                         .zIndex(Double(piece.depth))
                         .animation(villageMotionEnabled ? .easeInOut(duration: 0.75) : nil, value: piece.zone)
@@ -241,7 +240,7 @@ extension AgentHub {
         }.allowsHitTesting(false)
     }
 
-    private func villagePieces(hour: Int, time: TimeInterval, size: CGSize) -> [VillagePiece] {
+    private func villagePieces(time: TimeInterval, size: CGSize) -> [VillagePiece] {
         var pieces = (0..<4).map { zone in
             let point = villagePoint(zone, size: size)
             return VillagePiece(id: "building-\(zone)", kind: .building(zone), zone: zone, point: point,
@@ -258,13 +257,16 @@ extension AgentHub {
             agentSlots[zone] += 1
         }
         var botSlots = [0, 0, 0, 0]
-        let sleeping = villageBotsSleep(hour: hour)
         for (index, bot) in localVillageBots.enumerated() {
-            let routine = (hour + index) % 3
-            let zone = sleeping ? 3 : routine
-            let phase = villageMotionEnabled && !sleeping ? time * 0.7 + Double(index) : nil
+            let activity = residentActivity(bot.id)
+            let zone = switch activity {
+            case .working, .queued: 0
+            case .sleeping: 3
+            default: 2
+            }
+            let phase = villageMotionEnabled && !activity.isResting ? time * 0.7 + Double(index) : nil
             let foot = villageFoot(zone, slot: botSlots[zone], local: true, phase: phase, size: size)
-            pieces.append(VillagePiece(id: "bot-\(bot.id)", kind: .bot(bot, routine: routine, sleeping: sleeping),
+            pieces.append(VillagePiece(id: "bot-\(bot.id)", kind: .bot(bot, activity: activity),
                                        zone: zone, point: foot, depth: foot.y))
             botSlots[zone] += 1
         }
@@ -277,47 +279,33 @@ extension AgentHub {
             villageBuilding(zone, center: piece.point, night: night)
         case .agent(let agent):
             villageAvatar(agent).position(x: piece.point.x, y: piece.point.y - 21)
-        case .bot(let bot, let routine, let sleeping):
-            localVillageAvatar(bot, routine: routine, sleeping: sleeping)
+        case .bot(let bot, let activity):
+            localVillageAvatar(bot, activity: activity)
                 .position(x: piece.point.x, y: piece.point.y - 5)
         }
     }
 
-    func villageBotsSleep(hour: Int) -> Bool { offline || villagePause || hour < 7 || hour >= 22 }
-
-    func botActivity(_ bot: VillageBot, routine: Int, sleeping: Bool) -> String {
-        guard !sleeping else { return "Sover" }
-        let routines: [String] = switch bot.personality ?? "Nysgerrig" {
-        case "Rolig": ["Læser i biblioteket", "Ordner studiet", "Drikker te"]
-        case "Sjov": ["Finder på historier", "Øver en scene", "Fortæller jokes"]
-        case "Omsorgsfuld": ["Hjælper i laboratoriet", "Hjælper med video", "Laver kaffe til holdet"]
-        default: ["Undersøger nye idéer", "Øver sig i studiet", "Holder kaffepause"]
-        }
-        return routines[routine]
-    }
-
-    private func localVillageAvatar(_ bot: VillageBot, routine: Int, sleeping: Bool) -> some View {
-        let activity = botActivity(bot, routine: routine, sleeping: sleeping)
+    private func localVillageAvatar(_ bot: VillageBot, activity: PixelOfficeWorker.Status) -> some View {
         let color = bot.color == "Grøn" ? palette.green : bot.color == "Lilla" ? palette.purple : palette.cyan
         return Button {
             if !cinematic { openBotComputer(bot) }
         } label: {
             VStack(spacing: 0) {
                 Group {
-                if let data = bot.sprite, let image = UIImage(data: data) {
-                    Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
-                } else {
-                    Image(systemName: sleeping ? "moon.stars.fill" : "sparkle").foregroundStyle(color)
-                }
-                }.frame(width: 38, height: 38, alignment: .bottom).opacity(sleeping ? 0.55 : 1)
+                    if let data = bot.sprite, let image = UIImage(data: data) {
+                        Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
+                    } else {
+                        Image(systemName: activity.symbol).foregroundStyle(color)
+                    }
+                }.frame(width: 38, height: 38, alignment: .bottom).opacity(activity.isResting ? 0.55 : 1)
                 Text(bot.name).font(.caption2.bold()).lineLimit(1)
-                if !sleeping { Text(activity).font(.system(size: 8)).lineLimit(1) }
+                Text(activity.title).font(.system(size: 8)).lineLimit(1)
             }.frame(width: 92, height: 66, alignment: .top)
         }
         .buttonStyle(.plain)
         .allowsHitTesting(!cinematic)
         .accessibilityHidden(cinematic)
-        .accessibilityLabel(bot.name + ", " + (bot.personality ?? "Nysgerrig") + ", " + activity)
+        .accessibilityLabel(bot.name + ", " + activity.title)
         .accessibilityHint("Åbner bottens computer")
     }
 

@@ -2,7 +2,7 @@ import SwiftUI
 
 struct PixelOfficeWorker: Identifiable, Equatable, Sendable {
     enum Status: String, Equatable, Sendable {
-        case working, thinking, ready, offline
+        case working, thinking, ready, offline, queued, chatting, resting, sleeping, loading
 
         var title: String {
             switch self {
@@ -10,6 +10,11 @@ struct PixelOfficeWorker: Identifiable, Equatable, Sendable {
             case .thinking: "Tænker"
             case .ready: "Klar"
             case .offline: "Offline"
+            case .queued: "Opgave i kø"
+            case .chatting: "I samtale"
+            case .resting: "Hviler"
+            case .sleeping: "Sover"
+            case .loading: "Henter status"
             }
         }
 
@@ -19,8 +24,16 @@ struct PixelOfficeWorker: Identifiable, Equatable, Sendable {
             case .thinking: "ellipsis"
             case .ready: "checkmark"
             case .offline: "moon.fill"
+            case .queued: "clock"
+            case .chatting: "bubble.left.and.bubble.right"
+            case .resting: "cup.and.saucer"
+            case .sleeping: "moon.zzz"
+            case .loading: "ellipsis"
             }
         }
+
+        var isResting: Bool { self == .resting || self == .sleeping }
+        var animates: Bool { self == .working || self == .thinking || self == .chatting }
     }
 
     let id: String
@@ -46,16 +59,15 @@ struct PixelOfficeView: View {
     private let stationSize = CGSize(width: 70, height: 61)
 
     private var animates: Bool {
-        isVisible && scenePhase == .active && !reduceMotion && !calmMotion && workers.prefix(stationCount).contains {
-            $0.status == .working || $0.status == .thinking
-        }
+        isVisible && scenePhase == .active && !reduceMotion && !calmMotion &&
+            workers.prefix(stationCount).contains { $0.status.animates }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             if !workers.isEmpty {
                 FadedSectionHeader("Arbejdsstationer",
-                                   detail: "Lokale bots åbner deres profil. PC-agenter åbner historik og hukommelse.")
+                                   detail: "Tryk på en bot for at åbne dens computer. PC-agenter åbner historik og hukommelse.")
             }
             officeScene
             if workers.isEmpty {
@@ -257,7 +269,7 @@ private struct PixelOfficeDrawing {
     private func monitor(x: Int, y: Int, color: Color, status: PixelOfficeWorker.Status?, blink: Bool) {
         fill(x + 2, y + 3, 29, 17, ink.opacity(0.18))
         fill(x, y, 29, 17, ink)
-        fill(x + 2, y + 2, 25, 13, color.opacity(status == .offline || status == nil ? 0.16 : 0.42))
+        fill(x + 2, y + 2, 25, 13, color.opacity(status == .offline || status == nil || status?.isResting == true ? 0.16 : 0.42))
         fill(x + 12, y + 17, 5, 3, ink)
         fill(x + 8, y + 20, 13, 2, ink)
         if status == .working || status == .thinking {
@@ -278,10 +290,10 @@ private struct PixelOfficeDrawing {
         fill(x + 1, y + 1, 20, 14, ink)
         fill(x + 3, y + 3, 16, 10, color)
         fill(x + 5, y + 5, 12, 5, ink)
-        let closed = status == .offline || (status == .thinking && blink)
+        let closed = status == .offline || status.isResting || (status == .thinking && blink)
         fill(x + 7, y + 6, 2, closed ? 1 : 3, paper)
         fill(x + 13, y + 6, 2, closed ? 1 : 3, paper)
-        if status == .thinking {
+        if status == .thinking || status == .chatting {
             fill(x + 19, y - 5, 9, 5, ink)
             for offset in [1, 4, 7] { fill(x + 19 + offset, y - 3, 1, 1, paper) }
         }

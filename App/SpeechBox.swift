@@ -23,6 +23,7 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published private(set) var isSpeaking = false
     let wordProgress = WordProgress()
     private var currentUtterance: AVSpeechUtterance?
+    var voiceName: String? { currentUtterance?.voice?.name }
 
     override init() {
         super.init()
@@ -43,10 +44,22 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        setSpeaking(true, for: utterance)
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didPause utterance: AVSpeechUtterance) {
+        setSpeaking(false, for: utterance)
+    }
+
+    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didContinue utterance: AVSpeechUtterance) {
+        setSpeaking(true, for: utterance)
+    }
+
+    private func setSpeaking(_ speaking: Bool, for utterance: AVSpeechUtterance) {
         let identifier = ObjectIdentifier(utterance)
         Task { @MainActor [weak self] in
             guard let self, let currentUtterance, ObjectIdentifier(currentUtterance) == identifier else { return }
-            isSpeaking = true
+            isSpeaking = speaking
         }
     }
 

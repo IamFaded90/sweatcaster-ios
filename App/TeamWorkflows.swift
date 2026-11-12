@@ -42,14 +42,17 @@ enum TeamWorkflowMode: String, Identifiable, Hashable {
 private struct TeamWorkflowStep {
     let name: String
     let instructions: String
+    let botID: UUID?
 
     init(_ name: String, _ instructions: String) {
         self.name = name
         self.instructions = instructions
+        botID = nil
     }
 
     init(bot: VillageBot, action: String) {
         name = bot.name
+        botID = bot.id
         let profile = ["Speciale: \(bot.specialtyTitle)", bot.responsibility ?? "", bot.prompt]
             .filter { !$0.isEmpty }.joined(separator: "\n")
         instructions = "\(action)\nBotprofil: \(String(profile.unicodeScalars.prefix(600)))"
@@ -521,10 +524,20 @@ struct BotLocalMemoryPicker: View {
 
     private func run(_ plan: [TeamWorkflowStep], at index: Int, model: String, history: String,
                      memoryContext: String) async {
-        defer { status = nil; work = nil }
+        let eventID = turns[index].id
+        let participants = Set(plan.compactMap(\.botID))
+        let isBotCollaboration = participants.count > 1
+        defer {
+            if isBotCollaboration { SimulationEngine.shared.endConversation(eventID) }
+            status = nil
+            work = nil
+        }
         do {
             for (offset, step) in plan.enumerated() {
                 try Task.checkCancellation()
+                if isBotCollaboration, let botID = step.botID {
+                    SimulationEngine.shared.beginConversation(eventID, bots: [botID])
+                }
                 let prior = turns[index].replies.map { "\($0.name): \(String($0.text.unicodeScalars.prefix(350)))" }.joined(separator: "\n")
                 let previous = prior.isEmpty ? "" : "\n\nTidligere indlæg i denne runde:\n" + prior
                 let past = history.isEmpty ? "" : "\n\nSeneste samtalekontekst:\n" + String(history.unicodeScalars.suffix(600))
@@ -535,9 +548,18 @@ struct BotLocalMemoryPicker: View {
                 try await PhoneModels.reply(modelID: model, prompt: prompt, instructions: instructions) { reply in
                     if !Task.isCancelled { turns[index].replies[offset].text = reply }
                 }
+                try Task.checkCancellation()
+                if turns[index].replies[offset].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    throw PhoneModelError.emptyResponse
+                }
             }
             try Task.checkCancellation()
             turns[index].completed = true
+            if isBotCollaboration {
+                for botID in participants {
+                    SimulationEngine.shared.registerBotInteraction(botID, eventID: eventID)
+                }
+            }
         } catch {
             if Task.isCancelled || error is CancellationError {
                 turns[index].notice = "Samtalen blev stoppet. Du kan læse svarene ovenfor."

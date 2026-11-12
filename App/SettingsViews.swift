@@ -54,7 +54,7 @@ private struct VideoCleanupSettings: View {
     }
 }
 
-private struct PersonalVoiceSettings: View {
+struct PersonalVoiceSettings: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dynamicTypeSize) private var typeSize
     @AppStorage(AppStorageKeys.chatVoiceIdentifier) private var voiceID = ""

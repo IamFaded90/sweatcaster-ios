@@ -18,6 +18,12 @@ import UniformTypeIdentifiers
     @State private var openedFile: BotComputerFile?
     @State private var sharedFile: BotComputerFile?
     @State private var showRecipients = false
+    @State private var showVaultAccess = false
+    @State private var showPCServices = false
+    @State private var taskContext: String?
+    @State private var phoneKind: BotPhoneActionKind?
+    @State private var reviewingPhoneJob: BotComputerJob?
+    @AppStorage("fadedai.phone-job.applied") private var appliedPhoneJobs = ""
 
     private var client: BotComputerClient? { api.map { BotComputerClient(api: $0, botID: bot.id) } }
     private var otherBots: [VillageBot] { roster.filter { $0.id != bot.id } }
@@ -65,16 +71,45 @@ import UniformTypeIdentifiers
         }
         .onChange(of: api?.queueTargetID) {
             sourceFile = nil
+            taskContext = nil
             prompt = ""
             remoteText = ""
             openedFile = nil
             sharedFile = nil
             showRecipients = false
+            showVaultAccess = false
+            showPCServices = false
+            phoneKind = nil
+            reviewingPhoneJob = nil
         }
         .onDisappear { store.leaveDesktop() }
         .fileImporter(isPresented: $importFile, allowedContentTypes: [.plainText], onCompletion: importText)
         .sheet(item: $openedFile) { file in
             if let client { BotComputerFileView(file: file, client: client) }
+        }
+        .sheet(isPresented: $showVaultAccess) {
+            if let client {
+                VaultJobAccessView(botName: bot.name) { text in
+                    attachLookup(text, client: client)
+                }
+            }
+        }
+        .sheet(isPresented: $showPCServices) {
+            if let client {
+                NavigationStack {
+                    PCServicesView(api: client.api, onUse: { attachLookup($0, client: client) })
+                }
+            }
+        }
+        .sheet(item: $reviewingPhoneJob) { job in
+            if let action = job.phoneAction {
+                BotPhoneActionReview(action: action, jobID: job.id, botName: bot.name) {
+                    var keys = appliedPhoneJobs.split(separator: ",").map(String.init)
+                    let key = job.id.uuidString
+                    if !keys.contains(key) { keys.append(key) }
+                    appliedPhoneJobs = keys.suffix(500).joined(separator: ",")
+                }
+            }
         }
         .confirmationDialog("Del med en anden bot", isPresented: $showRecipients, presenting: sharedFile) { file in
             ForEach(otherBots) { recipient in
@@ -98,6 +133,13 @@ import UniformTypeIdentifiers
                             FadedDetailText(specialty)
                         }
                     }
+                    Spacer()
+                    Menu("Bottens indstillinger", systemImage: "ellipsis.circle") {
+                        Button("Kopiér bot-id", systemImage: "doc.on.doc") {
+                            UIPasteboard.general.string = bot.id.uuidString.lowercased()
+                        }
+                    }
+                    .labelStyle(.iconOnly)
                 }
                 if let status = store.status {
                     Text(status.status.title).font(.subheadline.weight(.semibold))
@@ -216,16 +258,44 @@ import UniformTypeIdentifiers
         FadedCard {
             VStack(alignment: .leading, spacing: 12) {
                 FadedSectionLabel("Opgaver")
+                if store.status?.phoneActions == true {
+                    Picker("Opgavetype", selection: $phoneKind) {
+                        Text("Almindelig opgave").tag(nil as BotPhoneActionKind?)
+                        ForEach(BotPhoneActionKind.allCases, id: \.self) { kind in
+                            if kind != .alarm || BotPhoneActionReview.supportsAlarms {
+                                Text(kind.title).tag(Optional(kind))
+                            }
+                        }
+                    }
+                    .frame(minHeight: 44)
+                }
                 TextField("Giv \(bot.name) en opgave", text: $prompt, axis: .vertical)
                     .lineLimit(3...6).textFieldStyle(.roundedBorder).frame(minHeight: 44)
-                if !store.files.isEmpty {
+                if phoneKind == nil && taskContext == nil && !store.files.isEmpty {
                     Picker("Brug en fil", selection: $sourceFile) {
                         Text("Ingen fil valgt").tag(nil as UUID?)
                         ForEach(store.files) { file in Text(file.name).tag(Optional(file.id)) }
                     }
                     .frame(minHeight: 44)
                 }
-                FadedPrimaryButton("Send opgave", icon: "arrow.up") { submit(client) }
+                if phoneKind == nil {
+                    if taskContext != nil {
+                        FadedDetailText("Ét opslag er vedhæftet denne opgave.")
+                        FadedSecondaryButton("Fjern opslag", icon: "xmark") {
+                            taskContext = nil
+                            store.forgetDraft()
+                        }
+                        .disabled(store.busy)
+                    } else {
+                        FadedSecondaryButton("Brug Vault", icon: "lock.shield") { showVaultAccess = true }
+                            .disabled(!store.canSend || store.busy || store.status?.taskContext != true)
+                        FadedSecondaryButton("Brug en PC-forbindelse", icon: "desktopcomputer") { showPCServices = true }
+                            .disabled(!store.canSend || store.busy || store.status?.taskContext != true)
+                    }
+                } else {
+                    FadedDetailText("Botten foreslår titlen og tidspunktet. Du godkender på din iPhone.")
+                }
+                FadedPrimaryButton(phoneKind == nil ? "Send opgave" : "Bed om forslag", icon: "arrow.up") { submit(client) }
                     .disabled(!store.canSend || store.busy || cleanPrompt.isEmpty || cleanPrompt.unicodeScalars.count > 2_000)
                 if let message = store.catalogError {
                     Text(message).foregroundStyle(palette.secondary)
@@ -239,24 +309,52 @@ import UniformTypeIdentifiers
 
     private func submit(_ client: BotComputerClient) {
         let submitted = cleanPrompt
-        let file = sourceFile
+        let kind = phoneKind
+        let file = kind == nil ? sourceFile : nil
+        let context = kind == nil ? taskContext : nil
         Task {
-            if await store.submit(prompt: submitted, fileID: file, client: client), cleanPrompt == submitted {
-                prompt = ""
+            if await store.submit(prompt: submitted, fileID: file, phoneKind: kind, context: context, client: client) {
+                if cleanPrompt == submitted { prompt = "" }
+                if let context, taskContext == context { taskContext = nil }
             }
         }
+    }
+
+    private func attachLookup(_ text: String, client: BotComputerClient) -> Bool {
+        guard self.client?.api.queueTargetID == client.api.queueTargetID,
+              !text.isEmpty, text.utf8.count <= 8_000 else { return false }
+        taskContext = text
+        sourceFile = nil
+        store.forgetDraft()
+        return true
     }
 
     private func jobRow(_ job: BotComputerJob, client: BotComputerClient) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Divider()
-            Text(job.status.title).font(.caption.weight(.semibold)).foregroundStyle(palette.secondary)
+            Text(jobLabel(job))
+                .font(.caption.weight(.semibold)).foregroundStyle(palette.secondary)
             Text(job.prompt).font(.subheadline).lineLimit(3)
             if let error = job.error { Text(error).font(.subheadline).foregroundStyle(palette.secondary) }
             if let result = job.result, !result.isEmpty {
-                DisclosureGroup("Læs resultat") {
-                    Text(result).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                if job.phoneKind != nil {
+                    Text(result).foregroundStyle(palette.secondary)
+                } else {
+                    DisclosureGroup("Læs resultat") {
+                        Text(result).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    }
                 }
+            }
+            if let action = job.phoneAction, action.kind == job.phoneKind {
+                if appliedPhoneJobs.split(separator: ",").contains(Substring(job.id.uuidString)) {
+                    Label("Oprettet på iPhone", systemImage: "checkmark.circle")
+                } else {
+                    FadedSecondaryButton("Gennemgå \(action.kind.title.lowercased())", icon: "checkmark.circle") {
+                        reviewingPhoneJob = job
+                    }
+                }
+            } else if job.phoneKind != nil && job.status == .completed {
+                FadedSecondaryButton("Ret opgaven", icon: "pencil") { reuse(job) }
             }
             if job.status.canCancel {
                 FadedSecondaryButton("Annuller opgave", icon: "stop.circle") {
@@ -264,13 +362,23 @@ import UniformTypeIdentifiers
                 }
                 .disabled(store.busy || !store.canSend)
             } else if job.status.canRetry {
-                FadedSecondaryButton("Brug opgaven igen", icon: "arrow.counterclockwise") {
-                    prompt = job.prompt
-                    sourceFile = job.fileID
-                    store.forgetDraft()
-                }
+                FadedSecondaryButton("Brug opgaven igen", icon: "arrow.counterclockwise") { reuse(job) }
+                if job.hasTaskContext == true { FadedDetailText("Hent opslaget igen, hvis du vil bruge det i den nye opgave.") }
             }
         }
+    }
+
+    private func jobLabel(_ job: BotComputerJob) -> String {
+        guard job.phoneKind != nil, job.status == .completed else { return job.status.title }
+        return job.phoneAction == nil ? "Afventer et svar fra dig" : "Forslag klar"
+    }
+
+    private func reuse(_ job: BotComputerJob) {
+        prompt = job.prompt
+        sourceFile = job.fileID
+        taskContext = nil
+        phoneKind = job.phoneKind
+        store.forgetDraft()
     }
 
     private func files(_ client: BotComputerClient) -> some View {
@@ -414,10 +522,13 @@ private struct BotDesktopSurface: View {
     private struct Draft: Equatable {
         let prompt: String
         let fileID: UUID?
+        let phoneKind: BotPhoneActionKind?
+        let phoneTime: String?
+        let context: String?
         let requestID = UUID()
 
-        func matches(_ prompt: String, _ fileID: UUID?) -> Bool {
-            self.prompt == prompt && self.fileID == fileID
+        func matches(_ prompt: String, _ fileID: UUID?, _ phoneKind: BotPhoneActionKind?, _ context: String?) -> Bool {
+            self.prompt == prompt && self.fileID == fileID && self.phoneKind == phoneKind && self.context == context
         }
     }
 
@@ -509,6 +620,8 @@ private struct BotDesktopSurface: View {
             guard isCurrent(client, revision) else { return }
             jobs = snapshot.0
             files = snapshot.1
+            SimulationEngine.shared.ingestJobs(jobs.map { .init(id: $0.id, status: $0.status) },
+                                               for: client.botID, targetID: client.api.queueTargetID)
             loadedCatalog = true
             catalogError = nil
         } catch {
@@ -567,12 +680,31 @@ private struct BotDesktopSurface: View {
         return await perform(client) { try await client.send(input) } apply: { _ in }
     }
 
-    func submit(prompt: String, fileID: UUID?, client: BotComputerClient) async -> Bool {
+    func submit(prompt: String, fileID: UUID?, phoneKind: BotPhoneActionKind?, context: String?,
+                client: BotComputerClient) async -> Bool {
         guard canSend, !busy else { return false }
-        let current = if let draft, draft.matches(prompt, fileID) { draft } else { Draft(prompt: prompt, fileID: fileID) }
+        guard loadedCatalog else {
+            feedback = "Vent, til bottens opgaver er hentet, og prøv igen."
+            return false
+        }
+        guard phoneKind == nil || status?.phoneActions == true else {
+            feedback = "Opdatér FadedAI på PC’en for at bruge iPhone-opgaver."
+            return false
+        }
+        guard context == nil || status?.taskContext == true else {
+            feedback = "Opdatér FadedAI på PC’en for at bruge opslag i botopgaver."
+            return false
+        }
+        let current = if let draft, draft.matches(prompt, fileID, phoneKind, context) {
+            draft
+        } else {
+            Draft(prompt: prompt, fileID: fileID, phoneKind: phoneKind,
+                  phoneTime: phoneKind.map { _ in BotPhoneAction.localFormatter().string(from: .now) }, context: context)
+        }
         draft = current
         return await perform(client) {
-            try await client.submit(prompt: prompt, fileID: fileID, requestID: current.requestID)
+            try await client.submit(prompt: prompt, fileID: fileID, requestID: current.requestID,
+                                    phoneKind: current.phoneKind, phoneTime: current.phoneTime, taskContext: current.context)
         } apply: { job in
             draft = nil
             applyJob(job)

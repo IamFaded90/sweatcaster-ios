@@ -58,7 +58,7 @@ def test_ocr_samples_full_duration_with_dense_ending(staged, monkeypatch, fps, b
     assert len(times) <= budget + 4 * fps
 
 
-def test_late_gameplay_survives_evidence_cap_and_focus_keeps_ending(staged, monkeypatch):
+def test_late_gameplay_survives_evidence_cap_and_render_keeps_full_clip(staged, monkeypatch):
     analysis = staged("analysis")
     monkeypatch.setitem(sys.modules, "sweatcaster.gameplay_vision", staged("gameplay_vision"))
     pipeline = staged("pipeline")
@@ -73,10 +73,20 @@ def test_late_gameplay_survives_evidence_cap_and_focus_keeps_ending(staged, monk
     ])
     assert len(events) == 24
     assert {event.t_start for event in events if event.kind == "kill"} == {4, 168}
-    clip = SimpleNamespace(probe=SimpleNamespace(duration=180), events=events)
-    assert pipeline.focus_window(clip) == (165, 180)
-    clip.events = [event for event in events if event.kind == "audio_spike"]
-    assert pipeline.focus_window(clip) is None
+    clip = SimpleNamespace(probe=SimpleNamespace(duration=180), events=events, keyframes=[], crop_mode_used="auto")
+    reaction = SimpleNamespace(t_start=168, event_ids=["168"])
+    timed = SimpleNamespace(lines=[reaction])
+    rendered = []
+    monkeypatch.setattr(pipeline, "attach_estimated_timings", lambda *_: timed)
+    monkeypatch.setattr(pipeline, "render_vertical", lambda **kwargs: rendered.append(kwargs) or [])
+    monkeypatch.setattr(pipeline, "trim_rendered", lambda *_: pytest.fail("Render removed earlier footage"))
+    pipeline.Pipeline.render(
+        SimpleNamespace(sounds={}), source=Path("original.mp4"), output=Path("result.mp4"),
+        workdir=Path("."), analysis=clip, plan=SimpleNamespace(commentary_source="local"),
+        bundle=SimpleNamespace(clips=[], source="local"), job={"denoise": False}, cancel=None,
+    )
+    assert rendered[0]["probe"].duration == 180
+    assert rendered[0]["lines"] == [reaction]
 
 
 def test_audio_keeps_a_late_spike_after_the_first_eight(staged, monkeypatch):

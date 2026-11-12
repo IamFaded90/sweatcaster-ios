@@ -128,6 +128,20 @@ struct ModuleInformation: Decodable {
     let text: String
 }
 
+struct VillageBotJobActivity: Decodable, Sendable {
+    let id: UUID
+    let status: BotComputerJob.State
+}
+
+struct VillageBotActivity: Decodable, Sendable {
+    struct Bot: Decodable, Sendable {
+        let id: UUID
+        let jobs: [VillageBotJobActivity]
+    }
+
+    let bots: [Bot]
+}
+
 struct EmbyLibraryPage: Decodable {
     struct Item: Decodable, Hashable, Identifiable {
         let id, title, kind: String

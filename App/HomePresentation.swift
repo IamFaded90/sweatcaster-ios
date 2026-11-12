@@ -344,6 +344,9 @@ extension Home {
                         storageKey: AppStorageKeys.chatSession(session), onBack: {
                             if embedded { goBackFromChat() }
                             else { showChat = false }
+                        }, openHome: {
+                            showChat = false
+                            openLandingDestination(.brain)
                         }, openImageStudio: { prompt in
                             if embedded { openStudio(.images, prompt: prompt) }
                             else { openImagesFromChat(prompt) }

@@ -329,7 +329,8 @@ extension OfflineStudio {
         }
         let history = Array(context.reversed())
         rememberPrompt(message)
-        runPrivateReply(historyPrompt: message, source: "Telefon · \(studioTextModelName(model))", progress: "Din bot skriver…") { id in
+        runPrivateReply(historyPrompt: message, source: "Telefon · \(studioTextModelName(model))",
+                        progress: "Din bot skriver…", countsAsVillageChat: true) { id in
             try await replyInStudio(model: model, prompt: message, instructions: instructions, history: history) {
                 updateChatReply(id, with: $0)
             }
@@ -382,19 +383,30 @@ extension OfflineStudio {
         }
     }
 
-    private func runPrivateReply(historyPrompt: String, source: String, progress: String,
+    private func runPrivateReply(historyPrompt: String, source: String, progress: String, countsAsVillageChat: Bool = false,
                                  work: @escaping @MainActor (UUID) async throws -> Void) {
         let turn = PrivateChatTurn(prompt: historyPrompt, reply: "", source: source, botID: selectedPrivateBot?.id)
+        let villageBotID = countsAsVillageChat && !privateSession ? turn.botID : nil
         chatWorkID = turn.id
         prompt = ""
         answer = ""
         turns.append(turn)
         status = progress
         task = Task { @MainActor in
+            defer {
+                if villageBotID != nil { SimulationEngine.shared.endConversation(turn.id) }
+            }
             do {
+                try Task.checkCancellation()
+                if let villageBotID {
+                    SimulationEngine.shared.beginConversation(turn.id, bots: [villageBotID])
+                }
                 try await work(turn.id)
                 try Task.checkCancellation()
                 if chatWorkID == turn.id {
+                    if let villageBotID, !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        SimulationEngine.shared.registerChat(with: villageBotID, eventID: turn.id)
+                    }
                     status = ""
                     offlineSuccessHaptic()
                 }

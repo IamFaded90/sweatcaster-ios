@@ -262,11 +262,8 @@ struct ConnectionsView: View {
         .init(name: "OneDrive", icon: "cloud", detail: "Kræver Microsoft-login og læseadgang til valgte filer."),
         .init(name: "GitHub", icon: "chevron.left.forwardslash.chevron.right", detail: "Kræver særskilt adgang til de repositories, du vil bruge."),
         .init(name: "Gmail", icon: "envelope", detail: "Kræver Google OAuth med godkendte mailtilladelser."),
-        .init(name: "Kalender", icon: "calendar", detail: "Kræver en valgt kalender og udtrykkelig læsetilladelse."),
-        .init(name: "Beskeder", icon: "bubble.left", detail: "Kontekst fra Beskeder er endnu ikke tilsluttet."),
         .init(name: "Todoist", icon: "checklist", detail: "Kræver Todoist OAuth og adgang til valgte projekter."),
         .init(name: "Notion", icon: "doc.text", detail: "Kræver en Notion-integration med adgang til valgte sider."),
-        .init(name: "YouTube", icon: "play.rectangle", detail: "Kræver Google OAuth til kontoadgang."),
         .init(name: "X", icon: "text.bubble", detail: "Kræver en X-udviklerapp og passende API-adgang."),
         .init(name: "Discord", icon: "bubble.left.and.bubble.right", detail: "Kræver en Discord-app og tilladelser i de valgte kanaler."),
         .init(name: "Slack", icon: "bubble.left", detail: "Kræver en Slack-app med læsetilladelse i dit arbejdsområde."),
@@ -302,6 +299,37 @@ struct ConnectionsView: View {
                     }
                 }
                 if openPairing != nil || embyAPI != nil { embyLink }
+                if openPairing != nil || embyAPI != nil {
+                    NavigationLink {
+                        PCServicesView(api: embyAPI)
+                    } label: {
+                        FadedCard {
+                            Label("Tjenester på PC’en", systemImage: "desktopcomputer")
+                                .frame(minHeight: 44)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                NavigationLink {
+                    AppleConnectionsView(onChooseNote: onChooseNote)
+                } label: {
+                    FadedCard {
+                        Label("Apple og iPhone", systemImage: "iphone")
+                            .frame(minHeight: 44)
+                    }
+                }
+                .buttonStyle(.plain)
+                if onChooseNote == nil && (openPairing != nil || embyAPI != nil) {
+                    NavigationLink {
+                        PersonalVaultView()
+                    } label: {
+                        FadedCard {
+                            Label("Vault", systemImage: "lock.shield")
+                                .frame(minHeight: 44)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
                 Text("Vælg indhold fra din telefon. Valget vises kun her i denne session.")
                     .foregroundStyle(palette.secondary)
                 pickerCard(photos, detail: "Vælg op til tre billeder i Apples billedvælger. Her vises små lokale forhåndsvisninger.")

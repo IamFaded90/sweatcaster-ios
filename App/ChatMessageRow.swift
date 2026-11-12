@@ -15,6 +15,7 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
     let showsTime: Bool
     let showsWordCount: Bool
     let readAlong: SpeechBox.WordProgress?
+    let isSpeaking: Bool
     let copyPrompt: () -> Void
     let replyActions: () -> ReplyActions
     let noticeActions: () -> NoticeActions
@@ -34,6 +35,7 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
                 .frame(maxWidth: userBubbleWidth, alignment: .trailing)
             }
             if !turn.reply.isEmpty {
+                let replyShape = RoundedRectangle(cornerRadius: 18)
                 VStack(alignment: .leading, spacing: FadedSpacing.s) {
                     messageHeading(attribution, icon: icon, accent: palette.isDark ? accent : palette.text)
                     ChatTranscriptView(reply: turn.reply)
@@ -46,7 +48,15 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
                 .padding(.horizontal, 16).padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .foregroundStyle(palette.text)
-                .background(palette.card, in: RoundedRectangle(cornerRadius: 18))
+                .background(palette.card, in: replyShape)
+                .overlay {
+                    if isSpeaking {
+                        replyShape.strokeBorder(accent.opacity(palette.isDark ? 0.55 : 0.7), lineWidth: 1.5)
+                            .shadow(color: accent.opacity(0.28), radius: 6)
+                            .allowsHitTesting(false)
+                            .accessibilityHidden(true)
+                    }
+                }
                 .overlay(alignment: .leading) {
                     Capsule().fill(accent).frame(width: 4).padding(.vertical, 8).accessibilityHidden(true)
                 }
@@ -128,11 +138,12 @@ extension ChatView {
 
     func transcriptRows(userBubbleWidth: CGFloat) -> some View {
         ForEach(filteredTurns) { turn in
+            let reading = speechBox.playback == .reply(turn.id)
             ChatMessageRow(
                 turn: turn, userBubbleWidth: userBubbleWidth, accent: replyColor(turn.source),
                 attribution: replyAttribution(for: turn), icon: sourceIcon(turn.source),
                 showsTime: aiTimestamps, showsWordCount: aiWordCount,
-                readAlong: speechBox.playback == .reply(turn.id) ? speechBox.wordProgress : nil,
+                readAlong: reading ? speechBox.wordProgress : nil, isSpeaking: reading && speechBox.isSpeaking,
                 copyPrompt: { copyText(turn.prompt) },
                 replyActions: { replyActions(turn) }, noticeActions: { noticeActions(turn) }
             )

@@ -30,6 +30,9 @@
     <key>NSPhotoLibraryAddUsageDescription</key><string>FadedAI gemmer billeder i Fotos, når du trykker Gem eller slår automatisk lagring til.</string>
     <key>NSMicrophoneUsageDescription</key><string>Mikrofonen bruges, når du dikterer en chatbesked.</string>
     <key>NSSpeechRecognitionUsageDescription</key><string>FadedAI bruger lokal talegenkendelse til at skrive din chatkladde.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key><string>FadedAI viser kommende aftaler, når du vælger at åbne din kalender.</string>
+    <key>NSRemindersFullAccessUsageDescription</key><string>FadedAI kan vise og oprette de påmindelser, du vælger.</string>
+    <key>NSAlarmKitUsageDescription</key><string>FadedAI bruger tilladelsen til de alarmer, du opretter i appen.</string>
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsLocalNetworking</key><true/>

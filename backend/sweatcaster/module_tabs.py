@@ -20,6 +20,8 @@ from fastapi import Body, FastAPI, Request, Response
 
 from sweatcaster.dto import ApiError
 from sweatcaster.emby_library import EmbyLibraryError, read_library
+from sweatcaster.searxng_search import SearXNGError, search_web
+from sweatcaster.youtube_connection import YouTubeError, read_channels
 
 MAX_IMPORT = 1_000_000
 CARD_TAB = {"id": "cards", "kind": "cards", "title": "Kortsamling"}
@@ -117,7 +119,7 @@ def collection_answer(settings, message: str) -> str | None:
 
 def register_modules(app: FastAPI, settings, authorize) -> None:
     from sweatcaster.bot_computer_routes import register_bot_computers
-    from sweatcaster.bot_computers import BotComputerWorker
+    from sweatcaster.bot_computers import BotComputerError, BotComputerWorker, wire_uuid
     from sweatcaster.code_batch import BatchWorker, configured_batch
     from sweatcaster.repository_library import RepositoryError
 
@@ -190,6 +192,40 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             raise ApiError(exc.status, code, str(exc)) from exc
         response.headers["Cache-Control"] = "no-store"
         return library
+
+    @app.get("/api/modules/v1/youtube/channels", include_in_schema=False)
+    def youtube_channels(request: Request, response: Response):
+        authorize(request, settings)
+        try:
+            channels = read_channels()
+        except YouTubeError as exc:
+            raise ApiError(exc.status, "NOT_READY", exc.message) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return channels
+
+    @app.put("/api/modules/v1/web-search", include_in_schema=False)
+    def web_search(request: Request, response: Response, body: dict = Body(...)):
+        authorize(request, settings)
+        try:
+            results = search_web(body.get("query"))
+        except SearXNGError as exc:
+            code = "INVALID_INPUT" if exc.status == 422 else "NOT_READY"
+            raise ApiError(exc.status, code, exc.message) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return {"results": results}
+
+    @app.put("/api/modules/v1/bot-activity", include_in_schema=False)
+    def bot_activity(request: Request, response: Response, body: dict = Body(...)):
+        authorize(request, settings)
+        bots = body.get("botIDs")
+        if not isinstance(bots, list) or len(bots) > 10:
+            raise ApiError(422, "INVALID_INPUT", "Vælg højst ti bots.")
+        try:
+            ids = list(dict.fromkeys(wire_uuid(value) for value in bots))
+        except BotComputerError as exc:
+            raise ApiError(422, "INVALID_INPUT", exc.message) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return computers.activity(ids)
 
     @app.put("/api/modules/v1/code-repositories", include_in_schema=False)
     def clone_repository(request: Request, body: dict = Body(...)):

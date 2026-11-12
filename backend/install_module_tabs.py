@@ -93,7 +93,7 @@ def install(root: Path) -> None:
     modules = {}
     for name in (source.name, "code_batch.py", "repository_library.py", "agent_workflows.py",
                  "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py",
-                 "emby_library.py", "emby_settings.py"):
+                 "emby_library.py", "emby_settings.py", "searxng_search.py", "google_desktop.py", "youtube_connection.py"):
         path = source.parent / name
         module = path.read_text(encoding="utf-8")
         compile(module, str(path), "exec")
