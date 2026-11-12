@@ -123,7 +123,7 @@ final class PairingQRCodeTests: XCTestCase {
 
         defaults.set("video", forKey: AppStorageKeys.spacesShortcut)
         await fulfillment(of: [video, folders, clips], timeout: 8)
-        XCTAssertTrue(model.clips.contains { $0.id == "clip-1" && $0.name == "fixture.mp4" })
+        XCTAssertTrue(model.clips.contains { $0.id == "clip-001" && $0.name == "fixture.mp4" })
     }
 
     private func qr(address: String = "192.168.1.42", expiry: Date?, nonce: String? = nil) throws -> String {
@@ -162,7 +162,7 @@ private final class PairingNavigationProtocol: URLProtocol {
             result = (200, #"{"roots":[{"id":"1","label":"Fortnite","file_count":1,"ready":true,"indexing":false}]}"#)
         case "/api/v2/clips" where URLComponents(url: url, resolvingAgainstBaseURL: false)?
             .queryItems?.contains(URLQueryItem(name: "root_id", value: "1")) == true:
-            result = (200, #"{"root_id":"1","label":"Fortnite","clips":[{"id":"clip-1","name":"fixture.mp4","duration_seconds":20,"width":1920,"height":1080}],"ready":true,"indexing":false}"#)
+            result = (200, #"{"root_id":"1","label":"Fortnite","clips":[{"id":"clip-001","name":"fixture.mp4","duration_seconds":20,"width":1920,"height":1080}],"ready":true,"indexing":false}"#)
         default:
             result = (404, #"{"error":{"code":"NOT_FOUND","message":"Unknown fixture path"}}"#)
         }
