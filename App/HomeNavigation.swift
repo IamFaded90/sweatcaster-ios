@@ -16,12 +16,8 @@ extension Home {
             ScrollView(.horizontal) { tabButtons }.scrollIndicators(.hidden)
         }
         .padding(6)
-        .background(v0LookPreset?.cardColor(in: palette) ?? palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.media))
-        .overlay {
-            RoundedRectangle(cornerRadius: FadedRadius.media)
-                .strokeBorder(v0LookPreset?.borderColor(in: palette) ?? palette.border)
-                .allowsHitTesting(false)
-        }
+        .fadedGlassSurface(radius: FadedRadius.media, tint: v0LookPreset?.cardColor(in: palette),
+                           border: v0LookPreset?.borderColor(in: palette))
         .frame(maxWidth: 570)
         .padding(.horizontal, 12).padding(.bottom, 4)
         .sheet(isPresented: $showMoreDestinations, onDismiss: openMoreDestination) {
@@ -225,7 +221,7 @@ private struct FadedMoreScreen: View {
                     link("Emby & bibliotek", "Se bibliotekets designvisning", "play.rectangle", .emby)
                     row("Holdet", "Se dine AI’er og deres roller", "person.2", .team)
                     row("Modeller", "Administrér modeller på telefon og PC", "sparkles", .models)
-                    link("Lookbook", "Prøv visuelle mønstre og finish", "paintpalette", .lookbook)
+                    link("Lookbook", "Skift baggrund, kort og bundmenu", "paintpalette", .lookbook)
                 }
                 Section("Overblik og kontrol") {
                     row("Aktivitet", "Se seneste jobs, status og udbakke", "bell", .activity)
@@ -245,6 +241,22 @@ private struct FadedMoreScreen: View {
                             row(tab.title, "Åbn på din tilsluttede PC", "square.grid.2x2", .module(tab.id))
                         }
                     }
+                }
+                Section {
+                    VStack(spacing: FadedSpacing.s) {
+                        Text("fadedai").font(FadedTypography.action).foregroundStyle(palette.text)
+                        FadedDetailText("Premium Dark · Supreme Sky · UI-preview")
+                        if let url = URL(string: "https://ui.aceternity.com/components") {
+                            Link(destination: url) {
+                                Label("Lys og detaljer med gratis Aceternity UI", systemImage: "arrow.up.right")
+                                    .font(.footnote)
+                                    .frame(minHeight: 44)
+                            }
+                        }
+                    }
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+                    .listRowBackground(Color.clear)
                 }
             }
             .scrollContentBackground(.hidden)

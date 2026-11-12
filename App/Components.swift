@@ -1,27 +1,33 @@
 import SwiftUI
 
 private struct FadedGlassSurface: ViewModifier {
+    let radius: CGFloat
+    let tint: Color?
+    let border: Color?
     @Environment(\.fadedPalette) private var palette
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
-        let shape = RoundedRectangle(cornerRadius: FadedRadius.small)
+        let shape = RoundedRectangle(cornerRadius: radius)
+        let surface = tint ?? palette.card
         content
             .background {
                 if reduceTransparency {
-                    shape.fill(palette.card)
+                    shape.fill(surface)
                 } else {
                     shape.fill(.regularMaterial)
-                        .overlay { shape.fill(palette.card.opacity(0.25)) }
+                        .overlay { shape.fill(surface.opacity(0.25)) }
                 }
             }
-            .overlay { shape.strokeBorder(palette.border).allowsHitTesting(false) }
+            .overlay { shape.strokeBorder(border ?? palette.border).allowsHitTesting(false) }
             .contentShape(shape)
     }
 }
 
 extension View {
-    func fadedGlassSurface() -> some View { modifier(FadedGlassSurface()) }
+    func fadedGlassSurface(radius: CGFloat = FadedRadius.small, tint: Color? = nil, border: Color? = nil) -> some View {
+        modifier(FadedGlassSurface(radius: radius, tint: tint, border: border))
+    }
 }
 import UIKit
 
