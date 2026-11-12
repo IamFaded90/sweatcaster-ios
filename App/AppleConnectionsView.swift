@@ -94,7 +94,7 @@ private struct AppleScheduleView: View {
                 }
             }
             Section(kind == .calendar ? "De næste syv dage" : "Åbne påmindelser") {
-                Button("Hent (kind.title.lowercased())", systemImage: "arrow.clockwise") {
+                Button("Hent \(kind.title.lowercased())", systemImage: "arrow.clockwise") {
                     Task { await loadEntries() }
                 }
                 .disabled(busy)
@@ -166,7 +166,7 @@ private struct AppleScheduleView: View {
             }
             if entries.isEmpty { status = "Der er ingen emner at vise." }
         } catch {
-            status = "Kunne ikke hente (kind.title.lowercased()). Prøv igen."
+            status = "Kunne ikke hente \(kind.title.lowercased()). Prøv igen."
         }
     }
 

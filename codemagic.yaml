@@ -9,8 +9,16 @@ workflows:
       - name: Run XCTest on an iPhone simulator
         script: |
           set -eu
-          simulator="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; runtimes=json.load(sys.stdin)["devices"]; print(next(d["udid"] for devices in runtimes.values() for d in devices if d["name"].startswith("iPhone")))')"
+          simulator="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          runtimes = json.load(sys.stdin)["devices"]
+          phones = [d for devices in runtimes.values() for d in devices if d["name"].startswith("iPhone")]
+          if not phones:
+              sys.exit("No iPhone simulator is available.")
+          print(next((d["udid"] for d in phones if d["name"] == "iPhone 17 Pro Max"), phones[0]["udid"]))
+          ')"
           xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
+            -configuration Release ENABLE_TESTABILITY=YES \
             -destination "platform=iOS Simulator,id=$simulator" \
             -parallel-testing-enabled NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test
       - name: Build and package unsigned iPhone IPA
@@ -24,6 +32,10 @@ workflows:
           app="$output/derived/Build/Products/Release-iphoneos/FadedAI.app"
           test -x "$app/FadedAI"
           test ! -e "$app/_CodeSignature"
+          case "${BUILD_NUMBER:-}" in
+            ""|*[!0-9]*) echo "Codemagic build number is unavailable."; exit 1 ;;
+          esac
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$app/Info.plist"
           staging="$(mktemp -d)"
           mkdir "$staging/Payload"
           ditto "$app" "$staging/Payload/FadedAI.app"
