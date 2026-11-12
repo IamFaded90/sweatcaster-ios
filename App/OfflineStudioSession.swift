@@ -78,6 +78,7 @@ extension OfflineStudio {
         LocalCompute.suspend()
         defer { LocalCompute.resume() }
         PhoneModelDownloads.shared.cancel()
+        StudioImageDownloads.shared.cancel()
         closeChatSession()
         loraPreviewSelection = nil
         removeTemporaryStudioImages()

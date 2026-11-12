@@ -565,12 +565,19 @@ enum PhoneModels {
         UNUserNotificationCenter.current().delegate = JobNotifications.shared
         UIDevice.current.isBatteryMonitoringEnabled = true
         PhoneModelDownloads.shared.activate()
+        StudioImageDownloads.shared.activate()
         return true
     }
 
     func application(_ application: UIApplication, handleEventsForBackgroundURLSession identifier: String,
                      completionHandler: @escaping () -> Void) {
-        guard identifier == PhoneModelDownloads.backgroundIdentifier else { completionHandler(); return }
-        PhoneModelDownloads.shared.handleBackgroundEvents(completion: completionHandler)
+        switch identifier {
+        case PhoneModelDownloads.backgroundIdentifier:
+            PhoneModelDownloads.shared.handleBackgroundEvents(completion: completionHandler)
+        case StudioImageDownloads.backgroundIdentifier:
+            StudioImageDownloads.shared.handleBackgroundEvents(completion: completionHandler)
+        default:
+            completionHandler()
+        }
     }
 }

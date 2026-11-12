@@ -44,7 +44,7 @@ final class PairingQRCodeTests: XCTestCase {
         XCTAssertThrowsError(try PairingQRSession.accept(invalid, now: now))
     }
 
-    @MainActor func testAcceptedQRReachesHomeAndOpensVideoFolder() async throws {
+    @MainActor func testAcceptedQRReachesHomeAndOpensActivityAndVideoFolder() async throws {
         let suite = "FadedAI.Tests.QRNavigation.\(UUID())"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         let videoDirectory = FileManager.default.temporaryDirectory.appending(path: suite, directoryHint: .isDirectory)
@@ -64,15 +64,18 @@ final class PairingQRCodeTests: XCTestCase {
                           })
         let landing = expectation(description: "The unpaired app displays the landing screen")
         let home = expectation(description: "Hjem renders after successful PC pairing")
+        let activity = expectation(description: "Seneste aktivitet renders after opening it from Hjem")
         let video = expectation(description: "The video shortcut displays the clip tab")
         let folders = expectation(description: "The Fortnite folder renders in the video catalog")
         let clips = expectation(description: "Opening the Fortnite folder displays the fetched clip")
         let screens: [Home.InitialScreen: XCTestExpectation] = [
-            .landing: landing, .dashboard: home, .videoClips: video,
+            .landing: landing, .dashboard: home, .dashboardActivity: activity, .videoClips: video,
             .videoFolders: folders, .videoFolderClips: clips
         ]
         var seen: Set<Home.InitialScreen> = []
-        let root = Home(model: model, onVideoFoldersAppeared: { $0 == "1" }) { screen in
+        var openActivity: (() -> Void)?
+        let root = Home(model: model, onVideoFoldersAppeared: { $0 == "1" },
+                        onDashboardAppeared: { openActivity = $0 }) { screen in
             if seen.insert(screen).inserted { screens[screen]?.fulfill() }
         }
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -120,6 +123,9 @@ final class PairingQRCodeTests: XCTestCase {
         XCTAssertEqual(savedAddress, payload.address)
         await fulfillment(of: [home], timeout: 8)
         XCTAssertEqual(seen, [.landing, .dashboard])
+
+        try XCTUnwrap(openActivity)()
+        await fulfillment(of: [activity], timeout: 8)
 
         defaults.set("video", forKey: AppStorageKeys.spacesShortcut)
         await fulfillment(of: [video, folders, clips], timeout: 8)

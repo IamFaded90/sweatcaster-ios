@@ -4,16 +4,19 @@ import SwiftUI
 import UIKit
 
 struct Home: View {
-    enum InitialScreen: Hashable { case landing, dashboard, videoClips, videoFolders, videoFolderClips }
+    enum InitialScreen: Hashable { case landing, dashboard, dashboardActivity, videoClips, videoFolders, videoFolderClips }
 
     let onScreenAppeared: ((InitialScreen) -> Void)?
     let onVideoFoldersAppeared: ((String) -> Bool)?
+    let onDashboardAppeared: ((@escaping () -> Void) -> Void)?
 
     @MainActor init(model: Model? = nil, onVideoFoldersAppeared: ((String) -> Bool)? = nil,
+                    onDashboardAppeared: ((@escaping () -> Void) -> Void)? = nil,
                     onScreenAppeared: ((InitialScreen) -> Void)? = nil) {
         _model = State(initialValue: model ?? Model())
         self.onScreenAppeared = onScreenAppeared
         self.onVideoFoldersAppeared = onVideoFoldersAppeared
+        self.onDashboardAppeared = onDashboardAppeared
     }
 
     enum SettingsCategory: String, CaseIterable, Hashable, Sendable {
@@ -86,6 +89,7 @@ struct Home: View {
     @Environment(\.scenePhase) var phase
     @State var model: Model
     @State var showLogin = false
+    @State var showDashboardActivity = false
     @State var enteredWithoutPC = false
     @State var showSettings = false
     @State var showPCStatus = false
@@ -128,7 +132,6 @@ struct Home: View {
     @State var diagnosticsError = false
     @State var media: Media?
     @State var showChat = false
-    @State private var chatComposerFocused = false
     @State var newChatRequest: UUID?
     @State var preferPhoneInChat = false
     @State private var tabHistory: [TabDestination] = []
@@ -138,7 +141,7 @@ struct Home: View {
     @AccessibilityFocusState var jobsFocus: Bool
     @State var showJobs = 0
     @State var space: Space = .brain
-    @State private var moduleTabs: [ModuleTab] = []
+    @State var moduleTabs: [ModuleTab] = []
     @State private var moduleAddress: String?
     @State private var moduleTargetID: String?
     @State var selectedModuleTab: String?
@@ -186,7 +189,7 @@ struct Home: View {
     @AppStorage(AppStorageKeys.spacesFont) var font = "Standard"
     @AppStorage(AppStorageKeys.spacesMotion) var motion = false
     @AppStorage(AppStorageKeys.spacesShortcut) var shortcut = ""
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
     @AppStorage(AppStorageKeys.videoLastMood) var selectedVideoMood: Mood = .hype
     @State var jobFilter = 0
     @AppStorage(AppStorageKeys.qolConfirmVideo) var confirmVideoStart = true
@@ -210,7 +213,7 @@ struct Home: View {
 
     var privateStudioPresented: Bool { showOfflineStudio && studioPage == .chat }
 
-    private var visibleModuleTarget: String? {
+    var visibleModuleTarget: String? {
         guard !privateStudioPresented, !model.isDemo, moduleAddress == model.address,
               let live = model.api as? LiveAPI, moduleTargetID == live.queueTargetID else { return nil }
         return live.queueTargetID
@@ -227,7 +230,7 @@ struct Home: View {
         VStack(spacing: 0) {
             homeTabs
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if currentDestination != .fixed(.notes) || !chatComposerFocused {
+            if currentDestination != .fixed(.notes) {
                 spacesBar
             }
         }
@@ -254,42 +257,46 @@ struct Home: View {
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
     }
 
+    private var selectedHomeTab: String {
+        if case .module(let selection, _) = currentDestination { return selection }
+        return space.rawValue
+    }
+
     private var homeTabs: some View {
-        TabView(selection: Binding(get: {
-            if case .module(let selection, _) = currentDestination { return selection }
-            return space.rawValue
-        }, set: { value in
+        TabView(selection: Binding(get: { selectedHomeTab }, set: { value in
             guard !privateStudioPresented else { return }
             if let fixed = Space(rawValue: value) { selectTab(fixed) }
             else { selectModule(value) }
         })) {
-            homeTab
-                .onAppear { if space == .brain { onScreenAppeared?(.dashboard) } }
+            DeferredHomeTab(isSelected: selectedHomeTab == Space.brain.rawValue) { AnyView(homeTab) }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Hjem", systemImage: "house.fill") }.tag(Space.brain.rawValue)
-            chatTab
+            DeferredHomeTab(isSelected: selectedHomeTab == Space.notes.rawValue) { AnyView(chatTab) }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Chat", systemImage: "bubble.left.fill") }.tag(Space.notes.rawValue)
-            Group {
-                if space == .gallery && selectedModuleTab == nil {
-                    videoStudio
-                        .onAppear { if videoPage == .clips { onScreenAppeared?(.videoClips) } }
-                }
+            DeferredHomeTab(isSelected: selectedHomeTab == Space.gallery.rawValue, keepAlive: false) {
+                AnyView(videoStudio.onAppear { if videoPage == .clips { onScreenAppeared?(.videoClips) } })
             }
             .toolbarVisibility(.hidden, for: .tabBar)
             .tabItem { Label("Video", systemImage: "film.fill") }.tag(Space.gallery.rawValue)
-            AgentHub(api: studioAPI, isVisible: space == .tasks && selectedModuleTab == nil,
-                     studioUnlocked: $nsfwSessionUnlocked,
-                     onPrivateSessionEnded: showPrivateSessionNotice, onBack: goBack,
-                     experimentalWork: experimentalVillageWork, onExperimentalAction: openExperimentalVillageWork)
+            DeferredHomeTab(isSelected: selectedHomeTab == Space.tasks.rawValue) {
+                AnyView(AgentHub(api: studioAPI, isVisible: selectedHomeTab == Space.tasks.rawValue,
+                                 studioUnlocked: $nsfwSessionUnlocked,
+                                 onPrivateSessionEnded: showPrivateSessionNotice, onBack: goBack,
+                                 experimentalWork: experimentalVillageWork, onExperimentalAction: openExperimentalVillageWork))
+            }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Landsby", systemImage: "house.lodge.fill") }.tag(Space.tasks.rawValue)
-            CodeWorkspaceView(api: privateStudioPresented ? nil : model.api as? LiveAPI, onBack: goBack)
+            DeferredHomeTab(isSelected: selectedHomeTab == Space.library.rawValue) {
+                AnyView(CodeWorkspaceView(api: privateStudioPresented ? nil : model.api as? LiveAPI, onBack: goBack))
+            }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Code Bot", systemImage: "chevron.left.forwardslash.chevron.right") }.tag(Space.library.rawValue)
             if visibleModuleTarget != nil, let api = model.api as? LiveAPI {
                 ForEach(moduleTabs) { tab in
-                    ModuleTabView(tab: tab, api: api, onBack: goBack)
+                    DeferredHomeTab(isSelected: selectedHomeTab == "module:" + tab.id) {
+                        AnyView(ModuleTabView(tab: tab, api: api, onBack: goBack))
+                    }
                         .id(api.queueTargetID + ":" + tab.id)
                         .toolbarVisibility(.hidden, for: .tabBar)
                         .tabItem { Label(tab.title, systemImage: tab.kind == "cards" ? "rectangle.on.rectangle" : "info.circle") }
@@ -339,10 +346,17 @@ struct Home: View {
             tabPage("Hjem") {
                 header
             }
+            .onAppear {
+                guard selectedHomeTab == Space.brain.rawValue else { return }
+                onDashboardAppeared?(openDashboardActivity)
+                onScreenAppeared?(.dashboard)
+            }
+            .navigationDestination(isPresented: $showDashboardActivity) {
+                dashboardActivityScreen.onAppear { onScreenAppeared?(.dashboardActivity) }
+            }
             .safeAreaInset(edge: .top, spacing: 0) {
                 VStack(alignment: .leading, spacing: FadedSpacing.s) {
                     dashboardConnection
-                    FadedSignature()
                 }
                 .frame(maxWidth: 640, alignment: .leading)
                 .frame(maxWidth: .infinity)
@@ -395,15 +409,19 @@ struct Home: View {
             Text("f.").font(.system(.headline, design: .rounded).bold())
                 .foregroundStyle(FadedColors.deep).padding(FadedSpacing.xs)
                 .frame(minWidth: 28, minHeight: 28)
-                .background(FadedBrand.gradient, in: Circle())
+                .background(FadedBrand.gradient, in: RoundedRectangle(cornerRadius: FadedRadius.small))
                 .accessibilityHidden(true)
-            Text("fadedai").font(FadedTypography.title).tracking(-0.5)
+            HStack(spacing: 0) {
+                Text("faded").foregroundStyle(palette.text)
+                Text("ai").foregroundStyle(palette.secondary)
+            }
+                .font(FadedTypography.title)
                 .accessibilityLabel("FadedAI").accessibilityAddTraits(.isHeader)
         }
     }
 
     private var chatTab: some View {
-        chatContent(embedded: true) { chatComposerFocused = $0 }
+        chatContent(embedded: true)
     }
 
     func selectSpace(_ destination: Space) {
@@ -419,12 +437,12 @@ struct Home: View {
         showJobs += 1
     }
 
-    private func selectTab(_ destination: Space) {
+    func selectTab(_ destination: Space) {
         if destination == .gallery, space != .gallery || selectedModuleTab != nil { openVideoClips() }
         else { selectSpace(destination) }
     }
 
-    private func selectModule(_ selection: String) {
+    func selectModule(_ selection: String) {
         guard let targetID = visibleModuleTarget else { return }
         let destination = TabDestination.module(selection: selection, targetID: targetID)
         if canShow(destination) { navigate(to: destination) }
@@ -472,83 +490,6 @@ struct Home: View {
             space = .gallery
         case .module(let selection, _):
             selectedModuleTab = selection
-        }
-    }
-
-    private var spacesBar: some View {
-        ViewThatFits(in: .horizontal) {
-            tabButtons
-            ScrollView(.horizontal) { tabButtons }.scrollIndicators(.hidden)
-        }
-        .padding(6)
-        .background(palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.media))
-        .overlay { RoundedRectangle(cornerRadius: FadedRadius.media).strokeBorder(palette.border).allowsHitTesting(false) }
-        .frame(maxWidth: 570)
-        .padding(.horizontal, 12).padding(.bottom, 4)
-    }
-
-    private var tabButtons: some View {
-        HStack(spacing: 2) {
-            ForEach(Space.allCases) { item in
-                let selected = selectedModuleTab == nil && space == item
-                Button {
-                    if reduceMotion { selectTab(item) }
-                    else { withAnimation(.spring(response: calmMotion ? 0.70 : 0.35, dampingFraction: 0.8)) { selectTab(item) } }
-                } label: {
-                    VStack(spacing: 3) {
-                        Image(systemName: spaceIcon(item)).font(.body)
-                        Text(spaceTitle(item)).font(.caption2.bold()).fixedSize(horizontal: true, vertical: false)
-                    }
-                    .padding(.horizontal, 4)
-                    .foregroundStyle(selected ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
-                    .frame(minWidth: 44, maxWidth: .infinity, minHeight: 48)
-                    .background(selected ? FadedBrand.mint.opacity(palette.isDark ? 0.14 : 0.24) : Color.clear,
-                                in: RoundedRectangle(cornerRadius: FadedRadius.medium))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Åbn " + spaceTitle(item))
-                .accessibilityAddTraits(selected ? .isSelected : [])
-            }
-            if visibleModuleTarget != nil, !moduleTabs.isEmpty { moduleTabMenu }
-        }
-    }
-
-    private var moduleTabMenu: some View {
-        Menu {
-            ForEach(moduleTabs) { tab in
-                Button(tab.title) { selectModule("module:" + tab.id) }
-            }
-        } label: {
-            VStack(spacing: 3) {
-                Image(systemName: "ellipsis").font(.body)
-                Text("Mere").font(.caption2.bold())
-            }
-            .frame(minWidth: 44, minHeight: 48)
-            .foregroundStyle(selectedModuleTab != nil ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
-            .background(selectedModuleTab != nil ? FadedBrand.mint.opacity(palette.isDark ? 0.14 : 0.24) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: FadedRadius.medium))
-        }
-        .accessibilityLabel("Flere faner")
-    }
-
-    private func spaceTitle(_ item: Space) -> String {
-        switch item {
-        case .brain: "Hjem"
-        case .notes: "Chat"
-        case .gallery: "Video"
-        case .tasks: "Landsby"
-        case .library: "Code Bot"
-        }
-    }
-
-    private func spaceIcon(_ item: Space) -> String {
-        switch item {
-        case .brain: "house.fill"
-        case .notes: "bubble.left.fill"
-        case .gallery: "play.rectangle.fill"
-        case .tasks: "house.lodge.fill"
-        case .library: "chevron.left.forwardslash.chevron.right"
         }
     }
 

@@ -509,6 +509,7 @@ struct ResourceMonitor: View {
         LocalCompute.suspend()
         defer { LocalCompute.resume() }
         PhoneModelDownloads.shared.cancel()
+        StudioImageDownloads.shared.cancel()
         try deleteOwnedData(documents: .documentsDirectory, support: .applicationSupportDirectory,
                             temporary: FileManager.default.temporaryDirectory)
         try Pairing.removeAll()

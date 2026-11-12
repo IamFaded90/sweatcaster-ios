@@ -116,7 +116,6 @@ struct OfflineStudio: View {
     @State var useLoRA = false
     @State var authenticating = false
     @State var studioAuthentication: LAContext?
-    @State var downloadProgress: Double?
     @State var turns: [PrivateChatTurn] = []
     @State var privateReplyIssues: [UUID: String] = [:]
     @State var loaded = false
@@ -454,9 +453,6 @@ struct OfflineStudio: View {
                     .progressViewStyle(.linear).tint(palette.cyan)
             }
             if !status.isEmpty { Text(status).font(.callout).foregroundStyle(palette.secondary) }
-            if let downloadProgress {
-                ProgressView(value: downloadProgress) { Text(downloadProgress.formatted(.percent)) }
-            }
         }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, FadedSpacing.edge)
     }
 }

@@ -40,15 +40,68 @@ struct DashboardVideoCard: View {
         if let result = try? await generator.image(at: .zero), !Task.isCancelled {
             preview = UIImage(cgImage: result.image)
         }
-        if let value = try? await asset.load(.duration), value.seconds.isFinite, !Task.isCancelled {
-            let seconds = max(0, Int(value.seconds.rounded()))
+        if let value = try? await asset.load(.duration), value.seconds.isFinite, !Task.isCancelled,
+           let seconds = Int(exactly: max(0, value.seconds.rounded())) {
             duration = String(format: "%02d:%02d", seconds / 60, seconds % 60)
         }
     }
 }
 
+private struct FadedDashboardHero: View {
+    let openVillage: () -> Void
+    @Environment(\.fadedPalette) private var palette
+
+    var body: some View {
+        VStack(spacing: FadedSpacing.l) {
+            artwork
+            VStack(spacing: FadedSpacing.xs) {
+                Text("Store idéer.").foregroundStyle(palette.text)
+                Text("Dit lille univers.").foregroundStyle(FadedBrand.gradient)
+            }
+            .font(.largeTitle.weight(.semibold))
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            Text("Et sted at tænke, skabe og bygge.\nMed et AI-hold, der er helt dit eget.")
+                .font(.subheadline)
+                .foregroundStyle(palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            FadedPrimaryButton("Træd ind i din verden", icon: "arrow.up.right", action: openVillage)
+            Text("Du giver retningen. Vi giver idéerne plads.")
+                .font(.footnote)
+                .foregroundStyle(palette.secondary)
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: 480)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var artwork: some View {
+        Color.clear
+            .aspectRatio(1.65, contentMode: .fit)
+            .frame(maxHeight: 256)
+            .overlay {
+                Image("V0AIWorld")
+                    .resizable()
+                    .scaledToFill()
+                    .accessibilityHidden(true)
+            }
+            .clipped()
+            .clipShape(.rect(cornerRadius: FadedRadius.hero))
+            .overlay(alignment: .bottom) {
+                Label("En verden af muligheder", systemImage: "sparkles")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(FadedBrand.mint)
+                    .padding(.horizontal, FadedSpacing.m)
+                    .padding(.vertical, FadedSpacing.s)
+                    .background(FadedColors.deep, in: Capsule())
+                    .padding(FadedSpacing.m)
+            }
+    }
+}
+
 extension Home {
     @ViewBuilder var header: some View {
+        FadedDashboardHero(openVillage: openDashboardVillage)
         dashboardMainActions
         quickActions
         if model.isDemo {
@@ -109,8 +162,8 @@ extension Home {
         } else if chatReviewCount > 0 {
             dashboardStatusRow("Chat venter på gennemgang", detail: "Beskeder til gennemgang · \(chatReviewCount)",
                                icon: "exclamationmark.circle", accent: palette.coral, actionTitle: "Se udbakken", action: openChat)
-        } else if let job = dashboardApprovalJob {
-            dashboardApprovalRow(job)
+        } else if let approval = dashboardApprovalCard {
+            approval
         } else if let job = dashboardActiveVideo {
             dashboardActiveJob(job)
         } else if queuedChatCount > 0 {
@@ -120,41 +173,15 @@ extension Home {
             dashboardStatusRow("Video i kø", detail: "Venter på PC’en · \(model.videoOutbox.count)",
                                icon: "film", accent: palette.cyan, actionTitle: "Se videokø", action: openVideoJobs)
         } else {
-            dashboardConnectedError
-            dashboardConnectionNotice
+            dashboardConnectionStatus
             if model.connected { loadingStatus }
         }
     }
 
-    @ViewBuilder private var dashboardConnectedError: some View {
-        if model.connected, let error = model.errorPresentation {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(error.title).font(.headline).accessibilityFocused($errorFocus)
-                if let detail = error.detail {
-                    DisclosureGroup("Tekniske detaljer", isExpanded: $errorDetails) {
-                        Text(detail).textSelection(.enabled)
-                    }
-                }
-                action(error.fixAction.title) { fixDashboardError(error.fixAction) }.disabled(switchDisabled)
-                FadedCopyErrorButton(title: error.title)
-            }
-        }
-    }
-
-    @ViewBuilder private var dashboardConnectionNotice: some View {
-        if !model.isDemo, !model.connected {
-            FadedCard(accent: model.refreshing ? palette.cyan : palette.coral) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(model.refreshing ? "Opdaterer forbindelsen…" : (model.errorTitle ?? "Tjekker PC’en…"))
-                        .font(FadedTypography.action)
-                    if !model.refreshing, let error = model.errorPresentation {
-                        FadedSecondaryButton("Brug Telefon", icon: "iphone", action: openPhoneChat)
-                        FadedSecondaryButton(error.fixAction.title, icon: "arrow.clockwise") { fixDashboardError(error.fixAction) }
-                        FadedCopyErrorButton(title: error.title)
-                    }
-                }
-            }
-        }
+    private var dashboardConnectionStatus: DashboardConnectionStatus {
+        DashboardConnectionStatus(model: model, errorDetails: $errorDetails, errorFocus: $errorFocus,
+                                  switchDisabled: { switchDisabled }, fixError: fixDashboardError,
+                                  openPhoneChat: openPhoneChat)
     }
 
     private func fixDashboardError(_ action: AppErrorPresentation.FixAction) {
@@ -167,29 +194,6 @@ extension Home {
             openVideoJobs()
         case .usePhone: openPhoneChat()
         case .retry: Task { await model.refresh() }
-        }
-    }
-
-    @ViewBuilder private var dashboardQueueNotice: some View {
-        let videos = model.videoOutbox.count
-        if !model.isDemo && (model.requiresVideoReview || queuedChatCount + chatReviewCount + videos > 0) {
-            FadedCard(accent: dashboardQueueNeedsAttention ? palette.coral : palette.cyan) {
-                VStack(alignment: .leading, spacing: 8) {
-                    FadedSectionLabel("Udbakke")
-                    if queuedChatCount > 0 {
-                        FadedSecondaryButton("Chat i kø · \(queuedChatCount)", icon: "bubble.left", action: openChat)
-                    }
-                    if chatReviewCount > 0 {
-                        FadedSecondaryButton("Tjek afsendelse · \(chatReviewCount)", icon: "exclamationmark.circle", action: openChat)
-                    }
-                    if videos > 0 {
-                        FadedSecondaryButton("Videokø · \(videos)", icon: "film", action: openVideoJobs)
-                    }
-                    if model.requiresVideoReview {
-                        FadedSecondaryButton("Tjek dit videojob", icon: "exclamationmark.circle", action: openVideoJobs)
-                    }
-                }
-            }
         }
     }
 
@@ -220,18 +224,10 @@ extension Home {
             : (cachedJobAddress == model.address ? cachedJobs.first : nil)
     }
 
-    private func dashboardActiveJob(_ job: DashboardJob) -> some View {
-        FadedCard(accent: palette.cyan) {
-            VStack(alignment: .leading, spacing: FadedSpacing.s) {
-                FadedSectionLabel("I gang")
-                FadedDetailText(job.mood.title)
-                VideoJobStatusLine(status: job.status, progress: job.progress,
-                                   isCurrent: model.connected || model.isDemo, accent: palette.cyan)
-                FadedSecondaryButton("Følg video", icon: "film") {
-                    searchVideoJobID = job.id
-                    openVideoJobs()
-                }
-            }
+    private func dashboardActiveJob(_ job: DashboardJob) -> DashboardActiveJobCard {
+        DashboardActiveJobCard(job: job, isCurrent: model.connected || model.isDemo) {
+            searchVideoJobID = job.id
+            openVideoJobs()
         }
     }
 
@@ -240,32 +236,28 @@ extension Home {
         return model.observedCodeJobs.first { $0.status == "review" }
     }
 
-    @ViewBuilder private func dashboardApprovalRow(_ job: CodeBatchList.Job) -> some View {
-        if let api = studioAPI {
-            dashboardStatusRow("Kodeforslag klar", detail: job.goal, icon: "checkmark.circle",
-                               accent: palette.lime, actionTitle: "Se forslag") {
-                dashboardApproval = DashboardApproval(id: job.id, api: api)
-            }
+    private var dashboardApprovalCard: DashboardStatusCard? {
+        guard let job = dashboardApprovalJob, let api = studioAPI else { return nil }
+        return dashboardStatusRow("Kodeforslag klar", detail: job.goal, icon: "checkmark.circle",
+                                  accent: palette.lime, actionTitle: "Se forslag") {
+            dashboardApproval = DashboardApproval(id: job.id, api: api)
         }
     }
 
     private func dashboardStatusRow(_ title: String, detail: String, icon: String, accent: Color,
-                                    actionTitle: String, action: @escaping () -> Void) -> some View {
-        FadedCard(accent: accent) {
-            VStack(alignment: .leading, spacing: FadedSpacing.s) {
-                Label(title, systemImage: icon).font(FadedTypography.action)
-                FadedDetailText(detail)
-                FadedSecondaryButton(actionTitle, action: action)
-            }
-        }
+                                    actionTitle: String, action: @escaping () -> Void) -> DashboardStatusCard {
+        DashboardStatusCard(title: title, detail: detail, icon: icon, accent: accent,
+                            actionTitle: actionTitle, action: action)
     }
 
     private var dashboardMainActions: some View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: FadedSpacing.s),
                             count: videoTypeSize.isAccessibilitySize ? 1 : 2)
         return LazyVGrid(columns: columns, spacing: FadedSpacing.s) {
-            quickAction("Start en samtale", icon: "bubble.left", accent: palette.lime, action: openNewChat)
-            quickAction("Mød din Code Bot", icon: "terminal", accent: palette.green) { selectSpace(.library) }
+            quickAction("Start en samtale", icon: "bubble.left", accent: palette.lime,
+                        eyebrow: "Bare en tanke?", action: openNewChat)
+            quickAction("Mød din Code Bot", icon: "terminal", accent: palette.green,
+                        eyebrow: "Noget at bygge?") { selectSpace(.library) }
         }
     }
 
@@ -281,12 +273,14 @@ extension Home {
     }
 
     private func quickAction(_ title: String, icon: String, accent: Color,
+                             eyebrow: String? = nil,
                              action: @escaping () -> Void) -> some View {
         Button(action: action) {
             FadedCard(size: .compact) {
                 VStack(alignment: .leading, spacing: 6) {
                     Image(systemName: icon).foregroundStyle(FadedColors.deep).frame(width: 32, height: 32)
                         .background(accent, in: Circle()).accessibilityHidden(true)
+                    if let eyebrow { Text(eyebrow).font(.caption).foregroundStyle(palette.secondary) }
                     Text(title).font(FadedTypography.action)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -296,9 +290,7 @@ extension Home {
     }
 
     private var dashboardQueueNeedsAttention: Bool {
-        chatReviewCount > 0 || model.requiresVideoReview || model.videoOutbox.contains {
-            $0.state == .rejected || ($0.state == .attempted && !model.checkingVideoOutbox)
-        }
+        DashboardActivityQueue.needsAttention(model: model, chatReviewCount: chatReviewCount)
     }
 
     private var dashboardActivitySummary: String {
@@ -315,7 +307,7 @@ extension Home {
 
     private var dashboardActivity: some View {
         let summary = dashboardActivitySummary
-        return NavigationLink { dashboardActivityPage } label: {
+        return Button(action: openDashboardActivity) {
             VStack(alignment: .leading, spacing: FadedSpacing.xs) {
                 Label("Seneste aktivitet", systemImage: summary.isEmpty ? "clock" : "tray")
                 if !summary.isEmpty {
@@ -327,83 +319,30 @@ extension Home {
         }.buttonStyle(FadedButtonStyle(kind: .secondary))
     }
 
-    @ViewBuilder private var dashboardContinueActivity: some View {
-        if !recentChats.isEmpty || !savedVideos.isEmpty {
-            FadedCard {
-                VStack(alignment: .leading, spacing: FadedSpacing.section) {
-                    FadedSectionHeader("Fortsæt hvor du slap")
-                    if let turn = recentChats.first {
-                        Button {
-                            searchChatQuery = FadedSearchIndex.boundedQuery(turn.prompt)
-                            openChat()
-                        } label: {
-                            Label(turn.prompt, systemImage: "bubble.left")
-                                .lineLimit(2).frame(minHeight: 44, alignment: .leading)
-                        }.buttonStyle(.plain).accessibilityHint("Find beskeden i chatarkivet")
-                    }
-                    if let file = savedVideos.first {
-                        FadedSecondaryButton("Afspil seneste gemte video", icon: "play.circle") {
-                            media = Media(url: file, demo: false)
-                        }
-                    }
-                }
-            }
-        }
+    func openDashboardActivity() {
+        showDashboardActivity = true
     }
 
-    private var dashboardActivityPage: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
-                dashboardConnectedError
-                dashboardConnectionNotice
-                dashboardQueueNotice
-                if let approval = dashboardApprovalJob { dashboardApprovalRow(approval) }
-                if let job = dashboardActiveVideo { dashboardActiveJob(job) }
-                dashboardContinueActivity
-                dashboardRecentChats
-                dashboardVideos
-            }.padding(FadedSpacing.edge).frame(maxWidth: 640).frame(maxWidth: .infinity)
-        }
-        .background { FadedBackground() }
-        .navigationTitle("Seneste aktivitet")
-        .navigationBarTitleDisplayMode(.inline)
-        .refreshable { refreshDashboard() }
-    }
-
-    @ViewBuilder private var dashboardRecentChats: some View {
-        if !recentChats.isEmpty {
-            FadedSectionLabel("Sidste chats")
-            ForEach(recentChats) { turn in
-                FadedCard(accent: dashboardSourceColor(turn.source)) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(turn.prompt).font(FadedTypography.body).lineLimit(2)
-                        if let date = turn.createdAt { Text(date, format: .dateTime.day().month().hour().minute()) }
-                    }.foregroundStyle(palette.text)
-                }
-            }
-        } else {
-            FadedDetailText("Samtaler dukker op her, når du har skrevet i chatten.")
-        }
-    }
-
-    private func dashboardSourceColor(_ source: String?) -> Color {
-        if source == GrokAPI.sourceLabel { return palette.purple }
-        if source == "PC" { return palette.cyan }
-        return palette.green
-    }
-
-    private var dashboardVideos: some View {
-        VStack(alignment: .leading, spacing: FadedSpacing.section) {
-            FadedSectionHeader("Gemte videoer")
-            if savedVideos.isEmpty {
-                FadedDetailText("Gem en færdig video fra Video Studio for at se den her.")
-            }
-            ForEach(savedVideos.prefix(3), id: \.self) { file in
-                Button { media = Media(url: file, demo: false) } label: { DashboardVideoCard(file: file) }
-                    .buttonStyle(.plain)
-            }
-            FadedSecondaryButton("Åbn videobibliotek", icon: "film.stack") { reloadSavedVideos(); showSavedVideos = true }
-        }
+    var dashboardActivityScreen: some View {
+        DashboardActivityScreen(
+            connection: dashboardConnectionStatus,
+            queue: DashboardActivityQueue(model: model, queuedChatCount: $queuedChatCount, chatReviewCount: $chatReviewCount,
+                                          openChat: openChat, openVideoJobs: openVideoJobs),
+            approval: { dashboardApprovalCard },
+            activeJob: { dashboardActiveVideo.map { dashboardActiveJob($0) } },
+            recentChats: $recentChats,
+            savedVideos: $savedVideos,
+            openRecentChat: { turn in
+                searchChatQuery = FadedSearchIndex.boundedQuery(turn.prompt)
+                openChat()
+            },
+            playVideo: { media = Media(url: $0, demo: false) },
+            openVideoLibrary: {
+                reloadSavedVideos()
+                showSavedVideos = true
+            },
+            refresh: refreshDashboard
+        )
     }
 
     func refreshDashboard() {

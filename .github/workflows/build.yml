@@ -22,7 +22,7 @@ jobs:
           set -euo pipefail
           git fetch --no-tags --depth=1 origin 65e772a0c609c1e55b83f368a718ffe0a1e09989
           git diff --exit-code FETCH_HEAD HEAD -- . ':(exclude).github/workflows/build.yml'
-      - name: Run XCTest on an iPhone simulator
+      - name: Run Release XCTest on an iPhone simulator
         if: ${{ github.ref_name != 'codex/ipa-bus-package-65e772a' }}
         run: |
           set -o pipefail
@@ -38,6 +38,7 @@ jobs:
               sys.exit("iPhone 17 Pro Max with iOS 26.2 is missing from the runner.")
           ')"
           xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
+            -configuration Release ENABLE_TESTABILITY=YES \
             -destination "platform=iOS Simulator,id=$simulator" \
             -parallel-testing-enabled NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test \
             2>&1 | tee "$RUNNER_TEMP/FadedAI-XCTest.log"

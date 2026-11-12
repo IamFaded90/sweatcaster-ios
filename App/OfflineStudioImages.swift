@@ -114,7 +114,8 @@ extension OfflineStudio {
     }
 
     var imageReady: Bool {
-        StudioImageModel(rawValue: imageModel)?.isInstalled == true
+        if StudioImageDownloads.shared.activeModel?.id == imageModel { return false }
+        return StudioImageModel(rawValue: imageModel)?.isInstalled == true
     }
 
     private var installedLoRA: String? {
@@ -179,13 +180,18 @@ extension OfflineStudio {
     }
 
     @ViewBuilder private var regularImageModelActions: some View {
-        if imageReady {
+        let downloads = StudioImageDownloads.shared
+        if downloads.activeModel?.id == imageModel {
+            StudioImageDownloadProgress()
+        } else if imageReady {
             Label("Billedmodellen er gemt på telefonen", systemImage: "checkmark.circle")
                 .font(.caption).foregroundStyle(.secondary)
         } else {
-            Button("Hent billedmodel") { downloadImageModel() }.frame(minHeight: 44).disabled(task != nil)
-            FadedDetailText("Lad FadedAI være åben, mens billedmodellen hentes.")
+            Button("Hent billedmodel") { downloadImageModel() }.frame(minHeight: 44)
+                .disabled(task != nil || downloads.activeModel != nil)
+            FadedDetailText("Download fortsætter i baggrunden.")
         }
+        if let notice = downloads.notice { FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently) }
         Button("Importér LoRA fra Filer") { importLoRA = true }.frame(minHeight: 44).disabled(task != nil)
         let names = importedLoRAs
         if !names.isEmpty {

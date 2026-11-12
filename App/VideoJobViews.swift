@@ -447,9 +447,7 @@ extension Home {
                 }
                 ForEach(savedVideos, id: \.self) { file in
                     HStack(spacing: 8) {
-                        NavigationLink {
-                            Preview(media: Media(url: file, demo: false))
-                        } label: {
+                        NavigationLink(value: file) {
                             Label(file.deletingPathExtension().lastPathComponent, systemImage: "film")
                                 .frame(minHeight: 44)
                         }
@@ -467,6 +465,9 @@ extension Home {
                     }
                 }
             }.navigationTitle("Gemte videoer")
+                .navigationDestination(for: URL.self) { file in
+                    Preview(media: Media(url: file, demo: false))
+                }
                 .toolbar { Button("Luk") { showSavedVideos = false } }
                 .confirmationDialog("Slet den gemte video fra telefonen?", isPresented: Binding(
                     get: { pendingLocalDeletion != nil },

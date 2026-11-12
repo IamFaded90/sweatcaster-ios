@@ -16,6 +16,11 @@ struct BatchReviewSheet: View {
 }
 
 struct BatchReviewView: View {
+    private struct ProposalRoute: Hashable {
+        let id: String
+        let goal: String?
+    }
+
     let api: LiveAPI
     @State private var jobs: [CodeBatchList.Job] = []
     @State private var repo = ""
@@ -69,9 +74,7 @@ struct BatchReviewView: View {
                     FadedDetailText("Dine forslag vises her. Tryk Bed om et forslag ovenfor for at begynde.")
                 }
                 ForEach(jobs) { job in
-                    NavigationLink {
-                        BatchProposalView(api: api, id: job.id, goal: job.goal)
-                    } label: {
+                    NavigationLink(value: ProposalRoute(id: job.id, goal: job.goal)) {
                         VStack(alignment: .leading) {
                             Text(job.goal)
                             Text(batchStatus(job.status)).foregroundStyle(.secondary)
@@ -83,6 +86,9 @@ struct BatchReviewView: View {
         .scrollContentBackground(.hidden)
         .background(FadedBackground(variant: .terminal))
         .navigationTitle("Forslag til flere filer")
+        .navigationDestination(for: ProposalRoute.self) { proposal in
+            BatchProposalView(api: api, id: proposal.id, goal: proposal.goal)
+        }
         .confirmationDialog("Hent projekt fra GitHub?", isPresented: Binding(
             get: { projectToClone != nil }, set: { if !$0 { projectToClone = nil } }
         ), titleVisibility: .visible, presenting: projectToClone) { project in

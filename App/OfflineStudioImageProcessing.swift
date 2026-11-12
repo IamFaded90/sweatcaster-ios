@@ -3,26 +3,14 @@
 
 import CoreImage
 import MediaGenerationKit
+import Observation
 import SwiftUI
 import UIKit
 
 extension OfflineStudio {
     func downloadImageModel() {
-        guard !privateSession, let selected = StudioImageModel(rawValue: imageModel) else { return }
-        guard !selected.isInstalled else { status = "Billedmodellen er allerede gemt på telefonen."; return }
-        guard PhoneModels.hasDownloadSpace(bytes: selected.minimumFreeBytes) else { status = "Frigør mere plads før download."; return }
-        run("Henter billedmodel…") {
-            defer { downloadProgress = nil }
-            try await selected.ensure { value in
-                Task { @MainActor in
-                    if task != nil { downloadProgress = value }
-                }
-            }
-            try Task.checkCancellation()
-            status = "Billedmodel hentet og gemt på telefonen."
-            await JobNotifications.shared.completed(kind: "image-model", server: "phone", id: UUID().uuidString,
-                                                     title: "Din lokale billedmodel er klar!")
-        }
+        guard !privateSession, task == nil, let selected = StudioImageModel(rawValue: imageModel) else { return }
+        StudioImageDownloads.shared.start(selected)
     }
 
     func prepareImageFolder(_ url: URL) throws {

@@ -61,7 +61,7 @@ struct StudioPhotoInput: Transferable {
 
 enum StudioImageInterruption: Error { case heat, battery, network }
 
-enum StudioImageModel: String, CaseIterable, Identifiable {
+enum StudioImageModel: String, CaseIterable, Identifiable, Sendable {
     case stableDiffusion = "sd_v1.5_f16.ckpt"
     case fluxKlein = "flux_2_klein_4b_q8p.ckpt"
 
@@ -76,11 +76,17 @@ enum StudioImageModel: String, CaseIterable, Identifiable {
     var renderSize: Int { self == .fluxKlein ? 1024 : 512 }
     var renderSteps: Int { self == .fluxKlein ? 4 : 16 }
     var minimumWorkingMemoryMiB: UInt64 { self == .fluxKlein ? 4_096 : 2_048 }
-    private var requiredFiles: [String] {
-        // The pinned SDK's catalog also requires a text encoder and autoencoder for each model.
+    var downloadFiles: [StudioImageDownloadFile] {
+        // Match the model filenames and hashes from the pinned Draw Things ModelZoo catalog.
         switch self {
-        case .stableDiffusion: [id, "clip_vit_l14_f16.ckpt", "vae_ft_mse_840000_f16.ckpt"]
-        case .fluxKlein: [id, "qwen_3_4b_q8p.ckpt", "flux_2_vae_f16.ckpt"]
+        case .stableDiffusion:
+            [StudioImageDownloadFile(name: id, sha256: "bf867591702e4c5d86cb126a3601d7e494180cce956b8dfaf90e5093d2e7c0f6"),
+             StudioImageDownloadFile(name: "clip_vit_l14_f16.ckpt", sha256: "809bfd12c8d4b3d79c14e850b99130a70854f6fd8dedcacdf429417c02fa3007"),
+             StudioImageDownloadFile(name: "vae_ft_mse_840000_f16.ckpt", sha256: "3b35514e11dd2b913e0579089babc1dfbd36589a77044c2e9b8065187e2f4154")]
+        case .fluxKlein:
+            [StudioImageDownloadFile(name: id, sha256: "430ba0f94ee0851a7f95c1383527f931afa6219898a51c5aa8e37979e9e4c86a"),
+             StudioImageDownloadFile(name: "qwen_3_4b_q8p.ckpt", sha256: "a24e3f832917aafe7f6186e6dfb96ab19a4a0729cdf60a875b5da20024333350"),
+             StudioImageDownloadFile(name: "flux_2_vae_f16.ckpt", sha256: nil)]
         }
     }
 
@@ -88,47 +94,17 @@ enum StudioImageModel: String, CaseIterable, Identifiable {
         let environment = MediaGenerationEnvironment.default
         // Offline inspection checks the renderer's catalog; verify the dependency files as well.
         guard let resolved = try? environment.inspectModel(id, offline: true), resolved.isDownloaded else { return false }
-        let roots = Set(environment.externalUrls)
-        return requiredFiles.allSatisfy { name in
-            roots.contains { root in
-                let file = root.appendingPathComponent(name, isDirectory: false)
-                return ((try? LocalFileStore.checkedFileSize(file, maximumBytes: Int.max)) ?? 0) > 0
-            }
-        }
-    }
-
-    func ensure(progress: @escaping @Sendable (Double) -> Void) async throws {
-        try Task.checkCancellation()
-        guard !isInstalled else { return }
-        _ = try await MediaGenerationEnvironment.default.ensure(rawValue) { state in
-            if case .downloading(_, let index, let count, let written, let total) = state, count > 0, total > 0 {
-                let part = min(1, Double(written) / Double(total))
-                progress(min(1, (Double(max(0, index - 1)) + part) / Double(count)))
-            }
-        }
-        try Task.checkCancellation()
-        guard isInstalled else { throw PhoneModelError.unavailable }
+        return downloadFiles.allSatisfy(\.isPresent)
     }
 }
 
 struct StudioImageDownloadsView: View {
-    @Binding var downloading: StudioImageModel?
     let canStart: Bool
-    let onDownloaded: () -> Void
-    @State private var task: Task<Void, Never>?
-    @State private var progress: Double?
-    @State private var notice: String?
-    @State private var activeDownload: UUID?
-
-    init(downloading: Binding<StudioImageModel?>, canStart: Bool, onDownloaded: @escaping () -> Void) {
-        _downloading = downloading
-        self.canStart = canStart
-        self.onDownloaded = onDownloaded
-    }
+    private var downloads: StudioImageDownloads { .shared }
 
     var body: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.section) {
-            FadedSectionHeader("Billedmodeller", detail: "Hent modellen én gang til din telefon. Hold siden åben, mens den hentes.")
+            FadedSectionHeader("Billedmodeller", detail: "Hent modellen én gang. Download fortsætter i baggrunden.")
             ForEach(StudioImageModel.allCases) { model in
                 FadedCard {
                     VStack(alignment: .leading, spacing: 10) {
@@ -136,61 +112,38 @@ struct StudioImageDownloadsView: View {
                         FadedDetailText(model == .stableDiffusion
                                         ? "Start her. Kræver mindst 4 GB ledig plads før download."
                                         : "Tungere model. Kræver mindst 8 GB ledig plads før download.")
-                        if downloading == model {
-                            if let progress {
-                                ProgressView(value: progress) { Text(progress.formatted(.percent)) }
-                            } else {
-                                ProgressView("Henter billedmodellen…")
-                            }
-                            FadedSecondaryButton("Stop download", icon: "stop.fill") { task?.cancel() }
+                        if downloads.activeModel == model {
+                            StudioImageDownloadProgress()
                         } else if model.isInstalled {
                             Label("Gemt på telefonen", systemImage: "checkmark.circle")
                         } else {
-                            FadedSecondaryButton("Hent billedmodel", icon: "arrow.down.circle") { download(model) }
+                            FadedSecondaryButton("Hent billedmodel", icon: "arrow.down.circle") { downloads.start(model) }
                                 .accessibilityLabel("Hent \(model.title)").disabled(!canStart)
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            if let notice { FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently) }
+            if let notice = downloads.notice { FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently) }
         }
-        .onDisappear { task?.cancel() }
+    }
+}
+
+struct StudioImageDownloadProgress: View {
+    var body: some View {
+        let downloads = StudioImageDownloads.shared
+        if let progress = downloads.progress, progress < 1 {
+            ProgressView(value: progress) { Text(progress.formatted(.percent)) }
+        } else {
+            ProgressView(progressLabel(downloads.progress))
+        }
+        FadedSecondaryButton("Stop download", icon: "stop.fill") { downloads.cancel() }
     }
 
-    private func download(_ model: StudioImageModel) {
-        guard canStart, !model.isInstalled else { return }
-        guard PhoneModels.hasDownloadSpace(bytes: model.minimumFreeBytes) else {
-            notice = "Der er for lidt ledig plads. Frigør plads, og prøv igen."
-            return
+    private func progressLabel(_ progress: Double?) -> String {
+        if progress == 1 {
+            return "Kontrollerer billedmodellen…"
         }
-        let id = UUID()
-        activeDownload = id
-        downloading = model
-        progress = nil
-        notice = nil
-        task = Task { @MainActor in
-            defer {
-                activeDownload = nil
-                downloading = nil
-                progress = nil
-                task = nil
-            }
-            do {
-                try await model.ensure { value in
-                    Task { @MainActor in
-                        if activeDownload == id { progress = value }
-                    }
-                }
-                try Task.checkCancellation()
-                notice = "\(model.title) er klar på telefonen."
-                onDownloaded()
-            } catch is CancellationError {
-                notice = "Download stoppet."
-            } catch {
-                AppDiagnostics.record(error)
-                notice = "Billedmodellen kunne ikke hentes. Tjek internet og ledig plads, og prøv igen."
-            }
-        }
+        return "Henter billedmodellen…"
     }
 }
 

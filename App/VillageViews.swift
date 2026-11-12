@@ -536,10 +536,7 @@ struct VillageBotLibrary: View {
                         .listRowInsets(rowInsets).listRowSeparator(.hidden).listRowBackground(Color.clear)
                 }
                 ForEach(bots) { bot in
-                    NavigationLink {
-                        VillageBotProfile(botID: bot.id, api: api, studioUnlocked: $studioUnlocked,
-                                          onPrivateSessionEnded: onPrivateSessionEnded)
-                    } label: {
+                    NavigationLink(value: bot.id) {
                         botRow(bot)
                     }
                     .listRowInsets(rowInsets).listRowSeparator(.hidden).listRowBackground(Color.clear)
@@ -557,6 +554,10 @@ struct VillageBotLibrary: View {
             .foregroundStyle(palette.text)
             .navigationTitle("Mine bots")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationDestination(for: UUID.self) { botID in
+                VillageBotProfile(botID: botID, api: api, studioUnlocked: $studioUnlocked,
+                                  onPrivateSessionEnded: onPrivateSessionEnded)
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Tilbage", systemImage: "chevron.left", action: onBack)
