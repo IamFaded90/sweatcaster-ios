@@ -369,13 +369,7 @@ extension Home {
             model: model, clips: clips, clipGame: $clipGame, shortClips: $shortClips,
             recentJobsFirst: $recentJobsFirst, clipDateRange: $clipDateRange,
             compactClipCards: compactClipCards, showClipDurations: showClipDurations,
-            onDone: openVideoRecipe,
-            onRemoved: { id in
-                for folderID in Array(folderPages.keys) {
-                    folderPages[folderID]?.removeAll { $0.id == id }
-                }
-                model.forgetRemovedOriginalClip(id)
-            }
+            onDone: openVideoRecipe
         ) : nil
         return VideoFolderScreen(
             folderID: folder.id, server: server, list: list,
@@ -582,10 +576,6 @@ private struct VideoClipList: View {
     let compactClipCards: Bool
     let showClipDurations: Bool
     let onDone: () -> Void
-    let onRemoved: (String) -> Void
-    @State private var removalCandidate: Clip? = nil
-    @State private var removingClip = false
-    @State private var removalError: String? = nil
 
     var body: some View {
         let filtered = filteredClips(clips)
@@ -606,7 +596,6 @@ private struct VideoClipList: View {
                 HStack { clipListActions(filtered, onDone: onDone) }
                 VStack(alignment: .leading) { clipListActions(filtered, onDone: onDone) }
             }
-            if let removalError { FadedDetailText(removalError) }
             if filtered.isEmpty {
                 FadedEmptyState(icon: "film", title: clips.isEmpty ? "Mappen er tom" : "Ingen klip matcher",
                                 detail: clips.isEmpty ? "Tilføj et klip på PC’en, og opdatér mappen." : "Prøv et andet filnavn eller filter.",
@@ -619,52 +608,8 @@ private struct VideoClipList: View {
             } else {
                 Text("PC’en sender klipnavne og varighed.").font(.caption).foregroundStyle(palette.secondary)
                 LazyVGrid(columns: videoClipColumns, spacing: 12) {
-                    ForEach(filtered) { clip in
-                        VStack(alignment: .trailing, spacing: 0) {
-                            videoClipCard(clip)
-                            if !model.isDemo {
-                                Button(role: .destructive) { removalCandidate = clip } label: {
-                                    Image(systemName: "trash").frame(width: 44, height: 44)
-                                }
-                                .buttonStyle(.plain)
-                                .foregroundStyle(palette.coralText)
-                                .accessibilityLabel("Slet originalklippet \(clip.name)")
-                                .disabled(removingClip || model.busy || !model.connected)
-                            }
-                        }
-                    }
+                    ForEach(filtered) { clip in videoClipCard(clip) }
                 }
-            }
-        }
-        .confirmationDialog("Slet originalklip fra spilmappen?", isPresented: Binding(
-            get: { removalCandidate != nil }, set: { if !$0 { removalCandidate = nil } }
-        ), presenting: removalCandidate) { clip in
-            Button("Slet originalklip", role: .destructive) {
-                Task { await removeOriginal(clip) }
-            }
-        } message: { clip in
-            Text("\(clip.name) flyttes til .FadedAI-slettede-klip i PC’ens spilmappe, hvor det kan gendannes.")
-        }
-    }
-
-    private func removeOriginal(_ clip: Clip) async {
-        guard !removingClip, !model.isDemo, model.connected, let api = model.api as? LiveAPI else { return }
-        removingClip = true
-        removalError = nil
-        defer { removingClip = false }
-        do {
-            try await api.removeOriginalVideoClip(clip.id)
-            guard (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
-            onRemoved(clip.id)
-        } catch {
-            guard (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
-            AppDiagnostics.record(error)
-            if case .http(404, nil)? = error as? APIError {
-                removalError = "Opdatér FadedAI på PC’en for at kunne slette originalklip."
-            } else if case .http(_, let problem?)? = error as? APIError {
-                removalError = problem.message
-            } else {
-                removalError = "Kunne ikke bekræfte sletningen. Opdatér spilmappen, og tjek forbindelsen."
             }
         }
     }

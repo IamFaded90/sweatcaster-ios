@@ -20,8 +20,6 @@ The optional `mcp` subcommand requires the official Python `mcp` SDK. Configure 
 
 Run `python backend/install_module_tabs.py <checkpoint-directory>` and restart the PC server. The installer validates the existing hook locations and keeps copies of the two original files. The separate `/api/modules/v1` endpoints use the existing pairing authentication. The first compatible iOS build is required once.
 
-I **Video Studio → Klip** flytter papirkurven originalen til `.FadedAI-slettede-klip` inde i PC’ens spilmappe. Åbn mappen i Stifinder, og flyt filen tilbage for at gendanne den. Filerne fylder på PC’en, indtil du sletter dem fra mappen.
-
 Export JSON from Kortscanner, open Kortsamling on the phone and choose the file. Import replaces the previous collection on this PC. In v2 chat, type `Kortsamling: Hvilke kort har jeg dubletter af?` or `Kortsamling: Hvilke kort mangler en pris?`. These answers use a local lookup.
 
 Add more native information tabs by placing `module-tabs.json` in the configured output directory, for example `[{"id":"status","title":"Status","text":"Alle rutiner er klar."}]`. The phone refreshes the manifest on foreground and pull-to-refresh. Other renderers and actions require a new app build.

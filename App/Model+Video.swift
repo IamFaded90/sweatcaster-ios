@@ -127,13 +127,6 @@ extension Model {
         saveVideoSelection()
     }
 
-    func forgetRemovedOriginalClip(_ id: String) {
-        selected.remove(id)
-        clips.removeAll { $0.id == id }
-        clipFolderIDs.removeValue(forKey: id)
-        saveVideoSelection()
-    }
-
     func includeFolderClips(_ additional: [Clip], folderID: String? = nil) {
         var known = Set(clips.map(\.id))
         clips.append(contentsOf: additional.filter { known.insert($0.id).inserted })
