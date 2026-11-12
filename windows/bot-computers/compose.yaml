@@ -1,0 +1,66 @@
+# Adam and Eva each get an on-demand AIO Computer desktop.
+# Image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/aio-computer:1.0.1
+# Source: https://github.com/agent-infra/sandbox (Apache-2.0). The image is not vendored here.
+# Ports stay on 127.0.0.1. The phone talks to the paired FadedAI server, not to these ports.
+# `restart: "no"` is intentional: a computer starts when someone asks for it.
+
+name: fadedai-bot-computers
+
+services:
+  adam:
+    image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/aio-computer:1.0.1
+    container_name: fadedai-bot-adam
+    profiles: ["adam"]
+    restart: "no"
+    security_opt:
+      - seccomp:unconfined
+    shm_size: "4gb"
+    ports:
+      - "127.0.0.1:8091:8091"
+    environment:
+      OLLAMA_HOST: http://host.docker.internal:11434
+      AIO_API_KEY: ${ADAM_AIO_KEY:?set ADAM_AIO_KEY in the data-folder env file}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: ${FADEDAI_BOT_ROOT:?set FADEDAI_BOT_ROOT}/desks/adam/files
+        target: /home/sandbox/fadedai
+      - adam-chromium:/home/sandbox/.config/chromium
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  eva:
+    image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/aio-computer:1.0.1
+    container_name: fadedai-bot-eva
+    profiles: ["eva"]
+    restart: "no"
+    security_opt:
+      - seccomp:unconfined
+    shm_size: "4gb"
+    ports:
+      - "127.0.0.1:8092:8091"
+    environment:
+      OLLAMA_HOST: http://host.docker.internal:11434
+      AIO_API_KEY: ${EVA_AIO_KEY:?set EVA_AIO_KEY in the data-folder env file}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - type: bind
+        source: ${FADEDAI_BOT_ROOT:?set FADEDAI_BOT_ROOT}/desks/eva/files
+        target: /home/sandbox/fadedai
+      - eva-chromium:/home/sandbox/.config/chromium
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  adam-chromium:
+  eva-chromium:

@@ -32,6 +32,10 @@ Copy `sweatcaster/code_batch.py` into the same installed Python package as `repo
 
 The queue persists under the PC output directory. The worker starts with the PC HTTP server after installing the module hooks. It serializes jobs and acquires the existing Ollama model lease shared with chat and rendering. A job produces a unified diff for up to five selected tracked files and a test plan. In the compatible iOS app, open **Code Bot → Forslag til flere filer** to submit and review jobs. Approval creates a local `fadedai/review-*` branch in the bare repository snapshot. The source branch remains unchanged. `worker --once` is also available for standalone diagnostics.
 
+## Bot-computere
+
+Adam og Eva kan få hver sin AIO Computer på Docker Desktop. Filen ligger i `windows/bot-computers/`, og den daglige brug er et vindue uden konsol. Læs `windows/bot-computers/LAES-MIG.md`. Modulet kopieres kun ind i en kopi af PC-programmet med `python backend/install_bot_computers.py <kopi>`. Scriptet skriver ikke til den kørende installation. Ollama på pc'en genbruges. Modellerne på `F:\FadedAI` bliver liggende.
+
 ## Forbindelse med QR
 
 Åbn en interaktiv Windows Terminal i projektmappen. QR-værktøjet kræver Python-pakken `qrcode`.
