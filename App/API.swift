@@ -123,6 +123,37 @@ struct LiveAPI: SweatAPI, ChatAPI {
     func approveCodeBatch(_ id: String) async throws -> CodeBatchDetail.Proposal {
         try await moduleJSON("code-batches/\(Server.segment(id))/approval", upload: JSONEncoder().encode(["approved": true]))
     }
+
+    func botComputerResponse(botID: UUID, route: BotComputerRoute,
+                             body: Data?) async throws -> (Data, HTTPURLResponse) {
+        guard var components = URLComponents(url: server.origin, resolvingAgainstBaseURL: false) else {
+            throw APIError.address
+        }
+        components.path = "/api/modules/v1/bot-computers/\(botID.uuidString.lowercased())" + route.suffix
+        guard let url = components.url else { throw APIError.input }
+        let mime = route.isScreen ? "image/png" : "application/json"
+        var endpoint = request(url, method: route.method)
+        endpoint.setValue(mime, forHTTPHeaderField: "Accept")
+        if let timeout = route.timeout { endpoint.timeoutInterval = timeout }
+        if let body {
+            endpoint.httpBody = body
+            endpoint.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await loggedData(for: endpoint)
+        } catch let error as URLError where !Task.isCancelled {
+            throw mapped(error, posting: route.method == "POST")
+        }
+        guard let http = response as? HTTPURLResponse else { throw APIError.malformed }
+        let expected = (200...202).contains(http.statusCode) ? http.statusCode : 200
+        try checked(http, expected: expected, data: data)
+        let limit = route.isScreen ? 8 * 1024 * 1024 : 2_000_000
+        guard data.count <= limit, http.mimeType?.lowercased() == mime else { throw APIError.malformed }
+        return (data, http)
+    }
+
     let server: Server
     let queueTargetID: String
     private let token: String

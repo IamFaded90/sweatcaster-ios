@@ -115,11 +115,14 @@ def collection_answer(settings, message: str) -> str | None:
 
 
 def register_modules(app: FastAPI, settings, authorize) -> None:
+    from sweatcaster.bot_computer_routes import register_bot_computers
+    from sweatcaster.bot_computers import BotComputerWorker
     from sweatcaster.code_batch import BatchWorker, configured_batch
     from sweatcaster.repository_library import RepositoryError
 
     workspace = Path(os.environ.get("SWEATCASTER_WORKSPACE_DIR", "workspace"))
     batch = configured_batch(settings, workspace)
+    computers = register_bot_computers(app, settings, authorize)
     workflows = batch.workflows
     original_lifespan = app.router.lifespan_context
     mcp = None
@@ -166,11 +169,12 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             if mcp is not None:
                 await stack.enter_async_context(mcp.session_manager.run())
             worker = BatchWorker(batch)
+            computers_worker = BotComputerWorker(computers)
             worker.start()
-            try:
-                yield
-            finally:
-                worker.stop()
+            stack.callback(worker.stop)
+            computers_worker.start()
+            stack.callback(computers_worker.stop)
+            yield
 
     app.router.lifespan_context = lifespan
 

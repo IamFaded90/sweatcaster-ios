@@ -38,6 +38,7 @@ struct VillageBotProfile: View {
             VStack(spacing: 16) {
                 if let bot = localBots.first(where: { $0.id == botID }) {
                     hero(bot)
+                    computerLink(bot, roster: localBots)
                     voiceCard(bot)
                     personalityCard(bot)
                     testCard(bot)
@@ -85,6 +86,20 @@ struct VillageBotProfile: View {
             do { try await Task.sleep(for: .seconds(5)) } catch { return }
             if deletedBot?.id == id { deletedBot = nil }
         }
+    }
+
+    private func computerLink(_ bot: VillageBot, roster: [VillageBot]) -> some View {
+        NavigationLink {
+            BotComputerView(bot: bot, roster: roster, api: api)
+        } label: {
+            FadedCard(accent: palette.cyan) {
+                Label("Computer", systemImage: "desktopcomputer")
+                    .font(FadedTypography.action)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Computer for \(bot.name)")
     }
 
     private func hero(_ bot: VillageBot) -> some View {

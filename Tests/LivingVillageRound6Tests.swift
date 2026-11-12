@@ -145,7 +145,7 @@ import XCTest
         if case .failure = model.loadBots() {} else { XCTFail("Forventede en læsefejl") }
     }
 
-    func testTwentyFourHourEnergyCycleSumsToZero() {
+    func testTwentyFourHourEnergyCycleReturnsToFullByMorning() {
         var counts: [BotActivity: Int] = [:]
         for hour in 0..<24 { counts[BotActivity.scheduled(atHour: hour), default: 0] += 1 }
         XCTAssertEqual(counts[.working], 9)
@@ -156,7 +156,6 @@ import XCTest
         XCTAssertEqual(BotActivity.scheduled(atHour: 12).energyPerHour, -1)
         XCTAssertEqual(BotActivity.scheduled(atHour: 18).energyPerHour, 2)
         XCTAssertEqual(BotActivity.scheduled(atHour: 22).energyPerHour, 4)
-        XCTAssertEqual(BotActivity.rawDailyEnergyDelta, Double(9 * -4 + 2 * -1 + 4 * 2 + 9 * 4))
         XCTAssertEqual(BotActivity.rawDailyEnergyDelta, 6)
         let morning = BotActivity.energyAfterOneDay(startingAtHour: 7, energy: 100)
         XCTAssertEqual(morning, 100)
