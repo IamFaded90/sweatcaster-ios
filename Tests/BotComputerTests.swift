@@ -158,6 +158,24 @@ import XCTest
         XCTAssertEqual(session.office.task(id: task.id)?.status, .cancelled)
     }
 
+    func testCancelDuringInFlightSubmitReachesThePC() async throws {
+        let transport = ScriptedComputer()
+        transport.gateSubmit = true
+        transport.leaveWaiting = true
+        let session = try makeSession(transport)
+        async let submitted = give(session, key: "key-adam-inflight")
+        await transport.waitUntilSubmitStarted()
+        let task = try XCTUnwrap(session.office.tasks.first)
+        let cancelled = try await result(session.cancel(id: task.id))
+        XCTAssertEqual(cancelled.status, .cancelled)
+        XCTAssertEqual(transport.cancels, 0)
+        transport.releaseSubmit()
+        _ = try await submitted
+        XCTAssertEqual(session.office.task(id: task.id)?.status, .cancelled)
+        XCTAssertEqual(transport.cancels, 1)
+        XCTAssertTrue(session.office.pendingCancelIDs.isEmpty)
+    }
+
     func testLocalCancelIsNotReplacedByARemoteWaitingTask() {
         var office = BotComputerOffice()
         let task = BotComputerTask(id: "task-cancel", botID: adam, botName: "Adam", idempotencyKey: "key-cancel",
@@ -232,7 +250,11 @@ import XCTest
     var isolateReads = false
     var leaveWaiting = false
     var delay = false
+    var gateSubmit = false
     private var sent: [String: BotComputerTask] = [:]
+    private var submitEntered = false
+    private var waitingForStart: CheckedContinuation<Void, Never>?
+    private var waitingForRelease: CheckedContinuation<Void, Never>?
 
     func health() async throws -> BotComputerLink {
         if healthLink == .pcOffline { throw BotComputerFailure.pcOffline }
@@ -240,8 +262,31 @@ import XCTest
         return healthLink
     }
 
+    func waitUntilSubmitStarted() async {
+        await withCheckedContinuation { continuation in
+            if submitEntered {
+                continuation.resume()
+            } else {
+                waitingForStart = continuation
+            }
+        }
+    }
+
+    func releaseSubmit() {
+        waitingForRelease?.resume()
+        waitingForRelease = nil
+    }
+
     func submit(_ task: BotComputerTask) async throws -> BotComputerSubmission {
         if delay { try await Task.sleep(for: .milliseconds(50)) }
+        if gateSubmit {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                waitingForRelease = continuation
+                submitEntered = true
+                waitingForStart?.resume()
+                waitingForStart = nil
+            }
+        }
         submits += 1
         if let existing = sent[task.idempotencyKey] {
             return BotComputerSubmission(link: healthLink == .dockerOffline ? .dockerOffline : .online, task: existing)

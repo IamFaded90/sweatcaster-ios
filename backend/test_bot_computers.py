@@ -155,6 +155,21 @@ def test_desk_write_replaces_a_symlink_instead_of_following_it(tmp_path):
     assert link.read_text(encoding="utf-8") == "Adams rapport"
 
 
+def test_share_copy_replaces_a_guest_planted_symlink(tmp_path):
+    desk, _ = office(tmp_path)
+    outside = tmp_path / "escape.txt"
+    outside.write_text("hemmelig", encoding="utf-8")
+    desk.submit(EVA, "Eva", "Vent", "key-eva-share")
+    desk.write_file(ADAM, "Adam", "rapport.txt", "Adams rapport")
+    planted = tmp_path / "desks" / "eva" / "files" / "delt-adam-rapport.txt"
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.symlink_to(outside)
+    desk.share(ADAM, "rapport.txt", EVA, approved=True)
+    assert outside.read_text(encoding="utf-8") == "hemmelig"
+    assert planted.is_symlink() is False
+    assert planted.read_text(encoding="utf-8") == "Adams rapport"
+
+
 def test_container_key_is_read_from_the_data_folder(tmp_path, monkeypatch):
     monkeypatch.delenv("ADAM_AIO_KEY", raising=False)
     monkeypatch.delenv("FADEDAI_OLLAMA_MODEL", raising=False)

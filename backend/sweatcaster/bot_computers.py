@@ -477,24 +477,41 @@ class BotComputerOffice:
         return folder
 
     def _write_desk(self, owner_name: str, path: str, text: str) -> None:
+        path = _check_path(path)
         folder = self._desk_folder(owner_name)
         target = folder / path
-        if target.is_symlink():
-            target.unlink()
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
+        temporary = folder / f".skriv-{uuid4().hex}"
         try:
-            handle = os.open(target, flags, 0o600)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                handle = os.open(temporary, flags, 0o600)
+            except OSError as exc:
+                raise BotComputerError("Filen peger uden for computerens mappe.") from exc
+            try:
+                os.write(handle, text.encode("utf-8"))
+            finally:
+                os.close(handle)
+            resolved_folder = folder.resolve()
+            if temporary.is_symlink() or not temporary.resolve().is_relative_to(resolved_folder):
+                raise BotComputerError("Filen peger uden for computerens mappe.")
+            if target.is_symlink():
+                target.unlink()
+            os.replace(temporary, target)
+            if target.is_symlink() or not target.resolve().is_relative_to(resolved_folder):
+                if target.is_symlink() or target.exists():
+                    target.unlink()
+                raise BotComputerError("Filen peger uden for computerens mappe.")
+        except BotComputerError:
+            if temporary.is_symlink() or temporary.exists():
+                temporary.unlink()
+            raise
         except OSError as exc:
+            if temporary.is_symlink() or temporary.exists():
+                temporary.unlink()
             raise BotComputerError("Filen peger uden for computerens mappe.") from exc
-        try:
-            os.write(handle, text.encode("utf-8"))
         finally:
-            os.close(handle)
-        if target.is_symlink() or not target.resolve().is_relative_to(folder.resolve()):
-            raise BotComputerError("Filen peger uden for computerens mappe.")
-
-    def _disk(self, owner_name: str, path: str) -> Path:
-        return self._desk_folder(owner_name) / path
+            if temporary.is_symlink() or temporary.exists():
+                temporary.unlink()
 
 
 def local_report(instruction: str, source: str) -> str:

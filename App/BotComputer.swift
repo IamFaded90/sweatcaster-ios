@@ -368,6 +368,8 @@ enum BotComputerDisk {
             office.link = submission.link
             office.adopt(submission.task)
             office.deliveredKeys.insert(key)
+            queueCancelIfNeeded(for: key)
+            await deliverCancels()
             persist()
             return .success(office.task(key: key) ?? submission.task)
         } catch {
@@ -397,6 +399,7 @@ enum BotComputerDisk {
                 office.link = submission.link
                 office.adopt(submission.task)
                 office.deliveredKeys.insert(task.idempotencyKey)
+                queueCancelIfNeeded(for: task.idempotencyKey)
             } catch {
                 office.link = Self.link(for: error)
                 inFlight.remove(task.idempotencyKey)
@@ -420,27 +423,22 @@ enum BotComputerDisk {
         catch { return .failure(.rejected("Opgaven kunne ikke annulleres.")) }
         persist()
         if before == .cancelled { return .success(updated) }
-        guard let current = office.task(id: id), office.deliveredKeys.contains(current.idempotencyKey) else {
+        guard let current = office.task(id: id) else { return .success(updated) }
+        let sentOrSending = office.deliveredKeys.contains(current.idempotencyKey)
+            || inFlight.contains(current.idempotencyKey)
+            || (current.retryKey.map(inFlight.contains) ?? false)
+        guard sentOrSending else {
             return .success(office.task(id: id) ?? updated)
         }
+        office.pendingCancelIDs.insert(id)
+        persist()
         let reachable = office.link == .online || office.link == .dockerOffline
-        guard reachable else {
-            office.pendingCancelIDs.insert(id)
-            persist()
+        guard reachable, office.deliveredKeys.contains(current.idempotencyKey) else {
             return .success(office.task(id: id) ?? updated)
         }
-        do {
-            let remote = try await transport.cancel(botID: current.botID, id: current.id)
-            office.pendingCancelIDs.remove(id)
-            office.adopt(remote)
-            persist()
-            return .success(office.task(id: id) ?? remote)
-        } catch {
-            office.pendingCancelIDs.insert(id)
-            office.link = Self.link(for: error)
-            persist()
-            return .success(office.task(id: id) ?? updated)
-        }
+        await deliverCancels()
+        persist()
+        return .success(office.task(id: id) ?? updated)
     }
 
     func retry(id: String, retryKey: String) async -> Result<BotComputerTask, BotComputerFailure> {
@@ -463,6 +461,8 @@ enum BotComputerDisk {
             office.link = submission.link
             office.adopt(submission.task)
             office.deliveredKeys.insert(updated.idempotencyKey)
+            queueCancelIfNeeded(for: updated.idempotencyKey)
+            await deliverCancels()
             persist()
             return .success(office.task(id: id) ?? submission.task)
         } catch {
@@ -512,12 +512,18 @@ enum BotComputerDisk {
         persist()
     }
 
+    private func queueCancelIfNeeded(for key: String) {
+        guard let task = office.task(key: key), task.status == .cancelled else { return }
+        office.pendingCancelIDs.insert(task.id)
+    }
+
     private func deliverCancels() async {
         for id in office.pendingCancelIDs {
             guard let task = office.task(id: id) else {
                 office.pendingCancelIDs.remove(id)
                 continue
             }
+            guard office.deliveredKeys.contains(task.idempotencyKey) else { continue }
             do {
                 let remote = try await transport.cancel(botID: task.botID, id: task.id)
                 office.pendingCancelIDs.remove(id)
