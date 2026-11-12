@@ -1,5 +1,9 @@
 # FadedAI PC backend extensions
 
+## Fælles opdatering på Windows
+
+Lad igangværende FadedAI-opgaver afslutte. Dobbeltklik på `setup_aio_windows.pyw`, vælg den eksisterende FadedAI-mappe, og tryk **Opdatér FadedAI**. Vinduet opdaterer AIO, Emby, FPS-kommentarer og stemmer samlet. Det tjekker kompatibiliteten, før det skriver til den eksisterende installation. Åbn derefter den sædvanlige FadedAI-genvej efter genstart. Emby-login klares særskilt i `setup_emby_windows.pyw`.
+
 `repository_library.py` is an additive PC module. Copy it into the existing Python installation's `sweatcaster` package. The current HTTP contracts stay as shipped. Use the PC's existing Git credential helper for private GitHub access, configured under the same Windows account that runs this command. The module never accepts a token or an arbitrary clone URL.
 
 From the PC backend directory, replace the two example paths with the configured Agent Workspace and the existing local ONNX embedding directory:

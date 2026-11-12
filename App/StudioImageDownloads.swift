@@ -38,14 +38,23 @@ private struct StudioImageTransfer: Equatable, Sendable {
 private struct StudioImageTransferFile: Sendable {
     let transfer: StudioImageTransfer
     let file: StudioImageDownloadFile
+    let usedResumeData: Bool
 
-    init?(_ task: URLSessionTask) {
-        guard let description = task.taskDescription, let separator = description.lastIndex(of: ":"),
-              let transfer = StudioImageTransfer(String(description[..<separator])),
-              let file = transfer.model.downloadFiles.first(where: { $0.name == description[description.index(after: separator)...] })
-        else { return nil }
+    init(transfer: StudioImageTransfer, file: StudioImageDownloadFile) {
         self.transfer = transfer
         self.file = file
+        usedResumeData = false
+    }
+
+    init?(_ task: URLSessionTask) {
+        guard let description = task.taskDescription else { return nil }
+        let fields = description.split(separator: ":", omittingEmptySubsequences: false)
+        guard fields.count == 3 || (fields.count == 4 && fields[3] == "resume"),
+              let transfer = StudioImageTransfer("\(fields[0]):\(fields[1])"),
+              let file = transfer.model.downloadFiles.first(where: { $0.name == fields[2] }) else { return nil }
+        self.transfer = transfer
+        self.file = file
+        usedResumeData = fields.count == 4
     }
 }
 
@@ -57,10 +66,14 @@ private struct StudioImageTransferFile: Sendable {
     private(set) var activeModel: StudioImageModel?
     private(set) var progress: Double?
     private(set) var notice: String?
+    private(set) var isInterrupted = false
     private var transfer: StudioImageTransfer?
     private var fractions: [String: Double] = [:]
     private var verifiedFiles = Set<String>()
-    private var pendingNotification: Task<Void, Never>?
+    private var blockedFiles = Set<String>()
+    @ObservationIgnored private var isForeground = false
+    @ObservationIgnored private var validation: Task<Void, Never>?
+    @ObservationIgnored private var reconciliation: Task<Void, Never>?
     private var backgroundCompletion: (() -> Void)?
     private let delegate = StudioImageDownloadDelegate()
     @ObservationIgnored private lazy var session: URLSession = {
@@ -69,6 +82,7 @@ private struct StudioImageTransferFile: Sendable {
         }
         let configuration = URLSessionConfiguration.background(withIdentifier: Self.backgroundIdentifier)
         configuration.sessionSendsLaunchEvents = true
+        configuration.isDiscretionary = false
         return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }()
 
@@ -80,22 +94,15 @@ private struct StudioImageTransferFile: Sendable {
     }
 
     func activate() {
-        guard let transfer else { return }
-        // Allow the background session to replay events from before this process started.
-        let session = self.session
-        Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2))
-            let tasks = await withCheckedContinuation { continuation in
-                session.getAllTasks { continuation.resume(returning: $0) }
-            }
-            guard self.transfer == transfer,
-                  !delegate.isValidating(transfer),
-                  !tasks.contains(where: { StudioImageTransferFile($0)?.transfer == transfer }) else { return }
-            if transfer.model.isInstalled {
-                finish(transfer)
-            } else {
-                clear(transfer, notice: "Download blev afbrudt. Tryk Hent billedmodel for at fortsætte.")
-            }
+        if transfer != nil { _ = session }
+    }
+
+    func setForeground(_ active: Bool) {
+        isForeground = active
+        if active {
+            reconcile()
+        } else {
+            validation?.cancel()
         }
     }
 
@@ -113,10 +120,38 @@ private struct StudioImageTransferFile: Sendable {
         let transfer = StudioImageTransfer(model: model)
         track(transfer)
         UserDefaults.standard.set(transfer.identifier, forKey: Self.pendingKey)
+        enqueue(missing, for: transfer)
+    }
+
+    func resume() {
+        guard let transfer, isInterrupted else { return }
+        isInterrupted = false
+        notice = nil
+        blockedFiles.removeAll()
+        let missing = transfer.model.downloadFiles.filter { file in
+            !file.isPresent && !delegate.isStaged(.init(transfer: transfer, file: file))
+        }
+        for file in missing { fractions[file.name] = nil }
+        updateProgress(for: transfer)
+        enqueue(missing, for: transfer)
+        reconcile()
+    }
+
+    private func enqueue(_ files: [StudioImageDownloadFile], for transfer: StudioImageTransfer) {
         let host = URL(string: "https://static.libnnc.org")!
-        for file in missing {
-            let task = session.downloadTask(with: host.appendingPathComponent(file.name))
-            task.taskDescription = "\(transfer.identifier):\(file.name)"
+        for file in files {
+            let transferFile = StudioImageTransferFile(transfer: transfer, file: file)
+            let resumeData = delegate.takeResumeData(for: transferFile)
+            let task: URLSessionDownloadTask
+            if let resumeData {
+                task = session.downloadTask(withResumeData: resumeData)
+            } else {
+                var request = URLRequest(url: host.appendingPathComponent(file.name))
+                request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+                task = session.downloadTask(with: request)
+            }
+            let suffix = resumeData == nil ? "" : ":resume"
+            task.taskDescription = "\(transfer.identifier):\(file.name)\(suffix)"
             task.resume()
         }
     }
@@ -137,8 +172,10 @@ private struct StudioImageTransferFile: Sendable {
         activeModel = transfer.model
         verifiedFiles = Set(transfer.model.downloadFiles.filter(\.isPresent).map(\.name))
         fractions = Dictionary(uniqueKeysWithValues: verifiedFiles.map { ($0, 1) })
+        blockedFiles.removeAll()
         progress = nil
         notice = nil
+        isInterrupted = false
     }
 
     private func receive(_ event: StudioImageDownloadDelegate.Event) {
@@ -148,50 +185,141 @@ private struct StudioImageTransferFile: Sendable {
             let previous = fractions[file.file.name] ?? 0
             guard fraction > previous else { return }
             fractions[file.file.name] = fraction
-            progress = fractions.values.reduce(0, +) / Double(file.transfer.model.downloadFiles.count)
-        case let .completed(file, error):
+            updateProgress(for: file.transfer)
+        case let .staged(file):
             guard file.transfer == transfer else { return }
-            if let error {
-                AppDiagnostics.record(error)
-                clear(file.transfer, notice: "Billedmodellen kunne ikke hentes. Tjek internet og ledig plads, og prøv igen.")
+            isInterrupted = false
+            notice = nil
+            receive(.progress(file, 1))
+            reconcile()
+        case let .failed(file, error):
+            guard file.transfer == transfer else { return }
+            AppDiagnostics.record(error)
+            if isForeground, file.usedResumeData, !delegate.hasResumeData(for: file),
+               !file.file.isPresent, !delegate.isStaged(file) {
+                fractions[file.file.name] = nil
+                enqueue([file.file], for: file.transfer)
+            }
+            reconcile()
+        case .eventsFinished:
+            let completion = backgroundCompletion
+            backgroundCompletion = nil
+            completion?()
+            reconcile()
+        }
+    }
+
+    private func updateProgress(for transfer: StudioImageTransfer) {
+        progress = fractions.isEmpty ? nil : fractions.values.reduce(0, +) / Double(transfer.model.downloadFiles.count)
+    }
+
+    private func reconcile() {
+        guard isForeground, let transfer, validation == nil else { return }
+        let files = transfer.model.downloadFiles
+        for file in files where file.isPresent {
+            verifiedFiles.insert(file.name)
+            fractions[file.name] = 1
+        }
+        updateProgress(for: transfer)
+        if verifiedFiles.count == files.count {
+            if transfer.model.isInstalled {
+                finish(transfer)
             } else {
-                verifiedFiles.insert(file.file.name)
-                receive(.progress(file, 1))
-                if verifiedFiles.count == file.transfer.model.downloadFiles.count {
-                    if file.transfer.model.isInstalled {
-                        finish(file.transfer)
-                    } else {
-                        clear(file.transfer, notice: "Telefonen kunne ikke åbne billedmodellen. Genåbn FadedAI, og prøv igen.")
+                clear(transfer, notice: "Telefonen kunne ikke åbne billedmodellen. Genåbn FadedAI, og prøv igen.")
+            }
+            return
+        }
+        let staged = files.filter { file in
+            !verifiedFiles.contains(file.name) && !blockedFiles.contains(file.name)
+                && delegate.isStaged(.init(transfer: transfer, file: file))
+        }
+        if !staged.isEmpty {
+            for file in staged { fractions[file.name] = 1 }
+            updateProgress(for: transfer)
+            validation = Task.detached(priority: .utility) { [weak self, delegate] in
+                for file in staged {
+                    let candidate = StudioImageTransferFile(transfer: transfer, file: file)
+                    do {
+                        try delegate.validateAndInstall(candidate)
+                    } catch is CancellationError {
+                        break
+                    } catch let error as MediaGenerationKitError {
+                        if case .hashMismatch = error {
+                            delegate.discardStaged(candidate)
+                        } else {
+                            await self?.blockValidation(for: candidate)
+                        }
+                        AppDiagnostics.record(error)
+                    } catch {
+                        guard !Task.isCancelled else { break }
+                        await self?.blockValidation(for: candidate)
+                        AppDiagnostics.record(error)
                     }
                 }
+                await self?.validationEnded()
             }
-        case .eventsFinished:
-            guard let completion = backgroundCompletion else { return }
-            backgroundCompletion = nil
-            let notification = pendingNotification
-            Task { @MainActor in
-                await notification?.value
-                completion()
+        } else {
+            inspectRemainingTasks(for: transfer)
+        }
+    }
+
+    private func validationEnded() {
+        validation = nil
+        reconcile()
+    }
+
+    private func blockValidation(for file: StudioImageTransferFile) {
+        if transfer == file.transfer { blockedFiles.insert(file.file.name) }
+    }
+
+    private func inspectRemainingTasks(for transfer: StudioImageTransfer) {
+        guard reconciliation == nil else { return }
+        reconciliation = Task {
+            // Let the restored session deliver its queued file events before exposing Resume.
+            try? await Task.sleep(for: .seconds(2))
+            let tasks = await withCheckedContinuation { continuation in
+                session.getAllTasks { continuation.resume(returning: $0) }
+            }
+            reconciliation = nil
+            guard isForeground else { return }
+            guard self.transfer == transfer else { reconcile(); return }
+            guard validation == nil,
+                  !tasks.contains(where: { task in
+                      task.state != .completed && task.state != .canceling && StudioImageTransferFile(task)?.transfer == transfer
+                  }) else { return }
+            if transfer.model.downloadFiles.contains(where: { file in
+                !verifiedFiles.contains(file.name) && !blockedFiles.contains(file.name)
+                    && delegate.isStaged(.init(transfer: transfer, file: file))
+            }) {
+                reconcile()
+            } else {
+                isInterrupted = true
+                notice = blockedFiles.isEmpty
+                    ? "Download er sat på pause. Fortsæt for at hente de filer, der mangler."
+                    : "Kontrollen af billedmodellen blev afbrudt. Tjek den ledige plads, og fortsæt."
             }
         }
     }
 
     private func finish(_ transfer: StudioImageTransfer) {
         clear(transfer, notice: "\(transfer.model.title) er klar på telefonen.")
-        pendingNotification = Task {
+        Task {
             await JobNotifications.shared.completed(kind: "image-model", server: "phone", id: transfer.id.uuidString,
                                                      title: "Din lokale billedmodel er klar!")
         }
     }
 
     private func clear(_ transfer: StudioImageTransfer, notice: String) {
-        delegate.track(nil)
+        validation?.cancel()
+        delegate.clear(transfer)
         UserDefaults.standard.removeObject(forKey: Self.pendingKey)
         self.transfer = nil
         activeModel = nil
         fractions = [:]
         verifiedFiles = []
+        blockedFiles.removeAll()
         progress = nil
+        isInterrupted = false
         self.notice = notice
         session.getAllTasks { tasks in
             for task in tasks where StudioImageTransferFile(task)?.transfer == transfer { task.cancel() }
@@ -202,21 +330,56 @@ private struct StudioImageTransferFile: Sendable {
 private final class StudioImageDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     enum Event: Sendable {
         case progress(StudioImageTransferFile, Double)
-        case completed(StudioImageTransferFile, Error?)
+        case staged(StudioImageTransferFile)
+        case failed(StudioImageTransferFile, Error)
         case eventsFinished
     }
 
+    private static let storage = URL.applicationSupportDirectory.appending(path: "FadedAI", directoryHint: .isDirectory)
+        .appending(path: "StudioImageDownloads", directoryHint: .isDirectory)
+    private static let maximumResumeDataBytes = 1_048_576
     var deliver: (@Sendable (Event) -> Void)?
     private let lock = NSLock()
     private var active: StudioImageTransfer?
-    private var validating: StudioImageTransfer?
 
-    func track(_ transfer: StudioImageTransfer?) {
+    func track(_ transfer: StudioImageTransfer) {
         lock.withLock { active = transfer }
     }
 
-    func isValidating(_ transfer: StudioImageTransfer) -> Bool {
-        lock.withLock { validating == transfer }
+    func clear(_ transfer: StudioImageTransfer) {
+        lock.withLock {
+            guard active == transfer else { return }
+            active = nil
+            try? FileManager.default.removeItem(at: directory(for: transfer))
+        }
+    }
+
+    func isStaged(_ file: StudioImageTransferFile) -> Bool {
+        ((try? LocalFileStore.checkedFileSize(stagedURL(for: file), maximumBytes: Int.max)) ?? 0) > 0
+    }
+
+    func discardStaged(_ file: StudioImageTransferFile) {
+        lock.withLock {
+            guard active == file.transfer else { return }
+            try? FileManager.default.removeItem(at: stagedURL(for: file))
+        }
+    }
+
+    func takeResumeData(for file: StudioImageTransferFile) -> Data? {
+        lock.withLock {
+            guard active == file.transfer else { return nil }
+            let url = resumeURL(for: file)
+            defer { try? FileManager.default.removeItem(at: url) }
+            guard let size = try? LocalFileStore.checkedFileSize(url, maximumBytes: Self.maximumResumeDataBytes),
+                  size > 0, let data = try? Data(contentsOf: url),
+                  let decoded = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+                  let properties = decoded as? [String: Any], !properties.isEmpty else { return nil }
+            return data
+        }
+    }
+
+    func hasResumeData(for file: StudioImageTransferFile) -> Bool {
+        FileManager.default.fileExists(atPath: resumeURL(for: file).path)
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
@@ -228,49 +391,106 @@ private final class StudioImageDownloadDelegate: NSObject, URLSessionDownloadDel
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let transferFile = StudioImageTransferFile(downloadTask) else { return }
-        lock.withLock { validating = transferFile.transfer }
-        defer { lock.withLock { validating = nil } }
         do {
             guard let response = downloadTask.response as? HTTPURLResponse,
                   [200, 206].contains(response.statusCode) else { throw URLError(.badServerResponse) }
-            try install(transferFile, from: location, response: response)
-            deliver?(.completed(transferFile, nil))
+            try stage(transferFile, from: location, response: response)
+            deliver?(.staged(transferFile))
+        } catch is CancellationError {
+            return
         } catch {
-            deliver?(.completed(transferFile, error))
+            deliver?(.failed(transferFile, error))
         }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error, let file = StudioImageTransferFile(task) else { return }
-        deliver?(.completed(file, error))
+        if !file.usedResumeData || task.countOfBytesReceived > 0,
+           let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
+           !data.isEmpty, data.count <= Self.maximumResumeDataBytes {
+            do {
+                try lock.withLock {
+                    guard active == file.transfer else { return }
+                    try prepareDirectory(for: file.transfer)
+                    try data.write(to: resumeURL(for: file), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+                }
+            } catch { AppDiagnostics.record(error) }
+        }
+        deliver?(.failed(file, error))
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         deliver?(.eventsFinished)
     }
 
-    private func install(_ transferFile: StudioImageTransferFile, from source: URL, response: HTTPURLResponse) throws {
-        let file = transferFile.file
+    private func directory(for transfer: StudioImageTransfer) -> URL {
+        Self.storage.appending(path: transfer.id.uuidString, directoryHint: .isDirectory)
+    }
+
+    private func stagedURL(for file: StudioImageTransferFile) -> URL {
+        directory(for: file.transfer).appending(path: file.file.name + ".staged", directoryHint: .notDirectory)
+    }
+
+    private func resumeURL(for file: StudioImageTransferFile) -> URL {
+        directory(for: file.transfer).appending(path: file.file.name + ".resume", directoryHint: .notDirectory)
+    }
+
+    private func prepareDirectory(for transfer: StudioImageTransfer) throws {
+        var directory = directory(for: transfer)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
+                                                attributes: [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication])
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try directory.setResourceValues(values)
+    }
+
+    private func stage(_ file: StudioImageTransferFile, from source: URL, response: HTTPURLResponse) throws {
         let size = try LocalFileStore.checkedFileSize(source, maximumBytes: Int.max)
         guard size > 0 else { throw URLError(.zeroByteResource) }
+        let contentType = response.mimeType?.lowercased() ?? ""
+        let expectedSize = response.statusCode == 200 ? response.expectedContentLength :
+            response.value(forHTTPHeaderField: "Content-Range")?.split(separator: "/").last.flatMap { Int64($0) } ?? -1
+        // Catalog files with no hash must at least have a complete binary response and a known length.
+        guard !contentType.hasPrefix("text/"), contentType != "application/json", !contentType.hasSuffix("+json"),
+              expectedSize > 0 ? Int64(size) == expectedSize : file.file.sha256 != nil else {
+            throw URLError(.cannotDecodeContentData)
+        }
+        try lock.withLock {
+            guard active == file.transfer else { throw CancellationError() }
+            try prepareDirectory(for: file.transfer)
+            let staged = stagedURL(for: file)
+            if !file.file.isPresent && !isStaged(file) {
+                let manager = FileManager.default
+                let incoming = staged.appendingPathExtension("incoming")
+                try? manager.removeItem(at: incoming)
+                defer { try? manager.removeItem(at: incoming) }
+                try manager.moveItem(at: source, to: incoming)
+                // The move can preserve the URLSession temporary file's protection class.
+                try? manager.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                                           ofItemAtPath: incoming.path)
+                try manager.moveItem(at: incoming, to: staged)
+            }
+            try? FileManager.default.removeItem(at: resumeURL(for: file))
+        }
+    }
+
+    func validateAndInstall(_ transferFile: StudioImageTransferFile) throws {
+        let source = stagedURL(for: transferFile)
+        let file = transferFile.file
+        try Task.checkCancellation()
         if let expected = file.sha256 {
             let handle = try FileHandle(forReadingFrom: source)
             defer { try? handle.close() }
             var hash = SHA256()
             while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
-                guard lock.withLock({ active == transferFile.transfer }) else { throw CancellationError() }
+                try Task.checkCancellation()
                 hash.update(data: data)
             }
             let actual = hash.finalize().map { String(format: "%02x", $0) }.joined()
             guard actual == expected else { throw MediaGenerationKitError.hashMismatch(file.name) }
-        } else {
-            // The catalog provides no hash for the FLUX VAE. Validate the complete binary response.
-            let expectedSize = response.statusCode == 200 ? response.expectedContentLength :
-                response.value(forHTTPHeaderField: "Content-Range")?.split(separator: "/").last.flatMap { Int64($0) } ?? -1
-            guard !(response.mimeType ?? "").hasPrefix("text/"), response.mimeType != "application/json",
-                  expectedSize <= 0 || Int64(size) == expectedSize else { throw URLError(.cannotDecodeContentData) }
         }
         try lock.withLock {
+            try Task.checkCancellation()
             guard active == transferFile.transfer else { throw CancellationError() }
             guard let root = MediaGenerationEnvironment.default.externalUrls.first, root.isFileURL else {
                 throw MediaGenerationKitError.invalidModelsDirectory

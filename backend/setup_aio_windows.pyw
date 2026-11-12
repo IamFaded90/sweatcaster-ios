@@ -1,4 +1,4 @@
-"""Prepare the FadedAI PC checkpoint for local AIO bot computers."""
+"""Prepare the Windows backend and the local AIO bot computers."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Callable
 
-from install_module_tabs import install
+from install_fadedai_pc import install
 from sweatcaster.aio_runtime import AIO_IMAGE
 
 
@@ -111,17 +111,17 @@ class SetupWindow:
         self.detail = tk.StringVar()
         self.checkpoint = tk.StringVar(value=default_checkpoint())
 
-        root.title("FadedAI – Botternes computere")
+        root.title("FadedAI – Opdatér PC’en")
         root.minsize(520, 360)
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
         frame = ttk.Frame(root, padding=22)
         frame.grid(sticky="nsew")
         frame.columnconfigure(0, weight=1)
-        ttk.Label(frame, text="Klargør botternes computere", font=("Segoe UI", 17, "bold")).grid(sticky="w")
+        ttk.Label(frame, text="Opdatér FadedAI på PC’en", font=("Segoe UI", 17, "bold")).grid(sticky="w")
         ttk.Label(
             frame,
-            text="Hent først AIO-skrivebordet. Opdatér derefter den FadedAI-installation, du allerede bruger.",
+            text="Klargør AIO-skrivebordet, og opdatér derefter botcomputere, Emby, videokommentarer og stemmer samlet.",
             wraplength=470,
         ).grid(sticky="w", pady=(4, 12))
         ttk.Label(frame, textvariable=self.status, wraplength=470).grid(sticky="w")

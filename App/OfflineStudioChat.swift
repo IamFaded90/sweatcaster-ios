@@ -70,9 +70,9 @@ extension OfflineStudio {
                     }
                     if turn.imageName == nil {
                         let reading = speech.playback == .reply(turn.id)
-                        let title = reading ? "Stop oplæsning" : privateSession ? "Læs svar op" : "Skift stemme og læs op"
+                        let title = reading ? "Stop oplæsning" : "Læs svar op"
                         Button(title, systemImage: reading ? "stop.circle" : "speaker.wave.2") {
-                            switchVoice(for: turn)
+                            readReply(turn)
                         }
                             .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                             .disabled(task != nil)
@@ -510,25 +510,19 @@ extension OfflineStudio {
         if let data = try? JSONEncoder().encode(items) { promptHistoryData = data }
     }
 
-    private func switchVoice(for turn: PrivateChatTurn) {
+    private func readReply(_ turn: PrivateChatTurn) {
         if speech.playback == .reply(turn.id) { speech.stop(); status = "Oplæsning stoppet."; return }
         let bot = turn.botID.flatMap { id in privateBots.first { $0.id == id } } ?? selectedPrivateBot
-        let id = bot?.id ?? turn.id
-        let baseLanguage = bot?.language?.hasPrefix("en") == true ? "en-US" : "da-DK"
-        let language = privateSession ? sessionPreferences.voiceLanguage
-            : (voiceLanguages[id] ?? baseLanguage) == "da-DK" ? "en-US" : "da-DK"
-        let label = language == "da-DK" ? "Dansk" : "Engelsk (US)"
+        let language = privateSession ? sessionPreferences.voiceLanguage : previewLanguage
+        let label = language == "da-DK" ? "dansk" : "engelsk"
         guard let voice = studioVoice(language: language, bot: bot) else {
             status = "Stemme til \(label) er ikke tilgængelig på telefonen."
             return
         }
-        voiceLanguages[id] = language
         dictation.stop()
-        let utterance = AVSpeechUtterance(string: turn.reply)
-        utterance.voice = voice
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(bot?.voiceRate ?? 1)
+        let utterance = LocalSpeechVoice.utterance(LocalSpeechVoice.replyText(turn.reply), voice: voice, rate: bot?.voiceRate ?? 1)
         speech.play(utterance, as: .reply(turn.id))
-        status = privateSession ? "Læser op på \(label.lowercased())." : "Stemme skiftet til \(label)"
+        status = "Læser op på \(label)."
     }
 
     var effectiveTextModel: String {

@@ -5,6 +5,7 @@ import AVFAudio
 import CoreTransferable
 import ImageIO
 import MediaGenerationKit
+import NaturalLanguage
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -131,7 +132,9 @@ struct StudioImageDownloadsView: View {
 struct StudioImageDownloadProgress: View {
     var body: some View {
         let downloads = StudioImageDownloads.shared
-        if let progress = downloads.progress, progress < 1 {
+        if downloads.isInterrupted {
+            FadedSecondaryButton("Fortsæt download", icon: "arrow.down.circle") { downloads.resume() }
+        } else if let progress = downloads.progress, progress < 1 {
             ProgressView(value: progress) { Text(progress.formatted(.percent)) }
         } else {
             ProgressView(progressLabel(downloads.progress))
@@ -348,6 +351,8 @@ private struct StudioImageComparisonCanvas: View {
 }
 
 enum LocalSpeechVoice {
+    static let downloadHint = "Hent en Forbedret- eller Premium-stemme under Indstillinger → Tilgængelighed → Læs og tal (Oplæst indhold) → Stemmer."
+
     static var personalVoices: [AVSpeechSynthesisVoice] {
         guard AVSpeechSynthesizer.personalVoiceAuthorizationStatus == .authorized else { return [] }
         return AVSpeechSynthesisVoice.speechVoices().filter { $0.voiceTraits.contains(.isPersonalVoice) }
@@ -381,6 +386,43 @@ enum LocalSpeechVoice {
             return voice
         }
         return preferred(language: language)
+    }
+
+    static func forReply(_ voice: AVSpeechSynthesisVoice?, language: String?) -> AVSpeechSynthesisVoice? {
+        guard let language else { return voice }
+        if let voice, voice.language.split(separator: "-").first == language.split(separator: "-").first {
+            return voice
+        }
+        return preferred(language: language)
+    }
+
+    static func detectedReplyLanguage(_ text: String) -> String? {
+        guard text.split(whereSeparator: \.isWhitespace).count >= 4 else { return nil }
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(String(text.prefix(1000)))
+        let probabilities = recognizer.languageHypotheses(withMaximum: 1)
+        if probabilities[.danish, default: 0] >= 0.8 { return "da-DK" }
+        if probabilities[.english, default: 0] >= 0.8 { return "en-US" }
+        return nil
+    }
+
+    static func utterance(_ text: String, voice: AVSpeechSynthesisVoice?, rate: Double) -> AVSpeechUtterance {
+        let result = AVSpeechUtterance(string: text)
+        result.voice = voice
+        result.rate = AVSpeechUtteranceDefaultSpeechRate * Float(rate.isFinite ? min(1.3, max(0.7, rate)) : 1)
+        return result
+    }
+
+    static func replyText(_ text: String) -> String {
+        let prose = text.components(separatedBy: "```").enumerated().compactMap { index, block in
+            index.isMultiple(of: 2) ? block : nil
+        }.joined(separator: "\n\n")
+        let spoken = prose.replacingOccurrences(of: #"(?m)^[ \t]*(?:#{1,6}|[-*+>])[ \t]+"#,
+                                               with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !spoken.isEmpty else { return text }
+        let markdown = try? AttributedString(markdown: spoken, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))
+        return markdown.map { String($0.characters) } ?? spoken
     }
 
     static func label(_ voice: AVSpeechSynthesisVoice) -> String {

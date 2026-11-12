@@ -225,7 +225,9 @@ extension ChatView {
                 FadedDetailText("Tempo · \(preferredVoiceRate.formatted(.number.precision(.fractionLength(2))))×")
             }
             if let voice = chatSpeechVoice.0, voice.voiceTraits.contains(.isPersonalVoice) {
-                FadedDetailText("Prøven følger stemmens sprog. Ved andet svar-sprog bruger chatten en passende systemstemme.")
+                FadedDetailText("Prøven bruger din personlige stemme. Svar på andre sprog læses op med en systemstemme.")
+            } else if !hasBotVoice, !LocalSpeechVoice.options(language: preferredVoiceLanguage).contains(where: { $0.quality != .default }) {
+                FadedDetailText(LocalSpeechVoice.downloadHint)
             }
             Button(speechBox.playback == .preview ? "Stop stemmeprøve" : "Prøv stemme",
                    systemImage: speechBox.playback == .preview ? "stop.circle" : "play.circle", action: toggleVoicePreview)
@@ -252,16 +254,15 @@ extension ChatView {
     func speak(_ text: String, turnID: UUID) {
         guard chatScenePhase == .active, !dictation.active,
               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        let spoken = LocalSpeechVoice.replyText(text)
         let (voice, rate) = chatSpeechVoice
-        let replyLanguage = aiLanguage == "Dansk" ? "da-DK" : aiLanguage == "Engelsk" ? "en-US" : nil
-        let playbackVoice: AVSpeechSynthesisVoice?
-        if let voice, voice.voiceTraits.contains(.isPersonalVoice), let replyLanguage,
-           voice.language.split(separator: "-").first != replyLanguage.split(separator: "-").first {
-            playbackVoice = LocalSpeechVoice.preferred(language: replyLanguage)
-        } else {
-            playbackVoice = voice
+        let replyLanguage: String? = switch aiLanguage {
+        case "Dansk": "da-DK"
+        case "Engelsk": "en-US"
+        default: LocalSpeechVoice.detectedReplyLanguage(spoken)
         }
-        playChatSpeech(text, voice: playbackVoice, rate: rate, as: .reply(turnID))
+        let playbackVoice = LocalSpeechVoice.forReply(voice, language: replyLanguage)
+        playChatSpeech(spoken, voice: playbackVoice, rate: rate, as: .reply(turnID))
     }
 
     private var chatSpeechVoice: (AVSpeechSynthesisVoice?, Double) {
@@ -284,10 +285,7 @@ extension ChatView {
     }
 
     private func playChatSpeech(_ text: String, voice: AVSpeechSynthesisVoice?, rate: Double, as playback: SpeechBox.Playback) {
-        let utterance = AVSpeechUtterance(string: text)
-        utterance.voice = voice
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(rate.isFinite ? min(1.3, max(0.7, rate)) : 1)
-        speechBox.play(utterance, as: playback)
+        speechBox.play(LocalSpeechVoice.utterance(text, voice: voice, rate: rate), as: playback)
     }
 }
 

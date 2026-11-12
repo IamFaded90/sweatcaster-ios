@@ -114,10 +114,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
     var voiceQuality: String { playbackVoice.map(LocalSpeechVoice.qualityLabel) ?? "Systemstemme" }
 
     func utterance(_ text: String) -> AVSpeechUtterance {
-        let result = AVSpeechUtterance(string: text)
-        result.voice = playbackVoice
-        result.rate = AVSpeechUtteranceDefaultSpeechRate * Float(min(1.3, max(0.7, voiceRate ?? 1)))
-        return result
+        LocalSpeechVoice.utterance(text, voice: playbackVoice, rate: voiceRate ?? 1)
     }
 
     private enum CodingKeys: String, CodingKey {

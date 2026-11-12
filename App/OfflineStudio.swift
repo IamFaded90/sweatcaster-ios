@@ -122,7 +122,6 @@ struct OfflineStudio: View {
     @State var chatWorkID: UUID?
     @State var textContextLimit = 2048
     @State var privateBatteryLevel: Float = -1
-    @State var voiceLanguages: [UUID: String] = [:]
     @StateObject var speech = SpeechBox()
     @State var pendingImageDeletion: URL?
     @FocusState var promptFocused: Bool

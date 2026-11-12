@@ -213,7 +213,6 @@ extension OfflineStudio {
             privateDeadline = nil
             sessionPreferences = StudioSessionPreferences()
             sessionNote = ""
-            voiceLanguages.removeAll()
         } else if loaded && !imageOnly {
             savePrivateConversation()
             do { try MigratedAppData.shared.saveRegularStudioDraft(prompt) }
@@ -317,7 +316,7 @@ extension OfflineStudio {
                 Text("Kreativ og legende").tag("creative")
                 Text("Direkte og konkret").tag("direct")
             }.disabled(task != nil)
-            Picker("Stemme til forhåndsvisning", selection: $previewLanguage) {
+            Picker("Oplæsningssprog", selection: $previewLanguage) {
                 Text("Dansk").tag("da-DK")
                 Text("Engelsk (US)").tag("en-US")
             }
@@ -463,9 +462,8 @@ extension OfflineStudio {
         }
         resetIdleTimer()
         dictation.stop()
-        let utterance = AVSpeechUtterance(string: LocalSpeechVoice.previewSentence(language: voice.language))
-        utterance.voice = voice
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(selectedPrivateBot?.voiceRate ?? 1)
+        let sample = LocalSpeechVoice.previewSentence(language: voice.language)
+        let utterance = LocalSpeechVoice.utterance(sample, voice: voice, rate: selectedPrivateBot?.voiceRate ?? 1)
         speech.play(utterance, as: .preview)
     }
 
@@ -473,10 +471,15 @@ extension OfflineStudio {
         let available = studioVoiceOptions(language: language)
         let selection = Binding(get: { available.contains { $0.identifier == saved.wrappedValue } ? saved.wrappedValue : "" },
                                 set: { saved.wrappedValue = $0 })
-        return Picker("Installeret stemme", selection: selection) {
-            Text("Automatisk").tag("")
-            ForEach(available, id: \.identifier) { voice in
-                Text(LocalSpeechVoice.label(voice)).tag(voice.identifier)
+        return VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            Picker("Installeret stemme", selection: selection) {
+                Text("Bedste tilgængelige").tag("")
+                ForEach(available, id: \.identifier) { voice in
+                    Text(LocalSpeechVoice.label(voice)).tag(voice.identifier)
+                }
+            }
+            if !available.contains(where: { $0.quality != .default }) {
+                FadedDetailText(LocalSpeechVoice.downloadHint)
             }
         }
     }

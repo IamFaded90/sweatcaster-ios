@@ -146,9 +146,8 @@ private struct PersonalVoiceSettings: View {
 
     private func playPreview(_ voice: AVSpeechSynthesisVoice) {
         guard scenePhase == .active, authorization == .authorized else { return }
-        let utterance = AVSpeechUtterance(string: LocalSpeechVoice.previewSentence(language: voice.language))
-        utterance.voice = voice
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(voiceRate.isFinite ? min(1.3, max(0.7, voiceRate)) : 1)
+        let sample = LocalSpeechVoice.previewSentence(language: voice.language)
+        let utterance = LocalSpeechVoice.utterance(sample, voice: voice, rate: voiceRate)
         previewVoiceID = voice.identifier
         previewSpeech.play(utterance, as: .preview)
     }

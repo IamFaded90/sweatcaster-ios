@@ -91,6 +91,7 @@ struct PromptExample: Identifiable {
                 [DynamicTypeSize.large, .xLarge, .xxLarge, .xxxLarge,
                  .accessibility1, .accessibility2][min(5, max(0, Int(textScale)))])
                 .onChange(of: scenePhase, initial: true) { _, phase in
+                    StudioImageDownloads.shared.setForeground(phase == .active)
                     if phase == .active { Task { await PhoneModelDownloads.shared.resumeInterruptedVisionDownload() } }
                     let village = SimulationEngine.shared
                     village.handle(phase)
