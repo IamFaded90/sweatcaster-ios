@@ -184,7 +184,7 @@ struct FadedBackground: View {
         }
         if palette.theme == .oled { return [palette.background, palette.background] }
         switch variant {
-        case .standard: return [FadedBrand.canvas, FadedBrand.panel]
+        case .standard: return [FadedBrand.canvas, Color(red: 0.105, green: 0.15, blue: 0.145)]
         case .privateChat: return [FadedColors.deep, FadedColors.privateGlow]
         case .village: return [FadedColors.sunset, FadedColors.deep]
         case .terminal: return [FadedColors.deep, FadedColors.terminal]
@@ -201,6 +201,22 @@ struct FadedBackground: View {
                 }
             }
             .overlay { if palette.theme != .oled && variant != .standard { texture } }
+            .overlay {
+                if palette.theme == .faded && variant == .standard && lookPreset == nil {
+                    Canvas { context, size in
+                        var grid = Path()
+                        for x in stride(from: CGFloat.zero, through: size.width, by: 24) {
+                            grid.move(to: CGPoint(x: x, y: 0))
+                            grid.addLine(to: CGPoint(x: x, y: size.height))
+                        }
+                        for y in stride(from: CGFloat.zero, through: size.height, by: 24) {
+                            grid.move(to: CGPoint(x: 0, y: y))
+                            grid.addLine(to: CGPoint(x: size.width, y: y))
+                        }
+                        context.stroke(grid, with: .color(FadedBrand.mint.opacity(0.065)), lineWidth: 1)
+                    }
+                }
+            }
             .overlay {
                 if let lookPreset, palette.theme == .faded && variant == .standard {
                     lookPreset.background(in: palette)

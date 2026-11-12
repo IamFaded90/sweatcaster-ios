@@ -308,10 +308,12 @@ private struct ChatModelSelectionButton: View {
     let blocked: Bool
     let pcHint: String?
     let resetTitle: String?
+    let smartSelected: Bool
     let pcSetupTitle: String
     let onOpen: () -> Void
     let onChoose: (ChatModelOption) -> Void
     let onReset: () -> Void
+    let onSmart: () -> Void
     let onPhoneSetup: () -> Void
     let onPCSetup: (() -> Void)?
 
@@ -322,16 +324,18 @@ private struct ChatModelSelectionButton: View {
             showing = true
         } label: {
             HStack(spacing: FadedSpacing.xs) {
-                modelIcon(current)
-                Text(current.title).lineLimit(typeSize.isAccessibilitySize ? nil : 1)
-                if current.isAdultRoleplay {
+                if smartSelected { Image(systemName: "brain.head.profile").accessibilityHidden(true) }
+                else { modelIcon(current) }
+                Text(smartSelected ? "Faded Smart" : current.title).lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                if !smartSelected && current.isAdultRoleplay {
                     Text("18+").fixedSize().foregroundStyle(palette.secondary)
                 }
                 Image(systemName: "chevron.down")
             }
             .font(.caption.bold())
+            .padding(.horizontal, FadedSpacing.s)
             .frame(minWidth: 44, minHeight: 44, alignment: .leading)
-            .contentShape(Rectangle())
+            .fadedGlassSurface()
         }
         .buttonStyle(.plain)
         .disabled(blocked)
@@ -341,7 +345,7 @@ private struct ChatModelSelectionButton: View {
     }
 
     private var currentAccessibilityValue: String {
-        var parts = [current.source.rawValue, current.title]
+        var parts = smartSelected ? ["Faded Smart", current.source.rawValue, current.title] : [current.source.rawValue, current.title]
         if current.isAdultRoleplay { parts.append(PCModelSelection.adultRoleplayLabel) }
         if !current.available { parts.append("ikke klar") }
         return parts.joined(separator: ", ")
@@ -352,6 +356,35 @@ private struct ChatModelSelectionButton: View {
         let results = options.filter { $0.matches(query) }
         return NavigationStack {
             List {
+                if emptyQuery {
+                    Section {
+                        Button {
+                            onSmart()
+                            showing = false
+                        } label: {
+                            HStack(spacing: FadedSpacing.m) {
+                                Image(systemName: "brain.head.profile")
+                                    .foregroundStyle(palette.isDark ? palette.lime : palette.text)
+                                    .frame(width: 36, height: 36)
+                                    .background(palette.lime.opacity(0.13), in: Circle())
+                                    .accessibilityHidden(true)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Faded Smart").font(FadedTypography.action)
+                                    FadedDetailText("Vælger automatisk blandt dine tilgængelige modeller")
+                                }
+                                Spacer(minLength: 4)
+                                if smartSelected { Image(systemName: "checkmark").accessibilityHidden(true) }
+                            }
+                            .frame(minHeight: 52)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(smartSelected ? .isSelected : [])
+                        .listRowBackground(smartSelected ? palette.lime.opacity(0.12) : palette.card)
+                    } header: {
+                        Text("Skift model uden at forlade samtalen")
+                    }
+                }
                 if let resetTitle, emptyQuery {
                     Button(resetTitle, systemImage: "arrow.uturn.backward") {
                         onReset()
@@ -376,6 +409,12 @@ private struct ChatModelSelectionButton: View {
                         }
                     }
                 }
+                if emptyQuery {
+                    Section("Andre tjenester") {
+                        unavailableProvider("Gemini Flash")
+                        unavailableProvider("Claude Create")
+                    }
+                }
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
@@ -390,8 +429,17 @@ private struct ChatModelSelectionButton: View {
         }
     }
 
+    private func unavailableProvider(_ title: String) -> some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            Text(title).font(FadedTypography.action)
+            FadedDetailText("Endnu ikke tilsluttet i FadedAI")
+        }
+        .foregroundStyle(palette.secondary)
+        .listRowBackground(palette.card)
+    }
+
     private func optionRow(_ row: ChatModelOption) -> some View {
-        let selected = row.id == current.id
+        let selected = !smartSelected && row.id == current.id
         return Button {
             onChoose(row)
             showing = false
@@ -399,12 +447,14 @@ private struct ChatModelSelectionButton: View {
             HStack(spacing: FadedSpacing.s) {
                 modelIcon(row)
                     .font(.body)
+                    .frame(width: 36, height: 36)
+                    .background(accent(row.source).opacity(0.12), in: Circle())
                 VStack(alignment: .leading, spacing: FadedSpacing.xs) {
                     Text(row.title).font(FadedTypography.action)
                     if row.isAdultRoleplay {
                         FadedBadge(PCModelSelection.adultRoleplayLabel, tone: .info)
                     }
-                    if !row.available { FadedDetailText("Ikke klar") }
+                    FadedDetailText(row.available ? row.source.rawValue : "\(row.source.rawValue) · Ikke klar")
                 }
                 Spacer(minLength: 8)
                 if selected {
@@ -419,7 +469,7 @@ private struct ChatModelSelectionButton: View {
         .buttonStyle(.plain)
         .disabled(!row.available || blocked)
         .accessibilityAddTraits(selected ? .isSelected : [])
-        .listRowBackground(palette.card)
+        .listRowBackground(selected ? accent(row.source).opacity(0.12) : palette.card)
     }
 
     private func modelIcon(_ option: ChatModelOption) -> some View {
@@ -482,16 +532,23 @@ extension ChatView {
                 current: current, options: chatModelOptions, blocked: task != nil,
                 pcHint: modelsLoading ? "Henter PC’ens modeller…" : pcEngineOffline ? pcEngineOfflineMessage : modelsError,
                 resetTitle: manualRoute == nil ? nil : autoRouterEnabled ? "Brug Auto igen" : "Brug mit normale valg",
+                smartSelected: autoRouterEnabled && manualRoute == nil,
                 pcSetupTitle: hasPCCatalog ? "Se hele PC-kataloget" : "Forbind til PC",
                 onOpen: { composerFocused = false },
                 onChoose: { chooseModelForNextMessage($0.source, modelID: $0.modelID) },
-                onReset: { manualRoute = nil }, onPhoneSetup: { showPhoneModelSetup = true }, onPCSetup: pcSetup
+                onReset: { manualRoute = nil },
+                onSmart: { autoRouterEnabled = true; manualRoute = nil },
+                onPhoneSetup: { showPhoneModelSetup = true }, onPCSetup: pcSetup
             )
         }
     }
 
     private var chatModelOptions: [ChatModelOption] {
         var options = phoneRoutingCandidates.map { ChatModelOption(source: .phone, modelID: $0.id, title: $0.name) }
+        if !options.contains(where: { $0.modelID == "apple" }) {
+            options.append(ChatModelOption(source: .phone, modelID: "apple", title: "Apple Foundation Models",
+                                           available: PhoneModels.isReady("apple")))
+        }
         let phone = PhoneModels.effectiveModelID(phoneModel)
         if !options.contains(where: { $0.modelID == phone }) {
             options.append(ChatModelOption(source: .phone, modelID: phone, title: phoneModelLabel(for: phone),

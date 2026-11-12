@@ -362,6 +362,25 @@ extension Home {
     }
 
     @ViewBuilder private var appearanceSettings: some View {
+        let colors = [Color(red: 0.83, green: 1, blue: 0.93), FadedBrand.mint, FadedBrand.blue, palette.raised]
+        Section {
+            FadedCard(size: .hero) {
+                VStack(alignment: .leading, spacing: FadedSpacing.m) {
+                    HStack(spacing: FadedSpacing.s) {
+                        ForEach(colors.indices, id: \.self) { index in
+                            Circle().fill(colors[index]).frame(width: 26, height: 26)
+                        }
+                    }
+                    .accessibilityHidden(true)
+                    Text("Premium Dark. Supreme Sky.").font(FadedTypography.title)
+                    FadedDetailText("Mørkt, roligt og helt dit. Tilpas tema, tekst og bevægelse her.")
+                }
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowBackground(Color.clear)
+        } header: {
+            Text("På dine vilkår")
+        }
         Section("Tema og tekst") {
             Picker("Lys og mørke", selection: $appearanceMode) {
                 ForEach(FadedAppearance.allCases, id: \.self) { mode in Text(mode.rawValue).tag(mode) }

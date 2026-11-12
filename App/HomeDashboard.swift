@@ -53,7 +53,7 @@ private struct FadedDashboardHero: View {
 
     var body: some View {
         VStack(spacing: FadedSpacing.l) {
-            artwork
+            FadedWorldArtwork()
             VStack(spacing: FadedSpacing.xs) {
                 Text("Store idéer.").foregroundStyle(palette.text)
                 Text("Dit lille univers.").foregroundStyle(FadedBrand.gradient)
@@ -73,29 +73,6 @@ private struct FadedDashboardHero: View {
         .multilineTextAlignment(.center)
         .frame(maxWidth: 480)
         .frame(maxWidth: .infinity)
-    }
-
-    private var artwork: some View {
-        Color.clear
-            .aspectRatio(1.65, contentMode: .fit)
-            .frame(maxHeight: 256)
-            .overlay {
-                Image("V0AIWorld")
-                    .resizable()
-                    .scaledToFill()
-                    .accessibilityHidden(true)
-            }
-            .clipped()
-            .clipShape(.rect(cornerRadius: FadedRadius.hero))
-            .overlay(alignment: .bottom) {
-                Label("En verden af muligheder", systemImage: "sparkles")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(FadedBrand.mint)
-                    .padding(.horizontal, FadedSpacing.m)
-                    .padding(.vertical, FadedSpacing.s)
-                    .background(FadedColors.deep, in: Capsule())
-                    .padding(FadedSpacing.m)
-            }
     }
 }
 

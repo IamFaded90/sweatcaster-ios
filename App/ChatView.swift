@@ -261,7 +261,10 @@ struct ChatView: View {
                 }
             }
         }
-        .background { FadedBackground() }
+        .background {
+            if palette.theme == .faded { palette.background.ignoresSafeArea() }
+            else { FadedBackground() }
+        }
     }
 
     private var historySidebar: some View {
@@ -430,22 +433,21 @@ struct ChatView: View {
             HStack(spacing: FadedSpacing.xs) {
                 if !embedded || onBack != nil {
                     headerButton("Tilbage", icon: "chevron.left", action: goBack)
-                        .background(palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.medium))
-                        .overlay { RoundedRectangle(cornerRadius: FadedRadius.medium)
-                            .strokeBorder(palette.border).allowsHitTesting(false) }
+                        .fadedGlassSurface()
                 }
                 chatBrand
                 Spacer(minLength: FadedSpacing.xs)
-                if composerFocused {
+                if composerFocused && wide {
                     headerButton("Skjul tastatur", icon: "keyboard.chevron.compact.down") {
                         composerFocused = false
                     }
-                } else if !chatTypeSize.isAccessibilitySize {
+                }
+                if !chatTypeSize.isAccessibilitySize {
                     quickModelPicker
                 }
             }
+            if chatTypeSize.isAccessibilitySize { quickModelPicker }
             if !composerFocused {
-                if chatTypeSize.isAccessibilitySize { quickModelPicker }
                 HStack(spacing: FadedSpacing.xs) {
                     Text(connection).font(.caption).foregroundStyle(palette.secondary)
                     Spacer(minLength: FadedSpacing.xs)
@@ -456,9 +458,6 @@ struct ChatView: View {
                         }
                         headerButton("Ny samtale", icon: "square.and.pencil") { newConversation() }
                             .disabled(task != nil)
-                    }
-                    headerButton("Chatindstillinger", icon: "slider.horizontal.3") {
-                        showChatSettings = true
                     }
                 }
                 if chatTypeSize.isAccessibilitySize { chatNavigationMenu }
@@ -521,6 +520,11 @@ struct ChatView: View {
         Button(label, systemImage: icon, action: action)
             .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
             .help(label)
+    }
+
+    func openComposerSettings() {
+        composerFocused = false
+        showChatSettings = true
     }
 
     private var chatSettingsSheet: some View {

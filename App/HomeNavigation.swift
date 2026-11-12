@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 extension Home {
     var v0LookPreset: V0LookPreset? {
@@ -80,13 +81,20 @@ extension Home {
         case .village: selectSpace(.tasks)
         case .video: openVideoClips()
         case .images: openStudio(.images)
+        case .imageBrief(let prompt): openStudio(.images, prompt: prompt)
+        case .holdchat: showHoldchatFromMore = true
+        case .activity:
+            selectSpace(.brain)
+            openDashboardActivity()
         case .privateStudio: openStudio(.chat)
         case .notes: showNotes = true
         case .projects: showProjects = true
         case .backup: showBackupFromMore = true
         case .savedVideos: reloadSavedVideos(); showSavedVideos = true
         case .team: openTeam()
-        case .models: showPhoneModels = true
+        case .models:
+            settingsPath = [.models]
+            showSettings = true
         case .settings: showSettings = true
         case .connections: showConnections = true
         case .pcStatus: showPCStatus = true
@@ -146,12 +154,20 @@ struct DeferredHomeTab: View {
 
 enum FadedMoreDestination {
     case chat, code, village
+    case holdchat, activity
+    case imageBrief(String)
     case video, images, privateStudio, notes, projects, backup, savedVideos, team, models, settings, connections, pcStatus, search
     case module(String)
 }
 
+@MainActor enum FadedMoreScreenData {
+    static var bots: [VillageBot] {
+        (try? JSONDecoder().decode([VillageBot].self, from: MigratedAppData.shared.villageBots)) ?? []
+    }
+}
+
 private struct FadedMoreScreen: View {
-    private enum Page: Hashable { case lookbook, emby, powerHub, atlas, help }
+    private enum Page: Hashable { case lookbook, emby, powerHub, atlas, help, creativeStudio, memory, safety }
 
     let modules: [ModuleTab]
     @Binding var lookPreset: V0LookPreset?
@@ -160,6 +176,7 @@ private struct FadedMoreScreen: View {
     @State private var projectExport: FadedProjectExport?
     @State private var exportingProjects = false
     @State private var shortcutError: String?
+    @State private var copiedOverview = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
 
@@ -172,25 +189,50 @@ private struct FadedMoreScreen: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
+                Section {
+                    ViewThatFits(in: .horizontal) {
+                        HStack(spacing: FadedSpacing.s) { highlightCards }
+                        VStack(spacing: FadedSpacing.s) { highlightCards }
+                    }
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
+                }
+                Section("Hurtigt fra Mere") {
+                    row("Eksport", "Gem en sikkerhedskopi af dine data", "square.and.arrow.up", .backup)
+                    Button {
+                        copyOverview()
+                    } label: {
+                        rowLabel("Kopiér overblik", "Kopiér antal lokale projekter og bots", "doc.on.clipboard")
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(lookPreset?.cardColor(in: palette) ?? palette.card)
+                    if copiedOverview {
+                        FadedDetailText("Overblik kopieret.")
+                            .accessibilityAddTraits(.updatesFrequently)
+                    }
+                    row("Søg med det samme", "Find et område eller en funktion", "magnifyingglass", .search)
+                }
                 Section("Skab og saml") {
-                    row("Video Studio", "Redigér og kommentér klip", "film", .video)
-                    row("Billeder", "Lav billeder på telefonen eller PC’en", "photo", .images)
+                    row("Holdchat", "Flere perspektiver i én samtale", "bubble.left.and.bubble.right", .holdchat)
+                    link("Kreativt Studio", "Klargør en brief, eller åbn video og billeder", "film", .creativeStudio)
                     row("Privat Studio", "Åbn dit private rum", "lock.shield", .privateStudio)
                     row("Noter", "Skriv og genfind noter", "note.text", .notes)
                     row("Projekter", "Find og redigér dine kladder", "folder", .projects)
                     row("Gemte videoer", "Afspil dine færdige videoer", "film.stack", .savedVideos)
-                    link("Emby & bibliotek", "Se bibliotekets designvisning", "play.rectangle", .emby)
                 }
                 Section("Gør det til dit") {
+                    link("Hukommelse", "Vælg selv, hvad dine bots skal huske", "brain.head.profile", .memory)
+                    link("Emby & bibliotek", "Se bibliotekets designvisning", "play.rectangle", .emby)
                     row("Holdet", "Se dine AI’er og deres roller", "person.2", .team)
-                    row("Lokale modeller", "Hent og administrér modeller til telefonen", "iphone", .models)
-                    row("Indstillinger", "Tilpas FadedAI", "gearshape", .settings)
+                    row("Modeller", "Administrér modeller på telefon og PC", "sparkles", .models)
                     link("Lookbook", "Prøv visuelle mønstre og finish", "paintpalette", .lookbook)
                 }
                 Section("Overblik og kontrol") {
+                    row("Aktivitet", "Se seneste jobs, status og udbakke", "bell", .activity)
+                    link("Sikkerhedscentral", "Data, forbindelser og godkendelser", "shield", .safety)
+                    row("Indstillinger", "Tilpas ro, tekst og detaljer", "slider.horizontal.3", .settings)
                     row("Forbindelser", "Se dine kilder og forbindelser", "link", .connections)
                     row("PC-status", "Tjek den tilsluttede PC", "stethoscope", .pcStatus)
-                    row("Søg", "Find chats, jobs og bots", "magnifyingglass", .search)
                 }
                 Section("Opdag mere") {
                     link("Hvad kan jeg?", "Find din egen vej ind", "questionmark.circle", .help)
@@ -221,6 +263,11 @@ private struct FadedMoreScreen: View {
                        resolveSourceAction: resolvePowerAction)
                 case .atlas: V0FeatureAtlasView()
                 case .help: V0HelpView()
+                case .creativeStudio:
+                    V0CreativeStudioView(openVideo: { open(.video) }, openImages: { open(.imageBrief($0)) })
+                case .memory: FadedMemoryOverview(bots: FadedMoreScreenData.bots)
+                case .safety:
+                    FadedSafetyOverview(openMemory: { path.append(Page.memory) }, open: open)
                 }
             }
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { dismiss() } } }
@@ -237,6 +284,40 @@ private struct FadedMoreScreen: View {
             get: { shortcutError != nil }, set: { if !$0 { shortcutError = nil } }
         )) { Button("OK", role: .cancel) {} } message: {
             Text(shortcutError ?? "")
+        }
+    }
+
+    private func copyOverview() {
+        do {
+            let count = try FadedProjectStore.load().count
+            UIPasteboard.general.string = "FadedAI · \(count) lokale projekter · \(FadedMoreScreenData.bots.count) bots"
+            copiedOverview = true
+        } catch {
+            AppDiagnostics.record(error)
+            shortcutError = "Projektoversigten kunne ikke åbnes."
+        }
+    }
+
+    @ViewBuilder private var highlightCards: some View {
+        NavigationLink(value: Page.creativeStudio) {
+            highlight("Skab noget", detail: "Dit kreative Studio", icon: "film")
+        }
+        .buttonStyle(.plain)
+        Button { open(.projects) } label: {
+            highlight("Saml idéerne", detail: "Dine projektkladder", icon: "folder")
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func highlight(_ title: String, detail: String, icon: String) -> some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                Image(systemName: icon).foregroundStyle(palette.isDark ? palette.lime : palette.text)
+                    .accessibilityHidden(true)
+                Text(title).font(FadedTypography.action)
+                FadedDetailText(detail)
+            }
+            .frame(minHeight: 74, alignment: .leading)
         }
     }
 
@@ -276,7 +357,7 @@ private struct FadedMoreScreen: View {
             ("notes", "Noter", "note.text", .notes),
             ("projects", "Projekter", "folder", .projects),
             ("saved", "Gemte videoer", "film.stack", .savedVideos),
-            ("models", "Lokale modeller", "iphone", .models),
+            ("models", "Modeller på telefon og PC", "sparkles", .models),
             ("status", "PC-status", "stethoscope", .pcStatus),
             ("connections", "Forbindelser", "link", .connections),
             ("search", "Søg i FadedAI", "magnifyingglass", .search),
@@ -319,6 +400,54 @@ private struct FadedMoreScreen: View {
         }
         .frame(minHeight: 44)
         .contentShape(Rectangle())
+    }
+}
+
+private struct FadedMemoryOverview: View {
+    let bots: [VillageBot]
+
+    var body: some View {
+        List {
+            Section {
+                FadedDetailText("Vælg en bot for at se og redigere de noter, du selv har gemt til den.")
+                if bots.isEmpty {
+                    FadedDetailText("Opret en bot i Landsbyen for at gemme hukommelse.")
+                }
+                ForEach(bots) { bot in
+                    NavigationLink(value: bot.id) {
+                        Label(bot.name, systemImage: "brain.head.profile")
+                    }
+                }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(FadedBackground())
+        .navigationTitle("Hukommelse")
+        .navigationDestination(for: UUID.self) { TeamBotNotebook(botID: $0) }
+    }
+}
+
+private struct FadedSafetyOverview: View {
+    let openMemory: () -> Void
+    let open: (FadedMoreDestination) -> Void
+
+    var body: some View {
+        List {
+            Section("Dine data og godkendelser") {
+                FadedDetailText("Kodeforslag kan gennemgås, før du godkender ændringer.")
+                FadedDetailText("Privat Studio har sin egen session på telefonen.")
+                Button("Hukommelse", systemImage: "brain.head.profile", action: openMemory)
+                Button("Åbn Privat Studio", systemImage: "lock.shield") { open(.privateStudio) }
+            }
+            Section("Administrér") {
+                Button("Forbindelser", systemImage: "link") { open(.connections) }
+                Button("Sikkerhedskopi og gendannelse", systemImage: "externaldrive") { open(.backup) }
+                Button("Indstillinger", systemImage: "gearshape") { open(.settings) }
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(FadedBackground())
+        .navigationTitle("Sikkerhedscentral")
     }
 }
 

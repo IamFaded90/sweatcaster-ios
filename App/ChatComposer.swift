@@ -66,21 +66,12 @@ extension ChatView {
                             .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                     }
                 }
-                HStack(alignment: .bottom, spacing: 4) {
-                    Button("Flere handlinger", systemImage: "plus") {
-                        composerFocused = false
-                        choosingNote = false
-                        newNote = ""
-                        showComposerTools = true
-                    }
-                    .labelStyle(.iconOnly).frame(width: 44, height: 44).disabled(task != nil)
-                    TextField("Skriv en besked…", text: $draft, axis: .vertical)
-                        .lineLimit(1...4).frame(minHeight: 44).focused($composerFocused)
-                        .dropDestination(for: StudioPhotoInput.self) { items, _ in acceptDroppedPhotos(items) }
-                        .accessibilityHint("Træk et billede hertil for at analysere det")
-                    dictationAction.disabled(task != nil)
-                    sendControl
-                }
+                TextField("Skriv til FadedAI…", text: $draft, axis: .vertical)
+                    .lineLimit(1...4).frame(minHeight: 44).focused($composerFocused)
+                    .padding(.horizontal, FadedSpacing.xs)
+                    .dropDestination(for: StudioPhotoInput.self) { items, _ in acceptDroppedPhotos(items) }
+                    .accessibilityHint("Træk et billede hertil for at analysere det")
+                composerActions
                 if let problem = dictation.problem { Text(problem).font(.caption).foregroundStyle(palette.secondary) }
             }
 
@@ -112,6 +103,49 @@ extension ChatView {
         }
         .padding(.horizontal, FadedSpacing.m).padding(.vertical, 6)
         .background(palette.background)
+    }
+
+    private var composerActions: some View {
+        HStack(spacing: 0) {
+            ChatResponseDepthButton(length: $aiLength).disabled(task != nil)
+            ChatPhoneContextButton(onOpen: { composerFocused = false }, onChooseNote: contextAttachment)
+                .disabled(demo || task != nil)
+            composerIconButton("Vedhæft eller åbn chatværktøjer", icon: "paperclip", action: openAttachmentTools)
+                .disabled(task != nil)
+            dictationAction.disabled(task != nil)
+            composerIconButton("Chatindstillinger", icon: "slider.horizontal.3", action: openComposerSettings)
+            Spacer(minLength: 0)
+            sendControl
+        }
+    }
+
+    private func composerIconButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .labelStyle(.iconOnly)
+                .frame(width: 38, height: 38)
+                .fadedGlassSurface()
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var contextAttachment: ((String) -> Void)? {
+        guard effectiveReplySource != .grok else { return nil }
+        return { excerpt in
+            let destination = effectiveReplySource
+            guard destination != .grok, task == nil else { return }
+            attachedNote = excerpt
+            noteDestination = destination
+        }
+    }
+
+    private func openAttachmentTools() {
+        composerFocused = false
+        choosingNote = false
+        newNote = ""
+        showComposerTools = true
     }
 
     @ViewBuilder private var pcRecoveryAction: some View {
@@ -157,8 +191,13 @@ extension ChatView {
             }
         } label: {
             Image(systemName: dictation.active ? "stop.circle" : "mic")
+                .frame(width: 38, height: 38)
+                .fadedGlassSurface()
                 .frame(minWidth: 44, minHeight: 44)
-        }.accessibilityLabel(dictation.active ? "Stop diktering" : "Dikter chatbesked")
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(dictation.active ? "Stop diktering" : "Dikter chatbesked")
     }
 
     private var voiceBots: [VillageBot] {
@@ -249,5 +288,81 @@ extension ChatView {
         utterance.voice = voice
         utterance.rate = AVSpeechUtteranceDefaultSpeechRate * Float(rate.isFinite ? min(1.3, max(0.7, rate)) : 1)
         speechBox.play(utterance, as: playback)
+    }
+}
+
+private struct ChatResponseDepthButton: View {
+    @Binding var length: String
+    @Environment(\.fadedPalette) private var palette
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @State private var previousLength: String?
+
+    private var isDeep: Bool { length == "Grundig" }
+
+    var body: some View {
+        Button {
+            if isDeep {
+                length = previousLength ?? "Kort"
+                previousLength = nil
+            } else {
+                previousLength = length
+                length = "Grundig"
+            }
+        } label: {
+            HStack(spacing: FadedSpacing.xs) {
+                Image(systemName: "sparkles")
+                if !typeSize.isAccessibilitySize { Text("Dyb").font(.caption.weight(.semibold)) }
+            }
+            .foregroundStyle(isDeep && palette.isDark ? palette.lime : palette.text)
+            .padding(.horizontal, FadedSpacing.xs)
+            .frame(minWidth: 40, minHeight: 34)
+            .background(isDeep ? palette.lime.opacity(0.14) : palette.raised, in: Capsule())
+            .frame(minWidth: 44, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Dyb")
+        .accessibilityValue(length)
+        .accessibilityHint("Skifter mellem grundige svar og din tidligere svarlængde.")
+        .accessibilityAddTraits(isDeep ? .isSelected : [])
+        .onChange(of: length) { _, value in
+            if value != "Grundig" { previousLength = nil }
+        }
+    }
+}
+
+private struct ChatPhoneContextButton: View {
+    let onOpen: () -> Void
+    let onChooseNote: ((String) -> Void)?
+    @State private var presenting = false
+
+    var body: some View {
+        Button {
+            onOpen()
+            presenting = true
+        } label: {
+            Label("Kontekst fra iPhone", systemImage: "cable.connector")
+                .labelStyle(.iconOnly)
+                .frame(width: 38, height: 38)
+                .fadedGlassSurface()
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint("Åbner Fotos og Filer.")
+        .sheet(isPresented: $presenting) {
+            NavigationStack {
+                ConnectionsView(title: "iPhone-kontekst", onChooseNote: chooseAndDismiss)
+                    .toolbar { Button("Luk") { presenting = false } }
+            }
+        }
+    }
+
+    private var chooseAndDismiss: ((String) -> Void)? {
+        guard let onChooseNote else { return nil }
+        return { excerpt in
+            onChooseNote(excerpt)
+            presenting = false
+        }
     }
 }

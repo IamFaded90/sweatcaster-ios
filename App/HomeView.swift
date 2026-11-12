@@ -92,6 +92,7 @@ struct Home: View {
     @State var showDashboardActivity = false
     @State var showMoreDestinations = false
     @State var showProjects = false
+    @State var showHoldchatFromMore = false
     @State var showBackupFromMore = false
     @AppStorage(AppStorageKeys.appearanceLookPreset) var v0LookPresetID = ""
     @State var pendingMoreDestination: FadedMoreDestination?
@@ -101,6 +102,7 @@ struct Home: View {
     @State var showingBackupTools = false
     @State var settingsPath: [SettingsCategory] = []
     @State var showConnections = false
+    @State var pairAfterConnections = false
     @State var showTeam = false
     @State var teamSidebarCompact = false
     @State var dashboardApproval: DashboardApproval?

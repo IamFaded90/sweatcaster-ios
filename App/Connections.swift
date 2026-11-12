@@ -229,13 +229,22 @@ private struct ConnectorPhoto: Transferable {
 
 struct ConnectionsView: View {
     private let onChooseNote: ((String) -> Void)?
+    private let title: String
+    private let pcConnected: Bool?
+    private let openPairing: (() -> Void)?
     @Environment(\.fadedPalette) private var palette
     @State private var photos = PickerConnector(source: .photos)
     @State private var files = PickerConnector(source: .files)
     @State private var photoSelection: [PhotosPickerItem] = []
     @State private var photoToAnalyze: PickerConnector.Record?
 
-    init(onChooseNote: ((String) -> Void)? = nil) { self.onChooseNote = onChooseNote }
+    init(title: String = "Forbindelser", pcConnected: Bool? = nil, openPairing: (() -> Void)? = nil,
+         onChooseNote: ((String) -> Void)? = nil) {
+        self.title = title
+        self.pcConnected = pcConnected
+        self.openPairing = openPairing
+        self.onChooseNote = onChooseNote
+    }
 
     private struct Provider: Identifiable {
         let name, icon, detail: String
@@ -250,7 +259,9 @@ struct ConnectionsView: View {
         .init(name: "OneDrive", icon: "cloud", detail: "Kræver Microsoft-login og læseadgang til valgte filer."),
         .init(name: "GitHub", icon: "chevron.left.forwardslash.chevron.right", detail: "Kræver særskilt adgang til de repositories, du vil bruge."),
         .init(name: "Gmail", icon: "envelope", detail: "Kræver Google OAuth med godkendte mailtilladelser."),
-        .init(name: "Calendar", icon: "calendar", detail: "Kræver en valgt kalender og udtrykkelig læsetilladelse."),
+        .init(name: "Kalender", icon: "calendar", detail: "Kræver en valgt kalender og udtrykkelig læsetilladelse."),
+        .init(name: "Beskeder", icon: "bubble.left", detail: "Kontekst fra Beskeder er endnu ikke tilsluttet."),
+        .init(name: "Emby", icon: "play.rectangle", detail: "Kræver en Emby-server og adgang til et mediebibliotek."),
         .init(name: "Todoist", icon: "checklist", detail: "Kræver Todoist OAuth og adgang til valgte projekter."),
         .init(name: "Notion", icon: "doc.text", detail: "Kræver en Notion-integration med adgang til valgte sider."),
         .init(name: "YouTube", icon: "play.rectangle", detail: "Kræver Google OAuth til kontoadgang."),
@@ -266,8 +277,28 @@ struct ConnectionsView: View {
         @Bindable var fileConnector = files
         ScrollView {
             VStack(alignment: .leading, spacing: FadedSpacing.action) {
-                FadedSignature()
-                Text("Forbindelser").font(FadedTypography.title).accessibilityAddTraits(.isHeader)
+                Text(title).font(FadedTypography.title).accessibilityAddTraits(.isHeader)
+                if let pcConnected, let openPairing {
+                    FadedCard(size: .hero) {
+                        VStack(alignment: .leading, spacing: FadedSpacing.m) {
+                            HStack {
+                                Image(systemName: "desktopcomputer").foregroundStyle(palette.cyan)
+                                Spacer()
+                                FadedBadge(pcConnected ? "Forbundet" : "Ikke forbundet",
+                                           tone: pcConnected ? .success : .info)
+                            }
+                            Text("Din PC. Mere kraft.").font(FadedTypography.title)
+                            FadedDetailText("Par din iPhone med FadedAI på din PC.")
+                            Button(action: openPairing) {
+                                Label("QR-login", systemImage: "qrcode")
+                                    .padding(.horizontal, FadedSpacing.m)
+                                    .frame(minHeight: 44)
+                                    .fadedGlassSurface()
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
                 Text("Vælg indhold fra din telefon. Valget vises kun her i denne session.")
                     .foregroundStyle(palette.secondary)
                 pickerCard(photos, detail: "Vælg op til tre billeder i Apples billedvælger. Her vises små lokale forhåndsvisninger.")
@@ -281,7 +312,7 @@ struct ConnectionsView: View {
         }
         .background { FadedBackground() }
         .foregroundStyle(palette.text)
-        .navigationTitle("Forbindelser")
+        .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .photosPicker(isPresented: $photoConnector.showPicker, selection: $photoSelection,
                       maxSelectionCount: 3, matching: .images)

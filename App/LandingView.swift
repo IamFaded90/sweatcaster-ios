@@ -29,7 +29,7 @@ struct FadedLandingView: View {
             VStack(spacing: 0) {
                 landingHeader
                     .padding(.horizontal, FadedSpacing.l)
-                worldArtwork
+                FadedWorldArtwork()
                 landingCopy
                     .padding(.horizontal, FadedSpacing.l)
                 if let openChatLocally, let openCodeLocally {
@@ -43,17 +43,7 @@ struct FadedLandingView: View {
             .frame(maxWidth: .infinity)
         }
         .scrollIndicators(.hidden)
-        .background {
-            palette.background
-                .overlay(alignment: .topLeading) {
-                    if palette.theme == .faded {
-                        RadialGradient(colors: [FadedBrand.mint.opacity(0.14), .clear],
-                                       center: .topLeading, startRadius: 0, endRadius: 430)
-                            .allowsHitTesting(false)
-                    }
-                }
-                .ignoresSafeArea()
-        }
+        .background(FadedBackground())
     }
 
     private var landingHeader: some View {
@@ -95,37 +85,6 @@ struct FadedLandingView: View {
             .accessibilityHint("Åbner sikker forbindelse til din PC")
         }
         .padding(.vertical, FadedSpacing.l)
-    }
-
-    private var worldArtwork: some View {
-        Color.clear
-            .aspectRatio(1.65, contentMode: .fit)
-            .frame(maxHeight: 256)
-            .overlay {
-                Image("V0AIWorld")
-                    .resizable()
-                    .scaledToFill()
-                    .accessibilityHidden(true)
-            }
-            .clipped()
-            .mask {
-                LinearGradient(stops: [
-                    .init(color: .clear, location: 0),
-                    .init(color: .black, location: 0.1),
-                    .init(color: .black, location: 0.84),
-                    .init(color: .clear, location: 1)
-                ], startPoint: .top, endPoint: .bottom)
-            }
-            .overlay(alignment: .bottom) {
-                Label("En verden af muligheder", systemImage: "sparkles")
-                    .font(.caption2)
-                    .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
-                    .padding(.horizontal, FadedSpacing.m)
-                    .padding(.vertical, 6)
-                    .background(palette.background.opacity(0.85), in: Capsule())
-                    .overlay { Capsule().strokeBorder(FadedBrand.mint.opacity(0.15)) }
-                    .padding(.bottom, FadedSpacing.m)
-            }
     }
 
     private var landingCopy: some View {
@@ -209,5 +168,48 @@ struct FadedLandingView: View {
             .overlay { RoundedRectangle(cornerRadius: FadedRadius.card).strokeBorder(palette.border) }
         }
         .buttonStyle(.plain)
+    }
+}
+
+struct FadedWorldArtwork: View {
+    @Environment(\.fadedPalette) private var palette
+
+    var body: some View {
+        Color.clear
+            .aspectRatio(1.65, contentMode: .fit)
+            .frame(maxHeight: 256)
+            .overlay {
+                GeometryReader { frame in
+                    Image("V0AIWorld")
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: frame.size.width, height: frame.size.height)
+                        .clipped()
+                        .mask { feather(.leading, .trailing, from: 0.18, through: 0.82) }
+                        .mask { feather(.top, .bottom, from: 0.16, through: 0.77) }
+                        .blendMode(palette.isDark ? .screen : .normal)
+                }
+                .accessibilityHidden(true)
+            }
+            .overlay(alignment: .bottom) {
+                Label("En verden af muligheder", systemImage: "sparkles")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
+                    .padding(.horizontal, FadedSpacing.m)
+                    .padding(.vertical, 6)
+                    .background(palette.card.opacity(0.92), in: Capsule())
+                    .overlay { Capsule().strokeBorder(palette.border).allowsHitTesting(false) }
+                    .padding(.horizontal, FadedSpacing.s)
+                    .padding(.bottom, FadedSpacing.m)
+            }
+    }
+
+    private func feather(_ start: UnitPoint, _ end: UnitPoint, from startOfArt: CGFloat, through endOfArt: CGFloat) -> some View {
+        LinearGradient(stops: [
+            .init(color: .clear, location: 0),
+            .init(color: .black, location: startOfArt),
+            .init(color: .black, location: endOfArt),
+            .init(color: .clear, location: 1)
+        ], startPoint: start, endPoint: end)
     }
 }

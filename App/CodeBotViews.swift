@@ -2,6 +2,53 @@
 import Foundation
 import SwiftUI
 
+private struct CodeWorkspaceHero: View {
+    @Environment(\.fadedPalette) private var palette
+    @ScaledMetric(relativeTo: .largeTitle) private var headingSize = 34.0
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: FadedRadius.hero)
+        VStack(alignment: .leading, spacing: FadedSpacing.m) {
+            Image(systemName: "chevron.left.forwardslash.chevron.right")
+                .font(.headline.monospaced())
+                .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
+                .frame(width: 42, height: 42)
+                .background(palette.raised, in: .rect(cornerRadius: FadedRadius.medium))
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Du har idéen.").foregroundStyle(palette.text)
+                Text("Lad os bygge den.").foregroundStyle(LinearGradient(
+                    colors: palette.isDark ? [FadedBrand.mint, FadedBrand.blue] : [palette.text, FadedBrand.actionText],
+                    startPoint: .leading, endPoint: .trailing
+                ))
+            }
+            .font(.system(size: headingSize, weight: .medium))
+            .tracking(-1)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+
+            Label("Du godkender, før en fil ændres på PC’en.", systemImage: "checkmark.shield")
+                .font(.footnote)
+                .foregroundStyle(palette.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(FadedSpacing.l)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            shape.fill(palette.card)
+                .overlay {
+                    if palette.isDark {
+                        shape.fill(LinearGradient(colors: [FadedBrand.mint.opacity(0.10), .clear, FadedBrand.blue.opacity(0.12)],
+                                                  startPoint: .topLeading, endPoint: .bottomTrailing))
+                    }
+                }
+        }
+        .overlay { shape.strokeBorder(palette.border).allowsHitTesting(false) }
+    }
+}
+
 struct CodeWorkspaceView: View {
     @Environment(\.fadedPalette) private var palette
     @Environment(\.horizontalSizeClass) private var sizeClass
@@ -153,6 +200,7 @@ struct CodeWorkspaceView: View {
     private func fileNavigation(useSplit: Bool) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
+                CodeWorkspaceHero()
                 if let api {
                     FadedSectionHeader("1. Vælg en fil", detail: "Find filen på PC’en. Derefter beskriver du ændringen og gennemgår forslaget, før du godkender.")
                     if !useSplit, currentProposal != nil {

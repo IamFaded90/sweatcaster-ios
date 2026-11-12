@@ -229,7 +229,10 @@ struct BotLocalMemoryPicker: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
                     overview
-                    if mode == .group { groupControls }
+                    if mode == .group {
+                        groupIntro
+                        groupControls
+                    }
                     if mode == .group || mode == .handoff { participantPicker }
                     if let skill {
                         Text(skill.title).font(FadedTypography.section)
@@ -255,7 +258,7 @@ struct BotLocalMemoryPicker: View {
         .safeAreaInset(edge: .bottom) { composer }
         .background { FadedBackground() }
         .foregroundStyle(palette.text)
-        .navigationTitle(activeGroup?.name ?? mode.title)
+        .navigationTitle(activeGroup?.name ?? (mode == .group ? "Holdchat" : mode.title))
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             if !turns.isEmpty {
@@ -276,6 +279,30 @@ struct BotLocalMemoryPicker: View {
         }
         .onDisappear { work?.cancel() }
         .onChange(of: phase) { _, value in if value == .background { work?.cancel() } }
+    }
+
+    private var groupIntro: some View {
+        VStack(spacing: FadedSpacing.s) {
+            if !selected.isEmpty {
+                HStack(spacing: FadedSpacing.xs) {
+                    ForEach(selected.prefix(3)) { bot in
+                        VillageBotAvatar(bot: bot, size: 48, radius: 12)
+                    }
+                }
+                .accessibilityHidden(true)
+            }
+            VStack(spacing: 0) {
+                Text("Flere hoveder.").foregroundStyle(palette.text)
+                Text("Én samtale.").foregroundStyle(FadedBrand.gradient)
+            }
+            .font(.largeTitle.weight(.semibold))
+            .accessibilityElement(children: .combine)
+            .accessibilityAddTraits(.isHeader)
+            FadedDetailText("Saml dine AI-perspektiver om én opgave. Du sætter retningen.")
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, FadedSpacing.m)
     }
 
     private var groupControls: some View {

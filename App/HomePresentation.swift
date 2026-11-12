@@ -152,9 +152,18 @@ extension Home {
                     .toolbar { Button("Luk") { showPCStatus = false } }
             }
         }
-        .sheet(isPresented: $showConnections) {
+        .sheet(isPresented: $showConnections, onDismiss: {
+            guard pairAfterConnections else { return }
+            pairAfterConnections = false
+            showLogin = true
+        }) {
             NavigationStack {
-                ConnectionsView().toolbar { Button("Luk") { showConnections = false } }
+                ConnectionsView(pcConnected: model.connected && !model.isDemo, openPairing: {
+                    guard !switchDisabled else { return }
+                    pairAfterConnections = true
+                    showConnections = false
+                })
+                .toolbar { Button("Luk") { showConnections = false } }
             }
         }
         .sheet(item: $diagnosticsExport) { DiagnosticsShareSheet(url: $0.url) }
@@ -231,6 +240,12 @@ extension Home {
         }
         .sheet(isPresented: $showSavedVideos) { savedVideoLibrary }
         .sheet(isPresented: $showProjects) { FadedProjectsView() }
+        .sheet(isPresented: $showHoldchatFromMore) {
+            NavigationStack {
+                TeamWorkflowView(mode: .group, bots: FadedMoreScreenData.bots)
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { showHoldchatFromMore = false } } }
+            }
+        }
         .sheet(isPresented: $showBackupFromMore) {
             NavigationStack {
                 BackupSettingsView(canRestore: {
