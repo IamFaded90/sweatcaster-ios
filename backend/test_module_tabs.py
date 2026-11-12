@@ -1,5 +1,6 @@
 import json
 from inspect import signature
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -9,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from sweatcaster.api import create_app
 from sweatcaster import emby_library
+from sweatcaster.catalog import iter_videos
+from sweatcaster.clip_removal import REMOVED_FOLDER, check_clip_for_job
 from sweatcaster.dto import ApiError
 from sweatcaster.module_tabs import collection_answer
 
@@ -67,6 +70,50 @@ def test_emby_library_requires_a_paired_client(tmp_path, monkeypatch):
     with pytest.raises(ApiError) as failure:
         endpoint(request, Response(), offset=-1)
     assert failure.value.status_code == 422
+
+
+def test_remove_original_clip_requires_pairing_and_keeps_a_recovery_copy(tmp_path):
+    settings = make_settings(tmp_path)
+    app = create_app(settings)
+    endpoint = next(route.endpoint for route in app.routes
+                    if getattr(route, "path", None) == "/api/modules/v1/video-clips/{clip_id}/remove")
+    clip_id = uuid4().hex
+    root = settings.input_roots[0]
+    source = root / "original.mp4"
+    source.write_bytes(b"test video")
+    other = root / "other.mp4"
+    other.write_bytes(b"unrelated video")
+    info = source.stat()
+    jobs = [{"clip_id": clip_id, "status": "rendering"}]
+    store = SimpleNamespace(
+        get_clip=lambda _: {"root_index": 0, "relative_path": source.name,
+                            "size_bytes": info.st_size, "mtime_ns": info.st_mtime_ns},
+        list_jobs=lambda: jobs,
+    )
+    app.state.store = store
+    request = Request({"type": "http", "app": app, "headers": []})
+    with pytest.raises(ApiError) as failure:
+        endpoint(clip_id, request, Response(), {"confirm_clip_id": clip_id})
+    assert failure.value.status_code == 401
+    paired = Request({"type": "http", "app": app,
+                      "headers": [(b"authorization", ("Bearer " + settings.token).encode())]})
+    with pytest.raises(ApiError) as failure:
+        endpoint(clip_id, paired, Response(), {"confirm_clip_id": uuid4().hex})
+    assert failure.value.status_code == 422
+    with pytest.raises(ApiError) as failure:
+        endpoint(clip_id, paired, Response(), {"confirm_clip_id": clip_id})
+    assert failure.value.status_code == 409
+    assert source.exists()
+    jobs.clear()
+    response = Response()
+    assert endpoint(clip_id, paired, response, {"confirm_clip_id": clip_id}) == {"removed": True}
+    assert response.headers["Cache-Control"] == "no-store"
+    assert not source.exists()
+    assert (root / REMOVED_FOLDER / clip_id / source.name).read_bytes() == b"test video"
+    assert list(iter_videos(root)) == [other]
+    with pytest.raises(ApiError) as failure:
+        check_clip_for_job(settings, store, clip_id)
+    assert failure.value.status_code == 404
 
 
 def test_module_mcp_rejects_untrusted_clients_and_lists_read_tools(tmp_path):

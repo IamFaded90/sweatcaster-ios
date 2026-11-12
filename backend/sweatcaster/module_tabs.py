@@ -118,6 +118,7 @@ def collection_answer(settings, message: str) -> str | None:
 def register_modules(app: FastAPI, settings, authorize) -> None:
     from sweatcaster.bot_computer_routes import register_bot_computers
     from sweatcaster.bot_computers import BotComputerWorker
+    from sweatcaster.clip_removal import move_original_clip
     from sweatcaster.code_batch import BatchWorker, configured_batch
     from sweatcaster.repository_library import RepositoryError
 
@@ -178,6 +179,14 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             yield
 
     app.router.lifespan_context = lifespan
+
+    @app.put("/api/modules/v1/video-clips/{clip_id}/remove", include_in_schema=False)
+    def remove_original_clip(clip_id: str, request: Request, response: Response, body: dict = Body(...)):
+        authorize(request, settings)
+        response.headers["Cache-Control"] = "no-store"
+        if body != {"confirm_clip_id": clip_id}:
+            raise ApiError(422, "INVALID_INPUT", "Bekræft det valgte originalklip.")
+        return move_original_clip(settings, request.app.state.store, clip_id)
 
     @app.get("/api/modules/v1/emby/library", include_in_schema=False)
     def emby_library(request: Request, response: Response, parent: str | None = None,

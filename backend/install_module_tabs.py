@@ -59,10 +59,27 @@ def install(root: Path) -> None:
         updated = base.replace(anchor, replacement)
         compile(updated, str(path), "exec")
         staged[path] = (original, updated)
+    api = package / "api.py"
+    original = api.read_text(encoding="utf-8")
+    current = staged.get(api, (original, original))[1]
+    create = "        created = jobs.create(parsed)\n"
+    guarded_create = (
+        "        from sweatcaster.clip_removal import check_clip_for_job, clip_operations\n"
+        "        with clip_operations:\n"
+        "            for clip_id in parsed[\"clip_ids\"]:\n"
+        "                check_clip_for_job(settings, store, clip_id)\n"
+        "            created = jobs.create(parsed)\n"
+    )
+    if guarded_create not in current:
+        if current.count(create) != 1:
+            raise ValueError("Checkpoint has an unexpected video job handler; no files were written.")
+        updated = current.replace(create, guarded_create)
+        compile(updated, str(api), "exec")
+        staged[api] = (original, updated)
     modules = {}
     for name in (source.name, "code_batch.py", "repository_library.py", "agent_workflows.py",
                  "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py",
-                 "emby_library.py", "emby_settings.py"):
+                 "emby_library.py", "emby_settings.py", "clip_removal.py"):
         path = source.parent / name
         module = path.read_text(encoding="utf-8")
         compile(module, str(path), "exec")

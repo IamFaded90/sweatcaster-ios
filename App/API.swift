@@ -92,6 +92,13 @@ struct LiveAPI: SweatAPI, ChatAPI {
     }
 
     func moduleManifest() async throws -> ModuleManifest { try await moduleJSON("manifest") }
+    func removeOriginalVideoClip(_ id: String) async throws {
+        struct Result: Decodable { let removed: Bool }
+        guard validWireID(id) else { throw APIError.input }
+        let payload = try JSONEncoder().encode(["confirm_clip_id": id])
+        let result: Result = try await moduleJSON("video-clips/\(id)/remove", upload: payload)
+        guard result.removed else { throw V2Failure.invalidResponse }
+    }
     func embyLibrary(parent: String?, search: String, offset: Int) async throws -> EmbyLibraryPage {
         var query = [URLQueryItem(name: "offset", value: String(offset))]
         if let parent { query.append(.init(name: "parent", value: parent)) }
