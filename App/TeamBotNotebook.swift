@@ -172,8 +172,7 @@ struct TeamBotNotebook: View {
 
     private var store: TeamBotNotebookStore { TeamBotNotebookStore(botID: botID) }
     private var profile: VillageBot? {
-        let bots = try? JSONDecoder().decode([VillageBot].self, from: MigratedAppData.shared.villageBots)
-        return bots?.first { $0.id == botID }
+        VillageBot.list(from: MigratedAppData.shared.villageBots).first { $0.id == botID }
     }
 
     var body: some View {

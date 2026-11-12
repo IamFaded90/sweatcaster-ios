@@ -10,18 +10,81 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct VillageBot: Codable, Identifiable, Equatable {
-    var id = UUID()
-    var name = ""
-    var color = "Blå"
-    var prompt = ""
-    var voice = "da-DK"
-    var sprite: Data? = nil
-    var personality: String? = nil
-    var notifications: Bool? = true
-    var voiceRate: Double? = 1.0
-    var language: String? = "da-DK"
-    var specialty: String? = nil
-    var responsibility: String? = nil
+    static let defaultTraits = ["Rolig", "Nysgerrig", "Tålmodig"]
+
+    var id: UUID
+    var name: String
+    var color: String
+    var prompt: String
+    var voice: String
+    var sprite: Data?
+    var personality: String?
+    var notifications: Bool?
+    var voiceRate: Double?
+    var language: String?
+    var specialty: String?
+    var responsibility: String?
+    var traits: [String]
+    var bestFriendID: UUID?
+    var dailyMemory: [String]
+
+    init(id: UUID = UUID(), name: String = "", color: String = "Blå", prompt: String = "",
+         voice: String = "da-DK", sprite: Data? = nil, personality: String? = nil,
+         notifications: Bool? = true, voiceRate: Double? = 1.0, language: String? = "da-DK",
+         specialty: String? = nil, responsibility: String? = nil,
+         traits: [String] = VillageBot.defaultTraits, bestFriendID: UUID? = nil, dailyMemory: [String] = []) {
+        self.id = id
+        self.name = name
+        self.color = color
+        self.prompt = prompt
+        self.voice = voice
+        self.sprite = sprite
+        self.personality = personality
+        self.notifications = notifications
+        self.voiceRate = voiceRate
+        self.language = language
+        self.specialty = specialty
+        self.responsibility = responsibility
+        self.traits = traits
+        self.bestFriendID = bestFriendID
+        self.dailyMemory = dailyMemory
+    }
+
+    static func founderAdam() -> VillageBot {
+        VillageBot(name: "Adam", color: "Blå",
+                   prompt: "Hjælp med kode og logik. Vær rolig, grundig og præcis, og foreslå ændringer som brugeren gennemgår.",
+                   personality: "Rolig", specialty: "Kode og logik",
+                   traits: ["Flittig", "Perfektionist", "Tålmodig"])
+    }
+
+    static func founderEva() -> VillageBot {
+        VillageBot(name: "Eva", color: "Lilla",
+                   prompt: "Hjælp med video. Vær legesyg, nysgerrig og social, og foreslå klip og fortælling.",
+                   personality: "Nysgerrig", specialty: "Kreativ leder",
+                   traits: ["Kreativ", "Nysgerrig", "Social"])
+    }
+
+    /// Hopper over én ødelagt bot og beholder resten. En ulæselig fil kaster videre.
+    static func listRecovering(from data: Data) throws -> [VillageBot] {
+        let raw = try JSONSerialization.jsonObject(with: data)
+        guard let array = raw as? [Any] else {
+            throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Botlisten er ikke en liste"))
+        }
+        return array.compactMap { element in
+            do {
+                let item = try JSONSerialization.data(withJSONObject: element)
+                return try JSONDecoder().decode(VillageBot.self, from: item)
+            } catch {
+                AppDiagnostics.record(error)
+                return nil
+            }
+        }
+    }
+
+    static func list(from data: Data) -> [VillageBot] {
+        guard !data.isEmpty else { return [] }
+        return (try? listRecovering(from: data)) ?? []
+    }
 
     var specialtyTitle: String {
         let named = specialty?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -55,6 +118,49 @@ struct VillageBot: Codable, Identifiable, Equatable {
         result.voice = playbackVoice
         result.rate = AVSpeechUtteranceDefaultSpeechRate * Float(min(1.3, max(0.7, voiceRate ?? 1)))
         return result
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, color, prompt, voice, sprite, personality, notifications, voiceRate, language
+        case specialty, responsibility, traits, bestFriendID, dailyMemory
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        color = try container.decode(String.self, forKey: .color)
+        prompt = try container.decode(String.self, forKey: .prompt)
+        voice = try container.decode(String.self, forKey: .voice)
+        sprite = try container.decodeIfPresent(Data.self, forKey: .sprite)
+        personality = try container.decodeIfPresent(String.self, forKey: .personality)
+        notifications = try container.decodeIfPresent(Bool.self, forKey: .notifications)
+        voiceRate = try container.decodeIfPresent(Double.self, forKey: .voiceRate)
+        language = try container.decodeIfPresent(String.self, forKey: .language)
+        specialty = try container.decodeIfPresent(String.self, forKey: .specialty)
+        responsibility = try container.decodeIfPresent(String.self, forKey: .responsibility)
+        traits = try container.decodeIfPresent([String].self, forKey: .traits) ?? Self.defaultTraits
+        bestFriendID = try container.decodeIfPresent(UUID.self, forKey: .bestFriendID)
+        dailyMemory = try container.decodeIfPresent([String].self, forKey: .dailyMemory) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(name, forKey: .name)
+        try container.encode(color, forKey: .color)
+        try container.encode(prompt, forKey: .prompt)
+        try container.encode(voice, forKey: .voice)
+        try container.encodeIfPresent(sprite, forKey: .sprite)
+        try container.encodeIfPresent(personality, forKey: .personality)
+        try container.encodeIfPresent(notifications, forKey: .notifications)
+        try container.encodeIfPresent(voiceRate, forKey: .voiceRate)
+        try container.encodeIfPresent(language, forKey: .language)
+        try container.encodeIfPresent(specialty, forKey: .specialty)
+        try container.encodeIfPresent(responsibility, forKey: .responsibility)
+        try container.encode(traits, forKey: .traits)
+        try container.encodeIfPresent(bestFriendID, forKey: .bestFriendID)
+        try container.encode(dailyMemory, forKey: .dailyMemory)
     }
 }
 
@@ -145,7 +251,7 @@ struct VillageBotBuilder: View {
     @State private var generatingSprite = false
     @State private var page = Page.profile
 
-    private var bots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: savedBots)) ?? [] }
+    private var bots: [VillageBot] { VillageBot.list(from: savedBots) }
     private var testing: Bool { testTask != nil }
     private var testModel: String { PhoneModels.effectiveModelID(phoneModel) }
     private var canTest: Bool { testModel == "apple" ? PhoneModels.appleAvailable : PhoneModels.installedDirectory(testModel) != nil }
@@ -522,7 +628,7 @@ struct VillageBotLibrary: View {
     @State private var editingBot: VillageBot?
     @State private var chattingBot: VillageBot?
 
-    private var bots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: savedBots)) ?? [] }
+    private var bots: [VillageBot] { VillageBot.list(from: savedBots) }
 
     var body: some View {
         NavigationStack {

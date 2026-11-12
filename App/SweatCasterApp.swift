@@ -84,6 +84,7 @@ struct PromptExample: Identifiable {
     @AppStorage(AppStorageKeys.appResetGeneration) private var resetGeneration = ""
     @Environment(\.dynamicTypeSize) private var systemTextSize
     @Environment(\.scenePhase) private var scenePhase
+    @State private var villageNotice: String?
     var body: some Scene {
         WindowGroup {
             Home().id(resetGeneration).dynamicTypeSize(textScale == 0 ? systemTextSize :
@@ -91,6 +92,17 @@ struct PromptExample: Identifiable {
                  .accessibility1, .accessibility2][min(5, max(0, Int(textScale)))])
                 .onChange(of: scenePhase, initial: true) { _, phase in
                     if phase == .active { Task { await PhoneModelDownloads.shared.resumeInterruptedVisionDownload() } }
+                    let village = SimulationEngine.shared
+                    village.handle(phase)
+                    villageNotice = village.readError
+                }
+                .alert("Landsbyen", isPresented: Binding(
+                    get: { villageNotice != nil },
+                    set: { if !$0 { villageNotice = nil; SimulationEngine.shared.readError = nil } }
+                )) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    Text(villageNotice ?? "")
                 }
         }
     }

@@ -379,7 +379,7 @@ extension Home {
 
     private var dashboardSearchRecords: [FadedSearchRecord] {
         let data = MigratedAppData.shared
-        let bots = (try? JSONDecoder().decode([VillageBot].self, from: data.villageBots)) ?? []
+        let bots = VillageBot.list(from: data.villageBots)
         var records = bots.map { bot in
             FadedSearchRecord(id: "bot:\(bot.id)", category: .bot, title: bot.name, detail: bot.specialtyTitle,
                               keywords: bot.responsibility ?? "",

@@ -58,7 +58,7 @@ struct TeamRoster: View {
     private var hub: V2Hub? { hasCurrentSnapshot ? storedHub : nil }
     private var approvals: [CodeBatchList.Job]? { hasCurrentSnapshot ? storedApprovals : nil }
     private var approvalError: AppErrorPresentation? { hasCurrentSnapshot ? storedApprovalError : nil }
-    private var bots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: savedBots)) ?? [] }
+    private var bots: [VillageBot] { VillageBot.list(from: savedBots) }
     private var pinned: Set<UUID> {
         Set(favorites.split(separator: ",").compactMap { UUID(uuidString: String($0)) }).intersection(bots.map(\.id))
     }

@@ -25,7 +25,7 @@ struct VillageBotProfile: View {
     @State private var notice: String?
     @StateObject private var speechBox = SpeechBox()
 
-    private var bots: [VillageBot] { (try? JSONDecoder().decode([VillageBot].self, from: savedBots)) ?? [] }
+    private var bots: [VillageBot] { VillageBot.list(from: savedBots) }
 
     private var modelID: String { PhoneModels.effectiveModelID(phoneModel) }
     private var canTest: Bool {
@@ -220,7 +220,7 @@ struct VillageBotProfile: View {
     }
 
     private func deleteBot() {
-        guard let bots = try? JSONDecoder().decode([VillageBot].self, from: savedBots),
+        guard let bots = try? VillageBot.listRecovering(from: savedBots),
               let index = bots.firstIndex(where: { $0.id == botID }),
               let remaining = try? JSONEncoder().encode(bots.filter { $0.id != botID }) else {
             notice = "Botprofilen kunne ikke slettes."
@@ -250,7 +250,8 @@ struct VillageBotProfile: View {
         }
         let copy = VillageBot(name: name, prompt: original.prompt, voice: original.voice,
                               personality: original.personality, notifications: false, voiceRate: original.voiceRate,
-                              language: original.language, specialty: original.specialty, responsibility: original.responsibility)
+                              language: original.language, specialty: original.specialty, responsibility: original.responsibility,
+                              traits: original.traits)
         updated.append(copy)
         do {
             try MigratedAppData.shared.saveVillageBots(JSONEncoder().encode(updated))
@@ -264,7 +265,7 @@ struct VillageBotProfile: View {
     }
 
     private func restoreBot() {
-        guard let deletedBot, var bots = try? JSONDecoder().decode([VillageBot].self, from: savedBots),
+        guard let deletedBot, var bots = try? VillageBot.listRecovering(from: savedBots),
               !bots.contains(where: { $0.id == deletedBot.id }), bots.count < 10 else {
             notice = "Botten kunne ikke gendannes. Tjek, om der er plads på holdet."
             return
