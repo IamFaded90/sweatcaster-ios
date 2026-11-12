@@ -171,21 +171,26 @@ import XCTest
         XCTAssertEqual(transport.cancels, 0)
         transport.releaseSubmit()
         _ = try await submitted
-        XCTAssertEqual(session.office.task(id: task.id)?.status, .cancelled)
+        let stored = try XCTUnwrap(session.office.task(key: "key-adam-inflight"))
+        XCTAssertEqual(stored.status, .cancelled)
+        XCTAssertTrue(stored.id.hasPrefix("pc-"))
+        XCTAssertNotEqual(stored.id, task.id)
         XCTAssertEqual(transport.cancels, 1)
         XCTAssertTrue(session.office.pendingCancelIDs.isEmpty)
     }
 
     func testLocalCancelIsNotReplacedByARemoteWaitingTask() {
         var office = BotComputerOffice()
-        let task = BotComputerTask(id: "task-cancel", botID: adam, botName: "Adam", idempotencyKey: "key-cancel",
+        let task = BotComputerTask(id: "phone-cancel", botID: adam, botName: "Adam", idempotencyKey: "key-cancel",
                                    retryKey: nil, instruction: "Skriv", inputPath: nil, status: .cancelled,
                                    resultText: nil, resultPath: nil, error: nil, attempt: 1, created: 1, updated: 2)
         office.tasks = [task]
         var remote = task
+        remote.id = "pc-cancel"
         remote.status = .running
         office.adopt(remote)
         XCTAssertEqual(office.tasks.first?.status, .cancelled)
+        XCTAssertEqual(office.tasks.first?.id, "pc-cancel")
     }
 
     func testServerIsolationDoesNotLookLikeAnOfflinePC() async throws {
@@ -292,6 +297,7 @@ import XCTest
             return BotComputerSubmission(link: healthLink == .dockerOffline ? .dockerOffline : .online, task: existing)
         }
         var stored = task
+        stored.id = "pc-" + task.id
         if healthLink == .dockerOffline {
             stored.status = .waiting
         } else if failSubmit {

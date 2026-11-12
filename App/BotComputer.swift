@@ -191,6 +191,8 @@ struct BotComputerOffice: Equatable {
     mutating func adopt(_ task: BotComputerTask) {
         if let index = tasks.firstIndex(where: { $0.idempotencyKey == task.idempotencyKey || $0.id == task.id }),
            tasks[index].status == .cancelled, task.status != .cancelled {
+            // Keep Annulleret, but learn the PC id so a queued cancel still hits the desk.
+            tasks[index].id = task.id
             return
         }
         if task.status == .done, let path = task.resultPath, let text = task.resultText {
@@ -313,9 +315,15 @@ enum BotComputerDisk {
               let record = try? JSONDecoder().decode(BotComputerRecord.self, from: data) else {
             return BotComputerOffice()
         }
-        return BotComputerOffice(tasks: record.tasks, files: record.files,
-                                 deliveredKeys: Set(record.deliveredKeys),
-                                 pendingCancelIDs: Set(record.pendingCancelIDs), link: record.link)
+        var office = BotComputerOffice(tasks: record.tasks, files: record.files,
+                                       deliveredKeys: Set(record.deliveredKeys),
+                                       pendingCancelIDs: Set(record.pendingCancelIDs), link: record.link)
+        office.pendingCancelIDs = Set(office.pendingCancelIDs.compactMap { token in
+            if let task = office.task(key: token) { return task.idempotencyKey }
+            if let task = office.task(id: token) { return task.idempotencyKey }
+            return nil
+        })
+        return office
     }
 
     static func save(_ office: BotComputerOffice, to directory: URL) throws {
@@ -430,7 +438,7 @@ enum BotComputerDisk {
         guard sentOrSending else {
             return .success(office.task(id: id) ?? updated)
         }
-        office.pendingCancelIDs.insert(id)
+        office.pendingCancelIDs.insert(current.idempotencyKey)
         persist()
         let reachable = office.link == .online || office.link == .dockerOffline
         guard reachable, office.deliveredKeys.contains(current.idempotencyKey) else {
@@ -514,19 +522,21 @@ enum BotComputerDisk {
 
     private func queueCancelIfNeeded(for key: String) {
         guard let task = office.task(key: key), task.status == .cancelled else { return }
-        office.pendingCancelIDs.insert(task.id)
+        office.pendingCancelIDs.insert(key)
     }
 
     private func deliverCancels() async {
-        for id in office.pendingCancelIDs {
-            guard let task = office.task(id: id) else {
-                office.pendingCancelIDs.remove(id)
+        for token in office.pendingCancelIDs {
+            let task = office.task(key: token) ?? office.task(id: token)
+            guard let task else {
+                office.pendingCancelIDs.remove(token)
                 continue
             }
             guard office.deliveredKeys.contains(task.idempotencyKey) else { continue }
             do {
                 let remote = try await transport.cancel(botID: task.botID, id: task.id)
-                office.pendingCancelIDs.remove(id)
+                office.pendingCancelIDs.remove(token)
+                office.pendingCancelIDs.remove(task.idempotencyKey)
                 office.adopt(remote)
             } catch {
                 office.link = Self.link(for: error)
