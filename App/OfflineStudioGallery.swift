@@ -329,7 +329,10 @@ extension OfflineStudio {
                     .overlay(alignment: .topTrailing) {
                         if selectingGalleryImages {
                             Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                                .foregroundStyle(palette.lime).padding(8)
+                                .foregroundStyle(palette.isDark ? palette.lime : palette.text)
+                                .frame(width: 36, height: 36)
+                                .fadedGlassSurface()
+                                .padding(6)
                         }
                     }
             }

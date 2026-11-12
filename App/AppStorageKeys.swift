@@ -39,6 +39,7 @@ enum AppStorageKeys {
     static let appTextScale = "app.text.scale"
     static let appearanceMode = "appearance.mode"
     static let appearanceTheme = "appearance.theme"
+    static let appearanceLookPreset = "appearance.lookPreset"
     static let chatAutoModelRouter = "chat.autoModelRouter"
     static let chatVoiceIdentifier = "chat.voice.identifier"
     static let chatVoiceLanguage = "chat.voice.language"

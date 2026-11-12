@@ -1,10 +1,48 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
-private struct FadedProject: Codable, Identifiable {
+struct FadedProject: Codable, Identifiable {
     var id = UUID()
     var title = ""
     var content = ""
     var updatedAt = Date.now
+}
+
+enum FadedProjectStore {
+    private static let root = URL.applicationSupportDirectory.appending(path: "FadedAI", directoryHint: .isDirectory)
+    private static let file = root.appending(path: "projects.json", directoryHint: .notDirectory)
+    private static let store = LocalFileStore(root: root)
+
+    static func load() throws -> [FadedProject] {
+        do { return try store.read([FadedProject].self, from: file) }
+        catch let error where LocalFileStore.isMissing(error) { return [] }
+    }
+
+    static func save(_ projects: [FadedProject]) throws {
+        try store.write(projects, to: file)
+    }
+}
+
+struct FadedProjectExport: FileDocument {
+    static let format = UTType(filenameExtension: "md") ?? .plainText
+    static var readableContentTypes: [UTType] { [format, .plainText] }
+    var text: String
+
+    init(projects: [FadedProject]) {
+        text = projects.sorted { $0.updatedAt > $1.updatedAt }
+            .map { "# \($0.title)\n\n\($0.content)" }
+            .joined(separator: "\n\n---\n\n")
+    }
+
+    init(configuration: ReadConfiguration) throws {
+        guard let bytes = configuration.file.regularFileContents,
+              let content = String(data: bytes, encoding: .utf8) else { throw CocoaError(.fileReadCorruptFile) }
+        text = content
+    }
+
+    func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
+        FileWrapper(regularFileWithContents: Data(text.utf8))
+    }
 }
 
 struct FadedProjectsView: View {
@@ -16,10 +54,6 @@ struct FadedProjectsView: View {
     @State private var query = ""
     @State private var loaded = false
     @State private var failure: String?
-
-    private let root = URL.applicationSupportDirectory.appending(path: "FadedAI", directoryHint: .isDirectory)
-    private var file: URL { root.appending(path: "projects.json", directoryHint: .notDirectory) }
-    private var store: LocalFileStore { LocalFileStore(root: root) }
 
     private var matching: [FadedProject] {
         let search = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -105,10 +139,7 @@ struct FadedProjectsView: View {
 
     private func load() {
         do {
-            projects = try store.read([FadedProject].self, from: file)
-            loaded = true
-            failure = nil
-        } catch let error where LocalFileStore.isMissing(error) {
+            projects = try FadedProjectStore.load()
             loaded = true
             failure = nil
         } catch {
@@ -120,7 +151,7 @@ struct FadedProjectsView: View {
     private func save(_ updated: [FadedProject]) -> Bool {
         guard loaded else { return false }
         do {
-            try store.write(updated, to: file)
+            try FadedProjectStore.save(updated)
             projects = updated
             failure = nil
             return true

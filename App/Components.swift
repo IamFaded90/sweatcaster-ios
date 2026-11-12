@@ -1,4 +1,28 @@
 import SwiftUI
+
+private struct FadedGlassSurface: ViewModifier {
+    @Environment(\.fadedPalette) private var palette
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: FadedRadius.small)
+        content
+            .background {
+                if reduceTransparency {
+                    shape.fill(palette.card)
+                } else {
+                    shape.fill(.regularMaterial)
+                        .overlay { shape.fill(palette.card.opacity(0.25)) }
+                }
+            }
+            .overlay { shape.strokeBorder(palette.border).allowsHitTesting(false) }
+            .contentShape(shape)
+    }
+}
+
+extension View {
+    func fadedGlassSurface() -> some View { modifier(FadedGlassSurface()) }
+}
 import UIKit
 
 struct FadedSignature: View {
@@ -172,6 +196,7 @@ struct FadedCard<Content: View>: View {
     let accent: Color?
     let content: Content
     @Environment(\.fadedPalette) private var palette
+    @Environment(\.fadedLookPreset) private var lookPreset
 
     init(size: FadedCardSize = .standard, accent: Color? = nil, @ViewBuilder content: () -> Content) {
         self.size = size
@@ -184,12 +209,12 @@ struct FadedCard<Content: View>: View {
         content
             .padding(size.inset)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(palette.card, in: shape)
+            .background(lookPreset?.cardColor(in: palette) ?? palette.card, in: shape)
             .overlay(alignment: .leading) {
                 if let accent { Rectangle().fill(accent).frame(width: FadedSpacing.xs).accessibilityHidden(true) }
             }
             .clipShape(shape)
-            .overlay { shape.strokeBorder(palette.border, lineWidth: 1).allowsHitTesting(false) }
+            .overlay { shape.strokeBorder(lookPreset?.borderColor(in: palette) ?? palette.border, lineWidth: 1).allowsHitTesting(false) }
             .shadow(color: .black.opacity(palette.theme == .faded ? 0.18 : palette.isDark ? 0.35 : 0.08),
                     radius: 10, y: 4)
     }

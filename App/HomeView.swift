@@ -92,6 +92,8 @@ struct Home: View {
     @State var showDashboardActivity = false
     @State var showMoreDestinations = false
     @State var showProjects = false
+    @State var showBackupFromMore = false
+    @AppStorage(AppStorageKeys.appearanceLookPreset) var v0LookPresetID = ""
     @State var pendingMoreDestination: FadedMoreDestination?
     @State var enteredWithoutPC = false
     @State var showSettings = false
@@ -512,6 +514,7 @@ struct Home: View {
             .sheet(item: $media) { Preview(media: $0) }
             .sheet(isPresented: $showChat, onDismiss: refreshAfterChat) { chatSheet }
             .environment(\.fadedPalette, palette)
+            .environment(\.fadedLookPreset, v0LookPreset)
             .preferredColorScheme(appearanceMode.preferredScheme(for: theme))
             .tint(palette.isDark ? palette.lime : palette.text)
             .foregroundStyle(palette.text)

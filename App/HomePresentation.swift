@@ -231,15 +231,22 @@ extension Home {
         }
         .sheet(isPresented: $showSavedVideos) { savedVideoLibrary }
         .sheet(isPresented: $showProjects) { FadedProjectsView() }
+        .sheet(isPresented: $showBackupFromMore) {
+            NavigationStack {
+                BackupSettingsView(canRestore: {
+                    !model.busy && !model.refreshing && !model.checkingVideoOutbox &&
+                        !model.mediaLoading && model.cancelling.isEmpty
+                }, onRestore: {
+                    UserDefaults.standard.set(UUID().uuidString, forKey: AppStorageKeys.appResetGeneration)
+                })
+                .onAppear { showingBackupTools = true }
+                .onDisappear { showingBackupTools = false }
+                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { showBackupFromMore = false } } }
+            }
+        }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
-                List {
-                    Text("Hjem · Find genveje, seneste aktivitet og indstillinger.")
-                    Text("Chat · Skriv til Telefon, PC eller Grok. Åbn Privat Studio eller Billeder.")
-                    Text("Video · Vælg klip og opskrift. Følg, afspil eller del dine videoer under Jobs.")
-                    Text("Landsby · Se dine bots, Kontoret og PC’ens agenter.")
-                    Text("Code Bot · Gennemgå kodeforslag og testplaner før godkendelse.")
-                }.navigationTitle("Hvad kan jeg?")
+                V0HelpView()
                     .toolbar { Button("Luk") { showHelp = false } }
             }
         }

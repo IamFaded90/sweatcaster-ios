@@ -84,8 +84,8 @@ extension AgentHub {
         Button(action: action) {
             Label(title, systemImage: icon).labelStyle(.iconOnly)
                 .frame(minWidth: 48, minHeight: 48)
-                .foregroundStyle(.white)
-                .background(.black.opacity(0.74), in: Circle())
+                .foregroundStyle(palette.text)
+                .fadedGlassSurface()
         }.accessibilityLabel(title)
     }
 

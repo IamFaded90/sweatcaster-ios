@@ -127,6 +127,15 @@ extension EnvironmentValues {
         get { self[FadedPaletteKey.self] }
         set { self[FadedPaletteKey.self] = newValue }
     }
+
+    var fadedLookPreset: V0LookPreset? {
+        get { self[FadedLookPresetKey.self] }
+        set { self[FadedLookPresetKey.self] = newValue }
+    }
+}
+
+private struct FadedLookPresetKey: EnvironmentKey {
+    static let defaultValue: V0LookPreset? = nil
 }
 
 enum FadedSpacing {
@@ -167,6 +176,7 @@ struct FadedBackground: View {
 
     var variant: Variant = .standard
     @Environment(\.fadedPalette) private var palette
+    @Environment(\.fadedLookPreset) private var lookPreset
 
     private var colors: [Color] {
         if !palette.isDark {
@@ -191,6 +201,11 @@ struct FadedBackground: View {
                 }
             }
             .overlay { if palette.theme != .oled && variant != .standard { texture } }
+            .overlay {
+                if let lookPreset, palette.theme == .faded && variant == .standard {
+                    lookPreset.background(in: palette)
+                }
+            }
             .ignoresSafeArea()
             .allowsHitTesting(false)
             .accessibilityHidden(true)

@@ -1,18 +1,30 @@
 import SwiftUI
 
 extension Home {
+    var v0LookPreset: V0LookPreset? {
+        V0LookPreset.all.first { $0.id == v0LookPresetID }
+    }
+
+    private var lookPresetBinding: Binding<V0LookPreset?> {
+        Binding(get: { v0LookPreset }, set: { v0LookPresetID = $0?.id ?? "" })
+    }
+
     var spacesBar: some View {
         ViewThatFits(in: .horizontal) {
             tabButtons
             ScrollView(.horizontal) { tabButtons }.scrollIndicators(.hidden)
         }
         .padding(6)
-        .background(palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.media))
-        .overlay { RoundedRectangle(cornerRadius: FadedRadius.media).strokeBorder(palette.border).allowsHitTesting(false) }
+        .background(v0LookPreset?.cardColor(in: palette) ?? palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.media))
+        .overlay {
+            RoundedRectangle(cornerRadius: FadedRadius.media)
+                .strokeBorder(v0LookPreset?.borderColor(in: palette) ?? palette.border)
+                .allowsHitTesting(false)
+        }
         .frame(maxWidth: 570)
         .padding(.horizontal, 12).padding(.bottom, 4)
         .sheet(isPresented: $showMoreDestinations, onDismiss: openMoreDestination) {
-            FadedMoreScreen(modules: visibleModuleTarget == nil ? [] : moduleTabs) { destination in
+            FadedMoreScreen(modules: visibleModuleTarget == nil ? [] : moduleTabs, lookPreset: lookPresetBinding) { destination in
                 pendingMoreDestination = destination
                 showMoreDestinations = false
             }
@@ -63,11 +75,15 @@ extension Home {
         guard let destination = pendingMoreDestination else { return }
         pendingMoreDestination = nil
         switch destination {
+        case .chat: selectSpace(.notes)
+        case .code: selectSpace(.library)
+        case .village: selectSpace(.tasks)
         case .video: openVideoClips()
         case .images: openStudio(.images)
         case .privateStudio: openStudio(.chat)
         case .notes: showNotes = true
         case .projects: showProjects = true
+        case .backup: showBackupFromMore = true
         case .savedVideos: reloadSavedVideos(); showSavedVideos = true
         case .team: openTeam()
         case .models: showPhoneModels = true
@@ -75,7 +91,6 @@ extension Home {
         case .connections: showConnections = true
         case .pcStatus: showPCStatus = true
         case .search: openSearch()
-        case .help: showHelp = true
         case .module(let id): selectModule("module:" + id)
         }
     }
@@ -130,18 +145,32 @@ struct DeferredHomeTab: View {
 
 
 enum FadedMoreDestination {
-    case video, images, privateStudio, notes, projects, savedVideos, team, models, settings, connections, pcStatus, search, help
+    case chat, code, village
+    case video, images, privateStudio, notes, projects, backup, savedVideos, team, models, settings, connections, pcStatus, search
     case module(String)
 }
 
 private struct FadedMoreScreen: View {
+    private enum Page: Hashable { case lookbook, emby, powerHub, atlas, help }
+
     let modules: [ModuleTab]
+    @Binding var lookPreset: V0LookPreset?
     let open: (FadedMoreDestination) -> Void
+    @State private var path = NavigationPath()
+    @State private var projectExport: FadedProjectExport?
+    @State private var exportingProjects = false
+    @State private var shortcutError: String?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
 
+    init(modules: [ModuleTab], lookPreset: Binding<V0LookPreset?>, open: @escaping (FadedMoreDestination) -> Void) {
+        self.modules = modules
+        _lookPreset = lookPreset
+        self.open = open
+    }
+
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 Section("Skab og saml") {
                     row("Video Studio", "Redigér og kommentér klip", "film", .video)
@@ -150,11 +179,13 @@ private struct FadedMoreScreen: View {
                     row("Noter", "Skriv og genfind noter", "note.text", .notes)
                     row("Projekter", "Find og redigér dine kladder", "folder", .projects)
                     row("Gemte videoer", "Afspil dine færdige videoer", "film.stack", .savedVideos)
+                    link("Emby & bibliotek", "Se bibliotekets designvisning", "play.rectangle", .emby)
                 }
                 Section("Gør det til dit") {
                     row("Holdet", "Se dine AI’er og deres roller", "person.2", .team)
                     row("Lokale modeller", "Hent og administrér modeller til telefonen", "iphone", .models)
                     row("Indstillinger", "Tilpas FadedAI", "gearshape", .settings)
+                    link("Lookbook", "Prøv visuelle mønstre og finish", "paintpalette", .lookbook)
                 }
                 Section("Overblik og kontrol") {
                     row("Forbindelser", "Se dine kilder og forbindelser", "link", .connections)
@@ -162,7 +193,9 @@ private struct FadedMoreScreen: View {
                     row("Søg", "Find chats, jobs og bots", "magnifyingglass", .search)
                 }
                 Section("Opdag mere") {
-                    row("Hvad kan jeg?", "Få overblik over appens funktioner", "questionmark.circle", .help)
+                    link("Hvad kan jeg?", "Find din egen vej ind", "questionmark.circle", .help)
+                    link("Funktionsatlas", "Krav og idéer fra v0-projektet", "map", .atlas)
+                    link("50 + 50 + 50", "Genveje, værktøjer og visuelle valg", "square.grid.2x2", .powerHub)
                 }
                 if !modules.isEmpty {
                     Section("Udvidelser") {
@@ -175,13 +208,99 @@ private struct FadedMoreScreen: View {
             .scrollContentBackground(.hidden)
             .background(FadedBackground())
             .navigationTitle("Mere")
+            .navigationDestination(for: Page.self) { page in
+                switch page {
+                case .lookbook: V0LookbookView(selection: $lookPreset)
+                case .emby:
+                    V0EmbyLibraryView(openNotes: { open(.notes) }, openProjects: { open(.projects) },
+                                      openExport: { open(.backup) })
+                case .powerHub:
+                    V0PowerHubView(actions: powerActions, openLookbook: { path.append(Page.lookbook) },
+                       tryAuroraGlass: { lookPreset = .auroraGlass },
+                       resetAppearance: { lookPreset = nil },
+                       resolveSourceAction: resolvePowerAction)
+                case .atlas: V0FeatureAtlasView()
+                case .help: V0HelpView()
+                }
+            }
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { dismiss() } } }
+        }
+        .fileExporter(isPresented: $exportingProjects, document: projectExport,
+                      contentType: FadedProjectExport.format, defaultFilename: "FadedAI-projekter") { result in
+            if case .failure(let error) = result {
+                AppDiagnostics.record(error)
+                shortcutError = "Projekterne kunne ikke eksporteres."
+            }
+            projectExport = nil
+        }
+        .alert("Genvejen kunne ikke gennemføres", isPresented: Binding(
+            get: { shortcutError != nil }, set: { if !$0 { shortcutError = nil } }
+        )) { Button("OK", role: .cancel) {} } message: {
+            Text(shortcutError ?? "")
+        }
+    }
+
+    private func resolvePowerAction(_ id: String) -> (() -> Void)? {
+        switch id {
+        case "utility-settings": return { open(.settings) }
+        case "utility-visuals": return { path.append(Page.lookbook) }
+        case "export-projects": return exportProjects
+        default: return nil
+        }
+    }
+
+    private func exportProjects() {
+        do {
+            let projects = try FadedProjectStore.load()
+            guard !projects.isEmpty else {
+                shortcutError = "Opret et projekt under Mere → Projekter, og prøv igen."
+                return
+            }
+            projectExport = FadedProjectExport(projects: projects)
+            exportingProjects = true
+        } catch {
+            AppDiagnostics.record(error)
+            shortcutError = "Projekterne kunne ikke åbnes."
+        }
+    }
+
+    private var powerActions: [V0PowerHubView.Action] {
+        let destinations: [(String, String, String, FadedMoreDestination)] = [
+            ("chat", "AI-chat", "bubble.left", .chat),
+            ("code", "Code Bot", "terminal", .code),
+            ("village", "Landsbyen", "house.lodge", .village),
+            ("video", "Video Studio", "film", .video),
+            ("images", "Billeder", "photo", .images),
+            ("private", "Privat Studio", "lock.shield", .privateStudio),
+            ("team", "Holdet", "person.2", .team),
+            ("notes", "Noter", "note.text", .notes),
+            ("projects", "Projekter", "folder", .projects),
+            ("saved", "Gemte videoer", "film.stack", .savedVideos),
+            ("models", "Lokale modeller", "iphone", .models),
+            ("status", "PC-status", "stethoscope", .pcStatus),
+            ("connections", "Forbindelser", "link", .connections),
+            ("search", "Søg i FadedAI", "magnifyingglass", .search),
+            ("settings", "Indstillinger", "gearshape", .settings),
+            ("backup", "Sikkerhedskopi", "square.and.arrow.up", .backup)
+        ]
+        return destinations.map { id, title, icon, destination in
+            .init(id: id, title: title, icon: icon) { open(destination) }
         }
     }
 
     private func row(_ title: String, _ detail: String, _ icon: String, _ destination: FadedMoreDestination) -> some View {
-        Button { open(destination) } label: {
-            HStack(spacing: FadedSpacing.m) {
+        Button { open(destination) } label: { rowLabel(title, detail, icon) }
+            .buttonStyle(.plain)
+            .listRowBackground(lookPreset?.cardColor(in: palette) ?? palette.card)
+    }
+
+    private func link(_ title: String, _ detail: String, _ icon: String, _ page: Page) -> some View {
+        NavigationLink(value: page) { rowLabel(title, detail, icon, showsChevron: false) }
+            .listRowBackground(lookPreset?.cardColor(in: palette) ?? palette.card)
+    }
+
+    private func rowLabel(_ title: String, _ detail: String, _ icon: String, showsChevron: Bool = true) -> some View {
+        HStack(spacing: FadedSpacing.m) {
                 Image(systemName: icon)
                     .foregroundStyle(palette.cyan)
                     .frame(width: 32, height: 32)
@@ -191,15 +310,49 @@ private struct FadedMoreScreen: View {
                     Text(detail).font(.caption).foregroundStyle(palette.secondary)
                 }
                 Spacer()
-                Image(systemName: "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(palette.secondary)
-                    .accessibilityHidden(true)
-            }
-            .frame(minHeight: 44)
-            .contentShape(Rectangle())
+                if showsChevron {
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(palette.secondary)
+                        .accessibilityHidden(true)
+                }
         }
-        .buttonStyle(.plain)
-        .listRowBackground(palette.card)
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
+    }
+}
+
+struct V0HelpView: View {
+    private enum Page: Hashable { case atlas }
+
+    private let topics = [
+        ("Hvad virker i FadedAI?", "Du kan chatte, arbejde med projekter og bruge dine lokale modeller. PC-funktioner åbnes via QR-login."),
+        ("Hvor gemmes mine kladder?", "Projekter gemmes lokalt på din iPhone. Åbn et projekt fra Mere for at redigere det, eller hold fingeren på det for at dele det som tekst."),
+        ("Hvordan bruger jeg Code Bot?", "Forbind PC’en, og åbn Code Bot. Gennemgå kodeforslaget, før du godkender ændringer."),
+        ("Hvordan installerer jeg på iPhone?", "Installer FadedAI fra den IPA, du bruger til at teste. Åbn QR-login på forsiden for at parre med PC’en."),
+        ("Kan jeg bruge iOS Genveje?", "Find FadedAI i appen Genveje for blandt andet at åbne chat, video og billeder."),
+        ("Hvor er overleveringen?", "Funktionsatlas viser idéer og krav fra det købte UI. Det viser også, hvilke dele der stadig afventer tilslutning.")
+    ]
+
+    var body: some View {
+        List {
+            Section {
+                Text("Find din egen vej ind.")
+                    .font(FadedTypography.title)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(topics.indices, id: \.self) { index in
+                    DisclosureGroup(topics[index].0) { FadedDetailText(topics[index].1) }
+                }
+                NavigationLink(value: Page.atlas) {
+                    Label("Udforsk Funktionsatlas", systemImage: "map")
+                }
+            } header: {
+                Text("En hjælpende hånd")
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background(FadedBackground())
+        .navigationTitle("Hvad kan jeg?")
+        .navigationDestination(for: Page.self) { _ in V0FeatureAtlasView() }
     }
 }

@@ -89,9 +89,7 @@ struct FadedLandingView: View {
                 .font(.footnote.weight(.semibold))
                 .padding(.horizontal, FadedSpacing.edge)
                 .frame(minHeight: 44)
-                .background(palette.card.opacity(0.6), in: Capsule())
-                .overlay { Capsule().strokeBorder(palette.border) }
-                .contentShape(Capsule())
+                .fadedGlassSurface()
             }
             .buttonStyle(.plain)
             .accessibilityHint("Åbner sikker forbindelse til din PC")

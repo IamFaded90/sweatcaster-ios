@@ -74,7 +74,8 @@ import Foundation
         ]
         let strings = [
             AppStorageKeys.aiCreativity, AppStorageKeys.aiLanguage, AppStorageKeys.aiLength, AppStorageKeys.aiTone,
-            AppStorageKeys.appearanceMode, AppStorageKeys.appearanceTheme, AppStorageKeys.chatVoiceIdentifier,
+            AppStorageKeys.appearanceMode, AppStorageKeys.appearanceTheme, AppStorageKeys.appearanceLookPreset,
+            AppStorageKeys.chatVoiceIdentifier,
             AppStorageKeys.chatVoiceLanguage, AppStorageKeys.chatVoiceBot, AppStorageKeys.codeAutonomy,
             AppStorageKeys.phoneModel, AppStorageKeys.phoneModelFavorites, AppStorageKeys.qolLastSpace,
             AppStorageKeys.spacesFont, AppStorageKeys.teamFavorites, AppStorageKeys.videoLastMood
