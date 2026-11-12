@@ -90,6 +90,9 @@ struct Home: View {
     @State var model: Model
     @State var showLogin = false
     @State var showDashboardActivity = false
+    @State var showMoreDestinations = false
+    @State var showProjects = false
+    @State var pendingMoreDestination: FadedMoreDestination?
     @State var enteredWithoutPC = false
     @State var showSettings = false
     @State var showPCStatus = false

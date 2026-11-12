@@ -5,18 +5,23 @@ import SwiftUI
 struct FadedLandingView: View {
     let openQRLogin: () -> Void
     let enterLocally: () -> Void
+    let openChatLocally: (() -> Void)?
+    let openCodeLocally: (() -> Void)?
 
-    @ScaledMetric(relativeTo: .largeTitle) private var headlineSize = 36.0
+    @Environment(\.fadedPalette) private var palette
+    @Environment(\.dynamicTypeSize) private var textSize
+    @ScaledMetric(relativeTo: .largeTitle) private var headlineSize = 40.0
 
-    private static let lightMint = Color(red: 0.83, green: 1, blue: 0.93)
-    private static let charcoal = Color(red: 0.17, green: 0.17, blue: 0.18)
-
-    private var landingGradient: LinearGradient {
-        LinearGradient(stops: [
-            .init(color: Self.lightMint, location: 0),
-            .init(color: FadedBrand.mint, location: 0.46),
-            .init(color: FadedBrand.blue, location: 1)
-        ], startPoint: .leading, endPoint: .trailing)
+    init(
+        openQRLogin: @escaping () -> Void,
+        enterLocally: @escaping () -> Void,
+        openChatLocally: (() -> Void)? = nil,
+        openCodeLocally: (() -> Void)? = nil
+    ) {
+        self.openQRLogin = openQRLogin
+        self.enterLocally = enterLocally
+        self.openChatLocally = openChatLocally
+        self.openCodeLocally = openCodeLocally
     }
 
     var body: some View {
@@ -25,37 +30,47 @@ struct FadedLandingView: View {
                 landingHeader
                     .padding(.horizontal, FadedSpacing.l)
                 worldArtwork
-                    .padding(.top, FadedSpacing.xl)
                 landingCopy
                     .padding(.horizontal, FadedSpacing.l)
+                if let openChatLocally, let openCodeLocally {
+                    quickLinks(openChat: openChatLocally, openCode: openCodeLocally)
+                        .padding(.horizontal, FadedSpacing.l)
+                        .padding(.top, FadedSpacing.xl)
+                }
             }
-            .padding(.top, FadedSpacing.s)
             .padding(.bottom, FadedSpacing.xxl)
-            .frame(maxWidth: 500)
+            .frame(maxWidth: 448)
             .frame(maxWidth: .infinity)
         }
         .scrollIndicators(.hidden)
         .background {
-            LinearGradient(colors: [Self.charcoal, FadedBrand.panel, FadedBrand.canvas],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            palette.background
+                .overlay(alignment: .topLeading) {
+                    if palette.theme == .faded {
+                        RadialGradient(colors: [FadedBrand.mint.opacity(0.14), .clear],
+                                       center: .topLeading, startRadius: 0, endRadius: 430)
+                            .allowsHitTesting(false)
+                    }
+                }
                 .ignoresSafeArea()
         }
     }
 
     private var landingHeader: some View {
         HStack(spacing: FadedSpacing.m) {
-            HStack(spacing: FadedSpacing.m) {
+            HStack(spacing: 10) {
                 Text("f.")
-                    .font(.system(.subheadline, design: .rounded).weight(.bold))
-                    .foregroundStyle(FadedBrand.actionText)
-                    .frame(width: 32, height: 32)
-                    .background(landingGradient, in: Circle())
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
+                    .frame(width: 36, height: 36)
+                    .background(palette.raised, in: .rect(cornerRadius: FadedRadius.medium))
+                    .overlay { RoundedRectangle(cornerRadius: FadedRadius.medium).strokeBorder(palette.border) }
                     .accessibilityHidden(true)
                 HStack(spacing: 0) {
-                    Text("Faded").foregroundStyle(.white)
-                    Text("AI").foregroundStyle(FadedBrand.mint)
+                    Text("faded").fontWeight(.semibold).foregroundStyle(palette.text)
+                    Text("ai").foregroundStyle(palette.secondary)
                 }
-                .font(.title3.weight(.semibold))
+                .font(.headline)
                 .accessibilityLabel("FadedAI")
             }
             .accessibilityElement(children: .combine)
@@ -66,81 +81,79 @@ struct FadedLandingView: View {
             Button(action: openQRLogin) {
                 HStack(spacing: FadedSpacing.s) {
                     Image(systemName: "qrcode")
-                        .foregroundStyle(FadedBrand.mint)
+                        .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
                         .accessibilityHidden(true)
                     Text("QR-login")
-                        .foregroundStyle(.white)
+                        .foregroundStyle(palette.text)
                 }
                 .font(.footnote.weight(.semibold))
-                .padding(.horizontal, FadedSpacing.m)
-                .padding(.vertical, FadedSpacing.s)
-                .background(FadedBrand.canvas.opacity(0.72), in: Capsule())
-                .overlay { Capsule().strokeBorder(.white.opacity(0.09), lineWidth: 1) }
+                .padding(.horizontal, FadedSpacing.edge)
                 .frame(minHeight: 44)
-                .contentShape(Rectangle())
+                .background(palette.card.opacity(0.6), in: Capsule())
+                .overlay { Capsule().strokeBorder(palette.border) }
+                .contentShape(Capsule())
             }
             .buttonStyle(.plain)
             .accessibilityHint("Åbner sikker forbindelse til din PC")
         }
+        .padding(.vertical, FadedSpacing.l)
     }
 
     private var worldArtwork: some View {
-        GeometryReader { geometry in
-            Image("V0AIWorld")
-                .resizable()
-                .scaledToFill()
-                .frame(width: geometry.size.width, height: geometry.size.height)
-                .clipped()
-                .mask {
-                    LinearGradient(stops: [
-                        .init(color: .clear, location: 0),
-                        .init(color: .black, location: 0.12),
-                        .init(color: .black, location: 0.79),
-                        .init(color: .clear, location: 1)
-                    ], startPoint: .top, endPoint: .bottom)
-                }
-                .mask {
-                    LinearGradient(stops: [
-                        .init(color: .clear, location: 0),
-                        .init(color: .black, location: 0.07),
-                        .init(color: .black, location: 0.93),
-                        .init(color: .clear, location: 1)
-                    ], startPoint: .leading, endPoint: .trailing)
-                }
-                .accessibilityLabel("FadedAI-univers med bots og deres arbejdssteder")
-        }
-        .aspectRatio(1.72, contentMode: .fit)
+        Color.clear
+            .aspectRatio(1.65, contentMode: .fit)
+            .frame(maxHeight: 256)
+            .overlay {
+                Image("V0AIWorld")
+                    .resizable()
+                    .scaledToFill()
+                    .accessibilityHidden(true)
+            }
+            .clipped()
+            .mask {
+                LinearGradient(stops: [
+                    .init(color: .clear, location: 0),
+                    .init(color: .black, location: 0.1),
+                    .init(color: .black, location: 0.84),
+                    .init(color: .clear, location: 1)
+                ], startPoint: .top, endPoint: .bottom)
+            }
+            .overlay(alignment: .bottom) {
+                Label("En verden af muligheder", systemImage: "sparkles")
+                    .font(.caption2)
+                    .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
+                    .padding(.horizontal, FadedSpacing.m)
+                    .padding(.vertical, 6)
+                    .background(palette.background.opacity(0.85), in: Capsule())
+                    .overlay { Capsule().strokeBorder(FadedBrand.mint.opacity(0.15)) }
+                    .padding(.bottom, FadedSpacing.m)
+            }
     }
 
     private var landingCopy: some View {
         VStack(spacing: FadedSpacing.edge) {
-            Label("DIT HELT EGET AI-UNIVERS", systemImage: "sparkles")
-                .font(.caption2.weight(.semibold))
-                .tracking(2)
-                .foregroundStyle(FadedBrand.mint)
-                .multilineTextAlignment(.center)
-                .accessibilityAddTraits(.isHeader)
-
             VStack(spacing: 0) {
-                Text("En lille verden.")
-                    .foregroundStyle(.white)
-                Text("Du er skaberen.")
-                    .foregroundStyle(landingGradient)
+                Text("Store idéer.")
+                    .foregroundStyle(palette.text)
+                Text("Dit lille univers.")
+                    .foregroundStyle(LinearGradient(colors: palette.isDark ? [FadedBrand.mint, FadedBrand.blue] :
+                                                        [palette.text, FadedBrand.actionText],
+                                                    startPoint: .leading, endPoint: .trailing))
             }
-            .font(.system(size: headlineSize, weight: .semibold))
-            .tracking(-1.4)
+            .font(.system(size: headlineSize, weight: .medium))
+            .tracking(-2)
             .multilineTextAlignment(.center)
             .fixedSize(horizontal: false, vertical: true)
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
 
-            Text("Dine AI’er har hver deres rolle.\nDu giver dem retning. Og plads til at vokse.")
-                .font(.subheadline)
-                .foregroundStyle(.white.opacity(0.63))
+            Text("Et sted at tænke, skabe og bygge.\nMed et AI-hold, der er helt dit eget.")
+                .font(.footnote)
+                .foregroundStyle(palette.secondary)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
 
-            VStack(spacing: FadedSpacing.edge) {
+            VStack(spacing: FadedSpacing.m) {
                 Button(action: enterLocally) {
                     HStack(spacing: FadedSpacing.s) {
                         Text("Træd ind i din verden")
@@ -152,20 +165,51 @@ struct FadedLandingView: View {
                     .foregroundStyle(FadedBrand.actionText)
                     .padding(.horizontal, FadedSpacing.l)
                     .padding(.vertical, FadedSpacing.s)
-                    .frame(maxWidth: .infinity, minHeight: 50)
-                    .background(landingGradient,
-                                in: RoundedRectangle(cornerRadius: FadedRadius.medium))
+                    .frame(maxWidth: .infinity, minHeight: 56)
+                    .background(FadedBrand.gradient,
+                                in: RoundedRectangle(cornerRadius: FadedRadius.card))
                 }
                 .buttonStyle(.plain)
                 .accessibilityHint("Åbner FadedAI på telefonen. Du kan forbinde PC’en senere")
 
-                Text("Udforsk designet · Ingen tilsluttet PC endnu")
-                    .font(.caption)
-                    .foregroundStyle(.white.opacity(0.58))
+                Text("Du giver retningen. Vi giver idéerne plads.")
+                    .font(.caption2)
+                    .foregroundStyle(palette.secondary)
                     .multilineTextAlignment(.center)
             }
             .padding(.top, FadedSpacing.s)
         }
         .padding(.top, FadedSpacing.m)
+    }
+
+    private func quickLinks(openChat: @escaping () -> Void, openCode: @escaping () -> Void) -> some View {
+        let layout = textSize.isAccessibilitySize ? AnyLayout(VStackLayout(spacing: FadedSpacing.m)) :
+            AnyLayout(HStackLayout(alignment: .top, spacing: FadedSpacing.m))
+        return layout {
+            quickLink("Bare en tanke?", detail: "Start en samtale", icon: "bubble.left", action: openChat)
+            quickLink("Noget at bygge?", detail: "Mød din Code Bot", icon: "chevron.left.forwardslash.chevron.right",
+                      action: openCode)
+        }
+    }
+
+    private func quickLink(_ title: String, detail: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: FadedSpacing.s) {
+                Image(systemName: icon)
+                    .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                    Text(title).font(.footnote.weight(.semibold)).foregroundStyle(palette.text)
+                    Text(detail).font(.caption).foregroundStyle(palette.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
+            .multilineTextAlignment(.leading)
+            .padding(FadedSpacing.m)
+            .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
+            .background(palette.card, in: .rect(cornerRadius: FadedRadius.card))
+            .overlay { RoundedRectangle(cornerRadius: FadedRadius.card).strokeBorder(palette.border) }
+        }
+        .buttonStyle(.plain)
     }
 }

@@ -61,7 +61,12 @@ extension Home {
             } else {
                 FadedLandingView(
                     openQRLogin: { showLogin = true },
-                    enterLocally: { enteredWithoutPC = true }
+                    enterLocally: { openLandingDestination(.tasks) },
+                    openChatLocally: {
+                        newChatRequest = UUID()
+                        openLandingDestination(.notes)
+                    },
+                    openCodeLocally: { openLandingDestination(.library) }
                 )
                 .onAppear { onScreenAppeared?(.landing) }
             }
@@ -70,6 +75,11 @@ extension Home {
         .onChange(of: teamPinned) { _, pinned in
             if pinned { showTeam = false }
         }
+    }
+
+    private func openLandingDestination(_ destination: Space) {
+        selectSpace(destination)
+        enteredWithoutPC = true
     }
 
     private var homeStartup: some View {
@@ -220,6 +230,7 @@ extension Home {
             VillageBotBuilder(api: studioAPI, onBack: { showNewBot = false })
         }
         .sheet(isPresented: $showSavedVideos) { savedVideoLibrary }
+        .sheet(isPresented: $showProjects) { FadedProjectsView() }
         .sheet(isPresented: $showHelp) {
             NavigationStack {
                 List {
