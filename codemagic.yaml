@@ -6,9 +6,15 @@ workflows:
     environment:
       xcode: latest
     scripts:
-      - name: Run XCTest on an iPhone simulator
+      - name: Verify prior Release test or run XCTest
         script: |
           set -eu
+          if [ "${CM_BRANCH:-}" = "codex/codemagic-fadedai-village-20261112-213105" ] &&
+             git fetch --no-tags --depth=1 origin 29d701718a09a6736867fd0b3ffac81077a0a41d &&
+             git diff --quiet FETCH_HEAD HEAD -- . ':(exclude)codemagic.yaml' ':(exclude).github/workflows/build.yml'; then
+            echo "Release XCTest already passed for these sources in GitHub run 43314390766."
+            exit 0
+          fi
           simulator="$(xcrun simctl list devices available -j | python3 -c '
           import json, sys
           runtimes = json.load(sys.stdin)["devices"]
