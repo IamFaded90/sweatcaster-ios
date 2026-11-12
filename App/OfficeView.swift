@@ -47,8 +47,11 @@ extension AgentHub {
     }
 
     func openOfficeWorker(_ worker: PixelOfficeWorker) {
-        if let bot = localVillageBots.first(where: { "bot:\($0.id.uuidString)" == worker.id }) { localBot = bot }
-        else if let agent = snapshot?.agents.first(where: { "agent:\($0.id)" == worker.id }) { details = agent }
+        if let bot = localVillageBots.first(where: { "bot:\($0.id.uuidString)" == worker.id }) {
+            openBotComputer(bot)
+        } else if let agent = snapshot?.agents.first(where: { "agent:\($0.id)" == worker.id }) {
+            details = agent
+        }
     }
 
     var villageVisible: Bool { isVisible && hubPhase == .active }
@@ -297,7 +300,7 @@ extension AgentHub {
         let activity = botActivity(bot, routine: routine, sleeping: sleeping)
         let color = bot.color == "Grøn" ? palette.green : bot.color == "Lilla" ? palette.purple : palette.cyan
         return Button {
-            if !cinematic { localBot = bot }
+            if !cinematic { openBotComputer(bot) }
         } label: {
             VStack(spacing: 0) {
                 Group {
@@ -315,6 +318,7 @@ extension AgentHub {
         .allowsHitTesting(!cinematic)
         .accessibilityHidden(cinematic)
         .accessibilityLabel(bot.name + ", " + (bot.personality ?? "Nysgerrig") + ", " + activity)
+        .accessibilityHint("Åbner bottens computer")
     }
 
     private func villagePoint(_ zone: Int, size: CGSize) -> CGPoint {

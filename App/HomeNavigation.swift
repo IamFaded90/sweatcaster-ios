@@ -21,7 +21,9 @@ extension Home {
         .frame(maxWidth: 570)
         .padding(.horizontal, 12).padding(.bottom, 4)
         .sheet(isPresented: $showMoreDestinations, onDismiss: openMoreDestination) {
-            FadedMoreScreen(modules: visibleModuleTarget == nil ? [] : moduleTabs, lookPreset: lookPresetBinding) { destination in
+            FadedMoreScreen(modules: visibleModuleTarget == nil ? [] : moduleTabs,
+                            embyAPI: model.isDemo || privateStudioPresented ? nil : model.api as? LiveAPI,
+                            lookPreset: lookPresetBinding) { destination in
                 pendingMoreDestination = destination
                 showMoreDestinations = false
             }
@@ -166,6 +168,7 @@ private struct FadedMoreScreen: View {
     private enum Page: Hashable { case lookbook, emby, powerHub, atlas, help, creativeStudio, memory, safety }
 
     let modules: [ModuleTab]
+    let embyAPI: LiveAPI?
     @Binding var lookPreset: V0LookPreset?
     let open: (FadedMoreDestination) -> Void
     @State private var path = NavigationPath()
@@ -176,8 +179,10 @@ private struct FadedMoreScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
 
-    init(modules: [ModuleTab], lookPreset: Binding<V0LookPreset?>, open: @escaping (FadedMoreDestination) -> Void) {
+    init(modules: [ModuleTab], embyAPI: LiveAPI?, lookPreset: Binding<V0LookPreset?>,
+         open: @escaping (FadedMoreDestination) -> Void) {
         self.modules = modules
+        self.embyAPI = embyAPI
         _lookPreset = lookPreset
         self.open = open
     }
@@ -218,7 +223,7 @@ private struct FadedMoreScreen: View {
                 }
                 Section("Gør det til dit") {
                     link("Hukommelse", "Vælg selv, hvad dine bots skal huske", "brain.head.profile", .memory)
-                    link("Emby & bibliotek", "Se bibliotekets designvisning", "play.rectangle", .emby)
+                    link("Emby & bibliotek", "Find film, serier og musik", "play.rectangle", .emby)
                     row("Holdet", "Se dine AI’er og deres roller", "person.2", .team)
                     row("Modeller", "Administrér modeller på telefon og PC", "sparkles", .models)
                     link("Lookbook", "Skift baggrund, kort og bundmenu", "paintpalette", .lookbook)
@@ -266,8 +271,9 @@ private struct FadedMoreScreen: View {
                 switch page {
                 case .lookbook: V0LookbookView(selection: $lookPreset)
                 case .emby:
-                    V0EmbyLibraryView(openNotes: { open(.notes) }, openProjects: { open(.projects) },
-                                      openExport: { open(.backup) })
+                    EmbyLibraryView(api: embyAPI, openNotes: { open(.notes) }, openProjects: { open(.projects) },
+                                    openExport: { open(.backup) }, openConnections: { open(.connections) })
+                        .id(embyAPI?.queueTargetID)
                 case .powerHub:
                     V0PowerHubView(actions: powerActions, openLookbook: { path.append(Page.lookbook) },
                        tryAuroraGlass: { lookPreset = .auroraGlass },

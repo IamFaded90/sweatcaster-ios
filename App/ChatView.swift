@@ -70,6 +70,7 @@ struct ChatView: View {
     private let onComposerFocusChange: ((Bool) -> Void)?
     @Environment(\.horizontalSizeClass) private var chatSizeClass
     @Environment(\.scenePhase) var chatScenePhase
+    @State private var chatPortraitIndex = 0
     @State private var showHistory = false
     @State private var showChatSettings = false
     @State private var handledNewConversation: UUID?
@@ -164,6 +165,17 @@ struct ChatView: View {
     @AppStorage(AppStorageKeys.aiWordCount) var aiWordCount = false
     @AppStorage(AppStorageKeys.aiShowTools) var aiShowTools = true
     @AppStorage(AppStorageKeys.qolReduceMotion) var calmMotion = false
+
+    private static let chatPortraits = [
+        "FadedChatPortraitPixel",
+        "FadedChatPortraitSculpture",
+        "FadedChatPortraitPuppet",
+        "FadedChatPortraitIllustrated"
+    ]
+    var chatPortraitName: String { Self.chatPortraits[chatPortraitIndex] }
+    private var rotatesChatPortrait: Bool {
+        chatScenePhase == .active && !reduceMotion && !calmMotion
+    }
 
     init(api: (any ChatAPI)?, demo: Bool, initialDraft: String, connection: String, storageKey: String,
          onBack: (() -> Void)? = nil, openImageStudio: ((String) -> Void)? = nil,
@@ -326,8 +338,23 @@ struct ChatView: View {
             }
             transcriptScroll(userBubbleWidth: userBubbleWidth)
             composer.layoutPriority(1)
+            if !composerFocused {
+                chatBrandFooter
+            }
         }
         return column
+            .task(id: rotatesChatPortrait) {
+                guard rotatesChatPortrait else { return }
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(for: .seconds(3))
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled else { return }
+                    chatPortraitIndex = (chatPortraitIndex + 1) % Self.chatPortraits.count
+                }
+            }
             .onChange(of: composerFocused) { _, focused in
                 onComposerFocusChange?(focused)
                 if focused { scrollChat(proxy) }

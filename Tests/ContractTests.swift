@@ -124,6 +124,15 @@ final class ContractTests: XCTestCase {
         } catch V2Failure.invalidInput {}
     }
 
+    func testEmbyUsesPairedPCAndPreservesSearchTerms() async throws {
+        let page = try await stubAPI().embyLibrary(parent: "folder_01", search: "C++ & blå", offset: 24)
+        XCTAssertTrue(page.configured)
+        XCTAssertEqual(page.nextOffset, 48)
+        XCTAssertEqual(page.items.map(\.title), ["Titel", "Usikkert link"])
+        XCTAssertEqual(page.items.first?.browserURL?.host, "emby.example")
+        XCTAssertNil(page.items.last?.browserURL)
+    }
+
     func testClipKeepsV1ShapeAndAcceptsFutureFolderMetadata() throws {
         let old = try JSONDecoder().decode(Clip.self, from: Data(#"{"id":"clip-one","name":"game.mp4","duration_seconds":12,"width":1920,"height":1080}"#.utf8))
         XCTAssertNil(old.folderName)
@@ -585,6 +594,12 @@ private final class Stub: URLProtocol {
             status = 200; body = #"{"cards":[]}"#
         } else if url.path == "/api/modules/v1/tabs/a", request.httpMethod == "GET" {
             status = 200; body = #"{"text":"Lokal information"}"#
+        } else if url.path == "/api/modules/v1/emby/library", request.httpMethod == "GET",
+                  url.host == "192.168.1.20", auth == "Bearer test-only-token",
+                  URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQuery
+                  == "offset=24&parent=folder_01&search=C%2B%2B%20%26%20bl%C3%A5" {
+            status = 200
+            body = #"{"configured":true,"items":[{"id":"1","title":"Titel","kind":"Movie","folder":false,"webURL":"https://emby.example/web/index.html"},{"id":"2","title":"Usikkert link","kind":"Movie","folder":false,"webURL":"http://emby.example/web/index.html"}],"nextOffset":48}"#
         } else if url.path == "/api/v1/capabilities" {
             status = 200
             body = #"{"moods":["hype"],"max_batch_size":10,"features":{"upload":false,"cancel":true,"range_preview":false},"dependencies":[]}"#

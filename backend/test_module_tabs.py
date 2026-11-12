@@ -3,10 +3,13 @@ from inspect import signature
 from uuid import uuid4
 
 import pytest
+from fastapi import Request, Response
 from tests.conftest import make_settings
 from fastapi.testclient import TestClient
 
 from sweatcaster.api import create_app
+from sweatcaster import emby_library
+from sweatcaster.dto import ApiError
 from sweatcaster.module_tabs import collection_answer
 
 
@@ -42,6 +45,28 @@ def test_manifest_import_and_local_answers(tmp_path):
         assert [frame["type"] for frame in frames] == ["tool_status", "text", "done"]
         assert "dubletgrupper" in frames[1]["content"]
         assert client.post("/api/v2/chat", headers=headers, json=chat).status_code == 409
+
+
+def test_emby_library_requires_a_paired_client(tmp_path, monkeypatch):
+    for key in (*emby_library.PRIMARY_ENV, "FADEDAI_EMBY_WEB_URL"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(emby_library, "_load_saved_settings", lambda: None)
+    settings = make_settings(tmp_path)
+    app = create_app(settings)
+    url = "/api/modules/v1/emby/library"
+    endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", None) == url)
+    with pytest.raises(ApiError) as failure:
+        endpoint(Request({"type": "http", "headers": []}), Response())
+    assert failure.value.status_code == 401
+
+    headers = [(b"authorization", ("Bearer " + settings.token).encode())]
+    request = Request({"type": "http", "headers": headers})
+    response = Response()
+    assert endpoint(request, response) == {"configured": False, "items": [], "nextOffset": None}
+    assert response.headers["Cache-Control"] == "no-store"
+    with pytest.raises(ApiError) as failure:
+        endpoint(request, Response(), offset=-1)
+    assert failure.value.status_code == 422
 
 
 def test_module_mcp_rejects_untrusted_clients_and_lists_read_tools(tmp_path):

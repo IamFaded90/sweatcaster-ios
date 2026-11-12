@@ -128,6 +128,26 @@ struct ModuleInformation: Decodable {
     let text: String
 }
 
+struct EmbyLibraryPage: Decodable {
+    struct Item: Decodable, Hashable, Identifiable {
+        let id, title, kind: String
+        let folder: Bool
+        let subtitle: String?
+        let webURL: URL?
+
+        var browserURL: URL? {
+            guard let webURL, let components = URLComponents(url: webURL, resolvingAgainstBaseURL: false),
+                  components.scheme == "https", let host = components.host, !host.isEmpty,
+                  components.user == nil, components.password == nil else { return nil }
+            return webURL
+        }
+    }
+
+    let configured: Bool
+    let items: [Item]
+    let nextOffset: Int?
+}
+
 struct CodeBatchList: Decodable, Sendable {
     struct Job: Decodable, Identifiable, Sendable {
         let id, repo, goal, status: String

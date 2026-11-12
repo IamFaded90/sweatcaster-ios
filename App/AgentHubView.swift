@@ -17,7 +17,8 @@ struct AgentHub: View {
     @AppStorage(AppStorageKeys.villageShowOffice) private var showOffice = true
     @AppStorage(AppStorageKeys.villageExperimentalEnabled) private var experimentalVillageEnabled = false
     var localBotsData: Data { MigratedAppData.shared.villageBots }
-    @State var localBot: VillageBot?
+    @State private var localBot: VillageBot?
+    @State private var computerBot: VillageBot?
     @State private var villageChatBot: VillageBot?
     @State var villagePause = false
     @State var cinematic = false
@@ -68,6 +69,7 @@ struct AgentHub: View {
             .sensoryFeedback(.success, trigger: completions)
             .sheet(isPresented: $showBuilder) { botLibrary }
             .sheet(item: $localBot, content: botProfile)
+            .sheet(item: $computerBot, content: botComputer)
             .sheet(item: $villageChatBot) { bot in
                 OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
                               initialPage: .chat, initialBotID: bot.id)
@@ -180,6 +182,8 @@ struct AgentHub: View {
     }
 
     @ViewBuilder private func villageBotActions(_ bot: VillageBot) -> some View {
+        FadedSecondaryButton("Computer", icon: "desktopcomputer") { openBotComputer(bot) }
+            .accessibilityLabel("Åbn computer for \(bot.name)")
         FadedSecondaryButton("Profil", icon: "person.crop.circle") { localBot = bot }
             .accessibilityLabel("Åbn profil for \(bot.name)")
         FadedSecondaryButton("Chat", icon: "bubble.left") { villageChatBot = bot }
@@ -229,6 +233,21 @@ struct AgentHub: View {
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Tilbage", systemImage: "chevron.left") { localBot = nil }
+                    }
+                }
+        }
+    }
+
+    func openBotComputer(_ bot: VillageBot) {
+        computerBot = bot
+    }
+
+    private func botComputer(_ bot: VillageBot) -> some View {
+        NavigationStack {
+            BotComputerView(bot: bot, roster: localVillageBots, api: api)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Tilbage", systemImage: "chevron.left") { computerBot = nil }
                     }
                 }
         }

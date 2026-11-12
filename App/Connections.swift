@@ -232,6 +232,7 @@ struct ConnectionsView: View {
     private let title: String
     private let pcConnected: Bool?
     private let openPairing: (() -> Void)?
+    private let embyAPI: LiveAPI?
     @Environment(\.fadedPalette) private var palette
     @State private var photos = PickerConnector(source: .photos)
     @State private var files = PickerConnector(source: .files)
@@ -239,10 +240,12 @@ struct ConnectionsView: View {
     @State private var photoToAnalyze: PickerConnector.Record?
 
     init(title: String = "Forbindelser", pcConnected: Bool? = nil, openPairing: (() -> Void)? = nil,
+         embyAPI: LiveAPI? = nil,
          onChooseNote: ((String) -> Void)? = nil) {
         self.title = title
         self.pcConnected = pcConnected
         self.openPairing = openPairing
+        self.embyAPI = embyAPI
         self.onChooseNote = onChooseNote
     }
 
@@ -261,7 +264,6 @@ struct ConnectionsView: View {
         .init(name: "Gmail", icon: "envelope", detail: "Kræver Google OAuth med godkendte mailtilladelser."),
         .init(name: "Kalender", icon: "calendar", detail: "Kræver en valgt kalender og udtrykkelig læsetilladelse."),
         .init(name: "Beskeder", icon: "bubble.left", detail: "Kontekst fra Beskeder er endnu ikke tilsluttet."),
-        .init(name: "Emby", icon: "play.rectangle", detail: "Kræver en Emby-server og adgang til et mediebibliotek."),
         .init(name: "Todoist", icon: "checklist", detail: "Kræver Todoist OAuth og adgang til valgte projekter."),
         .init(name: "Notion", icon: "doc.text", detail: "Kræver en Notion-integration med adgang til valgte sider."),
         .init(name: "YouTube", icon: "play.rectangle", detail: "Kræver Google OAuth til kontoadgang."),
@@ -299,6 +301,7 @@ struct ConnectionsView: View {
                         }
                     }
                 }
+                if openPairing != nil || embyAPI != nil { embyLink }
                 Text("Vælg indhold fra din telefon. Valget vises kun her i denne session.")
                     .foregroundStyle(palette.secondary)
                 pickerCard(photos, detail: "Vælg op til tre billeder i Apples billedvælger. Her vises små lokale forhåndsvisninger.")
@@ -326,6 +329,18 @@ struct ConnectionsView: View {
                 LocalImageAnalysisView(data: preview, onChooseNote: onChooseNote)
             }
         }
+    }
+
+    private var embyLink: some View {
+        NavigationLink {
+            EmbyLibraryView(api: embyAPI).id(embyAPI?.queueTargetID)
+        } label: {
+            FadedCard {
+                Label("Emby & bibliotek", systemImage: "play.rectangle")
+                    .frame(minHeight: 44)
+            }
+        }
+        .buttonStyle(.plain)
     }
 
     private func pickerCard(_ connector: PickerConnector, detail: String) -> some View {

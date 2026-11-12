@@ -254,7 +254,9 @@ extension Home {
                     connectionIndicator
                     pingSetting
                     Button("Skift forbindelse") { closeSettings(for: .login) }.disabled(switchDisabled)
-                    NavigationLink("Forbindelser") { ConnectionsView() }
+                    NavigationLink("Forbindelser") {
+                        ConnectionsView(embyAPI: model.isDemo || privateStudioPresented ? nil : model.api as? LiveAPI)
+                    }
                 }
                 Section("Status og opdatering") {
                     Toggle("Vis forbindelsesbanner", isOn: $showConnectionBanner)

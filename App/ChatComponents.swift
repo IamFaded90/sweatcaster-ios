@@ -359,7 +359,7 @@ struct CloudModelSettings: View {
 extension ChatView {
     var chatBrand: some View {
         HStack(spacing: FadedSpacing.s) {
-            chatBrandMark(large: false)
+            chatBrandMark
             VStack(alignment: .leading, spacing: 0) {
                 Text("FadedAI").font(FadedTypography.section)
                     .accessibilityAddTraits(.isHeader)
@@ -373,7 +373,6 @@ extension ChatView {
 
     var chatWelcome: some View {
         VStack(spacing: FadedSpacing.m) {
-            chatBrandMark(large: true)
             Text("Hvad tænker du på?")
                 .font(FadedTypography.title)
                 .foregroundStyle(palette.text)
@@ -390,14 +389,31 @@ extension ChatView {
         .padding(.vertical, FadedSpacing.xl)
     }
 
-    private func chatBrandMark(large: Bool) -> some View {
-        Text("F")
-            .font(.system(large ? .largeTitle : .headline, design: .rounded).bold())
-            .foregroundStyle(FadedColors.deep)
-            .frame(width: large ? 64 : 32, height: large ? 64 : 32)
-            .background(FadedBrand.mint, in: RoundedRectangle(cornerRadius: large ? FadedRadius.card : FadedRadius.small))
-            .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
-            .accessibilityHidden(true)
+    var chatBrandFooter: some View {
+        VStack(spacing: FadedSpacing.xs) {
+            chatBrandMark
+            Text("FadedAI est 2026")
+                .font(.caption2)
+                .foregroundStyle(palette.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, FadedSpacing.edge)
+        .padding(.bottom, FadedSpacing.s)
+    }
+
+    private var chatBrandMark: some View {
+        ZStack {
+            Image(chatPortraitName)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 32, height: 32)
+                .id(chatPortraitName)
+                .transition(.opacity)
+        }
+        .clipShape(Circle())
+        .animation(.easeInOut(duration: 0.25), value: chatPortraitName)
+        .accessibilityHidden(true)
     }
 
     @ViewBuilder var chatAgentActivity: some View {

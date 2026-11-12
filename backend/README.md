@@ -20,6 +20,19 @@ Export JSON from Kortscanner, open Kortsamling on the phone and choose the file.
 
 Add more native information tabs by placing `module-tabs.json` in the configured output directory, for example `[{"id":"status","title":"Status","text":"Alle rutiner er klar."}]`. The phone refreshes the manifest on foreground and pull-to-refresh. Other renderers and actions require a new app build.
 
+## Emby & bibliotek
+
+Installer modulopdateringen med `install_module_tabs.py` som beskrevet ovenfor. Åbn derefter `setup_emby_windows.pyw` på PC’en, og gem opsætningen under samme Windows-bruger som PC-serveren. Tokenet krypteres med Windows' brugerbeskyttelse. Ved manuel opsætning kan PC-serveren også få følgende miljøvariabler. Miljøvariablerne for adresse, bruger og token går forud for den gemte Windows-opsætning.
+
+| Variabel | Værdi |
+| --- | --- |
+| `FADEDAI_EMBY_URL` | Emby-serverens basisadresse. Brug HTTPS eller en lokal HTTP-adresse som `http://192.168.1.50:8096`. Et eventuelt `/emby`-suffiks accepteres. |
+| `FADEDAI_EMBY_USER_ID` | Emby-brugerens id. Vælg en bruger med adgang til de biblioteker, der skal vises på den parrede iPhone. |
+| `FADEDAI_EMBY_TOKEN` | Brugerens Emby-adgangstoken. Det bliver på PC’en. |
+| `FADEDAI_EMBY_WEB_URL` | Valgfri HTTPS-adresse til samme Emby-servers webapp, fx `https://emby.example.org/web/index.html`. Aktiverer åbning af titler i Emby, når serveren giver det nødvendige id. Webappen bruger sit eget login. |
+
+Åbn **Mere → Emby & bibliotek** i den kompatible iOS-app. Den parrede forbindelse bruges til at gennemse og søge i biblioteket. En server uden opsætning vises som ikke konfigureret. Afspilning åbnes i Emby, når en webadresse er sat op. Se Embys [brugergodkendelse](https://dev.emby.media/doc/restapi/User-Authentication.html) og [biblioteksopslag](https://dev.emby.media/doc/restapi/Browsing-the-Library.html).
+
 ## Local Code Bot batch queue
 
 Copy `sweatcaster/code_batch.py` into the same installed Python package as `repository_library.py`. Run from the checkpoint directory:

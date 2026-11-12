@@ -162,7 +162,7 @@ extension Home {
                     guard !switchDisabled else { return }
                     pairAfterConnections = true
                     showConnections = false
-                })
+                }, embyAPI: model.isDemo || privateStudioPresented ? nil : model.api as? LiveAPI)
                 .toolbar { Button("Luk") { showConnections = false } }
             }
         }

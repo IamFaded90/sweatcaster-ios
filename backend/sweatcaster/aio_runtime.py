@@ -15,9 +15,11 @@ from uuid import UUID
 AIO_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/aio-computer:1.0.1"
 MANAGED_LABEL = "com.fadedai.aio"
 BOT_LABEL = "com.fadedai.bot-id"
-SANDBOX_HOME = "/home/sandbox"
+DESKTOP_USER = "gem"  # The pinned AIO image starts XFCE as gem.
+SANDBOX_HOME = "/home/" + DESKTOP_USER
 WORKSPACE = SANDBOX_HOME + "/workspace"
 MAX_ACTIVE = 2
+START_TIMEOUT_SECONDS = 120
 MAX_SCREEN_BYTES = 8 * 1024 * 1024
 MAX_ARTIFACT_BYTES = 512 * 1024
 MAX_ARTIFACT_RESPONSE_BYTES = 6 * MAX_ARTIFACT_BYTES + 8192
@@ -222,10 +224,10 @@ class AIORuntime:
                         "--mount", f"type=volume,source={_volume(bot)},target={SANDBOX_HOME}",
                         "--env", "BROWSER_START_MODE=manual", "--env", "DISABLE_CODE_SERVER=true",
                         "--env", "DISABLE_JUPYTER=true", AIO_IMAGE,
-                    ], timeout=20)
+                    ], timeout=START_TIMEOUT_SECONDS)
                 else:
                     self._ensure_volume(bot)
-                    result = self._call(["container", "start", _container(bot)], timeout=20)
+                    result = self._call(["container", "start", _container(bot)], timeout=START_TIMEOUT_SECONDS)
                 if result.returncode:
                     raise AIORuntimeError(503, "Docker kunne ikke starte bottens AIO-computer.")
             return self._desktop_status(bot, self._inspect(bot))
@@ -321,9 +323,9 @@ class AIORuntime:
             data.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise AIORuntimeError(422, "Filen skal være en UTF-8-tekstfil.") from exc
-        payload = _json(self._use(bot_id, "/v2/fs/write", {
+        payload = _json(self._use(bot_id, "/v2/fs/write?user=" + DESKTOP_USER, {
             "path": path, "content": base64.b64encode(data).decode("ascii"),
-            "encoding": "base64", "user": "sandbox",
+            "encoding": "base64",
         }))
         if _output(payload).get("bytes_written") != len(data):
             raise AIORuntimeError(502, "AIO kunne ikke bekræfte, at hele filen blev gemt.")
@@ -349,9 +351,10 @@ class AIORuntime:
         with self._lock(bot):
             self.read_artifact(bot, name)
             result = self._call([
-                "container", "exec", "--detach", "--user", "sandbox",
-                "--env", "DISPLAY=:99.0", "--env", "XAUTHORITY=/home/sandbox/.Xauthority",
-                "--env", "HOME=/home/sandbox", _container(bot), "mousepad", "--", path,
+                "container", "exec", "--detach", "--user", DESKTOP_USER,
+                "--env", "DISPLAY=:99.0", "--env", f"XAUTHORITY={SANDBOX_HOME}/.Xauthority",
+                "--env", f"HOME={SANDBOX_HOME}", _container(bot), "/usr/bin/xmessage",
+                "-center", "-geometry", "760x480", "-title", "FadedAI", "-buttons", "Luk:0", "-file", path,
             ])
             if result.returncode:
                 raise AIORuntimeError(503, "AIO kunne ikke åbne tekstviseren på skrivebordet.")

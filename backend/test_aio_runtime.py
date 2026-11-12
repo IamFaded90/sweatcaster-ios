@@ -67,7 +67,8 @@ class DockerFixture:
             self.containers[args[-1]]["State"]["Running"] = args[1] == "start"
             return answer(args[-1].encode())
         if args[:3] == ["container", "exec", "--detach"]:
-            assert args[-3:-1] == ["mousepad", "--"]
+            assert args[args.index("--user") + 1] == "gem"
+            assert "/usr/bin/xmessage" in args and args[-2] == "-file"
             return answer()
         if args[:2] == ["container", "exec"]:
             name = args[3] if args[2] == "--interactive" else args[2]
@@ -83,7 +84,8 @@ class DockerFixture:
                 self.actions.append((name, body))
                 return answer({"data": {"status": "success"}})
             if url.path == "/v2/fs/write":
-                assert body["user"] == "sandbox"
+                assert parse_qs(url.query) == {"user": ["gem"]}
+                assert "user" not in body
                 content = base64.b64decode(body["content"])
                 self.files[volume][body["path"]] = content
                 return answer({"data": {"bytes_written": len(content)}})
@@ -112,6 +114,7 @@ def test_each_bot_has_private_persistent_home_and_on_demand_desktop():
     assert len(docker.volumes) == 2
     assert {item["Labels"][BOT_LABEL] for item in docker.volumes.values()} == {ADAM, EVA}
     assert all(item["Labels"][MANAGED_LABEL] == "1" for item in docker.volumes.values())
+    assert SANDBOX_HOME == "/home/gem"
     assert all(item["Mounts"][0]["Destination"] == SANDBOX_HOME for item in docker.containers.values())
 
     runtime.save_artifact(ADAM, "rapport.md", "Adams blå rapport".encode())

@@ -87,7 +87,7 @@ enum BotComputerRoute: Sendable {
     }
 
     var timeout: TimeInterval? {
-        if case .start = self { 45 } else { nil }
+        if case .start = self { 150 } else { nil }
     }
 }
 

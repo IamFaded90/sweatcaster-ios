@@ -16,9 +16,10 @@ from inspect import signature
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, Request, Response
 
 from sweatcaster.dto import ApiError
+from sweatcaster.emby_library import EmbyLibraryError, read_library
 
 MAX_IMPORT = 1_000_000
 CARD_TAB = {"id": "cards", "kind": "cards", "title": "Kortsamling"}
@@ -177,6 +178,18 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             yield
 
     app.router.lifespan_context = lifespan
+
+    @app.get("/api/modules/v1/emby/library", include_in_schema=False)
+    def emby_library(request: Request, response: Response, parent: str | None = None,
+                     search: str = "", offset: int = 0):
+        authorize(request, settings)
+        try:
+            library = read_library(parent=parent, search=search, offset=offset)
+        except EmbyLibraryError as exc:
+            code = "INVALID_INPUT" if exc.status == 422 else "NOT_READY"
+            raise ApiError(exc.status, code, str(exc)) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return library
 
     @app.put("/api/modules/v1/code-repositories", include_in_schema=False)
     def clone_repository(request: Request, body: dict = Body(...)):

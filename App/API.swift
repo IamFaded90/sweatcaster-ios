@@ -66,13 +66,18 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
 }
 
 struct LiveAPI: SweatAPI, ChatAPI {
-    private func moduleJSON<T: Decodable>(_ path: String, upload: Data? = nil, timeout: TimeInterval? = nil) async throws -> T {
+    private func moduleJSON<T: Decodable>(_ path: String, upload: Data? = nil, timeout: TimeInterval? = nil,
+                                          query: [URLQueryItem] = []) async throws -> T {
         var endpoint = try v2Request("modules")
         guard let url = endpoint.url,
               var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             throw V2Failure.invalidInput
         }
         components.path = "/api/modules/v1/" + path
+        components.queryItems = query.isEmpty ? nil : query
+        if let encoded = components.percentEncodedQuery {
+            components.percentEncodedQuery = encoded.replacingOccurrences(of: "+", with: "%2B")
+        }
         guard let target = components.url else { throw V2Failure.invalidInput }
         endpoint = request(target, method: upload == nil ? "GET" : "PUT")
         if let timeout { endpoint.timeoutInterval = timeout }
@@ -87,6 +92,13 @@ struct LiveAPI: SweatAPI, ChatAPI {
     }
 
     func moduleManifest() async throws -> ModuleManifest { try await moduleJSON("manifest") }
+    func embyLibrary(parent: String?, search: String, offset: Int) async throws -> EmbyLibraryPage {
+        var query = [URLQueryItem(name: "offset", value: String(offset))]
+        if let parent { query.append(.init(name: "parent", value: parent)) }
+        if !search.isEmpty { query.append(.init(name: "search", value: search)) }
+        return try await moduleJSON("emby/library", query: query)
+    }
+
     func moduleCards(_ id: String, upload: Data? = nil) async throws -> ModuleCards {
         guard ModuleTab.validID(id) else { throw V2Failure.invalidInput }
         return try await moduleJSON("tabs/\(id)", upload: upload)
