@@ -156,11 +156,28 @@ import XCTest
         XCTAssertEqual(BotActivity.scheduled(atHour: 12).energyPerHour, -1)
         XCTAssertEqual(BotActivity.scheduled(atHour: 18).energyPerHour, 2)
         XCTAssertEqual(BotActivity.scheduled(atHour: 22).energyPerHour, 4)
-        XCTAssertEqual(BotActivity.rawDailyEnergyDelta, Double(9 * -4 + 2 * -1 + 4 * 2 + 9 * 4))
-        XCTAssertEqual(BotActivity.rawDailyEnergyDelta, 6)
+        let expectedDelta = expectedRawDailyEnergyDelta()
+        let actualDelta = BotActivity.rawDailyEnergyDelta
+        XCTAssertEqual(actualDelta, expectedDelta)
+        XCTAssertEqual(actualDelta, 6)
         let morning = BotActivity.energyAfterOneDay(startingAtHour: 7, energy: 100)
+        let cappedChange = morning - 100
         XCTAssertEqual(morning, 100)
-        XCTAssertEqual(morning - 100, 0)
+        XCTAssertEqual(cappedChange, 0)
+    }
+
+    /// 9×−4 + 2×−1 + 4×+2 + 9×+4. Split so Release type-checking does not stall on one assertion.
+    private func expectedRawDailyEnergyDelta() -> Double {
+        let workingHours = 9
+        let idleHours = 2
+        let restingHours = 4
+        let sleepingHours = 9
+        let workingCost = workingHours * -4
+        let idleCost = idleHours * -1
+        let restingGain = restingHours * 2
+        let sleepingGain = sleepingHours * 4
+        let total = workingCost + idleCost + restingGain + sleepingGain
+        return Double(total)
     }
 
     func testNeedsUseDoublesAndTheSpecifiedRates() {

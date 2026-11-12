@@ -55,7 +55,7 @@ struct PixelOfficeView: View {
         VStack(alignment: .leading, spacing: 12) {
             if !workers.isEmpty {
                 FadedSectionHeader("Arbejdsstationer",
-                                   detail: "Lokale bots åbner deres profil. PC-agenter åbner historik og hukommelse.")
+                                   detail: "Tryk på Adam eller Eva for at åbne computeren. PC-agenter åbner historik og hukommelse.")
             }
             officeScene
             if workers.isEmpty {

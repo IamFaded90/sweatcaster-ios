@@ -66,15 +66,16 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
 }
 
 struct LiveAPI: SweatAPI, ChatAPI {
-    private func moduleJSON<T: Decodable>(_ path: String, upload: Data? = nil, timeout: TimeInterval? = nil) async throws -> T {
+    private func moduleJSON<T: Decodable>(_ path: String, method: String? = nil, upload: Data? = nil, query: [URLQueryItem] = [], timeout: TimeInterval? = nil) async throws -> T {
         var endpoint = try v2Request("modules")
         guard let url = endpoint.url,
               var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             throw V2Failure.invalidInput
         }
         components.path = "/api/modules/v1/" + path
+        if !query.isEmpty { components.queryItems = query }
         guard let target = components.url else { throw V2Failure.invalidInput }
-        endpoint = request(target, method: upload == nil ? "GET" : "PUT")
+        endpoint = request(target, method: method ?? (upload == nil ? "GET" : "PUT"))
         if let timeout { endpoint.timeoutInterval = timeout }
         if let upload {
             endpoint.httpBody = upload
@@ -122,6 +123,126 @@ struct LiveAPI: SweatAPI, ChatAPI {
 
     func approveCodeBatch(_ id: String) async throws -> CodeBatchDetail.Proposal {
         try await moduleJSON("code-batches/\(Server.segment(id))/approval", upload: JSONEncoder().encode(["approved": true]))
+    }
+
+    func botComputerHealth() async throws -> BotComputerLink {
+        struct Body: Decodable { let link: String }
+        let body: Body = try await botModule("bot-computers/health")
+        return BotComputerLink(rawValue: body.link) ?? .pcOffline
+    }
+
+    func botComputerTasks(_ botID: String) async throws -> [BotComputerTask] {
+        struct Body: Decodable { let tasks: [BotComputerTask] }
+        let body: Body = try await botModule("bot-computers/\(try Server.segment(botID))/tasks")
+        return body.tasks
+    }
+
+    func submitBotComputerTask(_ task: BotComputerTask) async throws -> BotComputerSubmission {
+        try await botTask("bot-computers/\(try Server.segment(task.botID))/tasks", task)
+    }
+
+    func cancelBotComputerTask(botID: String, id: String) async throws -> BotComputerTask {
+        struct Body: Decodable { let task: BotComputerTask }
+        let body: Body = try await botModule("bot-computers/\(try Server.segment(botID))/tasks/\(try Server.segment(id))/cancel", method: "PUT", upload: Data("{}".utf8))
+        return body.task
+    }
+
+    func retryBotComputerTask(botID: String, id: String, retryKey: String) async throws -> BotComputerSubmission {
+        struct Input: Encodable { let retryKey: String
+            enum CodingKeys: String, CodingKey { case retryKey = "retry_key" }
+        }
+        let body: BotComputerTaskEnvelope = try await botModule(
+            "bot-computers/\(try Server.segment(botID))/tasks/\(try Server.segment(id))/retry",
+            method: "PUT", upload: JSONEncoder().encode(Input(retryKey: retryKey)))
+        return BotComputerSubmission(link: BotComputerLink(rawValue: body.link) ?? .pcOffline, task: body.task)
+    }
+
+    func readBotComputerFile(botID: String, ownerID: String, path: String) async throws -> BotComputerFile {
+        guard BotComputerOffice.validPath(path) else { throw BotComputerFailure.rejected("Filnavnet er ikke gyldigt.") }
+        struct Body: Decodable { let file: BotComputerFile }
+        let body: Body = try await botModule("bot-computers/\(try Server.segment(botID))/files/\(try Server.segment(ownerID))",
+                                             query: [URLQueryItem(name: "name", value: path)])
+        return body.file
+    }
+
+    func shareBotComputerFile(ownerID: String, path: String, with botID: String, approved: Bool) async throws -> BotComputerFile {
+        struct Input: Encodable { let ownerID, path, readerID: String; let approved: Bool
+            enum CodingKeys: String, CodingKey {
+                case ownerID = "owner_id"
+                case path
+                case readerID = "with"
+                case approved
+            }
+        }
+        struct Body: Decodable { let file: BotComputerFile }
+        let upload = try JSONEncoder().encode(Input(ownerID: ownerID, path: path, readerID: botID, approved: approved))
+        let body: Body = try await botModule("bot-computers/files/share", method: "PUT", upload: upload)
+        return body.file
+    }
+
+    func startBotComputer(botID: String, name: String) async throws -> BotComputerLink {
+        struct Input: Encodable { let name: String }
+        struct Body: Decodable { let link: String }
+        let body: Body = try await botModule("bot-computers/\(try Server.segment(botID))/desktop", method: "PUT",
+                                             upload: JSONEncoder().encode(Input(name: name)))
+        return BotComputerLink(rawValue: body.link) ?? .pcOffline
+    }
+
+    func botComputerFrame(_ botID: String, name: String) async throws -> Data {
+        let data = try await botBytes("bot-computers/\(try Server.segment(botID))/desktop",
+                                      query: [URLQueryItem(name: "name", value: name)])
+        guard data.count <= 6_000_000, data.starts(with: Data([0x89, 0x50, 0x4E, 0x47])) else { throw BotComputerFailure.rejected("Skrivebordet kunne ikke vises.") }
+        return data
+    }
+
+    func clickBotComputer(botID: String, name: String, x: Double, y: Double, approved: Bool) async throws {
+        struct Input: Encodable { let name: String; let x, y: Double; let approved: Bool }
+        let _: BotComputerAck = try await botModule("bot-computers/\(try Server.segment(botID))/desktop/input", method: "PUT",
+                                                    upload: JSONEncoder().encode(Input(name: name, x: x, y: y, approved: approved)))
+    }
+
+    private struct BotComputerTaskEnvelope: Decodable {
+        let link: String
+        let task: BotComputerTask
+    }
+
+    private struct BotComputerAck: Decodable { let ok: Bool }
+
+    private func botTask(_ path: String, _ task: BotComputerTask) async throws -> BotComputerSubmission {
+        let body: BotComputerTaskEnvelope = try await botModule(path, method: "PUT", upload: JSONEncoder().encode(task))
+        return BotComputerSubmission(link: BotComputerLink(rawValue: body.link) ?? .pcOffline, task: body.task)
+    }
+
+    private func botModule<T: Decodable>(_ path: String, method: String? = nil, upload: Data? = nil, query: [URLQueryItem] = []) async throws -> T {
+        do { return try await moduleJSON(path, method: method, upload: upload, query: query) }
+        catch { throw Self.botFailure(error) }
+    }
+
+    private func botBytes(_ path: String, query: [URLQueryItem] = []) async throws -> Data {
+        do {
+            var endpoint = try v2Request("modules")
+            guard let url = endpoint.url, var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+                throw V2Failure.invalidInput
+            }
+            components.path = "/api/modules/v1/" + path
+            if !query.isEmpty { components.queryItems = query }
+            guard let target = components.url else { throw V2Failure.invalidInput }
+            endpoint = request(target)
+            let (data, response) = try await loggedData(for: endpoint)
+            try checked(response, expected: 200, data: data)
+            return data
+        } catch {
+            throw Self.botFailure(error)
+        }
+    }
+
+    private static func botFailure(_ error: Error) -> Error {
+        guard let error = error as? APIError else { return error }
+        if case .offline = error { return BotComputerFailure.pcOffline }
+        if case .http(let status, _) = error, let failure = BotComputerSession.failure(forHTTPStatus: status) {
+            return failure
+        }
+        return error
     }
     let server: Server
     let queueTargetID: String

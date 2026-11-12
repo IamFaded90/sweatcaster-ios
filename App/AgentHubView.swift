@@ -18,6 +18,7 @@ struct AgentHub: View {
     @AppStorage(AppStorageKeys.villageExperimentalEnabled) private var experimentalVillageEnabled = false
     var localBotsData: Data { MigratedAppData.shared.villageBots }
     @State var localBot: VillageBot?
+    @State var computerBot: VillageBot?
     @State private var villageChatBot: VillageBot?
     @State var villagePause = false
     @State var cinematic = false
@@ -68,6 +69,11 @@ struct AgentHub: View {
             .sensoryFeedback(.success, trigger: completions)
             .sheet(isPresented: $showBuilder) { botLibrary }
             .sheet(item: $localBot, content: botProfile)
+            .fullScreenCover(item: $computerBot) { bot in
+                BotComputerScreen(bot: bot, others: localVillageBots.filter { $0.id != bot.id }, api: api) {
+                    computerBot = nil
+                }
+            }
             .sheet(item: $villageChatBot) { bot in
                 OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
                               initialPage: .chat, initialBotID: bot.id)
@@ -164,13 +170,19 @@ struct AgentHub: View {
             let activity = botActivity(bot, routine: (hour + item.offset) % 3, sleeping: villageBotsSleep(hour: hour))
             Divider().overlay(palette.border)
             VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 12) {
-                    VillageBotAvatar(bot: bot, size: 44, radius: FadedRadius.small)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(bot.name).font(FadedTypography.section)
-                        Text(activity).font(.subheadline).foregroundStyle(palette.secondary)
+                Button { computerBot = bot } label: {
+                    HStack(spacing: 12) {
+                        VillageBotAvatar(bot: bot, size: 44, radius: FadedRadius.small)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(bot.name).font(FadedTypography.section)
+                            Text(activity).font(.subheadline).foregroundStyle(palette.secondary)
+                        }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Åbn \(bot.name)s computer")
                 ViewThatFits(in: .horizontal) {
                     HStack { villageBotActions(bot) }
                     VStack(alignment: .leading) { villageBotActions(bot) }
@@ -180,6 +192,8 @@ struct AgentHub: View {
     }
 
     @ViewBuilder private func villageBotActions(_ bot: VillageBot) -> some View {
+        FadedSecondaryButton("Computer", icon: "desktopcomputer") { computerBot = bot }
+            .accessibilityLabel("Åbn \(bot.name)s computer")
         FadedSecondaryButton("Profil", icon: "person.crop.circle") { localBot = bot }
             .accessibilityLabel("Åbn profil for \(bot.name)")
         FadedSecondaryButton("Chat", icon: "bubble.left") { villageChatBot = bot }
