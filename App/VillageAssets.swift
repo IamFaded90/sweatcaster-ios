@@ -45,3 +45,22 @@ struct VillagePixelImage: View {
         .frame(width: width, height: height)
     }
 }
+
+struct VillageBotSprite: View {
+    let bot: VillageLifeBot
+    var size: CGFloat = 48
+
+    var body: some View {
+        Group {
+            if let data = bot.customSprite, let image = UIImage(data: data) {
+                Image(uiImage: image)
+                    .resizable()
+                    .interpolation(.none)
+                    .scaledToFit()
+            } else {
+                VillagePixelImage(name: "\(bot.spriteID)_idle", folder: "characters", width: size, height: size)
+            }
+        }
+        .frame(width: size, height: size)
+    }
+}

@@ -50,7 +50,7 @@ struct VillageOfficeView: View {
                 ForEach(bots) { bot in
                     Button { onSelect(bot) } label: {
                         HStack(spacing: 10) {
-                            VillagePixelImage(name: "\(bot.spriteID)_idle", folder: "characters", width: 36, height: 36)
+                            VillageBotSprite(bot: bot, size: 36)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(bot.displayName).font(.subheadline.bold()).lineLimit(1)
                                 Text(bot.poseLabel + " · " + bot.zoneID.title)
@@ -84,7 +84,7 @@ struct VillageOfficeView: View {
             }
             if let bot {
                 Button { onSelect(bot) } label: {
-                    VillagePixelImage(name: "\(bot.spriteID)_idle", folder: "characters", width: 28, height: 28)
+                    VillageBotSprite(bot: bot, size: 28)
                         .offset(y: 4)
                 }
                 .buttonStyle(.plain)

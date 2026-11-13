@@ -169,8 +169,7 @@ struct VillageMapView: View {
         } label: {
             VStack(spacing: 2) {
                 ZStack(alignment: .topTrailing) {
-                    sprite(for: bot)
-                        .frame(width: 48, height: 48)
+                    VillageBotSprite(bot: bot, size: 48)
                         .opacity(bot.activity == .sleep ? 0.55 : 1)
                     if bot.carrying != nil {
                         Circle().fill(Color.orange).frame(width: 8, height: 8).offset(x: 4, y: -2)
@@ -197,15 +196,6 @@ struct VillageMapView: View {
         .accessibilityLabel("\(bot.displayName), \(bot.poseLabel), \(bot.zoneID.title)")
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: bot.zoneID)
         .animation(reduceMotion ? nil : .linear(duration: 0.25), value: bot.pathProgress)
-    }
-
-    @ViewBuilder
-    private func sprite(for bot: VillageLifeBot) -> some View {
-        if let data = bot.customSprite, let image = UIImage(data: data) {
-            Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
-        } else {
-            VillagePixelImage(name: "\(bot.spriteID)_idle", folder: "characters", width: 48, height: 48)
-        }
     }
 
     private func needDots(_ needs: VillageNeeds) -> some View {

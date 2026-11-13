@@ -14,6 +14,8 @@ final class VillageLifeSimulator: ObservableObject {
 
     private var lastDecision = Date.distantPast
     private var handoffCooldownUntil = Date.distantPast
+    private var speechClearAt: [String: Date] = [:]
+    private var lastTickAt = Date.distantPast
 
     init() {
         bots = Self.seedAdamEva()
@@ -46,28 +48,57 @@ final class VillageLifeSimulator: ObservableObject {
     }
 
     func mergeLocalProfiles(_ profiles: [VillageBot]) {
-        guard !profiles.isEmpty else { return }
+        // Keep seeded Adam/Eva; add user bots beside them (match by id or exact demo name only).
         var next = bots
-        for (index, profile) in profiles.prefix(8).enumerated() {
+        if !next.contains(where: { $0.id == "adam" }) || !next.contains(where: { $0.id == "eva" }) {
+            let seeds = Self.seedAdamEva()
+            for seed in seeds where !next.contains(where: { $0.id == seed.id }) {
+                next.insert(seed, at: seed.id == "adam" ? 0 : min(1, next.count))
+            }
+        }
+
+        let profileIDs = Set(profiles.map(\.id.uuidString))
+        next.removeAll { bot in
+            bot.linkedAgentID == nil
+                && bot.id != "adam" && bot.id != "eva"
+                && !profileIDs.contains(bot.id)
+        }
+
+        for profile in profiles.prefix(8) {
             let archetype = VillageArchetype.from(personality: profile.personality, color: profile.color, name: profile.name)
             let sprite = profile.name.localizedCaseInsensitiveContains("eva") || profile.color == "Lilla" ? "eva" : "adam"
-            if index < next.count {
-                next[index].displayName = profile.name.isEmpty ? next[index].displayName : profile.name
-                next[index].archetype = archetype
-                next[index].customSprite = profile.sprite
-                if profile.sprite == nil { next[index].spriteID = sprite }
-            } else {
-                next.append(
-                    VillageLifeBot(
-                        id: profile.id.uuidString, displayName: profile.name.isEmpty ? "Bot \(index + 1)" : profile.name,
-                        archetype: archetype, spriteID: sprite,
-                        zoneID: archetype.workZone, activity: .idle, pose: .idle,
-                        needs: .balanced, destinationZoneID: nil, pathProgress: 0,
-                        speechHint: nil, carrying: nil, lastEventID: nil,
-                        customSprite: profile.sprite, linkedAgentID: nil, updatedAt: Date()
-                    )
-                )
+            let name = profile.name.isEmpty ? "Bot" : profile.name
+
+            if let idx = next.firstIndex(where: { $0.id == profile.id.uuidString }) {
+                next[idx].displayName = name
+                next[idx].archetype = archetype
+                next[idx].customSprite = profile.sprite
+                if profile.sprite == nil { next[idx].spriteID = sprite }
+                continue
             }
+
+            // Only customize seeded Adam/Eva when the saved profile uses that exact name.
+            if let idx = next.firstIndex(where: {
+                ($0.id == "adam" || $0.id == "eva") &&
+                $0.displayName.localizedCaseInsensitiveCompare(name) == .orderedSame
+            }) {
+                next[idx].archetype = archetype
+                next[idx].customSprite = profile.sprite
+                if profile.sprite == nil { next[idx].spriteID = sprite }
+                continue
+            }
+
+            guard next.count < 10 else { break }
+            next.append(
+                VillageLifeBot(
+                    id: profile.id.uuidString, displayName: name,
+                    archetype: archetype, spriteID: sprite,
+                    zoneID: archetype.workZone, activity: .idle, pose: .idle,
+                    needs: .balanced, destinationZoneID: nil, pathProgress: 0,
+                    speechHint: nil, carrying: nil, lastEventID: nil,
+                    customSprite: profile.sprite, linkedAgentID: nil, updatedAt: Date()
+                )
+            )
         }
         bots = Array(next.prefix(10))
     }
@@ -127,6 +158,11 @@ final class VillageLifeSimulator: ObservableObject {
 
     func tick(now: Date = Date(), hour: Int, reduceMotion: Bool, offlinePC: Bool) {
         guard !paused else { return }
+        // Ignore duplicate publishes that arrive faster than the intended interval.
+        let minGap = reduceMotion ? 1.8 : 0.9
+        guard now.timeIntervalSince(lastTickAt) >= minGap else { return }
+        lastTickAt = now
+
         var next = bots
         let dt = reduceMotion ? 2.0 : 1.0
 
@@ -158,27 +194,30 @@ final class VillageLifeSimulator: ObservableObject {
             }
 
             if let carry = next[i].carrying, next[i].zoneID == next.first(where: { $0.id == carry.toBotID })?.zoneID {
-                next[i].speechHint = "file_handoff"
+                setSpeech(&next[i], key: "file_handoff", until: now.addingTimeInterval(4))
                 next[i].carrying = nil
                 next[i].lastEventID = "file_handoff"
+            }
+
+            if let until = speechClearAt[next[i].id], now >= until {
+                next[i].speechHint = nil
+                speechClearAt[next[i].id] = nil
             }
         }
 
         if now.timeIntervalSince(lastDecision) >= (reduceMotion ? decisionEvery * 1.5 : decisionEvery) {
             lastDecision = now
             decideDestinations(&next, hour: hour, now: now, offlinePC: offlinePC)
-            maybeCafeTalk(&next)
+            maybeCafeTalk(&next, now: now)
             maybeFileHandoff(&next, now: now)
         }
 
-        // Clear short speech hints
-        for i in next.indices {
-            if next[i].activity != .talk, next[i].speechHint == "cafe_chat" {
-                next[i].speechHint = nil
-            }
-        }
-
         bots = next
+    }
+
+    private func setSpeech(_ bot: inout VillageLifeBot, key: String, until: Date) {
+        bot.speechHint = key
+        speechClearAt[bot.id] = until
     }
 
     // MARK: - Decision (minimum policy)
@@ -258,13 +297,13 @@ final class VillageLifeSimulator: ObservableObject {
         }
     }
 
-    private func maybeCafeTalk(_ bots: inout [VillageLifeBot]) {
+    private func maybeCafeTalk(_ bots: inout [VillageLifeBot], now: Date) {
         let cafe = bots.indices.filter { bots[$0].zoneID == .cafe && bots[$0].destinationZoneID == nil }
         guard cafe.count >= 2 else { return }
         for i in cafe.prefix(2) {
             bots[i].activity = .talk
             bots[i].pose = .talk
-            bots[i].speechHint = "cafe_chat"
+            setSpeech(&bots[i], key: "cafe_chat", until: now.addingTimeInterval(4))
             bots[i].lastEventID = "cafe_chat"
             bots[i].needs.social = min(1, bots[i].needs.social + 0.08)
         }

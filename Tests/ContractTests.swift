@@ -51,6 +51,19 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(life.chooseZone(for: bot, night: false, others: life.bots), .cafe)
     }
 
+    @MainActor
+    func testMergeLocalProfilesKeepsAdamAndEva() {
+        let life = VillageLifeSimulator()
+        var profile = VillageBot()
+        profile.name = "Nova"
+        profile.color = "Lilla"
+        profile.personality = "Nysgerrig"
+        life.mergeLocalProfiles([profile])
+        XCTAssertTrue(life.bots.contains { $0.id == "adam" && $0.displayName == "Adam" })
+        XCTAssertTrue(life.bots.contains { $0.id == "eva" && $0.displayName == "Eva" })
+        XCTAssertTrue(life.bots.contains { $0.displayName == "Nova" })
+    }
+
     func testPCImageFallbackUsesAuthenticatedPNGRoute() async throws {
         let api = try stubAPI()
         let data = try await api.v2GenerateImage(prompt: "Blue star")

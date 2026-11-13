@@ -1465,6 +1465,16 @@ private struct AgentHub: View {
                 }
             }
             .task(id: attempt) { await followHub() }
+            .task(id: reduceMotion) {
+                // Drive life sim off the view body to avoid republishing during TimelineView evaluation.
+                let nanos: UInt64 = reduceMotion ? 2_000_000_000 : 1_000_000_000
+                while !Task.isCancelled {
+                    let now = Date()
+                    let hour = Calendar.current.component(.hour, from: now)
+                    life.tick(now: now, hour: hour, reduceMotion: reduceMotion, offlinePC: offline)
+                    try? await Task.sleep(nanoseconds: nanos)
+                }
+            }
             .onAppear {
                 life.mergeLocalProfiles(localVillageBots)
                 life.paused = villagePause
@@ -1487,37 +1497,34 @@ private struct AgentHub: View {
     }
 
     private var villageChrome: some View {
-        TimelineView(.periodic(from: .now, by: reduceMotion ? 2 : 1)) { timeline in
-            let hour = Calendar.current.component(.hour, from: timeline.date)
-            let night = hour < 7 || hour >= 20
-            let _ = life.tick(now: timeline.date, hour: hour, reduceMotion: reduceMotion, offlinePC: offline)
-            ZStack(alignment: .topTrailing) {
-                Group {
-                    if surface == .office {
-                        VillageOfficeView(bots: life.bots, onSelect: openLifeBot)
-                    } else {
-                        VillageMapView(
-                            bots: life.bots,
-                            night: night,
-                            cinematic: cinematic,
-                            reduceMotion: reduceMotion,
-                            offline: offline,
-                            onSelect: openLifeBot
-                        )
-                    }
+        let hour = Calendar.current.component(.hour, from: Date())
+        let night = hour < 7 || hour >= 20
+        return ZStack(alignment: .topTrailing) {
+            Group {
+                if surface == .office {
+                    VillageOfficeView(bots: life.bots, onSelect: openLifeBot)
+                } else {
+                    VillageMapView(
+                        bots: life.bots,
+                        night: night,
+                        cinematic: cinematic,
+                        reduceMotion: reduceMotion,
+                        offline: offline,
+                        onSelect: openLifeBot
+                    )
                 }
-                if cinematic {
-                    HStack(spacing: 8) {
-                        Button(surface == .map ? "Kontor" : "Kort") {
-                            surface = surface == .map ? .office : .map
-                        }
-                        .buttonStyle(.borderedProminent)
-                        Button("Menu", systemImage: "eye") { cinematic = false }
-                            .labelStyle(.iconOnly)
-                            .buttonStyle(.bordered)
+            }
+            if cinematic {
+                HStack(spacing: 8) {
+                    Button(surface == .map ? "Kontor" : "Kort") {
+                        surface = surface == .map ? .office : .map
                     }
-                    .padding(12)
+                    .buttonStyle(.borderedProminent)
+                    Button("Menu", systemImage: "eye") { cinematic = false }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.bordered)
                 }
+                .padding(12)
             }
         }
     }
