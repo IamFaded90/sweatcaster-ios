@@ -570,6 +570,7 @@ struct AgentHub: View {
     private func resetRemoteIfNeeded() {
         let target = api?.queueTargetID
         guard remoteTarget != target else { return }
+        let previous = remoteTarget
         remoteTarget = target
         storedSnapshot = nil
         if target == nil {
@@ -577,9 +578,13 @@ struct AgentHub: View {
             life.applyHubAgents([], offline: true)
             wasOffline = true
             offline = true
+        } else if previous == nil {
+            // Coming back online: keep lastWasOffline so the next successful apply emits pc_reconnected.
+            life.clearPCJobMarkers()
+            wasOffline = true
+            offline = false
         } else {
-            // PC switch / new target: clear markers and quiet any prior offline flag so the
-            // next successful apply does not emit a fake pc_reconnected.
+            // PC A → PC B: clear markers quietly (no offline_rest / pc_reconnected pair).
             life.clearPCJobMarkers(resetOfflineState: true)
             wasOffline = false
             offline = false

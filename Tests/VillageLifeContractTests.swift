@@ -227,21 +227,31 @@ final class VillageLifeContractTests: XCTestCase {
     }
 
     @MainActor
-    func testDelBPCSwitchClearsMarkersWithoutOfflineRest() {
+    func testDelBPCSwitchWhileOnlineSkipsReconnectSpeech() {
         let life = VillageLifeSimulator()
         var bot = life.bots[0]
         bot.pcJobRunning = true
         bot.pcLiveLabel = "Render"
         bot.pcJobQueued = true
         life.replaceBotForTesting(bot)
-        life.applyHubAgents([], offline: true)
-        XCTAssertEqual(life.banner, VillageCopy.speech("offline_rest"))
+        // Online → switch target: quiet marker clear (resetOfflineState).
         life.clearPCJobMarkers(resetOfflineState: true)
         XCTAssertFalse(life.bots[0].pcJobRunning)
         XCTAssertFalse(life.bots[0].pcJobQueued)
         XCTAssertNil(life.bots[0].pcLiveLabel)
         life.applyHubAgents([], offline: false)
         XCTAssertNotEqual(life.banner, VillageCopy.speech("pc_reconnected"))
+    }
+
+    @MainActor
+    func testDelBReconnectAfterDisconnectEmitsPcReconnected() {
+        let life = VillageLifeSimulator()
+        life.applyHubAgents([], offline: true)
+        XCTAssertEqual(life.banner, VillageCopy.speech("offline_rest"))
+        // Coming back online keeps lastWasOffline; clear markers only.
+        life.clearPCJobMarkers()
+        life.applyHubAgents([], offline: false)
+        XCTAssertEqual(life.banner, VillageCopy.speech("pc_reconnected"))
     }
 
     func testVillageCameraClampAt1xIsCentered() {
