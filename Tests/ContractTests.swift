@@ -30,6 +30,27 @@ final class ContractTests: XCTestCase {
         XCTAssertEqual(bot.voiceRate ?? 1.0, 1.0)
     }
 
+    func testVillageZoneMappingAndNeedClamp() {
+        XCTAssertEqual(VillageZoneID.fromHubRoom("video-studio"), .video)
+        XCTAssertEqual(VillageZoneID.fromHubRoom("research"), .research)
+        var needs = VillageNeeds(energy: 1.4, social: -0.2, fulfillment: 0.5, mood: 2)
+        needs.clamp()
+        XCTAssertEqual(needs.energy, 1)
+        XCTAssertEqual(needs.social, 0)
+        XCTAssertEqual(needs.mood, 1)
+    }
+
+    @MainActor
+    func testVillageLifePrefersSleepWhenEnergyIsLow() {
+        let life = VillageLifeSimulator()
+        var bot = life.bots[0]
+        bot.needs.energy = 0.1
+        XCTAssertEqual(life.chooseZone(for: bot, night: false, others: life.bots), .sleep)
+        bot.needs.energy = 0.9
+        bot.needs.social = 0.1
+        XCTAssertEqual(life.chooseZone(for: bot, night: false, others: life.bots), .cafe)
+    }
+
     func testPCImageFallbackUsesAuthenticatedPNGRoute() async throws {
         let api = try stubAPI()
         let data = try await api.v2GenerateImage(prompt: "Blue star")
