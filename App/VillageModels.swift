@@ -133,11 +133,15 @@ struct VillageLifeBot: Identifiable, Equatable, Sendable {
     /// Session / live markers (simulator-side).
     var pcJobRunning: Bool = false
     var pcJobQueued: Bool = false
+    var pcJobZone: VillageZoneID? = nil
     var pcLiveLabel: String? = nil
     var localPractice: Bool = false
     var cafePartnerID: String? = nil
     var arrivedAt: Date? = nil
     var sleepSessionStarted: Date? = nil
+    var sleepBonusGrantedThisSession: Bool = false
+    var walkIntentRest: Bool = false
+    var workStartedAnnounced: Bool = false
     var restBonusReadyAt: Date = .distantPast
     var practiceBonusReadyAt: Date = .distantPast
     var sleepBonusReadyAt: Date = .distantPast

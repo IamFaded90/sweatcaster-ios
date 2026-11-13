@@ -103,10 +103,78 @@ final class ContractTests: XCTestCase {
     @MainActor
     func testDelBPauseStopsTickProgress() {
         let life = VillageLifeSimulator()
-        life.paused = true
+        life.setPaused(true)
         let before = life.bots.map(\.zoneID)
         life.tick(now: Date().addingTimeInterval(10), reduceMotion: false)
         XCTAssertEqual(life.bots.map(\.zoneID), before)
+    }
+
+    @MainActor
+    func testDelBPauseShiftsWalkTimers() {
+        let life = VillageLifeSimulator()
+        let t0 = Date()
+        var bot = life.bots[0]
+        bot.arrivedAt = t0.addingTimeInterval(-60)
+        bot.needs.social = 0.1
+        life.replaceBotForTesting(bot)
+        life.tick(now: t0, reduceMotion: false)
+        let walker = life.bots.first { $0.activity == .walk || $0.destinationZoneID == .cafe }
+        XCTAssertNotNil(walker, "Expected a café walk after forcing low social")
+        life.setPaused(true, at: t0.addingTimeInterval(1))
+        life.setPaused(false, at: t0.addingTimeInterval(30))
+        life.tick(now: t0.addingTimeInterval(31), reduceMotion: false)
+        // After a 29s pause shift, the walk should not have finished from wall-clock alone.
+        if let again = life.bots.first(where: { $0.id == walker!.id }), again.activity == .walk {
+            XCTAssertLessThan(again.pathProgress, 1)
+        }
+    }
+
+    @MainActor
+    func testDelBQuestCompletionFiresAfterRunning() throws {
+        let life = VillageLifeSimulator()
+        let running = V2Hub.Quest(id: "q1", title: "Video edit", state: .running, updated_at: Date())
+        let agent = V2Hub.Agent(
+            id: "adam", room_id: "video", name: "Adam", icon: "person",
+            status: .working, xp: 1, level: 1, xp_in_level: 1, xp_for_next_level: 10,
+            recent_quests: [running]
+        )
+        life.applyHubAgents([agent], offline: false)
+        XCTAssertFalse(life.bots.contains { $0.speechHint == "work_finished" })
+        let done = V2Hub.Quest(id: "q1", title: "Video edit", state: .completed, updated_at: Date())
+        let ready = V2Hub.Agent(
+            id: "adam", room_id: "video", name: "Adam", icon: "person",
+            status: .ready, xp: 1, level: 1, xp_in_level: 1, xp_for_next_level: 10,
+            recent_quests: [done]
+        )
+        let before = try XCTUnwrap(life.bots.first { $0.id == "adam" }).needs.fulfillment
+        life.applyHubAgents([ready], offline: false)
+        let adam = try XCTUnwrap(life.bots.first { $0.id == "adam" })
+        XCTAssertEqual(adam.needs.fulfillment, min(1, before + 0.10), accuracy: 0.001)
+        XCTAssertEqual(adam.speechHint, "work_finished")
+    }
+
+    @MainActor
+    func testDelBPCJobUsesQuestZoneNotOnlyArchetype() throws {
+        let life = VillageLifeSimulator()
+        var bot = try XCTUnwrap(life.bots.first { $0.id == "adam" })
+        bot.pcJobRunning = true
+        bot.pcJobZone = .video
+        bot.archetype = .logic
+        XCTAssertEqual(life.chooseZone(for: bot, night: false, others: life.bots), .video)
+    }
+
+    @MainActor
+    func testDelBThinkingWithoutQueueIsNotQueued() {
+        let life = VillageLifeSimulator()
+        let agent = V2Hub.Agent(
+            id: "eva", room_id: "video", name: "Eva", icon: "person",
+            status: .thinking, xp: 1, level: 1, xp_in_level: 1, xp_for_next_level: 10,
+            recent_quests: []
+        )
+        life.applyHubAgents([agent], offline: false)
+        let eva = life.bots.first { $0.id == "eva" }
+        XCTAssertEqual(eva?.pcLiveLabel, "Tænker")
+        XCTAssertEqual(eva?.pcJobQueued, false)
     }
 
     @MainActor
@@ -140,7 +208,7 @@ final class ContractTests: XCTestCase {
         var bot = life.bots[0]
         bot.arrivedAt = Date().addingTimeInterval(-60)
         bot.needs.social = 0.1
-        life.bots[0] = bot
+        life.replaceBotForTesting(bot)
         // Force decision by clearing lastDecision via many ticks with reduce motion
         let now = Date()
         for step in 0..<12 {

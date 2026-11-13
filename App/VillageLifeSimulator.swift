@@ -8,7 +8,7 @@ final class VillageLifeSimulator: ObservableObject {
     @Published private(set) var virtualClock: Date
     @Published private(set) var activeEvents: [VillageEventOccurrence] = []
     @Published private(set) var banner: String?
-    @Published var paused = false
+    @Published private(set) var paused = false
     @Published var filmMode = true
 
     let isDemoClock: Bool
@@ -23,6 +23,7 @@ final class VillageLifeSimulator: ObservableObject {
 
     private var lastDecision = Date.distantPast
     private var lastTickAt = Date.distantPast
+    private var pausedAt: Date?
     private var speechClearAt: [String: Date] = [:]
     private var walkStartedAt: [String: Date] = [:]
     private var cafeEndsAt: [String: Date] = [:]
@@ -31,12 +32,55 @@ final class VillageLifeSimulator: ObservableObject {
     private var cafePairCooldownUntil: Date = .distantPast
     private var demoFileShown = false
     private var lastWasOffline = false
-    private var lastDayBucket: Int?
     private var morningFiredForDay: Int?
-    private var nightFiredForDay: Int?
-    private var completedQuestIDs: Set<String> = []
+    private var nightFiredForEveningDay: Int?
+    private var settledQuestIDs: Set<String> = []
     private var firstHubSyncDone = false
     private let calendar: Calendar
+
+    func setPaused(_ value: Bool, at now: Date = .now) {
+        if value {
+            guard !paused else { return }
+            pausedAt = now
+            paused = true
+            banner = VillageCopy.paused
+            return
+        }
+        guard paused else { return }
+        if let pausedAt {
+            shiftActiveTimers(by: now.timeIntervalSince(pausedAt), now: now)
+        }
+        self.pausedAt = nil
+        paused = false
+        lastTickAt = now
+        if banner == VillageCopy.paused { banner = nil }
+    }
+
+    private func shiftActiveTimers(by delta: TimeInterval, now: Date) {
+        guard delta > 0 else { return }
+        func shift(_ date: Date?) -> Date? {
+            date.map { $0.addingTimeInterval(delta) }
+        }
+        lastDecision = lastDecision.addingTimeInterval(delta)
+        cafePairCooldownUntil = cafePairCooldownUntil.addingTimeInterval(delta)
+        for key in walkStartedAt.keys { walkStartedAt[key] = walkStartedAt[key]!.addingTimeInterval(delta) }
+        for key in cafeEndsAt.keys { cafeEndsAt[key] = cafeEndsAt[key]!.addingTimeInterval(delta) }
+        for key in restEndsAt.keys { restEndsAt[key] = restEndsAt[key]!.addingTimeInterval(delta) }
+        for key in practiceEndsAt.keys { practiceEndsAt[key] = practiceEndsAt[key]!.addingTimeInterval(delta) }
+        for key in speechClearAt.keys { speechClearAt[key] = speechClearAt[key]!.addingTimeInterval(delta) }
+        for i in bots.indices {
+            bots[i].arrivedAt = shift(bots[i].arrivedAt)
+            bots[i].sleepSessionStarted = shift(bots[i].sleepSessionStarted)
+            bots[i].restBonusReadyAt = bots[i].restBonusReadyAt.addingTimeInterval(delta)
+            bots[i].practiceBonusReadyAt = bots[i].practiceBonusReadyAt.addingTimeInterval(delta)
+            bots[i].sleepBonusReadyAt = bots[i].sleepBonusReadyAt.addingTimeInterval(delta)
+            bots[i].cafeCooldownUntil = bots[i].cafeCooldownUntil.addingTimeInterval(delta)
+        }
+        for i in activeEvents.indices {
+            activeEvents[i].startedAt = activeEvents[i].startedAt.addingTimeInterval(delta)
+        }
+        _ = now
+    }
 
     init(isDemoClock: Bool = true, now: Date = .now) {
         var cal = Calendar(identifier: .gregorian)
@@ -87,6 +131,16 @@ final class VillageLifeSimulator: ObservableObject {
         restEndsAt = [:]
         practiceEndsAt = [:]
         speechClearAt = [:]
+        settledQuestIDs = []
+        firstHubSyncDone = false
+        morningFiredForDay = nil
+        nightFiredForEveningDay = nil
+    }
+
+    /// Test helper — updates one bot without exposing a public setter on `bots`.
+    func replaceBotForTesting(_ bot: VillageLifeBot) {
+        guard let i = bots.firstIndex(where: { $0.id == bot.id }) else { return }
+        bots[i] = bot
     }
 
     // MARK: - Profiles / hub
@@ -163,7 +217,9 @@ final class VillageLifeSimulator: ObservableObject {
             for i in bots.indices {
                 bots[i].pcJobRunning = false
                 bots[i].pcJobQueued = false
+                bots[i].pcJobZone = nil
                 bots[i].pcLiveLabel = nil
+                bots[i].workStartedAnnounced = false
             }
             return
         }
@@ -187,60 +243,64 @@ final class VillageLifeSimulator: ObservableObject {
             applyAgent(&next, agent: agent)
         }
 
-        // Quest completion bonuses (once per quest id after first sync).
+        // Quest settlement bonuses once per quest id (only completed/failed count as settled).
         let quests = agents.flatMap(\.recent_quests)
         if firstHubSyncDone {
-            for quest in quests where !completedQuestIDs.contains(quest.id) {
-                completedQuestIDs.insert(quest.id)
-                guard let idx = next.firstIndex(where: {
-                    $0.linkedAgentID == agents.first(where: { a in a.recent_quests.contains(where: { $0.id == quest.id }) })?.id
-                        || $0.displayName.localizedCaseInsensitiveCompare(
-                            agents.first(where: { $0.recent_quests.contains(where: { $0.id == quest.id }) })?.name ?? ""
-                        ) == .orderedSame
-                }) else { continue }
+            for quest in quests {
                 switch quest.state {
-                case .completed:
-                    next[idx].needs.fulfillment = min(1, next[idx].needs.fulfillment + 0.10)
-                    next[idx].needs.clamp()
-                    say(&next[idx], "work_finished", now: .now)
-                    pushEvent(
-                        eventID: "work_finished",
-                        botIDs: [next[idx].id],
-                        zone: next[idx].zoneID,
-                        speech: "work_finished",
-                        duration: 10,
-                        banner: VillageCopy.speech("work_finished"),
-                        now: .now
-                    )
-                    next[idx].pcJobRunning = false
-                    next[idx].pcLiveLabel = nil
-                case .failed:
-                    next[idx].needs.fulfillment = max(0, next[idx].needs.fulfillment - 0.05)
-                    next[idx].needs.clamp()
-                    say(&next[idx], "stuck_on_task", now: .now)
-                    pushEvent(
-                        eventID: "stuck_on_task",
-                        botIDs: [next[idx].id],
-                        zone: next[idx].zoneID,
-                        speech: "stuck_on_task",
-                        duration: 12,
-                        banner: VillageCopy.speech("stuck_on_task"),
-                        now: .now
-                    )
-                    next[idx].pcJobRunning = false
-                    next[idx].pcLiveLabel = nil
                 case .queued, .running:
-                    break
+                    continue
+                case .completed, .failed:
+                    guard !settledQuestIDs.contains(quest.id) else { continue }
+                    settledQuestIDs.insert(quest.id)
+                    guard let owner = agents.first(where: { $0.recent_quests.contains(where: { $0.id == quest.id }) }),
+                          let idx = next.firstIndex(where: {
+                              $0.linkedAgentID == owner.id
+                                  || $0.id == owner.id
+                                  || $0.displayName.localizedCaseInsensitiveCompare(owner.name) == .orderedSame
+                          })
+                    else { continue }
+                    if quest.state == .completed {
+                        next[idx].needs.fulfillment = min(1, next[idx].needs.fulfillment + 0.10)
+                        next[idx].needs.clamp()
+                        say(&next[idx], "work_finished", now: .now)
+                        pushEvent(
+                            eventID: "work_finished",
+                            botIDs: [next[idx].id],
+                            zone: next[idx].zoneID,
+                            speech: "work_finished",
+                            duration: 10,
+                            banner: VillageCopy.speech("work_finished"),
+                            now: .now
+                        )
+                    } else {
+                        next[idx].needs.fulfillment = max(0, next[idx].needs.fulfillment - 0.05)
+                        next[idx].needs.clamp()
+                        say(&next[idx], "stuck_on_task", now: .now)
+                        pushEvent(
+                            eventID: "stuck_on_task",
+                            botIDs: [next[idx].id],
+                            zone: next[idx].zoneID,
+                            speech: "stuck_on_task",
+                            duration: 12,
+                            banner: VillageCopy.speech("stuck_on_task"),
+                            now: .now
+                        )
+                    }
+                    next[idx].pcJobRunning = false
+                    next[idx].pcLiveLabel = nil
+                    next[idx].workStartedAnnounced = false
                 }
             }
         } else {
-            // First sync: register old quests without bonus/events.
-            for quest in quests { completedQuestIDs.insert(quest.id) }
+            // First sync: register already-settled quests without bonus/events.
+            for quest in quests where quest.state == .completed || quest.state == .failed {
+                settledQuestIDs.insert(quest.id)
+            }
             firstHubSyncDone = true
         }
 
         bots = next
-        lastDecision = .distantPast // re-evaluate immediately on hub change
     }
 
     private func applyAgent(_ bots: inout [VillageLifeBot], agent: V2Hub.Agent) {
@@ -258,43 +318,57 @@ final class VillageLifeSimulator: ObservableObject {
             bots[idx].displayName = agent.name
             switch agent.status {
             case .working:
+                interruptLocalSessions(botIndex: idx, bots: &bots)
                 bots[idx].pcJobQueued = false
                 bots[idx].pcJobRunning = true
+                bots[idx].pcJobZone = jobZone
                 bots[idx].pcLiveLabel = running?.title ?? "Arbejder på PC’en"
-                if bots[idx].activity == .sleep || bots[idx].activity == .talk {
-                    // PC job wins — interrupt
-                }
                 if bots[idx].zoneID != jobZone {
-                    beginWalk(&bots[idx], to: jobZone, now: .now, reduceMotion: false)
+                    if bots[idx].destinationZoneID != jobZone || bots[idx].activity != .walk {
+                        beginWalk(&bots[idx], to: jobZone, now: .now, reduceMotion: false)
+                    }
                 } else {
+                    bots[idx].destinationZoneID = nil
                     bots[idx].activity = .work
                     bots[idx].pose = .work
-                    say(&bots[idx], "work_started", now: .now)
+                    if !bots[idx].workStartedAnnounced {
+                        say(&bots[idx], "work_started", now: .now)
+                        bots[idx].workStartedAnnounced = true
+                    }
                 }
             case .thinking:
                 if running != nil {
                     bots[idx].pcJobRunning = true
+                    bots[idx].pcJobZone = jobZone
+                    bots[idx].pcJobQueued = false
                     bots[idx].pcLiveLabel = "Tænker"
-                    bots[idx].activity = .work
-                    bots[idx].pose = .work
+                    if bots[idx].zoneID == jobZone {
+                        bots[idx].activity = .work
+                        bots[idx].pose = .work
+                    }
                 } else {
-                    bots[idx].pcJobQueued = queued || true
+                    bots[idx].pcJobRunning = false
+                    bots[idx].pcJobQueued = queued
                     bots[idx].pcLiveLabel = "Tænker"
                 }
             case .ready:
                 if bots[idx].pcJobRunning {
                     bots[idx].pcJobRunning = false
                     bots[idx].pcLiveLabel = nil
+                    bots[idx].workStartedAnnounced = false
                     if bots[idx].activity == .work && !bots[idx].localPractice {
                         bots[idx].activity = .idle
                         bots[idx].pose = .idle
                     }
                 }
                 bots[idx].pcJobQueued = queued
+                if !queued { bots[idx].pcJobZone = nil }
             case .offline:
                 bots[idx].pcJobRunning = false
                 bots[idx].pcJobQueued = false
+                bots[idx].pcJobZone = nil
                 bots[idx].pcLiveLabel = nil
+                bots[idx].workStartedAnnounced = false
             }
             if queued && agent.status != .working {
                 bots[idx].pcJobQueued = true
@@ -310,11 +384,34 @@ final class VillageLifeSimulator: ObservableObject {
                     customSprite: nil, linkedAgentID: agent.id, updatedAt: .now,
                     pcJobRunning: agent.status == .working,
                     pcJobQueued: queued,
+                    pcJobZone: agent.status == .working || queued ? jobZone : nil,
                     pcLiveLabel: agent.status == .working ? (running?.title ?? "Arbejder på PC’en") : nil,
-                    arrivedAt: .now
+                    arrivedAt: .now,
+                    workStartedAnnounced: agent.status == .working
                 )
             )
         }
+    }
+
+    private func interruptLocalSessions(botIndex idx: Int, bots: inout [VillageLifeBot]) {
+        let id = bots[idx].id
+        if let partnerID = bots[idx].cafePartnerID,
+           let j = bots.firstIndex(where: { $0.id == partnerID }) {
+            bots[j].cafePartnerID = nil
+            cafeEndsAt[bots[j].id] = nil
+            if bots[j].activity == .talk {
+                bots[j].activity = .idle
+                bots[j].pose = .idle
+            }
+        }
+        bots[idx].cafePartnerID = nil
+        cafeEndsAt[id] = nil
+        restEndsAt[id] = nil
+        practiceEndsAt[id] = nil
+        bots[idx].localPractice = false
+        bots[idx].sleepSessionStarted = nil
+        bots[idx].sleepBonusGrantedThisSession = false
+        bots[idx].walkIntentRest = false
     }
 
     // MARK: - Tick
@@ -459,9 +556,9 @@ final class VillageLifeSimulator: ObservableObject {
         clockHour: Int,
         now: Date
     ) -> VillageZoneID {
-        // 1. Confirmed PC job → job / work zone (applyAgent sets walk target)
+        // 1. Confirmed PC job → quest/room job zone, else profile work zone
         if bot.pcJobRunning {
-            return bot.destinationZoneID ?? bot.archetype.workZone
+            return bot.pcJobZone ?? bot.destinationZoneID ?? bot.archetype.workZone
         }
 
         // 3. Sleep window / crisis / unfinished sleep
@@ -502,11 +599,12 @@ final class VillageLifeSimulator: ObservableObject {
     }
 
     private func applyDecision(index i: Int, target: VillageZoneID, now: Date, clockHour: Int, reduceMotion: Bool) {
-        // PC running already handled in applyAgent for walks
         if bots[i].pcJobRunning {
-            let dest = bots[i].archetype.workZone
+            let dest = bots[i].pcJobZone ?? bots[i].archetype.workZone
             if bots[i].zoneID != dest {
-                beginWalk(&bots[i], to: dest, now: now, reduceMotion: reduceMotion)
+                if bots[i].destinationZoneID != dest || bots[i].activity != .walk {
+                    beginWalk(&bots[i], to: dest, now: now, reduceMotion: reduceMotion)
+                }
             } else {
                 bots[i].activity = .work
                 bots[i].pose = .work
@@ -520,11 +618,11 @@ final class VillageLifeSimulator: ObservableObject {
         }
 
         if target == bots[i].zoneID {
-            // Same zone — pick local activity
-            if target == .sleep && (bots[i].needs.energy <= 0.22 || isSleepWindow(clockHour)) {
+            let needsSleep = bots[i].needs.energy <= 0.22 || isSleepWindow(clockHour)
+            if target == .sleep && needsSleep {
+                bots[i].walkIntentRest = false
                 startSleep(index: i, now: now)
             } else if target == .cafe && bots[i].cafePartnerID != nil {
-                // wait for partner / talk started elsewhere
                 bots[i].activity = .idle
                 bots[i].pose = .idle
             } else if (bots[i].needs.energy <= 0.36 || (isPauseWindow(clockHour) && bots[i].needs.energy < 0.65)),
@@ -534,9 +632,6 @@ final class VillageLifeSimulator: ObservableObject {
                       (target == .research || target == .video),
                       now >= bots[i].practiceBonusReadyAt {
                 startPractice(index: i, now: now)
-            } else if bots[i].pcJobQueued {
-                bots[i].activity = .idle
-                bots[i].pose = .idle
             } else {
                 bots[i].activity = .idle
                 bots[i].pose = .idle
@@ -544,13 +639,17 @@ final class VillageLifeSimulator: ObservableObject {
             return
         }
 
-        // Crisis, PC work, and strong social need may leave before min stay.
         let socialCrisis = bots[i].needs.social <= 0.40 && target == .cafe
         guard canLeave(bots[i], now: now)
                 || bots[i].needs.energy <= 0.22
                 || bots[i].pcJobRunning
                 || socialCrisis
         else { return }
+
+        let softRestToSleep = target == .sleep
+            && bots[i].needs.energy > 0.22
+            && !isSleepWindow(clockHour)
+        bots[i].walkIntentRest = softRestToSleep
         beginWalk(&bots[i], to: target, now: now, reduceMotion: reduceMotion)
     }
 
@@ -565,6 +664,10 @@ final class VillageLifeSimulator: ObservableObject {
         if bot.zoneID == dest {
             bot.destinationZoneID = nil
             bot.pathProgress = 0
+            return
+        }
+        // Idempotent: keep an in-flight walk to the same destination.
+        if bot.destinationZoneID == dest, bot.activity == .walk, walkStartedAt[bot.id] != nil {
             return
         }
         bot.destinationZoneID = dest
@@ -614,16 +717,27 @@ final class VillageLifeSimulator: ObservableObject {
         if bot.pcJobRunning {
             bot.activity = .work
             bot.pose = .work
-            say(&bot, "work_started", now: now)
+            bot.walkIntentRest = false
+            if !bot.workStartedAnnounced {
+                say(&bot, "work_started", now: now)
+                bot.workStartedAnnounced = true
+            }
             return
         }
         switch bot.zoneID {
         case .sleep:
-            startSleep(bot: &bot, now: now)
+            if bot.walkIntentRest {
+                bot.walkIntentRest = false
+                startRest(bot: &bot, now: now)
+            } else {
+                startSleep(bot: &bot, now: now)
+            }
         case .cafe:
+            bot.walkIntentRest = false
             bot.activity = .idle
             bot.pose = .idle
         case .research, .video:
+            bot.walkIntentRest = false
             bot.activity = .idle
             bot.pose = .idle
         }
@@ -761,15 +875,16 @@ final class VillageLifeSimulator: ObservableObject {
     // MARK: - Rest / practice / sleep
 
     private func startRest(index i: Int, now: Date) {
-        guard now >= bots[i].restBonusReadyAt else {
-            bots[i].activity = .rest
-            bots[i].pose = .rest
-            return
-        }
-        bots[i].activity = .rest
-        bots[i].pose = .rest
-        restEndsAt[bots[i].id] = now.addingTimeInterval(restSessionSeconds)
-        say(&bots[i], "needs_break", now: now)
+        startRest(bot: &bots[i], now: now)
+    }
+
+    private func startRest(bot: inout VillageLifeBot, now: Date) {
+        bot.activity = .rest
+        bot.pose = .rest
+        bot.walkIntentRest = false
+        guard now >= bot.restBonusReadyAt else { return }
+        restEndsAt[bot.id] = now.addingTimeInterval(restSessionSeconds)
+        say(&bot, "needs_break", now: now)
     }
 
     private func advanceRest(now: Date) {
@@ -838,8 +953,10 @@ final class VillageLifeSimulator: ObservableObject {
         bot.activity = .sleep
         bot.pose = .sleep
         bot.localPractice = false
+        bot.walkIntentRest = false
         if bot.sleepSessionStarted == nil {
             bot.sleepSessionStarted = now
+            bot.sleepBonusGrantedThisSession = false
             say(&bot, "sleep_started", now: now)
             pushEvent(
                 eventID: "sleep_started",
@@ -869,10 +986,11 @@ final class VillageLifeSimulator: ObservableObject {
         let slept = now.timeIntervalSince(started)
         guard slept >= sleepMinSeconds else { return }
 
-        // One-shot +0.12 bonus
-        if now >= bots[i].sleepBonusReadyAt, slept >= sleepMinSeconds {
+        // +0.12 once per sleep session (and respect 120s cooldown between sessions).
+        if !bots[i].sleepBonusGrantedThisSession, now >= bots[i].sleepBonusReadyAt {
             bots[i].needs.energy = min(1, bots[i].needs.energy + 0.12)
             bots[i].needs.clamp()
+            bots[i].sleepBonusGrantedThisSession = true
             bots[i].sleepBonusReadyAt = now.addingTimeInterval(120)
         }
 
@@ -887,6 +1005,7 @@ final class VillageLifeSimulator: ObservableObject {
             bots[i].activity = .idle
             bots[i].pose = .idle
             bots[i].sleepSessionStarted = nil
+            bots[i].sleepBonusGrantedThisSession = false
             bots[i].arrivedAt = now
             say(&bots[i], "awake", now: now)
             pushEvent(
@@ -962,6 +1081,7 @@ final class VillageLifeSimulator: ObservableObject {
     private func maybeDayNightHints(now: Date) {
         let hour = calendar.component(.hour, from: virtualClock)
         let day = calendar.ordinality(of: .day, in: .year, for: virtualClock) ?? 0
+        // Morning: first tick at/after 07:00 once per calendar day.
         if hour >= 7 && hour < 22 {
             if morningFiredForDay != day {
                 morningFiredForDay = day
@@ -977,9 +1097,10 @@ final class VillageLifeSimulator: ObservableObject {
                 )
             }
         }
-        if hour >= 22 || hour < 7 {
-            if nightFiredForDay != day {
-                nightFiredForDay = day
+        // Night: first tick at/after 22:00 once per evening day (not again after midnight).
+        if hour >= 22 {
+            if nightFiredForEveningDay != day {
+                nightFiredForEveningDay = day
                 banner = VillageCopy.speech("night_wind_down")
                 pushEvent(
                     eventID: "night_wind_down",
@@ -992,7 +1113,6 @@ final class VillageLifeSimulator: ObservableObject {
                 )
             }
         }
-        lastDayBucket = day
     }
 
     // MARK: - Geometry

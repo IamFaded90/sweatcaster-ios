@@ -1487,7 +1487,7 @@ private struct AgentHub: View {
             }
             .onAppear {
                 life.mergeLocalProfiles(localVillageBots)
-                life.paused = villagePause
+                life.setPaused(villagePause)
                 life.filmMode = cinematic
                 if api == nil {
                     offline = true
@@ -1495,7 +1495,7 @@ private struct AgentHub: View {
                     wasOffline = true
                 }
             }
-            .onChange(of: villagePause) { _, value in life.paused = value }
+            .onChange(of: villagePause) { _, value in life.setPaused(value) }
             .onChange(of: cinematic) { _, value in life.filmMode = value }
             .onChange(of: localBotsData) { _, _ in life.mergeLocalProfiles(localVillageBots) }
             .onChange(of: offline) { _, value in
