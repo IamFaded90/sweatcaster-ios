@@ -4,9 +4,11 @@ import argparse
 import getpass
 import ipaddress
 import json
+import secrets
 import shutil
 import sys
 import warnings
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
@@ -33,8 +35,14 @@ def canonical_address(address: str) -> str:
 def pairing_payload(address: str, token: str) -> str:
     if not 1 <= len(token) <= 512 or any(not 33 <= ord(char) <= 126 for char in token):
         raise PairingError("Tokenet er ugyldigt. Brug tokenet fra FadedAI på PC’en.")
-    return json.dumps({"version": 1, "address": canonical_address(address), "token": token},
-                      separators=(",", ":"))
+    expires = datetime.now(timezone.utc) + timedelta(minutes=5)
+    return json.dumps({
+        "version": 1,
+        "address": canonical_address(address),
+        "token": token,
+        "expiresAt": expires.isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "nonce": secrets.token_urlsafe(18),
+    }, separators=(",", ":"))
 
 
 def read_token(path: Path | None) -> str:

@@ -63,7 +63,7 @@ The queue persists under the PC output directory. The worker starts with the PC 
 
 ## Forbindelse med QR
 
-Åbn en interaktiv Windows Terminal i projektmappen. QR-værktøjet kræver Python-pakken `qrcode`.
+Brug **FadedAI – Scan QR** på skrivebordet, hvis genvejen er installeret. Som alternativ kan du åbne Windows Terminal i projektmappen og køre QR-værktøjet med Python-pakken `qrcode`.
 
 ```powershell
 python -m pip install qrcode
@@ -72,4 +72,4 @@ python backend/show_pairing_qr.py 192.168.1.50
 
 Brug PC’ens egen LAN- eller Tailscale-adresse. Indsæt det eksisterende token i den skjulte prompt, eller tilføj `--token-file 'D:\FadedAIData\PAIRING_TOKEN.txt'` med stien til tokenfilen. Vælg **Scan QR fra PC’en** på iPhonen, og tryk derefter **Test og Forbind**.
 
-QR-koden indeholder tokenet. Vis den kun på din egen skærm, og luk visningen med Enter efter scanning. Forstør terminalvinduet, hvis QR-koden ikke kan være der.
+Åbn en ny QR-kode, hvis de fem minutter er gået. Vis koden på din egen skærm, og luk terminalvisningen med Enter efter scanning. Forstør vinduet, hvis koden ikke kan være der.
