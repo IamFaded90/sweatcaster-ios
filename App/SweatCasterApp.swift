@@ -1362,15 +1362,17 @@ private struct AgentHub: View {
     @AppStorage("village.bots") private var localBotsData = Data()
     @State private var localBot: VillageBot?
     @State private var villagePause = false
-    @State private var cinematic = false
-    @State private var villageZoom: CGFloat = 1
-    @State private var villageOffset: CGSize = .zero
+    @State private var cinematic = true
+    @State private var path = NavigationPath()
+    @StateObject private var life = VillageLifeSimulator()
     @State private var showBuilder = false
     @State private var offline = false
+    @State private var wasOffline = false
     @State private var completions = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var details: V2Hub.Agent?
     @State private var achievements = false
+    @State private var inspectedLifeBot: VillageLifeBot?
 
     @State private var snapshot: V2Hub?
     @State private var failure: String?
@@ -1384,16 +1386,23 @@ private struct AgentHub: View {
     @State private var badgesLoading = false
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    village
+                    villageChrome
                     if !cinematic {
-                        Toggle("Lad lokale bots hvile", isOn: $villagePause)
-                        Text("Lokale bots følger telefonens ur. PC-agenter følger deres live-status.")
+                        Button("Kontoret", systemImage: "desktopcomputer") {
+                            path.append(VillageSurface.office)
+                        }
+                        .frame(minHeight: 48)
+                        Toggle("Pause landsbyen", isOn: $villagePause)
+                        Text("Lokale bots lever på telefonen. Bekræftede PC-opgaver vises, når hub’en er online.")
                             .font(.caption).foregroundStyle(.secondary)
+                        if let banner = life.banner {
+                            Text(banner).font(.caption).foregroundStyle(.secondary)
+                        }
                     }
-                    if offline { Text("PC’en er offline. Botsene hviler.") }
+                    if offline { Text(VillageCopy.pcUnavailable) }
                     if !cinematic {
                     Button("Botbygger", systemImage: "person.crop.circle.badge.plus") { showBuilder = true }
                         .frame(minHeight: 48)
@@ -1410,7 +1419,7 @@ private struct AgentHub: View {
                     }
                     Button("Achievements", systemImage: "trophy") { achievements = true }
                         .frame(minHeight: 48)
-                    } else if failure == nil {
+                    } else if failure == nil && api != nil {
                         LoadingSkeleton(label: "Henter agenter…")
                     }
                     }
@@ -1418,6 +1427,11 @@ private struct AgentHub: View {
             }
             .navigationTitle("Landsbyen")
             .toolbarVisibility(cinematic ? .hidden : .visible, for: .navigationBar)
+            .navigationDestination(for: VillageSurface.self) { surface in
+                if surface == .office {
+                    VillageOfficeView(bots: life.bots, onSelect: openLifeBot)
+                }
+            }
             .sensoryFeedback(.success, trigger: completions)
             .sheet(isPresented: $showBuilder) { VillageBotBuilder() }
             .sheet(item: $localBot) { bot in
@@ -1434,130 +1448,103 @@ private struct AgentHub: View {
                     .toolbar { Button("Luk") { localBot = nil } }
                 }
             }
+            .sheet(item: $inspectedLifeBot) { bot in
+                NavigationStack {
+                    List {
+                        Section("Status") {
+                            Text(bot.poseLabel)
+                            Text(bot.zoneID.title)
+                            Text("Energi \(Int(bot.needs.energy * 100))%")
+                            Text("Social \(Int(bot.needs.social * 100))%")
+                            Text("Arbejdsglæde \(Int(bot.needs.fulfillment * 100))%")
+                            if bot.pcJobRunning { Text("PC-opgave i gang") }
+                            if bot.pcJobQueued { Text("Venter på en opgave") }
+                            if let live = bot.pcLiveLabel { Text(live) }
+                        }
+                        if bot.carrying != nil {
+                            Section("Bærer") { Text(bot.carrying?.label ?? "Pakke") }
+                        }
+                        Section {
+                            Button("Åbn Botbygger") {
+                                inspectedLifeBot = nil
+                                showBuilder = true
+                            }
+                        }
+                    }
+                    .navigationTitle(bot.displayName)
+                    .toolbar { Button("Luk") { inspectedLifeBot = nil } }
+                }
+            }
             .task(id: attempt) { await followHub() }
+            .task(id: "\(reduceMotion)-\(offline)") {
+                // Key on offline too so reconnect/disconnect is not stuck in a stale @Sendable capture.
+                // PC live markers are applied via onChange(offline) / hub apply; tick only advances local life.
+                let nanos: UInt64 = reduceMotion ? 2_000_000_000 : 1_000_000_000
+                while !Task.isCancelled {
+                    life.tick(now: Date(), reduceMotion: reduceMotion)
+                    try? await Task.sleep(nanoseconds: nanos)
+                }
+            }
+            .onAppear {
+                life.mergeLocalProfiles(localVillageBots)
+                life.setPaused(villagePause)
+                life.filmMode = cinematic
+                if api == nil {
+                    offline = true
+                    life.applyHubAgents([], offline: true)
+                    wasOffline = true
+                }
+            }
+            .onChange(of: villagePause) { _, value in life.setPaused(value) }
+            .onChange(of: cinematic) { _, value in life.filmMode = value }
+            .onChange(of: localBotsData) { _, _ in life.mergeLocalProfiles(localVillageBots) }
+            .onChange(of: offline) { _, value in
+                if value {
+                    life.applyHubAgents([], offline: true)
+                    wasOffline = true
+                } else if wasOffline, let snapshot {
+                    life.applyHubAgents(snapshot.agents, offline: false)
+                    wasOffline = false
+                }
+            }
             .refreshable { attempt += 1 }
-            .toolbar { Button("Luk") { dismiss() } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Luk") { dismiss() } }
+                ToolbarItem(placement: .primaryAction) {
+                    Button(cinematic ? "Vis menu" : "Filmtilstand", systemImage: cinematic ? "eye" : "video") {
+                        cinematic.toggle()
+                    }
+                    .accessibilityLabel(cinematic ? "Afslut filmtilstand" : "Start filmtilstand")
+                }
+            }
             .sheet(item: $details) { agent in agentDetails(agent) }
             .sheet(isPresented: $achievements) { achievementPage }
         }
     }
 
-    private var village: some View {
-        TimelineView(.periodic(from: .now, by: reduceMotion ? 60 : 0.25)) { timeline in
-            let hour = Calendar.current.component(.hour, from: timeline.date)
-            let night = hour < 7 || hour >= 20
-            GeometryReader { geometry in
-                let size = geometry.size
-                ZStack {
-                    RoundedRectangle(cornerRadius: 20)
-                        .fill(night ? Color(red: 0.03, green: 0.06, blue: 0.14) :
-                            Color(red: 0.10, green: 0.19, blue: 0.29))
-                    Canvas { context, canvas in
-                        let pixelRect: (CGRect) -> Path = { frame in Path { $0.addRect(frame) } }
-                        let diamond: (CGPoint, CGFloat, CGFloat) -> Path = { center, width, height in
-                            Path { path in
-                                path.move(to: CGPoint(x: center.x, y: center.y - height / 2))
-                                path.addLine(to: CGPoint(x: center.x + width / 2, y: center.y))
-                                path.addLine(to: CGPoint(x: center.x, y: center.y + height / 2))
-                                path.addLine(to: CGPoint(x: center.x - width / 2, y: center.y))
-                                path.closeSubpath()
-                            }
-                        }
-                        let quad: (CGPoint, CGPoint, CGPoint, CGPoint) -> Path = { a, b, c, d in
-                            Path { path in
-                                path.move(to: a); path.addLine(to: b)
-                                path.addLine(to: c); path.addLine(to: d); path.closeSubpath()
-                            }
-                        }
-                        context.fill(pixelRect(CGRect(origin: .zero, size: canvas)),
-                                     with: .color(night ? Color(red: 0.04, green: 0.14, blue: 0.15) : Color(red: 0.10, green: 0.34, blue: 0.22)))
-                        let tile: CGFloat = 12
-                        for row in 0..<Int(canvas.height / tile) {
-                            for column in 0..<Int(canvas.width / tile) where (row * 7 + column * 11) % 13 == 0 {
-                                context.fill(pixelRect(CGRect(x: CGFloat(column) * tile, y: CGFloat(row) * tile,
-                                                         width: 4, height: 4)),
-                                             with: .color(.green.opacity(night ? 0.18 : 0.38)))
-                            }
-                        }
-                        context.fill(pixelRect(CGRect(x: canvas.width * 0.46, y: 0, width: 26, height: canvas.height)),
-                                     with: .color(Color(red: 0.70, green: 0.59, blue: 0.40).opacity(0.78)))
-                        context.fill(pixelRect(CGRect(x: 0, y: canvas.height * 0.48, width: canvas.width, height: 26)),
-                                     with: .color(Color(red: 0.70, green: 0.59, blue: 0.40).opacity(0.78)))
-                        for zone in 0..<4 {
-                            let center = villagePoint(zone, size: canvas)
-                            let colors: [Color] = [.indigo, .blue, .orange, .purple]
-                            let x = center.x, y = center.y
-                            context.fill(diamond(CGPoint(x: x + 10, y: y + 41), 154, 86),
-                                         with: .color(.black.opacity(0.34)))
-                            context.fill(diamond(CGPoint(x: x, y: y + 22), 148, 80),
-                                         with: .color(Color(red: 0.36, green: 0.48, blue: 0.39)))
-                            context.fill(quad(CGPoint(x: x - 57, y: y - 28), CGPoint(x: x, y: y + 1),
-                                              CGPoint(x: x, y: y + 47), CGPoint(x: x - 57, y: y + 18)),
-                                         with: .color(colors[zone].opacity(0.72)))
-                            context.fill(quad(CGPoint(x: x, y: y + 1), CGPoint(x: x + 57, y: y - 28),
-                                              CGPoint(x: x + 57, y: y + 18), CGPoint(x: x, y: y + 47)),
-                                         with: .color(colors[zone].opacity(0.48)))
-                            context.fill(diamond(CGPoint(x: x, y: y - 29), 132, 66),
-                                         with: .color(colors[zone].opacity(0.96)))
-                            context.stroke(diamond(CGPoint(x: x, y: y - 29), 132, 66),
-                                           with: .color(.white.opacity(0.38)), lineWidth: 2)
-                            context.fill(quad(CGPoint(x: x - 13, y: y + 13), CGPoint(x: x, y: y + 20),
-                                              CGPoint(x: x, y: y + 45), CGPoint(x: x - 13, y: y + 38)),
-                                         with: .color(.black.opacity(0.56)))
-                            context.fill(quad(CGPoint(x: x + 17, y: y + 17), CGPoint(x: x + 34, y: y + 8),
-                                              CGPoint(x: x + 34, y: y + 22), CGPoint(x: x + 17, y: y + 31)),
-                                         with: .color(night ? .yellow.opacity(0.84) : .cyan.opacity(0.82)))
-                        }
-                        for tree in 0..<12 {
-                            let x = canvas.width * (0.08 + Double((tree * 31) % 83) / 100)
-                            let y = canvas.height * (0.11 + Double((tree * 47) % 75) / 100)
-                            context.fill(pixelRect(CGRect(x: x + 4, y: y + 6, width: 4, height: 9)), with: .color(.brown))
-                            context.fill(pixelRect(CGRect(x: x, y: y, width: 13, height: 10)),
-                                         with: .color(Color(red: 0.08, green: 0.52, blue: 0.30)))
-                        }
-                        if offline {
-                            let phase = reduceMotion ? 0 : Int(timeline.date.timeIntervalSince1970 * 24) % 100
-                            for drop in 0..<30 {
-                                let x = canvas.width * Double((drop * 37) % 100) / 100
-                                let y = canvas.height * Double((drop * 61 + phase) % 100) / 100
-                                let line = Path { path in
-                                    path.move(to: CGPoint(x: x, y: y))
-                                    path.addLine(to: CGPoint(x: x - 4, y: y + 10))
-                                }
-                                context.stroke(line, with: .color(.cyan.opacity(0.45)), lineWidth: 1)
-                            }
-                        }
-                    }.accessibilityHidden(true)
-                    ForEach(Array(["Research Lab", "Video Studio", "Kaffeområde", "Sovekrog"].enumerated()), id: \.offset) { item in
-                        let point = villagePoint(item.offset, size: size)
-                        Label(item.element, systemImage: ["books.vertical.fill", "film.fill", "cup.and.saucer.fill", "moon.stars.fill"][item.offset])
-                            .font(.caption2.bold()).labelStyle(.titleAndIcon)
-                            .position(x: point.x, y: point.y + 25)
-                    }
-                    ForEach(Array((snapshot?.agents ?? []).enumerated()), id: \.element.id) { item in
-                        villageAvatar(item.element, index: item.offset, time: timeline.date.timeIntervalSinceReferenceDate, size: size)
-                    }
-                    ForEach(Array(localVillageBots.enumerated()), id: \.element.id) { item in
-                        localVillageAvatar(item.element, index: item.offset, hour: hour,
-                                           time: timeline.date.timeIntervalSinceReferenceDate, size: size)
-                    }
+    private var villageChrome: some View {
+        let hour = Calendar.current.component(.hour, from: life.virtualClock)
+        let night = hour < 7 || hour >= 22
+        return ZStack(alignment: .topTrailing) {
+            VillageMapView(
+                bots: life.bots,
+                night: night,
+                cinematic: cinematic,
+                reduceMotion: reduceMotion,
+                offline: offline,
+                banner: life.banner,
+                onSelect: openLifeBot
+            )
+            if cinematic {
+                HStack(spacing: 8) {
+                    Button("Kontor") { path.append(VillageSurface.office) }
+                        .buttonStyle(.borderedProminent)
+                    Button("Menu", systemImage: "eye") { cinematic = false }
+                        .labelStyle(.iconOnly)
+                        .buttonStyle(.bordered)
                 }
-                .scaleEffect(villageZoom)
-                .offset(villageOffset)
-                .gesture(MagnifyGesture().onChanged { villageZoom = min(2, max(1, $0.magnification)) })
-                .simultaneousGesture(DragGesture().onChanged { villageOffset = $0.translation })
-                .foregroundStyle(.white)
-                .clipShape(RoundedRectangle(cornerRadius: 20))
-            }.frame(height: 420)
-        }
-        .overlay(alignment: .topTrailing) {
-            Button(cinematic ? "Vis menu" : "Filmtilstand", systemImage: cinematic ? "eye" : "video") {
-                cinematic.toggle()
+                .padding(12)
             }
-            .labelStyle(.iconOnly)
-            .accessibilityLabel(cinematic ? "Afslut filmtilstand" : "Start filmtilstand")
-            .frame(minWidth: 48, minHeight: 48)
-            .foregroundStyle(.white)
         }
     }
 
@@ -1565,82 +1552,24 @@ private struct AgentHub: View {
         (try? JSONDecoder().decode([VillageBot].self, from: localBotsData)) ?? []
     }
 
-    private func localVillageAvatar(_ bot: VillageBot, index: Int, hour: Int, time: TimeInterval, size: CGSize) -> some View {
-        let sleeping = offline || villagePause || hour < 7 || hour >= 22
-        let routine = (hour + index) % 3
-        let zone = sleeping ? 3 : routine
-        let center = villagePoint(zone, size: size)
-        let personality = bot.personality ?? "Nysgerrig"
-        let routines: [String] = switch personality {
-        case "Rolig": ["Læser i biblioteket", "Ordner studiet", "Drikker te"]
-        case "Sjov": ["Finder på historier", "Øver en scene", "Fortæller jokes"]
-        case "Omsorgsfuld": ["Hjælper i laboratoriet", "Hjælper med video", "Laver kaffe til holdet"]
-        default: ["Undersøger nye idéer", "Øver sig i studiet", "Holder kaffepause"]
+    private func openLifeBot(_ bot: VillageLifeBot) {
+        // Prefer stable id: linked hub agent → saved VillageBot UUID → life inspector.
+        if let agent = snapshot?.agents.first(where: {
+            $0.id == bot.linkedAgentID ||
+            $0.id == bot.id ||
+            $0.name.localizedCaseInsensitiveCompare(bot.displayName) == .orderedSame
+        }) {
+            details = agent
+            return
         }
-        let activity = sleeping ? "Sover" : routines[routine]
-        let color: Color = bot.color == "Grøn" ? .green : bot.color == "Lilla" ? .purple : .cyan
-        return Button {
-            if !cinematic { localBot = bot }
-        } label: {
-            VStack(spacing: 0) {
-                Group {
-                if let data = bot.sprite, let image = UIImage(data: data) {
-                    Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
-                } else {
-                    Image(systemName: sleeping ? "moon.stars.fill" : "sparkle").foregroundStyle(color)
-                }
-                }.frame(width: 38, height: 38).opacity(sleeping ? 0.55 : 1)
-                Text(bot.name).font(.caption2.bold()).lineLimit(1)
-                if !sleeping { Text(activity).font(.system(size: 8)).lineLimit(1) }
-            }.frame(width: 92, height: 66)
+        if let local = localVillageBots.first(where: {
+            $0.id.uuidString == bot.id ||
+            $0.name.localizedCaseInsensitiveCompare(bot.displayName) == .orderedSame
+        }) {
+            localBot = local
+            return
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(bot.name + ", " + (bot.personality ?? "Nysgerrig") + ", " + activity)
-        .position(x: center.x + CGFloat(index % 5 - 2) * 23 + (reduceMotion || sleeping ? 0 : CGFloat(sin(time * 0.7 + Double(index))) * 18),
-                  y: center.y + 42 + CGFloat(index / 5) * 20 + (reduceMotion || sleeping ? 0 : CGFloat(cos(time * 0.7 + Double(index))) * 8))
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.75), value: zone)
-    }
-
-    private func villagePoint(_ zone: Int, size: CGSize) -> CGPoint {
-        let columns = [0.27, 0.73, 0.27, 0.73]
-        let rows = [0.28, 0.37, 0.65, 0.74]
-        return CGPoint(x: size.width * columns[zone], y: size.height * rows[zone])
-    }
-
-    private func villageAvatar(_ agent: V2Hub.Agent, index: Int, time: TimeInterval, size: CGSize) -> some View {
-        let sleeping = offline || agent.status == .offline
-        let resting = agent.status == .ready
-        let zone = sleeping ? 3 : resting ? 2 : agent.room_id.lowercased().contains("video") ? 1 : 0
-        let point = villagePoint(zone, size: size)
-        let offset = CGFloat(index % 4) * 29 - 43.5
-        let matchingSprite = localVillageBots.first {
-            $0.name.localizedCaseInsensitiveCompare(agent.name) == .orderedSame ||
-            $0.name.localizedCaseInsensitiveCompare(agent.id) == .orderedSame
-        }?.sprite
-        return Button {
-            if !cinematic { details = agent }
-        } label: {
-            Group {
-                if let matchingSprite, let image = UIImage(data: matchingSprite) {
-                    Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
-                } else {
-                    Image(systemName: sleeping ? "moon.zzz.fill" : icon(agent.icon)).font(.title2)
-                }
-            }
-            .frame(width: 42, height: 42)
-            .opacity(sleeping ? 0.55 : 1)
-            .modifier(AgentPulse(active: !sleeping && !resting))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(agent.name + ", " + (sleeping ? "Hviler" : status(agent.status)))
-        .contextMenu {
-            if !cinematic {
-                Button("Vis historik og hukommelse") { details = agent }
-            }
-        }
-        .position(x: point.x + offset + (reduceMotion || sleeping ? 0 : CGFloat(sin(time * 0.55 + Double(index))) * 16),
-                  y: point.y - 5 - CGFloat(index / 4) * 28 + (reduceMotion || sleeping ? 0 : CGFloat(cos(time * 0.55 + Double(index))) * 7))
-        .animation(reduceMotion ? nil : .easeInOut(duration: 0.75), value: zone)
+        inspectedLifeBot = bot
     }
 
     private func missionHUD(_ summary: V2Hub.Summary) -> some View {
@@ -1738,7 +1667,11 @@ private struct AgentHub: View {
 
     private func followHub() async {
         failure = nil
-        guard let api else { failure = "Forbind til din PC i Indstillinger."; return }
+        guard let api else {
+            // Demo / no PC: local life simulator still runs in the village view.
+            offline = true
+            return
+        }
         do {
             while !Task.isCancelled {
                 let initial = try await api.v2Hub()
@@ -1755,10 +1688,10 @@ private struct AgentHub: View {
             }
         } catch {
             if !Task.isCancelled {
-                if let networkError = error as? URLError {
-                    offline = [.notConnectedToInternet, .cannotConnectToHost, .networkConnectionLost,
-                               .timedOut, .cannotFindHost].contains(networkError.code)
-                }
+                // Any hub failure → local village continues without live PC markers.
+                offline = true
+                life.applyHubAgents([], offline: true)
+                wasOffline = true
                 failure = "Kunne ikke hente Agent-Hub. Tjek forbindelsen til PC’en."
             }
         }
@@ -1772,6 +1705,7 @@ private struct AgentHub: View {
         }
         offline = false
         snapshot = value
+        life.applyHubAgents(value.agents, offline: false)
         if !value.rooms.contains(where: { $0.id == selectedRoom }) {
             selectedRoom = value.rooms.first?.id ?? ""
         }
