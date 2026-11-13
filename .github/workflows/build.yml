@@ -3,7 +3,7 @@ name: Build unsigned iOS IPA
 on:
   workflow_dispatch:
   push:
-    branches: [main, 'codex/ipa-*']
+    branches: [main, 'codex/ipa-*', 'cursor/ipa-*-6c4b']
 
 permissions:
   contents: read
