@@ -167,6 +167,33 @@ final class VillageLifeContractTests: XCTestCase {
     }
 
     @MainActor
+    func testDelBThinkingJobDoesNotAnnounceWorkStartedOnArrival() throws {
+        let life = VillageLifeSimulator()
+        var adam = try XCTUnwrap(life.bots.first { $0.id == "adam" })
+        adam.zoneID = .research
+        adam.arrivedAt = Date().addingTimeInterval(-60)
+        life.replaceBotForTesting(adam)
+        let running = V2Hub.Quest(id: "q-think", title: "Video edit", state: .running, updated_at: Date())
+        let agent = V2Hub.Agent(
+            id: "adam", room_id: "video", name: "Adam", icon: "person",
+            status: .thinking, xp: 1, level: 1, xp_in_level: 1, xp_for_next_level: 10,
+            recent_quests: [running]
+        )
+        life.applyHubAgents([agent], offline: false)
+        let walking = try XCTUnwrap(life.bots.first { $0.id == "adam" })
+        XCTAssertEqual(walking.pcLiveLabel, "Tænker")
+        XCTAssertNotEqual(walking.speechHint, "work_started")
+        // Force arrival (reduce-motion path completes the walk immediately).
+        let now = Date().addingTimeInterval(5)
+        life.tick(now: now, reduceMotion: true)
+        let arrived = try XCTUnwrap(life.bots.first { $0.id == "adam" })
+        XCTAssertEqual(arrived.activity, .work)
+        XCTAssertEqual(arrived.pcLiveLabel, "Tænker")
+        XCTAssertNotEqual(arrived.speechHint, "work_started")
+        XCTAssertTrue(arrived.workStartedAnnounced)
+    }
+
+    @MainActor
     func testDelBPauseDoesNotFutureShiftMidPauseWalk() {
         let life = VillageLifeSimulator()
         let t0 = Date()

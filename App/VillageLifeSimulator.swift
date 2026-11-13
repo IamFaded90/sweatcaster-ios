@@ -412,6 +412,10 @@ final class VillageLifeSimulator: ObservableObject {
             if bots[idx].destinationZoneID != jobZone || bots[idx].activity != .walk {
                 beginWalk(&bots[idx], to: jobZone, now: now, reduceMotion: false)
             }
+            // Thinking-labeled PC jobs must not say "work_started" on arrival.
+            if !announceStart {
+                bots[idx].workStartedAnnounced = true
+            }
         } else {
             bots[idx].destinationZoneID = nil
             walkStartedAt[bots[idx].id] = nil
@@ -419,6 +423,8 @@ final class VillageLifeSimulator: ObservableObject {
             bots[idx].pose = .work
             if announceStart, !bots[idx].workStartedAnnounced {
                 say(&bots[idx], "work_started", now: now)
+                bots[idx].workStartedAnnounced = true
+            } else if !announceStart {
                 bots[idx].workStartedAnnounced = true
             }
         }
@@ -749,6 +755,8 @@ final class VillageLifeSimulator: ObservableObject {
             bot.activity = .work
             bot.pose = .work
             bot.walkIntentRest = false
+            // Skip when engageConfirmedPCJob(announceStart: false) already marked announced
+            // (thinking + running quest), or when speech was already shown at the desk.
             if !bot.workStartedAnnounced {
                 say(&bot, "work_started", now: now)
                 bot.workStartedAnnounced = true
