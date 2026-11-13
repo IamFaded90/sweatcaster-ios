@@ -71,8 +71,10 @@ private struct FadedDashboardHero: View {
                 .foregroundStyle(palette.secondary)
         }
         .multilineTextAlignment(.center)
+        .padding(FadedSpacing.l)
         .frame(maxWidth: 480)
         .frame(maxWidth: .infinity)
+        .fadedGlassSurface(radius: FadedRadius.hero)
     }
 }
 

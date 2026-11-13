@@ -204,11 +204,11 @@ struct BotComputerClient: Sendable {
         try await json(.uploadFile, body: JSONEncoder().encode(Import(name: name, content: content)))
     }
 
-    func share(fileID: UUID, with recipient: UUID) async throws {
+    func share(fileID: UUID, with recipient: UUID) async throws -> BotComputerFile {
         let transfer = Share(sourceBotID: botID.uuidString.lowercased(), fileID: fileID.uuidString.lowercased())
         let body = try JSONEncoder().encode(transfer)
         let (data, _) = try await api.botComputerResponse(botID: recipient, route: .share, body: body)
-        _ = try JSONDecoder().decode(BotComputerFile.self, from: data)
+        return try JSONDecoder().decode(BotComputerFile.self, from: data)
     }
 
     private func json<Response: Decodable>(_ route: BotComputerRoute, as type: Response.Type = Response.self,

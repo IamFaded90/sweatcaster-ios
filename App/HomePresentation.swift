@@ -196,6 +196,13 @@ extension Home {
                 }
             }
         } message: { _ in Text("Sletter jobposten og et eventuelt videoudkast fra PC’en. Originalklippet bevares.") }
+        .confirmationDialog(unavailableJobDeletion?.ids.count == 1 ? "Fjern det gamle jobkort?" : "Fjern gamle jobkort?", isPresented: Binding(
+            get: { unavailableJobDeletion != nil }, set: { if !$0 { unavailableJobDeletion = nil } }
+        ), presenting: unavailableJobDeletion) { target in
+            Button(target.ids.count == 1 ? "Fjern jobkort" : "Fjern \(target.ids.count) jobkort", role: .destructive) {
+                Task { await deleteUnavailableVideoJobs(target.ids, using: target.api) }
+            }
+        } message: { _ in Text("FadedAI fjerner jobkort uden en video på PC’en. Dine originalklip og gemte videoer bevares.") }
         .confirmationDialog("Start videomagi?", isPresented: Binding(
             get: { pendingVideoMood != nil }, set: { if !$0 { pendingVideoMood = nil } }
         ), presenting: pendingVideoMood) { mood in

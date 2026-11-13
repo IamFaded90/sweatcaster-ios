@@ -239,6 +239,14 @@ extension Home {
             FadedSectionLabel("Dine videojobs").accessibilityFocused($jobsFocus)
             if videoTypeSize.isAccessibilitySize { videoJobFilter.pickerStyle(.menu).frame(minHeight: 44) }
             else { videoJobFilter.pickerStyle(.segmented) }
+            let unavailable = model.jobs.filter {
+                $0.status == .completed && !hiddenJobs.contains($0.id) && !videoOutputAvailable($0)
+            }
+            if unavailable.count > 1, !model.isDemo, let api = model.api as? LiveAPI {
+                FadedSecondaryButton("Fjern gamle jobkort (\(unavailable.count))", icon: "trash", role: .destructive) {
+                    unavailableJobDeletion = (unavailable.map(\.id), api)
+                }.disabled(!model.connected || deletingPCVideo || model.mediaLoading)
+            }
             if model.requiresVideoReview {
                 FadedCard(accent: palette.coral) {
                     VStack(alignment: .leading, spacing: 8) {
@@ -284,7 +292,8 @@ extension Home {
     }
 
     private func videoJobCard(_ job: Job) -> some View {
-        let accent = videoJobAccent(job.status)
+        let outputAvailable = videoOutputAvailable(job)
+        let accent = job.status == .completed && !outputAvailable ? palette.muted : videoJobAccent(job.status)
         let failure = videoJobFailure(job)
         return FadedCard(accent: accent) {
             VStack(alignment: .leading, spacing: FadedSpacing.s) {
@@ -294,10 +303,10 @@ extension Home {
                 VideoJobStatusLine(status: job.status, progress: job.progress,
                                    isCurrent: model.connected || model.isDemo, accent: accent,
                                    updatedAt: job.updated_at,
-                                   outputAvailable: job.output_url != nil, failureDetail: failure?.detail)
-                videoJobPrimaryAction(job, recoveryPage: failure?.page)
+                                   outputAvailable: outputAvailable, failureDetail: failure?.detail)
+                videoJobPrimaryAction(job, outputAvailable: outputAvailable, recoveryPage: failure?.page)
                 if showJobDetails || !job.warnings.isEmpty || job.error != nil ||
-                    job.status == .failed || (job.status == .completed && job.output_url != nil) {
+                    job.status == .failed || (job.status == .completed && outputAvailable) {
                     DisclosureGroup {
                         VStack(alignment: .leading, spacing: FadedSpacing.s) {
                             if showJobDetails {
@@ -307,7 +316,7 @@ extension Home {
                             }
                             ForEach(Array(job.warnings.enumerated()), id: \.offset) { Text($0.element) }
                             if let problem = job.error { Text(problem.message) }
-                            videoJobSecondaryActions(job, recoveryPage: failure?.page)
+                            videoJobSecondaryActions(job, outputAvailable: outputAvailable, recoveryPage: failure?.page)
                         }.padding(.top, FadedSpacing.s)
                     } label: {
                         Text("Detaljer og handlinger").frame(minHeight: 44)
@@ -315,6 +324,10 @@ extension Home {
                 }
             }
         }.modifier(FadedJobFeedback(status: job.status))
+    }
+
+    private func videoOutputAvailable(_ job: Job) -> Bool {
+        job.output_url != nil && !model.unavailableVideoIDs.contains(job.id)
     }
 
     private func videoJobAccent(_ status: Stage) -> Color {
@@ -346,7 +359,7 @@ extension Home {
             .disabled(!model.canRetry(job))
     }
 
-    @ViewBuilder private func videoJobPrimaryAction(_ job: Job, recoveryPage: VideoPage?) -> some View {
+    @ViewBuilder private func videoJobPrimaryAction(_ job: Job, outputAvailable: Bool, recoveryPage: VideoPage?) -> some View {
         if !model.connected && !model.isDemo && (job.status.active || job.status == .failed) {
             FadedSecondaryButton("Opdatér PC-status", icon: "arrow.clockwise") { Task { await model.refresh() } }
                 .disabled(model.refreshing || switchDisabled)
@@ -362,17 +375,21 @@ extension Home {
                                      icon: "stop.circle") { Task { await model.cancel(job) } }
                     .disabled(model.cancelling.contains(job.id) || model.busy || model.refreshing)
             }
-        } else if job.status == .completed, job.output_url != nil {
+        } else if job.status == .completed, outputAvailable {
             FadedSecondaryButton(model.isDemo ? "Se testvideo" : "Se video", icon: "play") {
                 Task {
                     let demo = model.isDemo
                     if let url = await model.video(job) { media = Media(url: url, demo: demo) }
                 }
             }.disabled(model.mediaLoading)
+        } else if job.status == .completed, !model.isDemo, let api = model.api as? LiveAPI {
+            FadedSecondaryButton("Fjern gammelt jobkort", icon: "trash", role: .destructive) {
+                unavailableJobDeletion = ([job.id], api)
+            }.disabled(!model.connected || deletingPCVideo || model.mediaLoading)
         }
     }
 
-    @ViewBuilder private func videoJobSecondaryActions(_ job: Job, recoveryPage: VideoPage?) -> some View {
+    @ViewBuilder private func videoJobSecondaryActions(_ job: Job, outputAvailable: Bool, recoveryPage: VideoPage?) -> some View {
         if job.status == .failed {
             if recoveryPage != nil { videoJobRetryButton(job) }
             FadedSecondaryButton("Skjul fejlet job på telefonen", icon: "eye.slash") { hiddenJobs.insert(job.id) }
@@ -381,7 +398,7 @@ extension Home {
                     failedJobDeletion = (job.id, api)
                 }
             }
-        } else if job.status == .completed, job.output_url != nil {
+        } else if job.status == .completed, outputAvailable {
             if !model.isDemo {
                 FadedSecondaryButton("Gem på telefonen", icon: "square.and.arrow.down") { Task { await saveVideo(job) } }
                     .disabled(model.mediaLoading)
@@ -431,6 +448,45 @@ extension Home {
         } catch {
             AppDiagnostics.record(error)
             saveVideoNotice = "PC’en kunne ikke bekræfte sletningen. Opdater joblisten."
+        }
+    }
+
+    func deleteUnavailableVideoJobs(_ ids: [String], using api: LiveAPI) async {
+        guard !ids.isEmpty, !deletingPCVideo, (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
+        deletingPCVideo = true
+        saveVideoNotice = nil
+        defer { deletingPCVideo = false }
+        var removed = 0
+        var kept = 0
+        for id in ids {
+            guard (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
+            do {
+                try await api.deleteUnavailableVideoJob(id)
+                guard (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
+                hiddenJobs.insert(id)
+                removed += 1
+            } catch APIError.http(409, _) {
+                kept += 1
+            } catch APIError.http(404, _) {
+                guard (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
+                saveVideoNotice = "Opdatér FadedAI på PC’en, og prøv igen."
+                return
+            } catch {
+                AppDiagnostics.record(error)
+                guard (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
+                saveVideoNotice = removed == 0 ? "PC’en kunne ikke fjerne jobkort. Opdatér listen, og prøv igen." :
+                    "\(removed) jobkort fjernet. Opdatér listen, og prøv igen for resten."
+                if removed > 0 { await model.refresh() }
+                return
+            }
+        }
+        if removed > 0 { await model.refresh() }
+        guard (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
+        if kept > 0 {
+            saveVideoNotice = removed == 0 ? "PC’en beholdt jobkortene. Opdatér listen for at se, om videoerne stadig findes." :
+                "\(removed) jobkort fjernet. PC’en beholdt \(kept) jobkort."
+        } else {
+            saveVideoNotice = removed == 1 ? "Det gamle jobkort er fjernet." : "\(removed) gamle jobkort er fjernet."
         }
     }
 

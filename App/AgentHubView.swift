@@ -14,21 +14,20 @@ import SwiftUI
     var experimentalWork = ExperimentalVillageWork()
     var onExperimentalAction: (ExperimentalVillageAction) -> Void = { _ in }
     @State private var selectedRoom = "research"
-    @AppStorage(AppStorageKeys.villageShowOffice) private var showOffice = true
+    @State private var showOffice = false
     @AppStorage(AppStorageKeys.villageExperimentalEnabled) private var experimentalVillageEnabled = false
     var localBotsData: Data { MigratedAppData.shared.villageBots }
     @State private var localBot: VillageBot?
     @State private var computerBot: VillageBot?
     @State private var villageChatBot: VillageBot?
     var villagePause: Bool { simulation.isPaused }
-    @State var cinematic = false
-    @State var villageZoom: CGFloat = 1
-    @State var villageOffset: CGSize = .zero
+    @State private var cinematic = true
+    @StateObject private var life = VillageLifeSimulator()
+    @State private var inspectedLifeBot: VillageLifeBot?
     @State private var showBuilder = false
     @State var offline = false
     @State private var completions = 0
     @Environment(\.accessibilityReduceMotion) var reduceMotion
-    @Environment(\.dynamicTypeSize) private var hubTypeSize
     @AppStorage(AppStorageKeys.qolReduceMotion) var calmMotion = false
     @State var details: V2Hub.Agent?
     @State private var achievements = false
@@ -66,7 +65,7 @@ import SwiftUI
 
     private var botActivityRequest: BotActivityRequest {
         let visible = villageVisible && computerBot == nil && localBot == nil && villageChatBot == nil &&
-            !showBuilder && details == nil && !achievements
+            !showBuilder && details == nil && !achievements && inspectedLifeBot == nil
         return BotActivityRequest(targetID: api?.queueTargetID, ids: localVillageBots.prefix(10).map(\.id),
                                   visible: visible, attempt: attempt)
     }
@@ -84,11 +83,13 @@ import SwiftUI
             .background { FadedBackground(variant: .village) }
             .foregroundStyle(palette.text)
             .navigationTitle("Landsbyen")
-            .toolbarVisibility(cinematic ? .hidden : .visible, for: .navigationBar)
+            .toolbarVisibility(cinematic && !showOffice ? .hidden : .visible, for: .navigationBar)
+            .navigationDestination(isPresented: $showOffice) { office }
             .sensoryFeedback(.success, trigger: completions)
             .sheet(isPresented: $showBuilder) { botLibrary }
             .sheet(item: $localBot, content: botProfile)
             .sheet(item: $computerBot, content: botComputer)
+            .sheet(item: $inspectedLifeBot, content: lifeBotInspector)
             .sheet(item: $villageChatBot) { bot in
                 OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
                               initialPage: .chat, initialBotID: bot.id)
@@ -98,6 +99,26 @@ import SwiftUI
                 if hubPhase == .active { await followHub() }
             }
             .task(id: request) { await followBotActivity(request) }
+            .task(id: villageVisible) {
+                guard villageVisible else { return }
+                while !Task.isCancelled {
+                    life.updateRoundSix(states: simulation.states, activeJobs: simulation.activeJobs,
+                                        chatting: simulation.chattingBots, reduceMotion: reduceMotion || calmMotion)
+                    life.tick(reduceMotion: reduceMotion || calmMotion)
+                    do { try await Task.sleep(for: .seconds(1)) }
+                    catch { return }
+                }
+            }
+            .onChange(of: localBotsData, initial: true) { _, _ in
+                life.mergeLocalProfiles(localVillageBots, keepDemoFounders: false)
+            }
+            .onChange(of: api?.queueTargetID, initial: true) { _, target in
+                life.setDemoClock(target == nil)
+            }
+            .onChange(of: villageVisible, initial: true) { _, visible in
+                life.setActive(visible)
+            }
+            .onChange(of: villagePause, initial: true) { _, paused in life.setPaused(paused) }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Tilbage", systemImage: "chevron.left", action: onBack)
@@ -116,11 +137,6 @@ import SwiftUI
         VStack(alignment: .leading, spacing: FadedSpacing.s) {
             FadedSignature()
             Text("Agent-Hub").font(FadedTypography.title).accessibilityAddTraits(.isHeader)
-            if hubTypeSize.isAccessibilitySize {
-                hubViewPicker.pickerStyle(.menu).frame(minHeight: 44)
-            } else {
-                hubViewPicker.pickerStyle(.segmented)
-            }
         }
         .padding(.horizontal, FadedSpacing.edge)
         .padding(.top, FadedSpacing.s)
@@ -130,11 +146,7 @@ import SwiftUI
 
     private var hubContent: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.action) {
-            if showOffice && !cinematic {
-                PixelOfficeView(workers: officeWorkers, isVisible: villageVisible, onSelect: openOfficeWorker)
-            } else {
-                village
-            }
+            villageMap
             if !cinematic {
                 if !showOffice && ExperimentalVillageGate.available && experimentalVillageEnabled {
                     ExperimentalVillageView(bots: localVillageBots, work: experimentalWork, paused: villagePause,
@@ -152,10 +164,65 @@ import SwiftUI
         .padding(FadedSpacing.edge).frame(maxWidth: 640).frame(maxWidth: .infinity)
     }
 
-    private var hubViewPicker: some View {
-        Picker("Visning", selection: $showOffice) {
-            Text("Kontoret").tag(true)
-            Text("Landsbyen").tag(false)
+    private var villageMap: some View {
+        let hour = Calendar.current.component(.hour, from: life.virtualClock)
+        return VillageMapView(bots: life.bots, night: hour < 7 || hour >= 22,
+                              cinematic: cinematic, reduceMotion: reduceMotion || calmMotion,
+                              offline: offline, banner: life.banner, paused: life.paused,
+                              onSelect: openLifeComputer)
+            .overlay(alignment: .topTrailing) {
+                HStack(spacing: 8) {
+                    mapControl("Kontor", icon: "desktopcomputer") { showOffice = true }
+                    mapControl(cinematic ? "Vis menu" : "Filmtilstand", icon: cinematic ? "eye" : "video") {
+                        cinematic.toggle()
+                    }
+                }
+                .padding(8)
+            }
+    }
+
+    private func mapControl(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .labelStyle(.iconOnly)
+                .frame(width: 44, height: 44)
+                .foregroundStyle(palette.text)
+                .fadedGlassSurface()
+        }
+        .accessibilityLabel(title)
+    }
+
+    private var office: some View {
+        VillageOfficeView(bots: life.bots, onOpenProfile: openLifeProfile, onOpenComputer: openLifeComputer)
+            .background { FadedBackground(variant: .village) }
+            .foregroundStyle(palette.text)
+            .toolbarVisibility(.visible, for: .navigationBar)
+    }
+
+    private func matchedLocalBot(_ bot: VillageLifeBot) -> VillageBot? {
+        guard let id = UUID(uuidString: bot.id) else { return nil }
+        return localVillageBots.first { $0.id == id }
+    }
+
+    private func openLifeComputer(_ bot: VillageLifeBot) {
+        if let local = matchedLocalBot(bot) { openBotComputer(local) }
+        else { openLifeProfile(bot) }
+    }
+
+    private func openLifeProfile(_ bot: VillageLifeBot) {
+        if let local = matchedLocalBot(bot) { localBot = local }
+        else if let agent = snapshot?.agents.first(where: { $0.id == bot.linkedAgentID }) { details = agent }
+        else { inspectedLifeBot = bot }
+    }
+
+    private func lifeBotInspector(_ bot: VillageLifeBot) -> some View {
+        NavigationStack {
+            List {
+                Text(bot.poseLabel)
+                Text(bot.zoneID.title)
+            }
+            .navigationTitle(bot.displayName)
+            .toolbar { Button("Luk") { inspectedLifeBot = nil } }
         }
     }
 
@@ -256,12 +323,19 @@ import SwiftUI
                 guard observedBotTarget == target else { return }
                 for bot in activity.bots where ids.contains(bot.id) {
                     simulation.ingestJobs(bot.jobs, for: bot.id, targetID: target)
+                    life.observeJobs(bot.jobs, botID: bot.id, targetID: target)
+                }
+                let reported = Set(activity.bots.map(\.id))
+                for id in ids.subtracting(reported) {
+                    simulation.ingestJobs([], for: id, targetID: target)
+                    life.observeJobs([], botID: id, targetID: target)
                 }
                 botStatusNotice = nil
                 delay = 5
             } catch {
                 guard !Task.isCancelled, observedBotTarget == target else { return }
                 if case .http(404, _)? = error as? APIError {
+                    simulation.clearActiveJobs()
                     botStatusNotice = "Opdatér FadedAI på PC’en for at se opgaver her."
                     return
                 }
@@ -322,7 +396,7 @@ import SwiftUI
     private func botProfile(_ bot: VillageBot) -> some View {
         NavigationStack {
             VillageBotProfile(botID: bot.id, api: api, studioUnlocked: $studioUnlocked,
-                              onPrivateSessionEnded: onPrivateSessionEnded)
+                              onPrivateSessionEnded: onPrivateSessionEnded, onFileShared: recordFileShare)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Tilbage", systemImage: "chevron.left") { localBot = nil }
@@ -337,13 +411,18 @@ import SwiftUI
 
     private func botComputer(_ bot: VillageBot) -> some View {
         NavigationStack {
-            BotComputerView(bot: bot, roster: localVillageBots, api: api)
+            BotComputerView(bot: bot, roster: localVillageBots, api: api, onFileShared: recordFileShare)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Tilbage", systemImage: "chevron.left") { computerBot = nil }
                     }
                 }
         }
+    }
+
+    private func recordFileShare(_ source: UUID, _ recipient: UUID, _ copyID: UUID) {
+        guard let target = api?.queueTargetID else { return }
+        life.recordFileShare(source: source, recipient: recipient, copyID: copyID, targetID: target)
     }
 
     private func missionHUD(_ summary: V2Hub.Summary) -> some View {
@@ -487,6 +566,7 @@ import SwiftUI
                 if let networkError = error as? URLError {
                     offline = [.notConnectedToInternet, .cannotConnectToHost, .networkConnectionLost,
                                .timedOut, .cannotFindHost].contains(networkError.code)
+                    if offline { life.setPCOffline(true) }
                 }
                 failure = "Kunne ikke hente Agent-Hub. Tjek forbindelsen til PC’en."
             }
@@ -501,6 +581,8 @@ import SwiftUI
         guard remoteTarget != target else { return }
         remoteTarget = target
         storedSnapshot = nil
+        life.resetPCProjection()
+        if target == nil { life.setPCOffline(true) }
         if target != nil { offline = false }
         failure = nil
         details = nil
@@ -524,6 +606,7 @@ import SwiftUI
             if !next.subtracting(previous).isEmpty { completions += 1 }
         }
         offline = false
+        life.setPCOffline(false)
         storedSnapshot = value
         if !value.rooms.contains(where: { $0.id == selectedRoom }) {
             selectedRoom = value.rooms.first?.id ?? ""

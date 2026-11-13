@@ -263,11 +263,16 @@ extension Model {
         defer { mediaLoading = false }
         error = nil
         do { return try await api.video(job) }
+        catch APIError.http(404, _) {
+            unavailableVideoIDs.insert(job.id)
+            return nil
+        }
         catch { AppDiagnostics.record(error); report(error); return nil }
     }
 
     func replaceJobs(_ current: [Job]) {
         jobs = current
+        unavailableVideoIDs.formIntersection(current.map(\.id))
         waitingForStop.formIntersection(current.filter { $0.status.active }.map(\.id))
         observeVideos()
     }

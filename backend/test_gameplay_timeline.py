@@ -326,3 +326,58 @@ def test_windows_ocr_source_obeys_exact_result_validation(staged):
     payload["lines"][0]["text"] = "A scoreboard of 9? That's cheeky."
     with pytest.raises(commentary.CommentaryError, match="result not shown"):
         commentary.validate_commentary(payload, **options)
+
+
+def test_fortnite_crown_beat_is_not_a_backstab_or_second_elimination(staged):
+    hud = sys.modules["sweatcaster.gameplay_hud"]
+    commentary = staged("commentary")
+    line = "ONE SHALL RULE Eliminated a crown wearer while wearing a crown +250 XP"
+    assert hud.classify_hud_text(line) == "objective"
+    crown = hud.GameplayEvent(id="crown", kind="objective", source="windows_ocr", t_start=3,
+                              t_end=3.3, text=line, confidence=0.7)
+    banner = hud.GameplayEvent(id="kill", kind="kill", source="windows_ocr", t_start=3.3,
+                               t_end=3.6, text="ELIMINATED", confidence=0.7)
+    assert commentary.focus_event([crown, banner]).id == crown.id
+    assert "Fortnite replay specialist" in hud.specialist_prompt(None, [crown])
+    options = dict(events=[crown, banner], duration=8, allowlist=[], allow_cues=False,
+                   recent=[], enforce_repeat=False)
+    for text, reason in (
+        ("Wow, two eliminations in a row! You really got that guy with the backstab.", "separately confirmed"),
+        ("That backstab was nasty.", "cited visual observation"),
+        ("You picked up that crown.", "picked it up"),
+    ):
+        payload = {"lines": [{"text": text, "event_ids": [crown.id, banner.id], "t_start": 3}]}
+        with pytest.raises(commentary.CommentaryError, match=reason):
+            commentary.validate_commentary(payload, **options)
+    reaction = {"lines": [{"text": "Two crowns in one fight? That's a royal grudge match.",
+                           "event_ids": [crown.id], "t_start": 3}]}
+    assert commentary.validate_commentary(reaction, **options)[0][0].event_ids == [crown.id]
+
+
+def test_the_finals_cites_the_cashout_stage_without_inventing_the_player(staged, tmp_path):
+    hud = sys.modules["sweatcaster.gameplay_hud"]
+    commentary = staged("commentary")
+    base = tmp_path / "Recordings"
+    finals = base / "THE_FINALS"
+    fortnite = base / "Fortnite"
+    settings = SimpleNamespace(input_roots=(base, finals, fortnite),
+                               root_labels=("Recordings", "THE FINALS", "Fortnite"))
+    assert hud.game_for_clip(finals / "game.mp4", settings) == "the_finals"
+    assert hud.game_for_clip(fortnite / "game.mp4", settings) == "fortnite"
+    assert hud.game_for_clip(base / "Random" / "Fortnite.mp4", settings) is None
+    assert hud.classify_hud_text("CASHOUT STOLEN") == "objective"
+    event = hud.GameplayEvent(id="cashout", kind="objective", source="windows_ocr", t_start=3,
+                              t_end=3.3, text="CASHOUT STOLEN", confidence=0.7)
+    assert "THE FINALS replay specialist" in hud.specialist_prompt(None, [event])
+    assert "THE FINALS replay specialist" in hud.specialist_prompt("the_finals", [])
+    options = dict(events=[event], duration=8, allowlist=[], allow_cues=False,
+                   recent=[], enforce_repeat=False)
+    for text, reason in (
+        ("You stole the cashout.", "does not identify"),
+        ("That cashout has been completed.", "different stage"),
+    ):
+        payload = {"lines": [{"text": text, "event_ids": [event.id], "t_start": 3}]}
+        with pytest.raises(commentary.CommentaryError, match=reason):
+            commentary.validate_commentary(payload, **options)
+    reaction = {"lines": [{"text": "That's one spicy cashout steal.", "event_ids": [event.id], "t_start": 3}]}
+    assert commentary.validate_commentary(reaction, **options)[0][0].event_ids == [event.id]

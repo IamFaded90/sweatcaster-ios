@@ -13,7 +13,10 @@ PREVIOUS_VISION_HASHES = {
     "7f961981355748e27bc888f5f9c4d7cd41e44a7a1a2814838183d8fca0bf1570",
     "997f53745858774fdf2a6b722d043a3885aad681f93d5e662f21dc08fd527e71",
 }
-PREVIOUS_HUD_HASHES = {"db67e99e3dfa7ce623127c8c026222555325e1e47082e7cf65ca623c06a0e665"}
+PREVIOUS_HUD_HASHES = {
+    "db67e99e3dfa7ce623127c8c026222555325e1e47082e7cf65ca623c06a0e665",
+    "52675fadb8429f8fabc5f3c316bb43e0606baf705c8187b7e51f78a9019315c8",
+}
 LEGACY_RESULT_SOURCE = '                event.source in {"tesseract", "easyocr"}\n'
 RESULT_SOURCE = '                event.source in {"tesseract", "easyocr", "windows_ocr"}\n'
 REACTION_GROUNDING = "Ground your reaction in one concrete detail from a cited event."
@@ -183,6 +186,69 @@ BEAT_EDITS = {
             '                payload,\n'
             '                events=attempt_events,\n',
         ),
+    ],
+}
+
+SPECIALIST_EDITS = {
+    "sweatcaster/analysis.py": [
+        ('from sweatcaster.gameplay_hud import classify_hud_text, windows_hud_events\n',
+         'from sweatcaster.gameplay_hud import classify_hud_text, game_for_clip, game_objective, windows_hud_events\n'),
+        ('    probe: Probe | None = None\n',
+         '    probe: Probe | None = None\n    commentary_game: str | None = None\n'),
+        ('    extractor["tesseract"] = ocr_state\n',
+         '    extractor["tesseract"] = ocr_state\n'
+         '    game = game_for_clip(path, settings)\n'),
+        ('    if rois and not any(event.kind == "kill" and event.t_start >= ending for event in ocr_events):\n',
+         '    recent = [event for event in ocr_events if event.t_start >= ending]\n'
+         '    has_late_kill = any(event.kind == "kill" for event in recent)\n'
+         '    has_game_beat = any(event.kind == "objective" and game_objective(event.text or "") for event in recent)\n'
+         '    if rois and not (has_late_kill and (game is None or has_game_beat)):\n'),
+        ('        extractor_status=extractor,\n        probe=probe,\n',
+         '        extractor_status=extractor,\n        probe=probe,\n        commentary_game=game,\n'),
+    ],
+    "sweatcaster/pipeline.py": [
+        ('            events=commentary_evidence(analysis.events),\n',
+         '            events=commentary_evidence(analysis.events),\n'
+         '            game=analysis.commentary_game,\n'),
+    ],
+    "sweatcaster/commentary.py": [
+        ('from sweatcaster.coord import ollama_call\n',
+         'from sweatcaster.coord import ollama_call\n'
+         'from sweatcaster.gameplay_hud import game_objective, specialist_prompt, unsupported_game_claim\n'),
+        ('        if cited and all(event.kind == "audio_spike" for event in cited):\n',
+         '        unsupported = unsupported_game_claim(text, cited)\n'
+         '        if unsupported:\n'
+         '            raise CommentaryError(unsupported)\n'
+         '        if cited and all(event.kind == "audio_spike" for event in cited):\n'),
+        ('        event.kind == "objective" and re.search(\n'
+         '            r"\\b(?:victory|defeat|captured|round won|round lost)\\b", event.text or "", re.I\n'
+         '        )\n',
+         '        event.kind == "objective" and (game_objective(event.text or "") or re.search(\n'
+         '            r"\\b(?:victory|defeat|captured|round won|round lost)\\b", event.text or "", re.I\n'
+         '        ))\n'),
+        ('    return max(candidates, key=lambda event: (event.t_start, event.confidence), default=None)\n',
+         '    latest = max(candidates, key=lambda event: (event.t_start, event.confidence), default=None)\n'
+         '    if latest and latest.kind == "kill":\n'
+         '        nearby = [event for event in confirmed if event.kind == "objective"\n'
+         '                  and game_objective(event.text or "") and latest.t_start - event.t_start <= 1.0]\n'
+         '        return max(nearby, key=lambda event: event.t_start, default=latest)\n'
+         '    return latest\n'),
+        ('    client: OllamaClient | None = None,\n',
+         '    client: OllamaClient | None = None,\n'
+         '    game: str | None = None,\n'),
+        ('    prompt_hash = sha256_text(system + "\\n" + user)\n',
+         '    system += specialist_prompt(game, events)\n'
+         '    prompt_hash = sha256_text(system + "\\n" + user)\n'),
+        ('        "Use the exact focus event ID in the JSON example and replace its placeholder text. "\n',
+         '        "One badge is one event. Multiple banners may describe the same event. "\n'
+         '        "Mention a tactic or weapon only if a cited visual observation shows it. "\n'
+         '        "Use the exact focus event ID in the JSON example and replace its placeholder text. "\n'),
+        ('            if focus and not any(line.event_ids == [focus.id] for line in lines):\n'
+         '                raise CommentaryError("React to focus_event_id and cite it alone on its line.")\n',
+         '            if focus and not any(focus.id in line.event_ids for line in lines):\n'
+         '                raise CommentaryError("React to focus_event_id and cite it on that line.")\n'),
+        (' If focus_event_id is supplied, make it the main beat and cite it on a line by itself. ',
+         ' If focus_event_id is supplied, make it the main beat and cite it. Add only evidence for the same play. '),
     ],
 }
 
@@ -565,8 +631,9 @@ def install(root: Path, apply: bool = False) -> list[Path]:
         updated = current
         beat_edits = BEAT_EDITS.get(name, [])
         full_clip_edits = FULL_CLIP_EDITS if name == "sweatcaster/pipeline.py" else ()
+        specialist_edits = SPECIALIST_EDITS.get(name, [])
         # Reconcile older compatible checkpoints and make the same update a no-op on rerun.
-        for previous, final in reversed([*beat_edits, *full_clip_edits]):
+        for previous, final in reversed([*beat_edits, *full_clip_edits, *specialist_edits]):
             if updated.count(final) == 1:
                 updated = updated.replace(final, previous)
         if name == "sweatcaster/commentary.py":
@@ -586,7 +653,7 @@ def install(root: Path, apply: bool = False) -> list[Path]:
             ).replace(
                 PREVIOUS_CLAIM_CHECK, CLAIM_CHECK,
             )
-        for anchor, replacement in [*edits, *beat_edits, *full_clip_edits]:
+        for anchor, replacement in [*edits, *beat_edits, *full_clip_edits, *specialist_edits]:
             if replacement and replacement in updated:
                 continue
             count = updated.count(anchor)
@@ -610,10 +677,12 @@ def install(root: Path, apply: bool = False) -> list[Path]:
             staged[helper] = None, source
         else:
             previous = helper.read_bytes()
-            if previous != source:
-                if sha256(previous.replace(b"\r\n", b"\n")).hexdigest() not in allowed_hashes:
-                    raise ValueError(f"Unrecognized helper: {name}. No sources were changed.")
-                staged[helper] = previous, source
+            previous_normalized = previous.replace(b"\r\n", b"\n")
+            if previous_normalized == source.replace(b"\r\n", b"\n"):
+                continue
+            if sha256(previous_normalized).hexdigest() not in allowed_hashes:
+                raise ValueError(f"Unrecognized helper: {name}. No sources were changed.")
+            staged[helper] = previous, source
 
     if apply:
         for path, (original, _) in staged.items():

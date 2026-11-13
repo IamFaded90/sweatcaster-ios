@@ -31,6 +31,7 @@ import Observation
     var cancelledVideoAttempt = false
     var requiresVideoReview: Bool { uncertain || cancelledVideoAttempt }
     var mediaLoading = false
+    var unavailableVideoIDs = Set<String>()
     var connected = false
     var latencyMs: Int?
     var jobsObservationWindow: Int = 0
@@ -100,6 +101,7 @@ import Observation
         needsPairing = false
         revision += 1
         clips = []; jobs = []; selected = []; capabilities = nil; connected = false
+        unavailableVideoIDs.removeAll()
         observedCodeJobs = []
         codeJobsObservationWindow = 0
         latencyMs = nil

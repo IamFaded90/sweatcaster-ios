@@ -154,6 +154,57 @@ def test_module_mcp_rejects_untrusted_clients_and_lists_read_tools(tmp_path):
         assert {tool["name"] for tool in reply.json()["result"]["tools"]} == {"read_repository_file", "search_repository"}
 
 
+def test_removing_unavailable_video_record_keeps_existing_videos_and_originals(tmp_path):
+    settings = make_settings(tmp_path)
+    app = create_app(settings)
+    url = "/api/modules/v1/video-jobs/{job_id}/record"
+    endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", None) == url)
+    paired = Request({"type": "http", "headers": [(b"authorization", ("Bearer " + settings.token).encode())]})
+    unpaired = Request({"type": "http", "headers": []})
+    source = settings.input_roots[0] / "original.mp4"
+    source.write_bytes(b"original")
+
+    def job(status, *, output_ready):
+        job_id = uuid4().hex
+        app.state.store.save_job({"id": job_id, "status": status, "created_at": "2026-11-07T11:40:00Z",
+                                  "clip_id": uuid4().hex, "output_ready": output_ready})
+        return job_id
+
+    unavailable = job("completed", output_ready=False)
+    missing = job("completed", output_ready=True)
+    available = job("completed", output_ready=True)
+    unexpected_output = job("completed", output_ready=False)
+    running = job("rendering", output_ready=False)
+    kept = settings.output_root / "jobs" / available / "output.mp4"
+    unexpected = settings.output_root / "jobs" / unexpected_output / "output.mp4"
+    report = settings.output_root / "jobs" / missing / "output.report.json"
+    kept.parent.mkdir(parents=True)
+    kept.write_bytes(b"edited")
+    unexpected.parent.mkdir(parents=True)
+    unexpected.write_bytes(b"recoverable")
+    report.parent.mkdir(parents=True)
+    report.write_bytes(b"report")
+
+    with pytest.raises(ApiError) as rejection:
+        endpoint(unavailable, unpaired, {"confirm_job_id": unavailable})
+    assert rejection.value.status_code == 401
+    with pytest.raises(ApiError) as rejection:
+        endpoint(unavailable, paired, {"confirm_job_id": missing})
+    assert rejection.value.status_code == 422
+    for job_id in (available, unexpected_output, running):
+        with pytest.raises(ApiError) as rejection:
+            endpoint(job_id, paired, {"confirm_job_id": job_id})
+        assert rejection.value.status_code == 409
+        assert app.state.store.get_job(job_id) is not None
+    for job_id in (unavailable, missing, missing):
+        assert endpoint(job_id, paired, {"confirm_job_id": job_id}) == {"removed": True}
+        assert app.state.store.get_job(job_id) is None
+    assert source.read_bytes() == b"original"
+    assert kept.read_bytes() == b"edited"
+    assert unexpected.read_bytes() == b"recoverable"
+    assert report.read_bytes() == b"report"
+
+
 def test_older_optional_mcp_does_not_prevent_api_startup(tmp_path, monkeypatch):
     fastmcp = pytest.importorskip("mcp.server.fastmcp")
 

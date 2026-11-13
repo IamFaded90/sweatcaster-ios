@@ -136,8 +136,9 @@ def install(root: Path, apply: bool = False) -> list[Path]:
         raise ValueError("Unexpected Kokoro adapter path.")
     original = adapter.read_bytes() if adapter.exists() else None
     source = Path(__file__).with_name("sweatcaster").joinpath("kokoro_voice.py").read_bytes()
-    if original != source:
-        if original is not None and sha256(original.replace(b"\r\n", b"\n")).hexdigest() not in PREVIOUS_ADAPTER_HASHES:
+    original_normalized = original.replace(b"\r\n", b"\n") if original is not None else None
+    if original_normalized != source.replace(b"\r\n", b"\n"):
+        if original_normalized is not None and sha256(original_normalized).hexdigest() not in PREVIOUS_ADAPTER_HASHES:
             raise ValueError("Unexpected Kokoro adapter version.")
         staged[adapter] = original, source
 

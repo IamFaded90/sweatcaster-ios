@@ -3,7 +3,7 @@ name: Build unsigned iOS IPA
 on:
   workflow_dispatch:
   push:
-    branches: [main, 'codex/ipa-*']
+    branches: [main, 'codex/ipa-*', 'codex/fadedai-village-integration']
 
 permissions:
   contents: read
@@ -43,6 +43,7 @@ jobs:
             -parallel-testing-enabled NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test \
             2>&1 | tee "$RUNNER_TEMP/FadedAI-XCTest.log"
       - name: Build for iPhone without signing
+        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
         run: |
           set -o pipefail
           xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
@@ -90,6 +91,7 @@ jobs:
                           sys.exit(0)
           PY
       - name: Package IPA
+        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
         run: |
           set -euxo pipefail
           app="$RUNNER_TEMP/SweatCasterBuild/Build/Products/Release-iphoneos/FadedAI.app"
@@ -107,6 +109,7 @@ jobs:
           zip -qr "$RUNNER_TEMP/FadedAI-unsigned.ipa" Payload
           unzip -tq "$RUNNER_TEMP/FadedAI-unsigned.ipa"
       - uses: actions/upload-artifact@v4
+        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
         with:
           name: FadedAI-unsigned
           path: ${{ runner.temp }}/FadedAI-unsigned.ipa

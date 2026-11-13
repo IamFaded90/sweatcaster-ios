@@ -105,6 +105,18 @@ final class ContractTests: XCTestCase {
             XCTAssertEqual(status, 503)
         }
     }
+
+    func testUnavailableJobsListDoesNotBlockChat() async throws {
+        let api = try stubAPI(address: "192.168.1.29")
+        let received = RequestCounter()
+        try await api.v2Chat(V2ChatRequest(message: "Hej")) { event in
+            if event.type == .text && event.content == "Hej fra PC" {
+                received.increment()
+            }
+        }
+        XCTAssertEqual(received.count, 1)
+    }
+
     func testModuleManifestRestrictsUntrustedTabDefinitions() throws {
         let json = #"{"version":1,"tabs":[{"id":"cards","title":"Kortsamling","kind":"cards"},{"id":"../health","title":"Sikkerhed","kind":"information"},{"id":"script","title":"Ny","kind":"web"}]}"#
         let manifest = try JSONDecoder().decode(ModuleManifest.self, from: Data(json.utf8))
@@ -611,9 +623,15 @@ private final class Stub: URLProtocol {
             body = #"{"default_model_id":"qwen","models":[{"id":"qwen","label":"Qwen","available":true,"loaded":true,"capabilities":["chat"]}]}"#
         } else if url.path == "/api/v1/clips" {
             status = 200; body = "bad JSON"
+        } else if url.path == "/api/v1/jobs", request.httpMethod == "GET", url.host == "192.168.1.29" {
+            status = 503; body = "{}"
         } else if url.path == "/api/v1/jobs", request.httpMethod == "GET" {
             status = 200
             body = url.host == "192.168.1.21" ? #"{"jobs":[{"id":"job-render","clip_id":"clip-one","mood":"hype","status":"rendering","progress":0.8,"message":"Rendering","warnings":[],"created_at":"2026-11-06T16:00:00Z","updated_at":"2026-11-06T16:00:00Z","output_url":null,"error":null}]}"# : #"{"jobs":[]}"#
+        } else if url.path == "/api/v2/chat", request.httpMethod == "POST", url.host == "192.168.1.29" {
+            status = 200
+            mime = "text/event-stream"
+            body = "data: {\"type\":\"text\",\"content\":\"Hej fra PC\"}\n\ndata: {\"type\":\"done\",\"content\":\"\"}\n\n"
         } else if url.path == "/api/v1/chat", request.httpMethod == "POST",
                   request.value(forHTTPHeaderField: "Accept") == "text/event-stream" {
             status = 200

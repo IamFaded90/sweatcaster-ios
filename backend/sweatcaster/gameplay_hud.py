@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from math import ceil, sqrt
+from pathlib import Path
 import re
 import shutil
 import subprocess
@@ -20,15 +21,57 @@ _DEATH = re.compile(
 )
 _ELIMINATION = re.compile(r"^(?:(?:you )?(?:eliminated|killed|eliminerede)|you scored an elimination)\b")
 _OBJECTIVE = re.compile(r"^(?:victory|defeat|round (?:won|lost)|(?:objective|target) captured)\b")
+_CROWN_BEAT = re.compile(r"\b(?:one shall rule|eliminated a crown wearer while wearing a crown)\b")
+_CASHOUT_BEAT = re.compile(r"^(?:cash[ -]?out (?:started|stolen|complete(?:d)?|secured)|vault opened)\b")
+_GAME_NAMES = {
+    "fortnite": re.compile(r"\bfortnite\b", re.I),
+    "the_finals": re.compile(r"\b(?:the[ _-]+finals|thefinals)\b", re.I),
+}
+_HUD_SOURCES = {"windows_ocr", "tesseract", "easyocr"}
+_MULTIKILL = re.compile(
+    r"\b(?:(double|triple|quadruple)[ -](?:kill|elimination)|"
+    r"(two|three|four|[2-9])\s+(?:kills|eliminations)|"
+    r"(two|three|four|[2-9])\s+(?:opponents|players|enemies)\s+(?:down|eliminated)|"
+    r"(?:eliminated|killed|took out)\s+(two|three|four|[2-9])\s+(?:opponents|players|enemies)|"
+    r"(both)\s+(?:opponents|players|enemies)\b)", re.I,
+)
+_COUNT_WORDS = {"double": 2, "triple": 3, "quadruple": 4, "two": 2, "three": 3, "four": 4, "both": 2}
+_TACTIC_CLAIMS = tuple(re.compile(pattern, re.I) for pattern in (
+    r"\b(?:back[ -]?stab\w*|stabbed? (?:him |her |them )?in the back|knife (?:in|to) the back)\b",
+    r"\b(?:behind (?:him|her|them|the opponent|the enemy)|from behind|flank(?:ed|ing|s)?)\b",
+    r"\b(?:ambush(?:ed|ing)?|caught (?:him|her|them) off guard|snuck up|sneak(?:ing)? up)\b",
+    r"\b(?:switch(?:ed|ing)? targets?|swapp(?:ed|ing) targets?|changed targets?)\b",
+    r"\b(?:snip(?:ed|ing)|quickscope\w*|noscope\w*|no[ -]scop\w*|point[ -]blank)\b",
+    r"\b(?:shotgun|sniper(?: rifle)?|assault rifle|submachine gun|smg|grenade|rocket launcher|sword|dagger)\b",
+))
+_FORTNITE_CLAIM = re.compile(r"\b(?:crown(?:s|ed)?|storm circle|reboot(?:ed|ing)?|zero build)\b", re.I)
+_FINALS_CLAIM = re.compile(r"\b(?:cash[ -]?out(?:s)?|vault(?:s)?)\b", re.I)
+_CASHOUT_ACTOR = re.compile(
+    r"\b(?:you|your team|your squad)\b.{0,22}\b(?:stole|started|secured|finished|completed|opened|lost)\b"
+    r".{0,26}\b(?:cash[ -]?out|vault)\b", re.I,
+)
+_CASHOUT_ACTIONS = (
+    (re.compile(r"\b(?:steal|steals|stealing|stole|stolen)\b", re.I), "cashout stolen"),
+    (re.compile(r"\b(?:start|starts|started|starting)\b", re.I), "cashout started"),
+    (re.compile(r"\b(?:secure|secured|complete|completed|finished)\b", re.I), "cashout complete"),
+    (re.compile(r"\b(?:open|opens|opened|opening)\b", re.I), "vault opened"),
+)
+_CROWN_PICKUP = re.compile(r"\b(?:pick(?:ed|ing)? up|grab(?:bed|bing)?|claim(?:ed|ing)?)\b.{0,18}\bcrown\b", re.I)
 _WHITE_HUD = [255] * 230 + [0] * 26
 _MAX_OCR_BATCH_BYTES = 12 * 1024 * 1024
 _GAMEPLAY_KINDS = {"kill", "death", "objective"}
 
 
+def _words(text: str) -> str:
+    return " ".join(re.findall(r"\w+", text.casefold())).replace("ø", "o")
+
+
 def classify_hud_text(text: str) -> str:
-    words = " ".join(re.findall(r"\w+", text.casefold())).replace("ø", "o")
+    words = _words(text)
     if re.search(r"\b(?:if|when|not|can be) (?:eliminated|killed)\b", words):
         return "ocr_text"
+    if _CROWN_BEAT.search(words) or _CASHOUT_BEAT.search(words):
+        return "objective"
     if _DEATH.search(words):
         return "death"
     if _ELIMINATION.search(words):
@@ -36,6 +79,94 @@ def classify_hud_text(text: str) -> str:
     if _OBJECTIVE.search(words):
         return "objective"
     return "ocr_text"
+
+
+def game_for_clip(path: Path, settings) -> str | None:
+    """Use the longest matching configured root, then its child folder names."""
+    roots = [(root, label) for root, label in zip(settings.input_roots, settings.root_labels)
+             if path.is_relative_to(root)]
+    if roots:
+        root, label = max(roots, key=lambda pair: len(pair[0].parts))
+        labels = (label, root.name, *path.relative_to(root).parts[:-1])
+    else:
+        labels = (path.parent.name,)
+    found = {game for game, pattern in _GAME_NAMES.items()
+             if any(pattern.search(label.replace("_", " ")) for label in labels)}
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def specialist_prompt(game: str | None, events: list[GameplayEvent]) -> str:
+    if game is None:
+        evidence = [_words(event.text or "") for event in events if event.source in _HUD_SOURCES]
+        fortnite = any(_CROWN_BEAT.search(words) or "victory royale" in words for words in evidence)
+        finals = any(_CASHOUT_BEAT.search(words) for words in evidence)
+        if fortnite != finals:
+            game = "fortnite" if fortnite else "the_finals"
+    if game == "fortnite":
+        return (
+            " You are the Fortnite replay specialist. ONE SHALL RULE is a single crown-versus-crown "
+            "elimination accolade, not a second elimination, a crown pickup or a match win. "
+            "A crown on the ground is loot, not proof of pickup. React to the crown duel when its "
+            "banner confirms it. Mention the storm, shield, or building only with cited evidence."
+        )
+    if game == "the_finals":
+        return (
+            " You are the THE FINALS replay specialist. In Cashout, opening a vault, starting a cashout, "
+            "stealing it, and completing it are different events. A team HUD notification does not "
+            "identify the player who did it or prove a round win. React to the confirmed objective beat."
+        )
+    return ""
+
+
+def game_objective(text: str) -> bool:
+    words = _words(text)
+    return bool(_CROWN_BEAT.search(words) or _CASHOUT_BEAT.search(words))
+
+
+def unsupported_game_claim(text: str, cited: list[GameplayEvent]) -> str | None:
+    hud = [event for event in cited if event.source in _HUD_SOURCES]
+    visuals = [event.text or "" for event in cited if event.kind == "visual_observation"]
+    for match in _MULTIKILL.finditer(text):
+        token = next(value for value in match.groups() if value is not None).casefold()
+        required = int(token) if token.isdecimal() else _COUNT_WORDS[token]
+        confirmed = set()
+        for event in hud:
+            if event.kind != "kill":
+                continue
+            banner = _words(event.text or "")
+            named = re.fullmatch(r"(?:you )?eliminated (\w+)", banner)
+            if named and named[1] not in {"opponent", "enemy", "player"}:
+                confirmed.add(named[1])
+        if len(confirmed) < required:
+            return "A count needs separately confirmed eliminations. One banner or accolade is one event."
+    for pattern in _TACTIC_CLAIMS:
+        if pattern.search(text) and not any(pattern.search(observation) for observation in visuals):
+            return "A tactic or weapon needs its own cited visual observation. React to the confirmed outcome."
+    if _FORTNITE_CLAIM.search(text):
+        crown_beat = any(_CROWN_BEAT.search(_words(event.text or "")) for event in hud)
+        claims = {match.group().lower() for match in _FORTNITE_CLAIM.finditer(text)}
+        supported = {match.group().lower() for source in [*visuals, *(event.text or "" for event in hud)]
+                     for match in _FORTNITE_CLAIM.finditer(source)}
+        supported = {word.rstrip("s") for word in supported}
+        if crown_beat:
+            supported.update({"crown", "crowned"})
+        if any(claim.rstrip("s") not in supported for claim in claims):
+            return "Only mention Fortnite details that appear in the cited evidence."
+    if _CROWN_PICKUP.search(text) and not any(_CROWN_PICKUP.search(source) for source in visuals):
+        return "A visible crown or elimination accolade does not confirm that the player picked it up."
+    if _FINALS_CLAIM.search(text):
+        objectives = [_words(event.text or "").replace("cash out", "cashout") for event in hud]
+        objectives = [objective for objective in objectives if _CASHOUT_BEAT.search(objective)]
+        for claim in _FINALS_CLAIM.finditer(text):
+            noun = _words(claim.group()).replace(" ", "").rstrip("s")
+            if not any(objective.startswith(noun) for objective in objectives):
+                return "Only mention a cashout or vault when the cited HUD confirms that objective."
+        if _CASHOUT_ACTOR.search(text):
+            return "A team notification does not identify who made that play. React without assigning the action."
+        for action, required in _CASHOUT_ACTIONS:
+            if action.search(text) and not any(objective.startswith(required) for objective in objectives):
+                return "The cited objective shows a different stage of the cashout or vault."
+    return None
 
 
 def commentary_evidence(events: list[GameplayEvent]) -> list[GameplayEvent]:
@@ -57,8 +188,10 @@ def _hud_regions(primary: NormalizedROI) -> list[tuple[NormalizedROI, str]]:
     # Keep the whole announcement, including a separate "BY" or opponent name.
     announcement = NormalizedROI(preset="bottom_center", x=0.18, y=0.54, w=0.64, h=0.28)
     respawn = NormalizedROI(preset="bottom_center", x=0.30, y=0.92, w=0.40, h=0.08)
+    accolades = NormalizedROI(preset="custom", x=0.08, y=0.08, w=0.84, h=0.24)
     return [
         (announcement, "enlarge"), (announcement, "bright"), (respawn, "bright"),
+        (accolades, "enlarge"),
         (primary, "raw"),
         *([(NormalizedROI(preset="top_right", x=x, y=y, w=w, h=h), "raw")]
           if primary.preset != "top_right" else []),

@@ -11,13 +11,21 @@ extension Home {
     }
 
     var spacesBar: some View {
-        ViewThatFits(in: .horizontal) {
-            tabButtons
-            ScrollView(.horizontal) { tabButtons }.scrollIndicators(.hidden)
+        VStack(spacing: 6) {
+            Text(currentTabAccessibilityName)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
+                .frame(maxWidth: .infinity)
+                .accessibilityLabel("Aktiv fane · \(currentTabAccessibilityName)")
+                .accessibilityAddTraits(.isHeader)
+            ViewThatFits(in: .horizontal) {
+                tabButtons
+                ScrollView(.horizontal) { tabButtons }.scrollIndicators(.hidden)
+            }
+            .padding(6)
+            .fadedGlassSurface(radius: FadedRadius.media, tint: v0LookPreset?.cardColor(in: palette),
+                               border: v0LookPreset?.borderColor(in: palette))
         }
-        .padding(6)
-        .fadedGlassSurface(radius: FadedRadius.media, tint: v0LookPreset?.cardColor(in: palette),
-                           border: v0LookPreset?.borderColor(in: palette))
         .frame(maxWidth: 570)
         .padding(.horizontal, 12).padding(.bottom, 4)
         .sheet(isPresented: $showMoreDestinations, onDismiss: openMoreDestination) {
@@ -30,44 +38,82 @@ extension Home {
         }
     }
 
+    /// Hjem sits in the middle of the dock: Chat · Video · Hjem · Landsby · Code Bot · Mere
+    private var dockSpaces: [Space] {
+        [.notes, .gallery, .brain, .tasks, .library]
+    }
+
     private var tabButtons: some View {
         HStack(spacing: 2) {
-            ForEach(Space.allCases) { item in
-                let selected = selectedModuleTab == nil && space == item
-                Button {
-                    if reduceMotion { selectTab(item) }
-                    else { withAnimation(.spring(response: calmMotion ? 0.70 : 0.35, dampingFraction: 0.8)) { selectTab(item) } }
-                } label: {
-                    VStack(spacing: 3) {
-                        Image(systemName: spaceIcon(item)).font(.body)
-                        Text(spaceTitle(item)).font(.caption2.bold()).fixedSize(horizontal: true, vertical: false)
-                    }
-                    .padding(.horizontal, 4)
-                    .foregroundStyle(selected ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
-                    .frame(minWidth: 44, maxWidth: .infinity, minHeight: 48)
-                    .background(selected ? FadedBrand.mint.opacity(palette.isDark ? 0.14 : 0.24) : Color.clear,
-                                in: RoundedRectangle(cornerRadius: FadedRadius.medium))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Åbn " + spaceTitle(item))
-                .accessibilityAddTraits(selected ? .isSelected : [])
+            ForEach(dockSpaces) { item in
+                dockTab(item)
             }
             moreDestinations
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Faner · \(currentTabAccessibilityName)")
+    }
+
+    private func dockTab(_ item: Space) -> some View {
+        let selected = selectedModuleTab == nil && space == item
+        let isHome = item == .brain
+        return Button {
+            if reduceMotion { selectTab(item) }
+            else { withAnimation(.spring(response: calmMotion ? 0.70 : 0.35, dampingFraction: 0.8)) { selectTab(item) } }
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: spaceIcon(item))
+                    .font(isHome ? .title3.weight(.semibold) : .body)
+                Text(spaceTitle(item)).font(.caption2.bold()).fixedSize(horizontal: true, vertical: false)
+                Capsule()
+                    .fill(selected ? FadedBrand.mint : Color.clear)
+                    .frame(width: selected ? (isHome ? 22 : 16) : 0, height: 3)
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 4)
+            .foregroundStyle(selected ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
+            .frame(minWidth: isHome ? 56 : 44, maxWidth: .infinity, minHeight: 48)
+            .background(selected ? FadedBrand.mint.opacity(palette.isDark ? 0.18 : 0.28) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: FadedRadius.medium))
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: FadedRadius.medium)
+                        .strokeBorder(FadedBrand.mint.opacity(0.45), lineWidth: 1)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Åbn " + spaceTitle(item))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(selected ? "Valgt" : "")
+    }
+
+    private var currentTabAccessibilityName: String {
+        if selectedModuleTab != nil { return "Mere" }
+        return spaceTitle(space)
     }
 
     private var moreDestinations: some View {
-        Button { showMoreDestinations = true } label: {
+        let selected = selectedModuleTab != nil || showMoreDestinations
+        return Button { showMoreDestinations = true } label: {
             VStack(spacing: 3) {
                 Image(systemName: "ellipsis").font(.body)
                 Text("Mere").font(.caption2.bold())
+                Capsule()
+                    .fill(selected ? FadedBrand.mint : Color.clear)
+                    .frame(width: selected ? 16 : 0, height: 3)
+                    .accessibilityHidden(true)
             }
             .frame(minWidth: 44, minHeight: 48)
-            .foregroundStyle(selectedModuleTab != nil && palette.isDark ? FadedBrand.mint : palette.secondary)
+            .foregroundStyle(selected ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
+            .background(selected ? FadedBrand.mint.opacity(palette.isDark ? 0.18 : 0.28) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: FadedRadius.medium))
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Mere")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(selected ? "Valgt" : "")
     }
 
     private func openMoreDestination() {
@@ -190,28 +236,22 @@ private struct FadedMoreScreen: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
-                Section {
-                    ViewThatFits(in: .horizontal) {
-                        HStack(spacing: FadedSpacing.s) { highlightCards }
-                        VStack(spacing: FadedSpacing.s) { highlightCards }
-                    }
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
+                Section("Overblik og kontrol") {
+                    row("Indstillinger", "Tilpas ro, tekst og detaljer", "slider.horizontal.3", .settings)
+                    row("Forbindelser", "Se dine kilder og forbindelser", "link", .connections)
+                    row("PC-status", "Tjek den tilsluttede PC", "stethoscope", .pcStatus)
+                    row("Aktivitet", "Se seneste jobs, status og udbakke", "bell", .activity)
+                    link("Sikkerhedscentral", "Data, forbindelser og godkendelser", "shield", .safety)
                 }
-                Section("Hurtigt fra Mere") {
-                    row("Eksport", "Gem en sikkerhedskopi af dine data", "square.and.arrow.up", .backup)
-                    Button {
-                        copyOverview()
-                    } label: {
-                        rowLabel("Kopiér overblik", "Kopiér antal lokale projekter og bots", "doc.on.clipboard")
+                Section("Hjælp") {
+                    link("Hvad kan jeg?", "Find din egen vej ind", "questionmark.circle", .help)
+                }
+                Section("Genveje") {
+                    NavigationLink(value: Page.creativeStudio) {
+                        rowLabel("Skab noget", "Dit kreative Studio", "film")
                     }
-                    .buttonStyle(.plain)
                     .listRowBackground(lookPreset?.cardColor(in: palette) ?? palette.card)
-                    if copiedOverview {
-                        FadedDetailText("Overblik kopieret.")
-                            .accessibilityAddTraits(.updatesFrequently)
-                    }
-                    row("Søg med det samme", "Find et område eller en funktion", "magnifyingglass", .search)
+                    row("Saml idéerne", "Dine projektkladder", "folder", .projects)
                 }
                 Section("Skab og saml") {
                     row("Holdchat", "Flere perspektiver i én samtale", "bubble.left.and.bubble.right", .holdchat)
@@ -229,17 +269,20 @@ private struct FadedMoreScreen: View {
                     row("Modeller", "Administrér modeller på telefon og PC", "sparkles", .models)
                     link("Lookbook", "Skift baggrund, kort og bundmenu", "paintpalette", .lookbook)
                 }
-                Section("Overblik og kontrol") {
-                    row("Aktivitet", "Se seneste jobs, status og udbakke", "bell", .activity)
-                    link("Sikkerhedscentral", "Data, forbindelser og godkendelser", "shield", .safety)
-                    row("Indstillinger", "Tilpas ro, tekst og detaljer", "slider.horizontal.3", .settings)
-                    row("Forbindelser", "Se dine kilder og forbindelser", "link", .connections)
-                    row("PC-status", "Tjek den tilsluttede PC", "stethoscope", .pcStatus)
-                }
-                Section("Opdag mere") {
-                    link("Hvad kan jeg?", "Find din egen vej ind", "questionmark.circle", .help)
-                    link("Funktionsatlas", "Krav og idéer fra v0-projektet", "map", .atlas)
-                    link("50 + 50 + 50", "Genveje, værktøjer og visuelle valg", "square.grid.2x2", .powerHub)
+                Section("Hurtigt fra Mere") {
+                    row("Eksport", "Gem en sikkerhedskopi af dine data", "square.and.arrow.up", .backup)
+                    Button {
+                        copyOverview()
+                    } label: {
+                        rowLabel("Kopiér overblik", "Kopiér antal lokale projekter og bots", "doc.on.clipboard")
+                    }
+                    .buttonStyle(.plain)
+                    .listRowBackground(lookPreset?.cardColor(in: palette) ?? palette.card)
+                    if copiedOverview {
+                        FadedDetailText("Overblik kopieret.")
+                            .accessibilityAddTraits(.updatesFrequently)
+                    }
+                    row("Søg med det samme", "Find et område eller en funktion", "magnifyingglass", .search)
                 }
                 if !modules.isEmpty {
                     Section("Udvidelser") {
@@ -247,6 +290,10 @@ private struct FadedMoreScreen: View {
                             row(tab.title, "Åbn på din tilsluttede PC", "square.grid.2x2", .module(tab.id))
                         }
                     }
+                }
+                Section("Opdag mere") {
+                    link("Funktionsatlas", "Krav og idéer fra v0-projektet", "map", .atlas)
+                    link("50 + 50 + 50", "Genveje, værktøjer og visuelle valg", "square.grid.2x2", .powerHub)
                 }
                 Section {
                     VStack(spacing: FadedSpacing.s) {
@@ -315,29 +362,6 @@ private struct FadedMoreScreen: View {
         } catch {
             AppDiagnostics.record(error)
             shortcutError = "Projektoversigten kunne ikke åbnes."
-        }
-    }
-
-    @ViewBuilder private var highlightCards: some View {
-        NavigationLink(value: Page.creativeStudio) {
-            highlight("Skab noget", detail: "Dit kreative Studio", icon: "film")
-        }
-        .buttonStyle(.plain)
-        Button { open(.projects) } label: {
-            highlight("Saml idéerne", detail: "Dine projektkladder", icon: "folder")
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func highlight(_ title: String, detail: String, icon: String) -> some View {
-        FadedCard {
-            VStack(alignment: .leading, spacing: FadedSpacing.s) {
-                Image(systemName: icon).foregroundStyle(palette.isDark ? palette.lime : palette.text)
-                    .accessibilityHidden(true)
-                Text(title).font(FadedTypography.action)
-                FadedDetailText(detail)
-            }
-            .frame(minHeight: 74, alignment: .leading)
         }
     }
 

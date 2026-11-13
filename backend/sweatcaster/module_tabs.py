@@ -227,6 +227,16 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
         response.headers["Cache-Control"] = "no-store"
         return computers.activity(ids)
 
+    @app.delete("/api/modules/v1/video-jobs/{job_id}/record", include_in_schema=False)
+    def delete_unavailable_video_job(job_id: str, request: Request, payload: dict = Body(...)):
+        authorize(request, settings)
+        if payload != {"confirm_job_id": job_id}:
+            raise ApiError(422, "INVALID_INPUT", "Bekræft jobkortet, før det fjernes.")
+        from sweatcaster.output_cleanup import discard_unavailable_video_job
+
+        discard_unavailable_video_job(settings, app.state.store, job_id)
+        return {"removed": True}
+
     @app.put("/api/modules/v1/code-repositories", include_in_schema=False)
     def clone_repository(request: Request, body: dict = Body(...)):
         authorize(request, settings)

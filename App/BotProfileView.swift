@@ -8,6 +8,7 @@ struct VillageBotProfile: View {
     let api: LiveAPI?
     @Binding var studioUnlocked: Bool
     let onPrivateSessionEnded: () -> Void
+    var onFileShared: (UUID, UUID, UUID) -> Void = { _, _, _ in }
     @Environment(\.fadedPalette) private var palette
     private var savedBots: Data { MigratedAppData.shared.villageBots }
     @AppStorage(AppStorageKeys.phoneModel) private var phoneModel = "apple"
@@ -90,10 +91,10 @@ struct VillageBotProfile: View {
 
     private func computerLink(_ bot: VillageBot, roster: [VillageBot]) -> some View {
         NavigationLink {
-            BotComputerView(bot: bot, roster: roster, api: api)
+            BotComputerView(bot: bot, roster: roster, api: api, onFileShared: onFileShared)
         } label: {
             FadedCard(accent: palette.cyan) {
-                Label("Computer", systemImage: "desktopcomputer")
+                Label("Åbn computer", systemImage: "desktopcomputer")
                     .font(FadedTypography.action)
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             }

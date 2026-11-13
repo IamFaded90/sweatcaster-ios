@@ -244,8 +244,15 @@ struct LiveAPI: SweatAPI, ChatAPI {
     }
 
     private func checkRenderBeforeChat() async throws {
-        let current = try await jobs()
-        guard !current.jobs.contains(where: { $0.status == .rendering }) else {
+        let current: Jobs
+        do {
+            current = try await jobs()
+        } catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            AppDiagnostics.record(error)
+            return
+        }
+        if current.jobs.contains(where: { $0.status == .rendering }) {
             throw AppDiagnostics.record(APIError.http(503, nil))
         }
     }
@@ -302,6 +309,15 @@ struct LiveAPI: SweatAPI, ChatAPI {
     func deleteFailedJob(_ id: String) async throws {
         let segment = try Server.segment(id)
         var req = request(server.endpoint("jobs/\(segment)"), method: "DELETE")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(["confirm_job_id": id])
+        let (data, response) = try await loggedData(for: req)
+        try checked(response, expected: 200, data: data)
+    }
+    func deleteUnavailableVideoJob(_ id: String) async throws {
+        let segment = try Server.segment(id)
+        let url = server.origin.appending(path: "api/modules/v1/video-jobs/\(segment)/record")
+        var req = request(url, method: "DELETE")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONEncoder().encode(["confirm_job_id": id])
         let (data, response) = try await loggedData(for: req)

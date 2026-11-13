@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
     let bot: VillageBot
     let roster: [VillageBot]
     let api: LiveAPI?
+    var onFileShared: (UUID, UUID, UUID) -> Void = { _, _, _ in }
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.fadedPalette) private var palette
     @State private var store = BotComputerStore()
@@ -114,7 +115,13 @@ import UniformTypeIdentifiers
         .confirmationDialog("Del med en anden bot", isPresented: $showRecipients, presenting: sharedFile) { file in
             ForEach(otherBots) { recipient in
                 Button("Del med \(recipient.name)") {
-                    if let client { Task { await store.share(file, with: recipient, client: client) } }
+                    if let client {
+                        Task {
+                            if let copy = await store.share(file, with: recipient, client: client) {
+                                onFileShared(bot.id, recipient.id, copy.id)
+                            }
+                        }
+                    }
                 }
             }
         } message: { file in
@@ -727,10 +734,15 @@ private struct BotDesktopSurface: View {
         return imported
     }
 
-    func share(_ file: BotComputerFile, with recipient: VillageBot, client: BotComputerClient) async {
+    func share(_ file: BotComputerFile, with recipient: VillageBot, client: BotComputerClient) async -> BotComputerFile? {
+        var copy: BotComputerFile?
         await perform(client) {
             try await client.share(fileID: file.id, with: recipient.id)
-        } apply: { _ in feedback = "En kopi er delt med \(recipient.name)." }
+        } apply: {
+            copy = $0
+            feedback = "En kopi er delt med \(recipient.name)."
+        }
+        return copy
     }
 
     private func applyJob(_ job: BotComputerJob) {
