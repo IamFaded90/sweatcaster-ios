@@ -1,0 +1,583 @@
+// Chat model routing, composer controls and the PC outbox interface.
+
+import Foundation
+import SwiftUI
+import UIKit
+
+extension ChatView {
+    func goBack() {
+        composerFocused = false
+        stop()
+        if let onBack { onBack() }
+        else { dismiss() }
+    }
+
+    func goToPrivateStudio() {
+        guard task == nil else { return }
+        dictation.stop()
+        composerFocused = false
+        openPrivateStudio?()
+    }
+
+    var sourcePicker: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) { sourceChips }
+            VStack(alignment: .leading, spacing: 6) { sourceChips }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Svar fra")
+        .disabled(task != nil)
+    }
+
+    private var sourceChips: some View {
+        ForEach([ReplySource.phone, .pc], id: \.self) { source in
+            FadedChip(source.rawValue, accent: sourceColor(source),
+                      selected: effectiveReplySource == source && (!usesAutomaticRouting || automaticSelection != nil), icon: source.icon) {
+                chooseSource(source)
+            }
+        }
+    }
+
+    private var automaticRoutingAvailable: Bool { autoRouterEnabled && !demo }
+    private var usesAutomaticRouting: Bool { automaticRoutingAvailable && manualRoute == nil }
+    private var pcReadyForText: Bool {
+        !demo && api is LiveAPI && !modelsLoading && !pcEngineOffline && (legacyChat || !models.isEmpty)
+    }
+
+    var pcEngineOfflineMessage: String {
+        "PC’ens chatmotor svarer ikke. Start FadedAI på PC’en, og prøv igen."
+    }
+
+    private var automaticSelection: ModelRouter.Selection? {
+        if let inFlightAutoRoute { return inFlightAutoRoute }
+        guard usesAutomaticRouting else { return nil }
+        if let pc = ModelRouter.choose(text: draft, candidates: pcRoutingCandidates) { return pc }
+        let readyPhones = phoneRoutingCandidates
+        if PhoneModels.shouldUseLiteModel,
+           let lite = readyPhones.first(where: { $0.defaultChoice }) {
+            return ModelRouter.Selection(candidate: lite, reason: "Lavt batteri. Bruger den lette telefonmodel.")
+        }
+        return ModelRouter.choose(text: draft, candidates: readyPhones)
+    }
+
+    var resolvedRoute: ResolvedRoute {
+        if let automaticSelection {
+            return ResolvedRoute(source: automaticSelection.candidate.location == .phone ? .phone : .pc,
+                                 modelID: automaticSelection.candidate.id.isEmpty ? nil : automaticSelection.candidate.id,
+                                 automatic: automaticSelection)
+        }
+        let requestedSource = manualRoute?.source ?? replySource ?? (pcReadyForText ? .pc : .phone)
+        let source = requestedSource == .grok && !cloudKeyAvailable ? ReplySource.phone : requestedSource
+        let modelID: String?
+        switch source {
+        case .phone:
+            let override = manualRoute?.source == .phone ? manualRoute?.modelID : nil
+            modelID = override ?? PhoneModels.effectiveModelID(phoneModel)
+        case .pc:
+            modelID = manualRoute?.modelID ?? (selectedModel.isEmpty ? nil : selectedModel)
+        case .grok: modelID = nil
+        }
+        return ResolvedRoute(source: source, modelID: modelID, automatic: nil)
+    }
+
+    var effectiveReplySource: ReplySource { resolvedRoute.source }
+
+    var phoneRoutingCandidates: [ModelRouter.Candidate] {
+        let favorites = Set(phoneFavorites.split(separator: "|").map(String.init))
+        let preferred = PhoneModels.effectiveModelID(phoneModel)
+        let entries = PhoneModels.catalog.map { ($0.id, $0.name) } + [("apple", "Apple Foundation Models"), ("imported", "Importeret model")]
+        let vision = Set(PhoneModels.readyVisionModelIDs)
+        return entries.compactMap { id, name in
+            guard PhoneModels.isReady(id) else { return nil }
+            return ModelRouter.candidate(id: id, name: name, location: .phone, ready: true,
+                                         capabilities: PhoneModels.routingCapabilities(for: id),
+                                         imageReady: vision.contains(id), favorite: favorites.contains(id), defaultChoice: id == preferred)
+        }
+    }
+
+    private var pcRoutingCandidates: [ModelRouter.Candidate] {
+        guard pcReadyForText, let live = api as? LiveAPI else { return [] }
+        if legacyChat {
+            return [.init(id: "", name: "PC’ens standardmodel (v1)", location: .pc, ready: true, defaultChoice: true)]
+        }
+        let favorite = PCModelSelection.saved(for: live)
+        return models.map { entry in
+            ModelRouter.candidate(id: entry.id, name: entry.label, location: .pc, ready: PCModelSelection.usable(entry),
+                                  capabilities: entry.capabilities, favorite: entry.id == favorite,
+                                  defaultChoice: entry.id == pcDefaultModelID || entry.loaded)
+        }
+    }
+
+    func chooseSource(_ source: ReplySource, modelID: String? = nil) {
+        guard task == nil, source != .grok || cloudKeyAvailable else { return }
+        if source == .phone { clearPCFallbackAction() }
+        if automaticRoutingAvailable {
+            manualRoute = ManualRoute(source: source, modelID: modelID)
+        } else {
+            manualRoute = nil
+            replySource = source
+            if source == .pc, let modelID, let live = api as? LiveAPI {
+                selectedModel = modelID
+                PCModelSelection.set(modelID, for: live)
+            }
+        }
+    }
+
+    func chooseModelForNextMessage(_ source: ReplySource, modelID: String? = nil) {
+        guard task == nil, source != .grok || cloudKeyAvailable else { return }
+        if source == .phone { clearPCFallbackAction() }
+        manualRoute = ManualRoute(source: source, modelID: modelID)
+    }
+
+    func clearPCFallbackAction() {
+        busyPCTurn = nil
+    }
+
+    func sourceColor(_ source: ReplySource) -> Color {
+        switch source {
+        case .phone: palette.green
+        case .pc: palette.cyan
+        case .grok: palette.purple
+        }
+    }
+
+    var sourceNote: String? {
+        guard !demo else { return nil }
+        if effectiveReplySource == .pc, api is LiveAPI {
+            if modelsLoading { return "Tjekker PC’ens modeller…" }
+            if pcEngineOffline { return pcEngineOfflineMessage }
+            if !hasRequestedPCModel(resolvedRoute) {
+                return modelsError ?? "Den valgte PC-model er ikke klar. Vælg en anden model for at sende."
+            }
+        }
+        return switch effectiveReplySource {
+        case .phone: nil
+        case .pc:
+            api != nil ? nil : canQueuePC
+                ? "PC’en kan ikke nås. Udbakken sender automatisk, når denne PC er tilbage."
+                : "Forbind til PC’en for at sende."
+        case .grok: cloudKeyAvailable
+            ? "Beskeden og de seneste Grok-udvekslinger sendes til xAI. Forbrug kan koste penge."
+            : "Gem en xAI-nøgle under Chatindstillinger for at sende til Grok."
+        }
+    }
+
+    var canSendToSource: Bool { canSend(to: resolvedRoute) }
+
+    func canSend(to route: ResolvedRoute) -> Bool {
+        if demo { return true }
+        if usesAutomaticRouting && route.automatic == nil { return false }
+        return switch route.source {
+        case .phone: PhoneModels.isReady(route.modelID ?? phoneModel)
+        case .pc: (api != nil && !modelsLoading && hasRequestedPCModel(route)) || canQueuePC
+        case .grok: cloudKeyAvailable
+        }
+    }
+
+    private func hasRequestedPCModel(_ route: ResolvedRoute) -> Bool {
+        guard let id = route.modelID else { return legacyChat || !(api is LiveAPI) || !models.isEmpty }
+        return models.contains { $0.id == id }
+    }
+
+    var canQueuePC: Bool {
+        api == nil && !demo && pcTargetAddress != nil && pcQueueTargetID != nil
+            && PCChatOutbox.confirmedOffline(pcConnectionError)
+    }
+
+    private func matchesQueueTarget(_ entry: PCChatOutbox.Entry) -> Bool {
+        pcQueueTargetID != nil && entry.targetID == pcQueueTargetID
+    }
+
+    private enum OutboxStage: String, CaseIterable {
+        case review = "Kræver gennemgang"
+        case waiting = "Venter"
+        case sending = "Sender"
+    }
+
+    private func outboxStage(_ entry: PCChatOutbox.Entry) -> OutboxStage {
+        if activeOutboxIDs.contains(entry.id) { return .sending }
+        if entry.state == .waiting && matchesQueueTarget(entry) { return .waiting }
+        return .review
+    }
+
+    var outboxPanel: some View {
+        let sections = Dictionary(grouping: outboxEntries) { outboxStage($0) }
+        return FadedCard(accent: sections[.review] == nil ? palette.cyan : palette.coral) {
+            VStack(alignment: .leading, spacing: 8) {
+                FadedSectionLabel("Udbakke til PC")
+                ForEach(OutboxStage.allCases, id: \.self) { stage in
+                    if let entries = sections[stage] {
+                        VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                            Text("\(stage.rawValue) · \(entries.count)")
+                                .font(.subheadline.weight(.semibold))
+                                .accessibilityAddTraits(.isHeader)
+                            ForEach(entries) { entry in
+                                outboxRow(entry, sending: stage == .sending)
+                            }
+                        }
+                    }
+                }
+                if api == nil, let reconnectPC {
+                    FadedSecondaryButton("Tjek forbindelse", icon: "arrow.clockwise", action: reconnectPC)
+                } else if let live = api as? LiveAPI, sections[.waiting] != nil {
+                    FadedSecondaryButton("Send ventende", icon: "paperplane") {
+                        Task { await PCChatOutbox().deliverReady(using: live) }
+                    }.disabled(!activeOutboxIDs.isEmpty || task != nil)
+                }
+            }
+        }
+        .confirmationDialog("Send PC-beskeden igen?", isPresented: Binding(
+            get: { outboxRetryID != nil }, set: { if !$0 { outboxRetryID = nil } }
+        ), presenting: outboxRetryID) { id in
+            Button("Send igen") { retryOutbox(id) }
+        } message: { _ in
+            Text("PC’en kan allerede have modtaget beskeden. Et nyt forsøg kan udføre samme opgave igen.")
+        }
+    }
+
+    private func outboxRow(_ entry: PCChatOutbox.Entry, sending: Bool) -> some View {
+        HStack(spacing: FadedSpacing.s) {
+            VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                Text(entry.prompt).lineLimit(2)
+                FadedDetailText(outboxStatus(entry, inFlight: sending))
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            if !sending {
+                Menu {
+                    Button("Kopiér besked", systemImage: "doc.on.doc") { copyText(entry.prompt) }
+                    if entry.needsReview && matchesQueueTarget(entry) {
+                        Button("Send igen", systemImage: "paperplane") { outboxRetryID = entry.id }
+                    }
+                    Button("Fjern fra udbakken", systemImage: "trash", role: .destructive) {
+                        removeFromOutbox(entry)
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }.accessibilityLabel("Udbakkehandlinger")
+            }
+        }.padding(.vertical, 3)
+    }
+
+    private func retryOutbox(_ id: UUID) {
+        guard let address = pcTargetAddress, let target = pcQueueTargetID else { return }
+        do {
+            let outbox = PCChatOutbox()
+            guard try outbox.retry(id, for: address, targetID: target) else { reloadOutbox(); return }
+            if let live = api as? LiveAPI, live.queueTargetID == target {
+                Task { await outbox.deliverReady(using: live) }
+            }
+        } catch { AppDiagnostics.record(error); chatNotice = "Beskeden kunne ikke lægges tilbage i udbakken." }
+    }
+
+    private func outboxStatus(_ entry: PCChatOutbox.Entry, inFlight: Bool) -> String {
+        if inFlight { return "PC-beskeden behandles…" }
+        if !matchesQueueTarget(entry) { return "PC-forbindelsen er ændret. Beskeden sendes ikke." }
+        if entry.state == .waiting { return api is LiveAPI ? "Klar til afsendelse." : "Sendes, når denne PC er tilbage." }
+        return "Kræver gennemgang. Vælg Send igen eller fjern beskeden."
+    }
+
+    func reloadOutbox() {
+        guard !demo, let address = pcTargetAddress else {
+            outboxEntries = []
+            activeOutboxIDs = []
+            return
+        }
+        let outbox = PCChatOutbox()
+        do {
+            let stored = try outbox.entries(for: address)
+            outboxEntries = stored.filter { $0.state != .completed || !matchesQueueTarget($0) }
+            activeOutboxIDs = Set(stored.map(\.id).filter { PCChatOutbox.isDelivering($0) })
+            guard loaded, task == nil else { return }
+            let completed = stored.filter { $0.state == .completed && matchesQueueTarget($0) && !PCChatOutbox.isDelivering($0.id) }
+            var imported = Set<UUID>()
+            var changed = false
+            for entry in outboxEntries where entry.sessionID == sessionID {
+                let status = entry.state == .waiting && matchesQueueTarget(entry)
+                    ? "Venter på PC" : outboxStatus(entry, inFlight: activeOutboxIDs.contains(entry.id))
+                let turn = ChatTurn(id: entry.id, prompt: entry.prompt, notice: status, source: "PC", createdAt: entry.createdAt)
+                if turns.first(where: { $0.id == entry.id })?.notice != status {
+                    ChatTurn.upsertOutbox(turn, in: &turns)
+                    changed = true
+                }
+            }
+            for entry in completed {
+                let reply = safeText(entry.reply ?? "", complete: true)
+                let turn = ChatTurn(id: entry.id, prompt: entry.prompt, reply: reply,
+                                    notice: reply.isEmpty ? "PC’en afsluttede beskeden uden svartekst." : nil,
+                                    source: "PC", createdAt: entry.createdAt, replyModelID: entry.replyModelID)
+                if entry.sessionID == sessionID {
+                    ChatTurn.upsertOutbox(turn, in: &turns)
+                    changed = true
+                    imported.insert(entry.id)
+                } else if ChatArchive.appendOutboxTurn(turn, to: entry.sessionID) {
+                    imported.insert(entry.id)
+                }
+            }
+            if changed, !save() { return }
+            try outbox.remove(imported, for: address)
+            if !imported.isEmpty { refreshHistorySessions() }
+        } catch { AppDiagnostics.record(error); chatNotice = "Udbakken kunne ikke læses eller opdateres." }
+    }
+
+    private func removeFromOutbox(_ entry: PCChatOutbox.Entry) {
+        guard !PCChatOutbox.isDelivering(entry.id) else { reloadOutbox(); return }
+        do {
+            let removedNotice = "Fjernet fra udbakken."
+            if entry.sessionID != sessionID,
+               let conversation = ChatArchive.sessions().first(where: { $0.id == entry.sessionID }),
+               var turn = conversation.turns.first(where: { $0.id == entry.id }) {
+                turn.notice = removedNotice
+                guard ChatArchive.appendOutboxTurn(turn, to: entry.sessionID) else { throw APIError.storage }
+            }
+            try PCChatOutbox().remove([entry.id], for: entry.address)
+            if let index = turns.firstIndex(where: { $0.id == entry.id }), entry.sessionID == sessionID {
+                turns[index].notice = removedNotice
+                save()
+            }
+            refreshHistorySessions()
+        }
+        catch { AppDiagnostics.record(error); chatNotice = "Beskeden kunne ikke fjernes fra udbakken." }
+    }
+
+    var modelRoutingNotice: String? {
+        if let automaticSelection {
+            return "Auto-valgt: \(automaticSelection.candidate.name) - \(automaticSelection.reason)"
+        }
+        if manualRoute != nil { return "Modelvalget gælder denne besked." }
+        guard usesAutomaticRouting else { return nil }
+        if ModelRouter.intent(for: draft) == .cardCollection { return "Kortsamlingen kræver en klar PC-forbindelse." }
+        return "Auto fandt ingen klar model. Vælg en model i menuen ovenfor."
+    }
+
+    var composerToolsSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if choosingNote {
+                        noteChoices
+                    } else {
+                        if openImageStudio != nil {
+                            FadedSecondaryButton("Lav billede", icon: "photo") {
+                                imageHandoff = draft
+                                showComposerTools = false
+                            }
+                        }
+                        if openPrivateStudio != nil {
+                            FadedSecondaryButton("Åbn privat chat", icon: "lock.shield") {
+                                privateHandoff = true
+                                showComposerTools = false
+                            }
+                        }
+                        FadedSecondaryButton("Vedhæft note", icon: "note.text") { choosingNote = true }
+                        NavigationLink {
+                            ConnectionsView(onChooseNote: effectiveReplySource == .grok ? nil : { excerpt in
+                                guard effectiveReplySource != .grok else { return }
+                                attachedNote = excerpt
+                                noteDestination = effectiveReplySource
+                                showComposerTools = false
+                            })
+                        } label: {
+                            Label("Forbindelser", systemImage: "link")
+                                .frame(minHeight: 44)
+                        }
+                            .disabled(demo)
+                        DisclosureGroup("Flere chatværktøjer") {
+                            promptTemplates
+                            Button("Vis nyeste besked", systemImage: "arrow.down") {
+                                scrollRequest += 1
+                                showComposerTools = false
+                            }.frame(minHeight: 44)
+                            Button("Ryd kladde", role: .destructive) {
+                                draft = ""
+                                attachedNote = nil
+                                attachedQuote = nil
+                                showComposerTools = false
+                            }.frame(minHeight: 44).disabled(draft.isEmpty && attachedNote == nil && attachedQuote == nil)
+                        }
+                    }
+                }.padding(20)
+            }
+            .background { FadedBackground() }
+            .navigationTitle(choosingNote ? "Vedhæft note" : "Chatværktøjer")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("Luk") { showComposerTools = false } }
+        }
+        .presentationDetents(choosingNote ? [.large] : [.medium, .large])
+    }
+
+    private var noteChoices: some View {
+        let excerpts = notes.split(whereSeparator: \.isNewline).map {
+            String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("Vælg et uddrag. Det følger næste besked til \(effectiveReplySource.rawValue).").foregroundStyle(palette.secondary)
+            if excerpts.isEmpty {
+                FadedEmptyState(icon: "note.text", title: "Ingen noter", detail: "Tilføj en note i appen, og prøv igen.")
+            } else {
+                ForEach(Array(excerpts.prefix(30).enumerated()), id: \.offset) { item in
+                    let excerpt = String(item.element.prefix(600))
+                    Button {
+                        attachedNote = excerpt
+                        noteDestination = effectiveReplySource
+                        showComposerTools = false
+                    } label: {
+                        Text(verbatim: excerpt).multilineTextAlignment(.leading)
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }.buttonStyle(FadedButtonStyle(kind: .secondary))
+                }
+            }
+            DisclosureGroup("Tilføj en lokal note") {
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Skriv en kort note…", text: $newNote, axis: .vertical)
+                        .lineLimit(2...5).textFieldStyle(.roundedBorder)
+                    Button("Gem note på telefonen", action: saveNote)
+                        .frame(minHeight: 44)
+                        .disabled(newNote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || newNote.count > 600)
+                }.padding(.top, 6)
+            }
+        }
+    }
+
+    private func saveNote() {
+        let clean = newNote.split(whereSeparator: \.isNewline).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty, clean.count <= 600 else { return }
+        do {
+            try MigratedAppData.shared.saveNotes(notes.isEmpty ? clean : clean + "\n" + notes)
+            newNote = ""
+        } catch { AppDiagnostics.record(error); chatNotice = "Noten kunne ikke gemmes." }
+    }
+
+    func finishComposerTools() {
+        newNote = ""
+        if privateHandoff {
+            privateHandoff = false
+            goToPrivateStudio()
+            return
+        }
+        guard let imageHandoff else { return }
+        self.imageHandoff = nil
+        dictation.stop()
+        openImageStudio?(imageHandoff)
+    }
+
+    private var promptTemplates: some View {
+        Menu("Skabeloner") {
+            ForEach(PromptExample.examples) { example in
+                Button(example.text) {
+                    draft = example.text
+                    showComposerTools = false
+                }
+            }
+        }.frame(minHeight: 44)
+    }
+
+    @ViewBuilder var modelControls: some View {
+        if modelsLoading { LoadingSkeleton(label: "Henter modeller…") }
+        if let modelsError {
+            if api == nil, let reconnectPC {
+                FadedDetailText(modelsError)
+                FadedSecondaryButton("Forbind til PC", icon: "desktopcomputer", action: reconnectPC)
+            } else {
+                RetryNotice(message: modelsError) { Task { await loadModels() } }
+            }
+        }
+        if legacyChat { Text("Chat bruger PC’ens standardmodel via v1.").font(.caption) }
+        if let live = api as? LiveAPI, !legacyChat {
+            NavigationLink {
+                PCModelsView(api: live)
+                    .onDisappear { Task { await loadModels() } }
+            } label: {
+                Label("Se hele PC-kataloget", systemImage: "desktopcomputer")
+                    .frame(minHeight: 44)
+            }
+            .disabled(task != nil)
+        }
+    }
+
+    var aiBoostControls: some View {
+        DisclosureGroup("AI Boost · 30 forbedringer") {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker("Tone", selection: $aiTone) {
+                    ForEach(["Naturlig", "Varm", "Professionel", "Direkte", "Legende"], id: \.self) { Text($0) }
+                }
+                Picker("Svarlængde", selection: $aiLength) {
+                    ForEach(["Meget kort", "Kort", "Mellem", "Grundig"], id: \.self) { Text($0) }
+                }
+                Picker("Sprog", selection: $aiLanguage) {
+                    ForEach(["Dansk", "Engelsk", "Følg beskeden"], id: \.self) { Text($0) }
+                }
+                Picker("Kreativitet", selection: $aiCreativity) {
+                    ForEach(["Præcis", "Balanceret", "Kreativ"], id: \.self) { Text($0) }
+                }
+                Toggle("Brug punktform", isOn: $aiBullets)
+                Toggle("Giv eksempler", isOn: $aiExamples)
+                Toggle("Start med et resumé", isOn: $aiSummary)
+                Toggle("Slut med næste handling", isOn: $aiActions)
+                Toggle("Spørg ved uklarhed", isOn: $aiClarify)
+                Toggle("Brug enkelt sprog", isOn: $aiSimple)
+                Toggle("Undgå fagsprog", isOn: $aiNoJargon)
+                Toggle("Vis trin for trin", isOn: $aiSteps)
+                Toggle("Brug tabel ved sammenligning", isOn: $aiTables)
+                Toggle("Fortæl når noget er usikkert", isOn: $aiUncertainty)
+                Toggle("Nævn et modargument", isOn: $aiCounterpoint)
+                Toggle("Vis antagelser", isOn: $aiAssumptions)
+                Toggle("Bed om kilder ved research", isOn: $aiSources)
+                Toggle("Korte kodekommentarer", isOn: $aiCodeComments)
+                Toggle("Bevar præcise navne", isOn: $aiPreserveNames)
+                Toggle("Tillad få emojis", isOn: $aiEmojis)
+                Toggle("Brug korte overskrifter", isOn: $aiHeadings)
+                Toggle("Slut med kontrolspørgsmål", isOn: $aiRecapQuestion)
+                Toggle("Foreslå relevante genveje", isOn: $aiSuggestions)
+                Toggle("Fremhæv risici", isOn: $aiRisks)
+                Toggle("Vis fordele og ulemper", isOn: $aiProsCons)
+                Toggle("Lav tjekliste ved opgaver", isOn: $aiChecklist)
+                Toggle("Vis klokkeslæt", isOn: $aiTimestamps)
+                Toggle("Vis antal ord", isOn: $aiWordCount)
+                Toggle("Vis værktøjsaktivitet", isOn: $aiShowTools)
+            }.padding(.top, 8)
+        }
+    }
+
+    func loadModels() async {
+        modelsLoading = true
+        defer { if !Task.isCancelled { modelsLoading = false } }
+        modelsError = nil
+        legacyChat = false
+        pcEngineOffline = false
+        guard let live = api as? LiveAPI else {
+            models = []
+            selectedModel = ""
+            pcDefaultModelID = ""
+            if !demo { modelsError = "Forbind til din PC i Indstillinger." }
+            return
+        }
+        do {
+            let catalog = try await live.v2Models()
+            guard !Task.isCancelled else { return }
+            let available = PCModelSelection.installed(in: catalog).filter(PCModelSelection.usable)
+            if !available.isEmpty {
+                let hub = try? await live.v2Hub()
+                guard !Task.isCancelled else { return }
+                pcEngineOffline = hub?.agents.first(where: { $0.id == "manager" })?.status == .offline
+            }
+            models = available
+            pcDefaultModelID = catalog.default_model_id
+            let preferred = PCModelSelection.saved(for: live)
+            selectedModel = PCModelSelection.textModel(in: catalog, preferredID: preferred)?.id ?? ""
+            if available.isEmpty { modelsError = "PC’en har ingen tilgængelige chatmodeller." }
+        } catch {
+            guard !Task.isCancelled else { return }
+            models = []
+            selectedModel = ""
+            pcDefaultModelID = ""
+            if let failure = error as? V2Failure, case .http(status: 404, code: _, message: _) = failure {
+                legacyChat = true // The API already recorded the original failure.
+            } else {
+                AppDiagnostics.record(error)
+                modelsError = error is V2Failure ? AppErrorPresentation(error).title : "Kunne ikke hente modeller. Tjek forbindelsen til PC’en."
+            }
+        }
+    }
+}

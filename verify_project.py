@@ -13,7 +13,8 @@ for ref in re.findall(r"\b[0-9A-F]{24}\b", pbx):
     assert ref in rows, ref
 for folder in ("App", "Tests"):
     for source in (root / folder).glob("*.swift"):
-        ref, = [key for key, row in rows.items() if f"path = {source.name};" in row]
+        ref, = [key for key, row in rows.items()
+                if f"path = {source.name};" in row or f'path = "{source.name}";' in row]
         build, = [key for key, row in rows.items() if f"fileRef = {ref};" in row]
         phase, = [row for row in rows.values() if "PBXSourcesBuildPhase" in row and build in row]
         assert phase
@@ -22,10 +23,17 @@ for ref in scheme.findall(".//BuildableReference"):
     assert "PBXNativeTarget" in rows[ref.attrib["BlueprintIdentifier"]]
     assert ref.attrib["ReferencedContainer"] == "container:SweatCaster.xcodeproj"
 assert len(scheme.findall(".//TestableReference")) == 1
+extension_targets = [row for row in rows.values() if 'productType = "com.apple.product-type.app-extension"' in row]
+assert len(extension_targets) == 1 and "FadedAIWidgets" in extension_targets[0]
+extension_source = (root / "Widgets/FadedAIWidgets.swift").read_text(encoding="utf-8")
+assert extension_source.count("ActivityConfiguration(") == 1
+assert "StaticConfiguration(" not in extension_source and "AppIntentConfiguration(" not in extension_source
+assert {path.name for path in (root / "App").rglob("*.appiconset")} == {"AppIcon.appiconset"}
 
 with (root / "App/Info.plist").open("rb") as file:
     info = plistlib.load(file)
 assert info["NSLocalNetworkUsageDescription"]
+assert "CFBundleAlternateIcons" not in repr(info)
 ats = info["NSAppTransportSecurity"]
 assert ats["NSAllowsLocalNetworking"] is True
 assert "NSAllowsArbitraryLoads" not in ats

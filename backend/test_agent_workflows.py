@@ -47,3 +47,8 @@ def test_schedule_runs_once_and_static_checks_refuse_bad_code(tmp_path):
     store.run_due(instant)
     AgentWorkflows(tmp_path, library).run_due(instant)
     assert library.indexed == ['user/repo']
+    assert store.routine_status(instant) == [
+        {'action': 'reindex_repository', 'repo': 'user/repo', 'hour': 2, 'today': 'completed'}
+    ]
+    with pytest.raises(ValueError):
+        store.configure_routines([{'action': 'shell', 'repo': 'user/repo', 'hour': 2}])

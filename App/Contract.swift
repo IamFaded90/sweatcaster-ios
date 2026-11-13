@@ -110,7 +110,8 @@ struct Batch: Codable, Sendable {
 }
 
 enum APIError: Error, Sendable {
-    case address, token, input, version, unhealthy, malformed, unsafeVideo, offline, localNetwork, storage
+    case address, token, pairingExpired, input, version, unhealthy, malformed, unsafeVideo, offline, localNetwork, storage
+    case addressLeadingZeros(String)
     case transport(Int)
     case http(Int, Problem?)
     var ambiguous: Bool {
@@ -123,7 +124,9 @@ enum APIError: Error, Sendable {
     var title: String {
         switch self {
         case .address: "Indsæt den lokale adresse, der vises på PC’en."
+        case .addressLeadingZeros(let address): "Fjern ledende nuller. Brug f.eks. \(address)."
         case .token, .http(401, _): "Tjek adgangskoden fra PC’en."
+        case .pairingExpired: "QR-koden er udløbet eller mangler en udløbstid. Lav en ny kode på PC’en, eller indtast IP og token."
         case .input, .http(422, _): "Tjek de valgte klip og indstillinger."
         case .version: "PC’en bruger en anden API-version. Appen kræver version 1."
         case .unhealthy: "PC’ens server er ikke klar."
@@ -134,7 +137,7 @@ enum APIError: Error, Sendable {
         case .storage: "Appen kunne ikke gemme data på telefonen."
         case .http(404, _): "Klippet eller jobbet findes ikke længere."
         case .http(409, _): "Videoen er ikke klar endnu."
-        case .http(503, _): "PC’en mangler noget for at kunne lave videoen."
+        case .http(503, _): "PC’en arbejder, skifter model eller mangler en tjeneste. Prøv igen om lidt."
         case .transport: "Forbindelsen blev afbrudt. Tjek PC’en og Wi-Fi."
         case .http: "PC’en kunne ikke udføre handlingen."
         }

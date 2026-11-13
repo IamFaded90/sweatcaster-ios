@@ -1,13 +1,150 @@
+import SwiftUI
 import XCTest
 @testable import SweatCaster
 
+extension ContractTests {
+    @MainActor func testDedicatedPrivateStudioDropsSuppliedPCClient() throws {
+        let pc = try LiveAPI(server: Server("192.168.1.20"), token: "fixture")
+        let studio = OfflineStudio(api: pc, sessionUnlocked: .constant(false), ephemeralOnly: true)
+        XCTAssertNil(studio.api)
+        XCTAssertEqual(studio.effectiveTextModel, DolphinPhoneRuntime.modelID)
+        XCTAssertEqual(OfflineStudio.Page.allCases, [.chat, .images, .gallery])
+    }
+
+    func testFivePhoneModelsIncludeOnlySupportedDownloadChoices() {
+        XCTAssertEqual(Set(PhoneModels.catalog.map(\.name)),
+                       Set(["MiniCPM5 1B", "Gemma 4 E2B", "Qwen3.5 0.8B", "Qwen3-VL 2B", "LFM2.5 350M"]))
+        XCTAssertEqual(Set(PhoneModels.catalog.filter { PhoneModels.supportsLocalInference($0.id) }.map(\.name)),
+                       Set(["LFM2.5 350M", "Qwen3.5 0.8B", "Qwen3-VL 2B", "Gemma 4 E2B"]))
+    }
+
+    func testDarkModeFollowsSystemAndAppStorage() {
+        XCTAssertNil(FadedAppearance.system.preferredScheme(for: .faded))
+        XCTAssertEqual(FadedAppearance.system.resolve(theme: .faded, system: .light), .day)
+        XCTAssertEqual(FadedAppearance.system.resolve(theme: .faded, system: .dark), .faded)
+        XCTAssertEqual(FadedAppearance.system.resolve(theme: .oled, system: .light), .oled)
+        XCTAssertEqual(FadedAppearance.dark.resolve(theme: .day, system: .light), .faded)
+        XCTAssertEqual(FadedAppearance.light.resolve(theme: .oled, system: .dark), .day)
+        let suite = UUID().uuidString
+        guard let defaults = UserDefaults(suiteName: suite) else { return XCTFail("Mangler testlager") }
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let storage = AppStorage(wrappedValue: FadedAppearance.system, "appearance.mode", store: defaults)
+        storage.wrappedValue = .light
+        XCTAssertEqual(defaults.string(forKey: "appearance.mode"), FadedAppearance.light.rawValue)
+        XCTAssertEqual(AppStorage(wrappedValue: FadedAppearance.system, "appearance.mode", store: defaults).wrappedValue, .light)
+    }
+
+    @MainActor func testWipeOnlyDeletesOwnFolders() throws {
+        let files = FileManager.default
+        let root = files.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let documents = root.appendingPathComponent("Documents", isDirectory: true)
+        let support = root.appendingPathComponent("Support", isDirectory: true)
+        let temporary = root.appendingPathComponent("Temp", isDirectory: true)
+        defer { try? files.removeItem(at: root) }
+        let model = documents.appendingPathComponent("Models", isDirectory: true)
+        let privateModels = support.appendingPathComponent(DolphinPhoneRuntime.storageRoot.lastPathComponent, isDirectory: true)
+        let saved = support.appendingPathComponent("SavedVideos", isDirectory: true)
+        let keep = support.appendingPathComponent("OtherTool", isDirectory: true)
+        let scratch = temporary.appendingPathComponent(StudioScratch.prefix + UUID().uuidString, isDirectory: true)
+        for folder in [model, privateModels, saved, keep, scratch] { try files.createDirectory(at: folder, withIntermediateDirectories: true) }
+        let personal = documents.appendingPathComponent("Personlig.txt")
+        let unrelatedPreview = temporary.appendingPathComponent("Sweat-min-fil.mp4")
+        for file in [personal, unrelatedPreview] { try Data("behold".utf8).write(to: file) }
+        try AppLocalReset.deleteOwnedData(documents: documents, support: support, temporary: temporary)
+        for removed in [model, privateModels, saved, scratch] { XCTAssertFalse(files.fileExists(atPath: removed.path)) }
+        for retained in [personal, unrelatedPreview, keep] { XCTAssertTrue(files.fileExists(atPath: retained.path)) }
+    }
+}
+
+extension ContractTests {
+    func testSearchFindsChatBotVideoAndFile() {
+        let input: [FadedSearchRecord] = [
+            .init(id: "chat", category: .chat, title: "Træning i morgen", destination: .chat(query: "Træning")),
+            .init(id: "bot", category: .bot, title: "Scout", keywords: "træning", destination: .bot(id: UUID())),
+            .init(id: "video", category: .video, title: "Træningsklip", destination: .video(jobID: "test-video")),
+            .init(id: "file", category: .file, title: "Plan.md", detail: "træning", destination: .file(path: "Plan.md")),
+        ]
+        let matches = FadedSearchIndex(records: input).matches("TRÆNING")
+        XCTAssertEqual(Set(matches.map(\.category)), Set([.chat, .bot, .video, .file]))
+        XCTAssertTrue(FadedSearchIndex(records: input).matches(" ").isEmpty)
+    }
+}
+
 final class ContractTests: XCTestCase {
+    func testPairingQRRecognizesLocalAndTailscaleProfiles() throws {
+        let home = try PairingQRCode.parse(#"{"version":1,"address":"192.168.1.42","token":"fixture-token"}"#)
+        let remote = try PairingQRCode.parse(#"{"version":1,"address":"100.64.1.42","token":"fixture-token"}"#)
+        XCTAssertEqual(try Server(home.address).profile, .home)
+        XCTAssertEqual(try Server(remote.address).profile, .tailscale)
+    }
+
+    func testPairingQRRejectsPublicAddressesAndHeaderInjection() {
+        for payload in [
+            #"{"version":1,"address":"8.8.8.8","token":"fixture-token"}"#,
+            #"{"version":1,"address":"http://192.168.1.42:8765/api/v1?token=x","token":"fixture-token"}"#,
+            #"{"version":1,"address":"192.168.1.42","token":"a\r\nb"}"#,
+            #"{"version":2,"address":"192.168.1.42","token":"fixture-token"}"#,
+        ] { XCTAssertThrowsError(try PairingQRCode.parse(payload)) }
+    }
+
+    func testCodeBotRemovesOnlyOuterMarkdownFence() throws {
+        let object = #"{"content":"keep ``` inside"}"#
+        for reply in [object, "```json\n\(object)\n```", "```JSON\r\n\(object)\r\n```"] {
+            let value = try JSONDecoder().decode([String: String].self, from: ModelJSON.payload(reply))
+            XCTAssertEqual(value["content"], "keep ``` inside")
+        }
+        XCTAssertThrowsError(try JSONDecoder().decode([String: String].self, from: ModelJSON.payload("```json\n\(object)")))
+    }
+
+    func testRenderingStopsDirectV2ChatBeforeTheLLMRequest() async throws {
+        let api = try stubAPI(address: "192.168.1.21")
+        do {
+            try await api.v2Chat(V2ChatRequest(message: "Hej")) { _ in XCTFail("Unexpected chat stream") }
+            XCTFail("Expected the PC-busy error")
+        } catch let APIError.http(status, _) {
+            XCTAssertEqual(status, 503)
+        }
+    }
+
+    func testUnavailableJobsListDoesNotBlockChat() async throws {
+        let api = try stubAPI(address: "192.168.1.29")
+        let received = RequestCounter()
+        try await api.v2Chat(V2ChatRequest(message: "Hej")) { event in
+            if event.type == .text && event.content == "Hej fra PC" {
+                received.increment()
+            }
+        }
+        XCTAssertEqual(received.count, 1)
+    }
+
     func testModuleManifestRestrictsUntrustedTabDefinitions() throws {
         let json = #"{"version":1,"tabs":[{"id":"cards","title":"Kortsamling","kind":"cards"},{"id":"../health","title":"Sikkerhed","kind":"information"},{"id":"script","title":"Ny","kind":"web"}]}"#
         let manifest = try JSONDecoder().decode(ModuleManifest.self, from: Data(json.utf8))
         XCTAssertEqual(manifest.version, 1)
         XCTAssertEqual(manifest.tabs.filter(\.supported).map(\.id), ["cards"])
     }
+
+    func testShortModuleIDsUseAuthenticatedModuleRoutes() async throws {
+        let api = try stubAPI()
+        let cards = try await api.moduleCards("cards")
+        let information = try await api.moduleInformation("a")
+        XCTAssertTrue(cards.cards.isEmpty)
+        XCTAssertEqual(information.text, "Lokal information")
+        do {
+            _ = try await api.moduleInformation("../health")
+            XCTFail("Expected a rejected module ID")
+        } catch V2Failure.invalidInput {}
+    }
+
+    func testEmbyUsesPairedPCAndPreservesSearchTerms() async throws {
+        let page = try await stubAPI().embyLibrary(parent: "folder_01", search: "C++ & blå", offset: 24)
+        XCTAssertTrue(page.configured)
+        XCTAssertEqual(page.nextOffset, 48)
+        XCTAssertEqual(page.items.map(\.title), ["Titel", "Usikkert link"])
+        XCTAssertEqual(page.items.first?.browserURL?.host, "emby.example")
+        XCTAssertNil(page.items.last?.browserURL)
+    }
+
     func testClipKeepsV1ShapeAndAcceptsFutureFolderMetadata() throws {
         let old = try JSONDecoder().decode(Clip.self, from: Data(#"{"id":"clip-one","name":"game.mp4","duration_seconds":12,"width":1920,"height":1080}"#.utf8))
         XCTAssertNil(old.folderName)
@@ -302,6 +439,111 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(model.selected.isEmpty)
     }
 
+    @MainActor func testV2FolderSelectionSurvivesLiveRefreshAndStartsV1Batch() async throws {
+        let api = try stubAPI()
+        let suite = "Tests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = Model(api: api, defaults: defaults)
+        await model.refresh()
+        XCTAssertTrue(model.connected, "The stub V1 clip listing returns malformed JSON and must not run on refresh")
+        XCTAssertTrue(model.clips.isEmpty)
+
+        let folder = try await api.v2ClipPage(rootID: "2")
+        model.select(folder.clips)
+        await model.refresh()
+        XCTAssertEqual(model.selected, Set(["clip-one", "clip-two"]))
+
+        let unsupported = await model.submit(.roast)
+        XCTAssertFalse(unsupported)
+        let accepted = await model.submit(.hype)
+        XCTAssertTrue(accepted)
+        XCTAssertEqual(model.jobs.map(\.clip_id), ["clip-one", "clip-two"])
+        XCTAssertTrue(model.selected.isEmpty)
+    }
+
+    @MainActor func testOfflineVideoDraftAndClaimSurviveRelaunch() async throws {
+        for host in ["192.168.1.20", "192.168.1.24"] {
+            let api = try stubAPI(address: host)
+            let suite = "Tests.\(UUID())"
+            let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+            let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+            defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: directory) }
+            defaults.set(host, forKey: Pairing.addressKey)
+
+            let first = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+            await first.refresh()
+            let folder = try await api.v2ClipPage(rootID: "2")
+            first.includeFolderClips(folder.clips, folderID: folder.root_id)
+            first.select(folder.clips)
+            first.rememberVideoFolder(folder.root_id)
+            first.rememberVideoMood(.roast)
+
+            let offline = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+            XCTAssertEqual(offline.selected, Set(["clip-one", "clip-two"]))
+            XCTAssertEqual(offline.lastVideoFolder, "2")
+            XCTAssertEqual(offline.lastVideoMood, .roast)
+            XCTAssertTrue(offline.queueVideoOffline(.hype))
+            XCTAssertTrue(offline.selected.isEmpty)
+
+            let reconnecting = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+            XCTAssertEqual(reconnecting.videoOutbox.first?.state, .waiting)
+            await reconnecting.refresh()
+            let before = Stub.timedOutVideoPosts.count
+            await reconnecting.deliverQueuedVideos()
+            if host == "192.168.1.24" {
+                XCTAssertTrue(reconnecting.uncertain)
+                XCTAssertEqual(reconnecting.videoOutbox.first?.state, .attempted)
+                let reopened = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+                await reopened.refresh()
+                await reopened.deliverQueuedVideos()
+                XCTAssertTrue(reopened.uncertain)
+                XCTAssertEqual(Stub.timedOutVideoPosts.count, before + 1)
+                await reopened.acknowledgeAfterReview()
+                XCTAssertTrue(reopened.videoOutbox.isEmpty)
+            } else {
+                XCTAssertEqual(reconnecting.jobs.map(\.clip_id), ["clip-one", "clip-two"])
+                XCTAssertTrue(reconnecting.videoOutbox.isEmpty)
+            }
+            defaults.set("192.168.1.25", forKey: Pairing.addressKey)
+            let other = Model(api: try stubAPI(address: "192.168.1.25"), defaults: defaults, videoStateDirectory: directory)
+            XCTAssertTrue(other.selected.isEmpty)
+            XCTAssertTrue(other.videoOutbox.isEmpty)
+            XCTAssertNil(other.lastVideoFolder)
+        }
+    }
+
+    @MainActor func testOfflineVideoDoesNotSendAfterSameAddressIsPairedAgain() async throws {
+        let host = "192.168.1.20"
+        let api = try stubAPI(address: host)
+        let suite = "Tests.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { defaults.removePersistentDomain(forName: suite); try? FileManager.default.removeItem(at: directory) }
+        defaults.set(host, forKey: Pairing.addressKey)
+
+        let first = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+        await first.refresh()
+        let folder = try await api.v2ClipPage(rootID: "2")
+        first.includeFolderClips(folder.clips, folderID: folder.root_id)
+        first.select(folder.clips)
+        let offline = Model(api: api, defaults: defaults, videoStateDirectory: directory)
+        XCTAssertTrue(offline.queueVideoOffline(.hype))
+        let stored = try String(contentsOf: directory.appending(path: host + ".json"), encoding: .utf8)
+        XCTAssertFalse(stored.contains("test-only-token"))
+
+        let replacementAPI = try stubAPI(address: host, token: "test-replacement-token")
+        let rePaired = Model(api: replacementAPI, defaults: defaults, videoStateDirectory: directory)
+        await rePaired.refresh()
+        XCTAssertTrue(rePaired.connected)
+        await rePaired.deliverQueuedVideos()
+        XCTAssertTrue(rePaired.jobs.isEmpty)
+        XCTAssertEqual(rePaired.videoOutbox.first?.state, .rejected)
+        let queued = try XCTUnwrap(rePaired.videoOutbox.first)
+        rePaired.removeQueuedVideo(queued.id)
+        XCTAssertTrue(rePaired.videoOutbox.isEmpty)
+    }
+
     @MainActor func testIncompatibleVersionPreventsSubmission() async {
         let model = Model(api: UncertainAPI(version: "2"))
         await model.refresh()
@@ -309,10 +551,10 @@ final class ContractTests: XCTestCase {
         XCTAssertFalse(model.canSubmit)
     }
 
-    private func stubAPI() throws -> LiveAPI {
+    private func stubAPI(address: String = "192.168.1.20", token: String = "test-only-token") throws -> LiveAPI {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [Stub.self]
-        return try LiveAPI(server: Server("192.168.1.20"), token: "test-only-token", configuration: configuration)
+        return try LiveAPI(server: Server(address), token: token, configuration: configuration)
     }
 }
 
@@ -327,11 +569,23 @@ private final class TestClock: @unchecked Sendable {
 }
 
 private final class Stub: URLProtocol {
+    static let timedOutVideoPosts = RequestCounter()
+    static let timedOutChatPosts = RequestCounter()
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
         guard let url = request.url else { return }
         let auth = request.value(forHTTPHeaderField: "Authorization")
+        if url.host == "192.168.1.24", url.path == "/api/v1/jobs", request.httpMethod == "POST" {
+            Self.timedOutVideoPosts.increment()
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+            return
+        }
+        if url.host == "192.168.1.27", url.path == "/api/v2/chat", request.httpMethod == "POST", auth == "Bearer test-only-token" {
+            Self.timedOutChatPosts.increment()
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
+            return
+        }
         if url.path == "/api/v2/images/generate", request.httpMethod == "POST",
            auth == "Bearer test-only-token", request.url?.host == "192.168.1.20" {
             let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil,
@@ -346,10 +600,38 @@ private final class Stub: URLProtocol {
         var mime = "application/json"
         if url.path == "/api/v1/health", auth == nil {
             status = 200; body = #"{"api_version":"1","status":"ok"}"#
-        } else if auth != "Bearer test-only-token" {
+        } else if auth != "Bearer test-only-token" && auth != "Bearer test-replacement-token" {
             status = 500; body = "{}"
+        } else if url.path == "/api/modules/v1/tabs/cards", request.httpMethod == "GET" {
+            status = 200; body = #"{"cards":[]}"#
+        } else if url.path == "/api/modules/v1/tabs/a", request.httpMethod == "GET" {
+            status = 200; body = #"{"text":"Lokal information"}"#
+        } else if url.path == "/api/modules/v1/emby/library", request.httpMethod == "GET",
+                  url.host == "192.168.1.20", auth == "Bearer test-only-token",
+                  URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedQuery
+                  == "offset=24&parent=folder_01&search=C%2B%2B%20%26%20bl%C3%A5" {
+            status = 200
+            body = #"{"configured":true,"items":[{"id":"1","title":"Titel","kind":"Movie","folder":false,"webURL":"https://emby.example/web/index.html"},{"id":"2","title":"Usikkert link","kind":"Movie","folder":false,"webURL":"http://emby.example/web/index.html"}],"nextOffset":48}"#
+        } else if url.path == "/api/v1/capabilities" {
+            status = 200
+            body = #"{"moods":["hype"],"max_batch_size":10,"features":{"upload":false,"cancel":true,"range_preview":false},"dependencies":[]}"#
+        } else if url.path == "/api/v2/clips", url.query == "root_id=2&limit=100" {
+            status = 200
+            body = #"{"root_id":"2","label":"Fortnite","clips":[{"id":"clip-one","name":"one.mp4","duration_seconds":10,"width":1920,"height":1080},{"id":"clip-two","name":"two.mp4","duration_seconds":20,"width":1920,"height":1080}],"next_cursor":null,"ready":true,"indexing":false}"#
+        } else if url.path == "/api/v2/models", url.host == "192.168.1.27" {
+            status = 200
+            body = #"{"default_model_id":"qwen","models":[{"id":"qwen","label":"Qwen","available":true,"loaded":true,"capabilities":["chat"]}]}"#
         } else if url.path == "/api/v1/clips" {
             status = 200; body = "bad JSON"
+        } else if url.path == "/api/v1/jobs", request.httpMethod == "GET", url.host == "192.168.1.29" {
+            status = 503; body = "{}"
+        } else if url.path == "/api/v1/jobs", request.httpMethod == "GET" {
+            status = 200
+            body = url.host == "192.168.1.21" ? #"{"jobs":[{"id":"job-render","clip_id":"clip-one","mood":"hype","status":"rendering","progress":0.8,"message":"Rendering","warnings":[],"created_at":"2026-11-06T16:00:00Z","updated_at":"2026-11-06T16:00:00Z","output_url":null,"error":null}]}"# : #"{"jobs":[]}"#
+        } else if url.path == "/api/v2/chat", request.httpMethod == "POST", url.host == "192.168.1.29" {
+            status = 200
+            mime = "text/event-stream"
+            body = "data: {\"type\":\"text\",\"content\":\"Hej fra PC\"}\n\ndata: {\"type\":\"done\",\"content\":\"\",\"message_id\":\"test-message\",\"model_id\":\"test-model\"}\n\n"
         } else if url.path == "/api/v1/chat", request.httpMethod == "POST",
                   request.value(forHTTPHeaderField: "Accept") == "text/event-stream" {
             status = 200
@@ -379,6 +661,13 @@ private final class Stub: URLProtocol {
     override func stopLoading() {}
 }
 
+private final class RequestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    var count: Int { lock.withLock { value } }
+    func increment() { lock.withLock { value += 1 } }
+}
+
 private actor UncertainAPI: SweatAPI {
     let version: String
     let mock = MockAPI()
@@ -397,4 +686,243 @@ private actor UncertainAPI: SweatAPI {
     }
     func cancel(_ id: String) async throws -> Job { try await mock.cancel(id) }
     func video(_ job: Job) async throws -> URL { try await mock.video(job) }
+}
+
+extension ContractTests {
+    func testWorkspacePatchEditsLongFileWithoutChangingOtherLines() throws {
+        let before = Array(repeating: "// eksisterende linje\r\n", count: 110).joined()
+        let source = before + "let value = 3\r\nlet stillHere = true\r\n"
+        let context = try WorkspacePatch.context(goal: "Set value to 4", path: "File.swift",
+                                                 source: source, firstLine: 111)
+        XCTAssertEqual(context.lines, 110..<112)
+        XCTAssertLessThanOrEqual(context.prompt.unicodeScalars.count, 2_000)
+        let diff = """
+        --- a/File.swift
+        +++ b/File.swift
+        @@ -111,2 +111,2 @@
+        -let value = 3
+        +let value = 4
+         let stillHere = true
+        """
+        let patched = try WorkspacePatch.applying(diff, to: source, path: "File.swift", within: context.lines)
+        XCTAssertEqual(Array(patched.utf8), Array((before + "let value = 4\r\nlet stillHere = true\r\n").utf8))
+    }
+
+    func testWorkspacePatchPreservesMissingFinalNewline() throws {
+        let diff = #"""
+        --- a/File.txt
+        +++ b/File.txt
+        @@ -2 +2 @@
+        -gammel
+        \ No newline at end of file
+        +ny
+        \ No newline at end of file
+        """#
+        XCTAssertEqual(try WorkspacePatch.applying(diff, to: "behold\ngammel", path: "File.txt", within: 1..<2),
+                       "behold\nny")
+    }
+
+    func testWorkspacePatchRejectsWrongPathRangeAndContext() {
+        let diff = "--- a/File.txt\n+++ b/File.txt\n@@ -2 +2 @@\n-gammel\n+ny\n"
+        for (source, path, window) in [
+            ("behold\ngammel\n", "Other.txt", 1..<2),
+            ("behold\ngammel\n", "File.txt", 0..<1),
+            ("behold\nændret\n", "File.txt", 1..<2),
+        ] {
+            XCTAssertThrowsError(try WorkspacePatch.applying(diff, to: source, path: path, within: window))
+        }
+        let invalidCount = diff.replacingOccurrences(of: "+2 @@", with: "+2,2 @@")
+        XCTAssertThrowsError(try WorkspacePatch.applying(invalidCount, to: "behold\ngammel\n", path: "File.txt", within: 1..<2))
+        XCTAssertThrowsError(try WorkspacePatch.applying(diff + diff, to: "behold\ngammel\n", path: "File.txt", within: 1..<2))
+    }
+
+    func testWorkspacePatchSupportsZeroCountInsertionAndMultipleHunks() throws {
+        let diff = """
+        --- a/File.txt
+        +++ b/File.txt
+        @@ -0,0 +1 @@
+        +prefix
+        @@ -3 +4 @@
+        -third
+        +new
+        """
+        XCTAssertEqual(try WorkspacePatch.applying(diff, to: "first\nsecond\nthird\n",
+                                                  path: "File.txt", within: 0..<3), "prefix\nfirst\nsecond\nnew\n")
+    }
+}
+
+extension ContractTests {
+    func testGrokRequestUsesOnlyFixedHTTPSAndDisablesResponseStorage() throws {
+        let key = "fixture-cloud-secret"
+        let request = try GrokAPI.request(input: [.init(role: .user, content: "Test \(key)")], key: key)
+        XCTAssertEqual(request.url?.absoluteString, "https://api.x.ai/v1/responses")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(key)")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "text/event-stream")
+        let bytes = try XCTUnwrap(request.httpBody)
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "grok-4.7")
+        XCTAssertEqual(body["store"] as? Bool, false)
+        XCTAssertEqual(body["stream"] as? Bool, true)
+        XCTAssertEqual((body["input"] as? [[String: String]])?.first?["content"], "Test [skjult]")
+        XCTAssertThrowsError(try GrokAPI.request(input: [], key: "bad\nheader"))
+    }
+
+    func testGrokParserStreamsUnicodeAndRequiresCompletion() throws {
+        let frames = "event: response.created\r\ndata: {\"type\":\"response.created\"}\r\n\r\n"
+            + "data: {\"type\":\"future_event\",\"delta\":{}}\n\n"
+            + "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hej æøå\"}\r\n\r\n"
+        var parser = GrokResponsesParser()
+        let chunks = try frames.utf8.compactMap { try parser.feed($0) }
+        XCTAssertEqual(chunks, ["Hej æøå"])
+        XCTAssertThrowsError(try parser.end()) { XCTAssertEqual($0 as? GrokFailure, .interrupted) }
+        for byte in "data: {\"type\":\"response.completed\"}\n\n".utf8 { _ = try parser.feed(byte) }
+        XCTAssertNoThrow(try parser.end())
+    }
+
+    func testGrokInterruptionsAndStreamingKeyRedaction() throws {
+        var parser = GrokResponsesParser()
+        XCTAssertThrowsError(try "data: {\"type\":\"response.incomplete\"}\n\n".utf8.forEach { _ = try parser.feed($0) }) {
+            XCTAssertEqual($0 as? GrokFailure, .interrupted)
+        }
+        XCTAssertEqual(GrokAPI.redacted("Hej, fixture-", key: "fixture-secret", streaming: true), "Hej, ")
+        XCTAssertEqual(GrokAPI.redacted("Hej, fixture-secret", key: "fixture-secret", streaming: false), "Hej, [skjult]")
+    }
+}
+
+extension ContractTests {
+    @MainActor func testPCChatOutboxClaimSurvivesRelaunchAndCannotReplay() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "queue.json")
+        let first = PCChatOutbox(file: file)
+        let home = "192.168.1.42"
+        let external = "100.64.1.42"
+        let target = "original-credential-fixture"
+        let replacement = "replacement-credential-fixture"
+        let session = UUID()
+        let record = try first.enqueue(address: home, targetID: target, prompt: "Søg", message: "Søg i noter",
+                                       sessionID: session, modelID: "qwen")
+        XCTAssertEqual(first.pendingCount(for: home, targetID: target), 1)
+        XCTAssertEqual(first.pendingCount(for: external, targetID: target), 0)
+        XCTAssertEqual(first.pendingCount(for: home, targetID: replacement), 0)
+        XCTAssertEqual(first.reviewCount(for: home, targetID: replacement), 1)
+        XCTAssertNil(try first.claim(record.id, for: external, targetID: target))
+        XCTAssertNil(try first.claim(record.id, for: home, targetID: replacement))
+        let attempt = try XCTUnwrap(first.claim(record.id, for: home, targetID: target))
+        let request = try attempt.request()
+        XCTAssertEqual(request.request_id, record.id)
+        XCTAssertEqual(request.session_id, session.uuidString)
+        XCTAssertEqual(request.message, "Søg i noter")
+        XCTAssertEqual(request.model_id, "qwen")
+
+        let reopened = PCChatOutbox(file: file)
+        XCTAssertNil(try reopened.claim(record.id, for: home, targetID: target))
+        XCTAssertEqual(reopened.reviewCount(for: home, targetID: target), 1)
+        XCTAssertEqual(try reopened.entries(for: home).first?.state, .attempted)
+        try reopened.complete(record.id, for: home, targetID: target, reply: "Noterne er fundet.")
+        XCTAssertNil(try reopened.claim(record.id, for: home, targetID: target))
+        XCTAssertEqual(try reopened.entries(for: home).first?.reply, "Noterne er fundet.")
+        XCTAssertEqual(try reopened.entries(for: home).first?.state, .completed)
+    }
+
+    @MainActor func testPCChatOutboxOnlyTreatsNetworkFailureAsOffline() {
+        XCTAssertTrue(PCChatOutbox.confirmedOffline(.offline))
+        XCTAssertTrue(PCChatOutbox.confirmedOffline(.transport(URLError.timedOut.rawValue)))
+        XCTAssertFalse(PCChatOutbox.confirmedOffline(nil))
+        XCTAssertFalse(PCChatOutbox.confirmedOffline(.token))
+        XCTAssertFalse(PCChatOutbox.confirmedOffline(.http(503, nil)))
+    }
+
+    @MainActor func testPCChatOutboxDrainNeverRepeatsTimedOutPOST() async throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appending(path: "queue.json")
+        let address = "192.168.1.27"
+        let api = try stubAPI(address: address)
+        let outbox = PCChatOutbox(file: file)
+        try outbox.enqueue(address: address, targetID: api.queueTargetID, prompt: "Se jobbet", message: "Se jobbet",
+                           sessionID: UUID(), modelID: nil)
+        let before = Stub.timedOutChatPosts.count
+        await outbox.deliverReady(using: api)
+        XCTAssertEqual(Stub.timedOutChatPosts.count - before, 1)
+        let reopened = PCChatOutbox(file: file)
+        XCTAssertEqual(reopened.reviewCount(for: address, targetID: api.queueTargetID), 1)
+        await reopened.deliverReady(using: api)
+        XCTAssertEqual(Stub.timedOutChatPosts.count - before, 1)
+    }
+}
+
+extension ContractTests {
+    func testAutoRouterPrefersReadyPCCodeModelThenReadyPhoneFallback() {
+        let unavailable = ModelRouter.Candidate(id: "qwen25-7b", name: "Qwen 2.5 7B", location: .pc, ready: false, favorite: true)
+        let pc = ModelRouter.Candidate(id: "authoritative-pc-id", name: "Qwen 3 8B", location: .pc, ready: true)
+        let phone = ModelRouter.Candidate(id: "minicpm5-1b", name: "MiniCPM5 1B", location: .phone, ready: true)
+        XCTAssertEqual(ModelRouter.choose(text: "Ret denne Swift-funktion", candidates: [unavailable, phone, pc])?.candidate, pc)
+        XCTAssertEqual(ModelRouter.choose(text: "Find buggen", candidates: [unavailable, phone])?.candidate, phone)
+    }
+
+    func testAutoRouterUsesLongModelsAndSuitableFavorites() {
+        let long = String(repeating: "å", count: 1_001)
+        let pc = ModelRouter.Candidate(id: "gemma4-9b", name: "Gemma 4 9B", location: .pc, ready: true)
+        let phone = ModelRouter.Candidate(id: "gemma4-e2b", name: "Gemma 4 E2B", location: .phone, ready: true, favorite: true)
+        let unrelated = ModelRouter.Candidate(id: "favorite", name: "Almindelig favorit", location: .phone, ready: true, favorite: true)
+        XCTAssertEqual(ModelRouter.intent(for: String(long.dropLast())), .text)
+        XCTAssertEqual(ModelRouter.intent(for: long), .long)
+        XCTAssertEqual(ModelRouter.choose(text: long, candidates: [pc, unrelated])?.candidate, pc)
+        XCTAssertEqual(ModelRouter.choose(text: long, candidates: [pc, phone])?.candidate, phone)
+    }
+
+    func testAutoRouterRequiresImageInputCapabilityAndKeepsPCOnlyToolsOnPC() {
+        let phone = ModelRouter.Candidate(id: "qwen3-vl-2b", name: "Qwen3-VL 2B", location: .phone, ready: true)
+        let vision = ModelRouter.Candidate(id: "vision-pc", name: "Vision", location: .pc, ready: true, acceptsImages: true)
+        XCTAssertEqual(ModelRouter.intent(for: "Skriv en idé til et billede"), .text)
+        XCTAssertNil(ModelRouter.choose(text: "Se her", hasImage: true, candidates: [phone]))
+        XCTAssertEqual(ModelRouter.choose(text: "Se her", hasImage: true, candidates: [phone, vision])?.candidate, vision)
+        XCTAssertNil(ModelRouter.choose(text: "Kortsamling: Vis dubletter", candidates: [phone]))
+    }
+
+    func testAutoRouterPicksReadyGeneralModelsWithoutInventingIDs() {
+        let phone = ModelRouter.Candidate(id: "minicpm5-1b", name: "MiniCPM5 1B", location: .phone, ready: false)
+        let pc = ModelRouter.Candidate(id: "opaque-from-pc", name: "Ornith 1.0 9B", location: .pc, ready: true)
+        XCTAssertEqual(ModelRouter.choose(text: "Hej", candidates: [phone, pc])?.candidate.id, "opaque-from-pc")
+        XCTAssertNil(ModelRouter.choose(text: "Hej", candidates: [phone]))
+    }
+}
+
+extension ContractTests {
+    func testBotNotebookSeparatesAndDeletesBotOwnedRecords() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let firstID = UUID()
+        let first = TeamBotNotebookStore(botID: firstID, support: folder)
+        let second = TeamBotNotebookStore(botID: UUID(), support: folder)
+        let note = TeamBotNotebookStore.Memory(id: UUID(), title: "Kode", text: "Brug små ændringer")
+        let skill = TeamBotNotebookStore.Skill(id: UUID(), title: "Review", steps: ["Læs diffen", "Kør test"], sop: "Rapportér resultatet.")
+        try first.save(note)
+        try first.save(skill)
+        XCTAssertEqual(try first.memories(), [note])
+        XCTAssertEqual(try first.skills(), [skill])
+        XCTAssertTrue(try second.memories().isEmpty)
+        XCTAssertTrue(try second.skills().isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appending(path: "FadedAI/Bots/\(firstID.uuidString)/Skills/\(skill.id.uuidString).json").path))
+        XCTAssertTrue(skill.prompt.contains("2. Kør test"))
+        try first.deleteMemory(note.id)
+        try first.deleteSkill(skill.id)
+        XCTAssertTrue(try first.memories().isEmpty)
+        XCTAssertTrue(try first.skills().isEmpty)
+    }
+
+    func testBotNotebookRejectsOversizedSOPAndEmptySkills() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let sop = folder.appending(path: "SOP.txt")
+        try Data("\u{FEFF}Læs instruktionen.".utf8).write(to: sop)
+        XCTAssertEqual(try TeamBotNotebookStore.readSOP(sop), "Læs instruktionen.")
+        try Data(repeating: 65, count: 16_385).write(to: sop)
+        XCTAssertThrowsError(try TeamBotNotebookStore.readSOP(sop))
+        let store = TeamBotNotebookStore(botID: UUID(), support: folder)
+        XCTAssertThrowsError(try store.save(.init(id: UUID(), title: "Tom", steps: ["  "], sop: nil)))
+    }
 }

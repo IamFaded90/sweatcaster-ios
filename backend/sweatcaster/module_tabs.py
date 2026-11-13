@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
 import sqlite3
 import unicodedata
 from collections import Counter
-from contextlib import asynccontextmanager, closing
+from contextlib import AsyncExitStack, asynccontextmanager, closing
+from datetime import datetime, timezone
+from inspect import signature
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import Body, FastAPI, Request
+from fastapi import Body, FastAPI, Request, Response
 
 from sweatcaster.dto import ApiError
+from sweatcaster.emby_library import EmbyLibraryError, read_library
+from sweatcaster.searxng_search import SearXNGError, search_web
+from sweatcaster.youtube_connection import YouTubeError, read_channels
 
 MAX_IMPORT = 1_000_000
 CARD_TAB = {"id": "cards", "kind": "cards", "title": "Kortsamling"}
@@ -112,25 +118,156 @@ def collection_answer(settings, message: str) -> str | None:
 
 
 def register_modules(app: FastAPI, settings, authorize) -> None:
+    from sweatcaster.bot_computer_routes import register_bot_computers
+    from sweatcaster.bot_computers import BotComputerError, BotComputerWorker, wire_uuid
     from sweatcaster.code_batch import BatchWorker, configured_batch
     from sweatcaster.repository_library import RepositoryError
 
     workspace = Path(os.environ.get("SWEATCASTER_WORKSPACE_DIR", "workspace"))
     batch = configured_batch(settings, workspace)
+    computers = register_bot_computers(app, settings, authorize)
     workflows = batch.workflows
     original_lifespan = app.router.lifespan_context
+    mcp = None
+    try:
+        from mcp.server.fastmcp import FastMCP
+        from mcp.server.transport_security import TransportSecuritySettings
+    except ImportError:
+        pass
+    else:
+        from sweatcaster.repository_library import mcp_server
+
+        if "max_request_body_size" in signature(FastMCP).parameters:
+            mcp = mcp_server(workflows.library, stateless_http=True, json_response=True,
+                             max_request_body_size=32_768,
+                             transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+        else:
+            logging.getLogger(__name__).warning("HTTP MCP requires mcp>=1.29.1,<2; the remaining API is available.")
+
+    if mcp is not None:
+        from starlette.routing import Route
+        from sweatcaster.security import is_phone_host
+
+        mcp.streamable_http_app()
+
+        class AuthenticatedMCP:
+            async def __call__(self, scope, receive, send):
+                request = Request(scope, receive)
+                try:
+                    host = request.url.hostname or ""
+                    permitted = host in {"localhost", "127.0.0.1", "::1"} or is_phone_host(host)
+                except ValueError:
+                    permitted = False
+                if not permitted or "origin" in request.headers:
+                    raise ApiError(403, "INVALID_INPUT", "MCP kræver en godkendt lokal adresse og en lokal klient.")
+                authorize(request, settings)
+                await mcp.session_manager.handle_request(scope, receive, send)
+
+        app.router.routes.append(Route("/api/modules/v1/mcp", AuthenticatedMCP(), methods=["GET", "POST", "DELETE"]))
 
     @asynccontextmanager
     async def lifespan(application):
-        async with original_lifespan(application):
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(original_lifespan(application))
+            if mcp is not None:
+                await stack.enter_async_context(mcp.session_manager.run())
             worker = BatchWorker(batch)
+            computers_worker = BotComputerWorker(computers)
             worker.start()
-            try:
-                yield
-            finally:
-                worker.stop()
+            stack.callback(worker.stop)
+            computers_worker.start()
+            stack.callback(computers_worker.stop)
+            yield
 
     app.router.lifespan_context = lifespan
+
+    @app.get("/api/modules/v1/emby/library", include_in_schema=False)
+    def emby_library(request: Request, response: Response, parent: str | None = None,
+                     search: str = "", offset: int = 0):
+        authorize(request, settings)
+        try:
+            library = read_library(parent=parent, search=search, offset=offset)
+        except EmbyLibraryError as exc:
+            code = "INVALID_INPUT" if exc.status == 422 else "NOT_READY"
+            raise ApiError(exc.status, code, str(exc)) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return library
+
+    @app.get("/api/modules/v1/youtube/channels", include_in_schema=False)
+    def youtube_channels(request: Request, response: Response):
+        authorize(request, settings)
+        try:
+            channels = read_channels()
+        except YouTubeError as exc:
+            raise ApiError(exc.status, "NOT_READY", exc.message) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return channels
+
+    @app.put("/api/modules/v1/web-search", include_in_schema=False)
+    def web_search(request: Request, response: Response, body: dict = Body(...)):
+        authorize(request, settings)
+        try:
+            results = search_web(body.get("query"))
+        except SearXNGError as exc:
+            code = "INVALID_INPUT" if exc.status == 422 else "NOT_READY"
+            raise ApiError(exc.status, code, exc.message) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return {"results": results}
+
+    @app.put("/api/modules/v1/bot-activity", include_in_schema=False)
+    def bot_activity(request: Request, response: Response, body: dict = Body(...)):
+        authorize(request, settings)
+        bots = body.get("botIDs")
+        if not isinstance(bots, list) or len(bots) > 10:
+            raise ApiError(422, "INVALID_INPUT", "Vælg højst ti bots.")
+        try:
+            ids = list(dict.fromkeys(wire_uuid(value) for value in bots))
+        except BotComputerError as exc:
+            raise ApiError(422, "INVALID_INPUT", exc.message) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return computers.activity(ids)
+
+    @app.delete("/api/modules/v1/video-jobs/{job_id}/record", include_in_schema=False)
+    def delete_unavailable_video_job(job_id: str, request: Request, payload: dict = Body(...)):
+        authorize(request, settings)
+        if payload != {"confirm_job_id": job_id}:
+            raise ApiError(422, "INVALID_INPUT", "Bekræft jobkortet, før det fjernes.")
+        from sweatcaster.output_cleanup import discard_unavailable_video_job
+
+        discard_unavailable_video_job(settings, app.state.store, job_id)
+        return {"removed": True}
+
+    @app.put("/api/modules/v1/code-repositories", include_in_schema=False)
+    def clone_repository(request: Request, body: dict = Body(...)):
+        authorize(request, settings)
+        repo = body.get("repo")
+        if not isinstance(repo, str) or len(repo) > 150:
+            raise ApiError(422, "INVALID_INPUT", "Angiv et GitHub-repo som ejer/projekt.")
+        try:
+            target = workflows.library._repo(repo)
+            if not target.exists():
+                workflows.library.clone(repo)
+            _, revision = workflows.library._head(repo)
+            return {"repo": repo.lower(), "revision": revision}
+        except (RepositoryError, OSError) as exc:
+            raise ApiError(422, "INVALID_INPUT", "GitHub-repoet kunne ikke klones eller læses med PC’ens Git-adgang.") from exc
+
+    @app.get("/api/modules/v1/routines", include_in_schema=False)
+    def routines(request: Request):
+        authorize(request, settings)
+        return {"routines": workflows.routine_status(datetime.now(timezone.utc))}
+
+    @app.put("/api/modules/v1/routines", include_in_schema=False)
+    def configure_routines(request: Request, body: dict = Body(...)):
+        authorize(request, settings)
+        entries = body.get("routines")
+        if not isinstance(entries, list):
+            raise ApiError(422, "INVALID_INPUT", "Angiv rutiner som en liste.")
+        try:
+            workflows.configure_routines(entries)
+        except RepositoryError as exc:
+            raise ApiError(422, "INVALID_INPUT", str(exc)) from exc
+        return {"routines": workflows.routines()}
 
     @app.get("/api/modules/v1/agent-memory", include_in_schema=False)
     def memories(request: Request):

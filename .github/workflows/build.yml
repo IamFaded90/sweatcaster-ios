@@ -3,42 +3,113 @@ name: Build unsigned iOS IPA
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, 'codex/ipa-*', 'codex/fadedai-village-integration']
 
 permissions:
   contents: read
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-26
     timeout-minutes: 60
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
-      - name: Run XCTest on an iPhone simulator
+      - name: Verify unchanged source for the packaging-only retry
+        if: ${{ github.ref_name == 'codex/ipa-bus-package-65e772a' }}
         run: |
-          simulator="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; runtimes=json.load(sys.stdin)["devices"]; print(next(d["udid"] for devices in runtimes.values() for d in devices if d["name"].startswith("iPhone")))')"
-          xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
-            -destination "platform=iOS Simulator,id=$simulator" \
-            -parallel-testing-enabled NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test
-      - name: Build for iPhone without signing
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 65e772a0c609c1e55b83f368a718ffe0a1e09989
+          git diff --exit-code FETCH_HEAD HEAD -- . ':(exclude).github/workflows/build.yml'
+      - name: Run Release XCTest on an iPhone simulator
+        if: ${{ github.ref_name != 'codex/ipa-bus-package-65e772a' }}
         run: |
+          set -o pipefail
           xcodebuild -version
+          simulator="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"].get("com.apple.CoreSimulator.SimRuntime.iOS-26-2", [])
+          for device in devices:
+              if device["name"] == "iPhone 17 Pro Max" and device.get("isAvailable", False):
+                  print(device["udid"])
+                  break
+          else:
+              sys.exit("iPhone 17 Pro Max with iOS 26.2 is missing from the runner.")
+          ')"
+          xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
+            -configuration Release ENABLE_TESTABILITY=YES \
+            -destination "platform=iOS Simulator,id=$simulator" \
+            -parallel-testing-enabled NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test \
+            2>&1 | tee "$RUNNER_TEMP/FadedAI-XCTest.log"
+      - name: Build for iPhone without signing
+        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
+        run: |
+          set -o pipefail
           xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
             -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
             -derivedDataPath "$RUNNER_TEMP/SweatCasterBuild" \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
-      - name: Package IPA
+            ARCHS=arm64 CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build \
+            2>&1 | tee "$RUNNER_TEMP/FadedAI-Device.log"
+      - name: Show actionable Xcode errors
+        if: ${{ failure() }}
         run: |
-          app="$RUNNER_TEMP/SweatCasterBuild/Build/Products/Release-iphoneos/SweatCaster.app"
-          test -x "$app/SweatCaster"
+          python3 - "$RUNNER_TEMP" <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          directory = Path(sys.argv[1])
+          diagnostics = re.compile(r"^(.+?\.swift):(\d+)(?::\d+)?:\s+(?:fatal )?error:\s+(.*)$")
+          summary = re.compile(r"^(?:xcodebuild: )?(?:fatal )?error:|^Undefined symbols for architecture")
+          secrets = re.compile(r"https?://[^/\s@]+@|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+")
+          seen = set()
+          for log in (directory / "FadedAI-XCTest.log", directory / "FadedAI-Device.log"):
+              if not log.is_file():
+                  continue
+              with log.open(encoding="utf-8", errors="replace") as lines:
+                  for raw in lines:
+                      line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw).strip()
+                      match = diagnostics.match(line)
+                      if match:
+                          file, number, message = match.groups()
+                          path = (workspace / file).resolve()
+                          relative = path.relative_to(workspace).as_posix() if path.is_relative_to(workspace) else ""
+                          location = f" file={relative},line={number}" if re.fullmatch(r"[\w./+-]+", relative) else ""
+                      elif summary.search(line):
+                          message, location = line, ""
+                      else:
+                          continue
+                      message = secrets.sub("[skjult]", message)[:500].replace("%", "%25")
+                      key = (location, message)
+                      if key not in seen:
+                          print(f"::error{location}::{message}")
+                          seen.add(key)
+                      if len(seen) >= 12:
+                          sys.exit(0)
+          PY
+      - name: Package IPA
+        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
+        run: |
+          set -euxo pipefail
+          app="$RUNNER_TEMP/SweatCasterBuild/Build/Products/Release-iphoneos/FadedAI.app"
+          test -x "$app/FadedAI"
+          xcrun lipo "$app/FadedAI" -verify_arch arm64
           test ! -e "$app/_CodeSignature"
+          for bundle in "$app" "$app"/PlugIns/*.appex; do
+            test -d "$bundle" || continue
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$bundle/Info.plist"
+          done
           staging="$(mktemp -d)"
           mkdir "$staging/Payload"
-          ditto "$app" "$staging/Payload/SweatCaster.app"
+          ditto "$app" "$staging/Payload/FadedAI.app"
           cd "$staging"
           zip -qr "$RUNNER_TEMP/FadedAI-unsigned.ipa" Payload
           unzip -tq "$RUNNER_TEMP/FadedAI-unsigned.ipa"
       - uses: actions/upload-artifact@v4
+        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
         with:
           name: FadedAI-unsigned
           path: ${{ runner.temp }}/FadedAI-unsigned.ipa

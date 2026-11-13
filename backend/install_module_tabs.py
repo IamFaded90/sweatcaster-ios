@@ -39,6 +39,36 @@ def install(root: Path) -> None:
             '            return StreamingResponse(stream_collection(), media_type="text/event-stream")\n'
             '        tag, lease = _admit_chat(settings, coord, body)\n',
         ),
+        "output_cleanup.py": (
+            "def delete_rendered_video(settings: Settings, store: Store, job_id: str) -> dict:\n",
+            "def discard_failed_video(settings: Settings, job_id: str) -> None:\n"
+            "    if not re.fullmatch(r\"[a-f0-9]{32}\", job_id):\n"
+            "        raise ApiError(404, \"NOT_FOUND\", \"Jobbet findes ikke.\")\n"
+            "    folder = settings.output_root.resolve() / \"jobs\" / job_id\n"
+            "    if folder.resolve() != folder:\n"
+            "        raise ApiError(409, \"NOT_READY\", \"Jobmappen er et link.\")\n"
+            "    with _HELD_LOCK:\n"
+            "        if _HELD.get(job_id):\n"
+            "            raise ApiError(409, \"NOT_READY\", \"Luk videoen, og prøv igen.\")\n"
+            "        for name in _FILES:\n"
+            "            _remove_allowlisted(folder, folder / name, unlink=Path.unlink, sleep=time.sleep)\n"
+            "\n\n"
+            "def delete_rendered_video(settings: Settings, store: Store, job_id: str) -> dict:\n"
+        ),
+        "store.py": (
+            "    def next_queued(self) -> str | None:\n",
+            "    def delete_completed_job(self, job_id: str) -> bool:\n"
+            "        with self._lock:\n"
+            "            conn = self._connect()\n"
+            "            try:\n"
+            "                result = conn.execute(\"DELETE FROM jobs WHERE id = ? AND state = 'completed'\", (job_id,))\n"
+            "                conn.commit()\n"
+            "                return result.rowcount == 1\n"
+            "            finally:\n"
+            "                conn.close()\n"
+            "\n"
+            "    def next_queued(self) -> str | None:\n"
+        ),
     }
     staged = {}
     for name, (anchor, replacement) in changes.items():
@@ -59,8 +89,60 @@ def install(root: Path) -> None:
         updated = base.replace(anchor, replacement)
         compile(updated, str(path), "exec")
         staged[path] = (original, updated)
+    api = package / "api.py"
+    original = api.read_text(encoding="utf-8")
+    current = staged.get(api, (original, original))[1]
+    failed_delete = "        if not store.delete_failed_job(job_id):\n"
+    failed_cleanup = (
+        "        from sweatcaster.output_cleanup import discard_failed_video\n"
+        "        discard_failed_video(settings, job_id)\n"
+        + failed_delete
+    )
+    if failed_cleanup not in current:
+        if current.count(failed_delete) != 1:
+            raise ValueError("Checkpoint has an unexpected failed video handler; no files were written.")
+        updated = current.replace(failed_delete, failed_cleanup)
+        compile(updated, str(api), "exec")
+        staged[api] = (original, updated)
+    cleanup = package / "output_cleanup.py"
+    original = cleanup.read_text(encoding="utf-8")
+    current = staged.get(cleanup, (original, original))[1]
+    unavailable_job = (
+        "def discard_unavailable_video_job(settings: Settings, store: Store, job_id: str) -> None:\n"
+        "    if not re.fullmatch(r\"[a-f0-9]{32}\", job_id):\n"
+        "        raise ApiError(404, \"NOT_FOUND\", \"Jobbet findes ikke.\")\n"
+        "    with _HELD_LOCK:\n"
+        "        job = store.get_job(job_id)\n"
+        "        if job is None:\n"
+        "            return\n"
+        "        if job[\"status\"] != \"completed\" or _HELD.get(job_id):\n"
+        "            raise ApiError(409, \"NOT_READY\", \"Kun afsluttede jobkort uden video kan fjernes.\")\n"
+        "        folder = settings.output_root.resolve() / \"jobs\" / job_id\n"
+        "        if folder.resolve() != folder:\n"
+        "            raise ApiError(409, \"NOT_READY\", \"Jobmappen er et link.\")\n"
+        "        try:\n"
+        "            (folder / \"output.mp4\").lstat()\n"
+        "        except FileNotFoundError:\n"
+        "            pass\n"
+        "        except OSError as exc:\n"
+        "            raise ApiError(409, \"NOT_READY\", \"PC’en kunne ikke kontrollere den redigerede video.\") from exc\n"
+        "        else:\n"
+        "            raise ApiError(409, \"NOT_READY\", \"Den redigerede video ligger stadig på PC’en.\")\n"
+        "        if not store.delete_completed_job(job_id):\n"
+        "            raise ApiError(409, \"NOT_READY\", \"Jobbet ændrede sig. Opdatér joblisten.\")\n"
+        "\n\n"
+    )
+    if unavailable_job not in current:
+        anchor = "def discard_failed_video(settings: Settings, job_id: str) -> None:\n"
+        if current.count(anchor) != 1:
+            raise ValueError("Checkpoint has unexpected video cleanup; no files were written.")
+        updated = current.replace(anchor, unavailable_job + anchor)
+        compile(updated, str(cleanup), "exec")
+        staged[cleanup] = (original, updated)
     modules = {}
-    for name in (source.name, "code_batch.py", "repository_library.py", "agent_workflows.py"):
+    for name in (source.name, "code_batch.py", "repository_library.py", "agent_workflows.py",
+                 "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py",
+                 "emby_library.py", "emby_settings.py", "searxng_search.py", "google_desktop.py", "youtube_connection.py"):
         path = source.parent / name
         module = path.read_text(encoding="utf-8")
         compile(module, str(path), "exec")

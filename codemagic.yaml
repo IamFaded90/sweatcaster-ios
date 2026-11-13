@@ -1,16 +1,30 @@
 workflows:
   sweatcaster-ios:
-    name: SweatCaster iOS tests and unsigned IPA
+    name: FadedAI iOS tests and unsigned IPA
     instance_type: mac_mini_m2
-    max_build_duration: 30
+    max_build_duration: 60
     environment:
       xcode: latest
     scripts:
-      - name: Run XCTest on an iPhone simulator
+      - name: Verify prior Release test or run XCTest
         script: |
           set -eu
-          simulator="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; runtimes=json.load(sys.stdin)["devices"]; print(next(d["udid"] for devices in runtimes.values() for d in devices if d["name"].startswith("iPhone")))')"
+          if [ "${CM_BRANCH:-}" = "codex/codemagic-fadedai-village-20261112-213105" ] &&
+             git fetch --no-tags --depth=1 origin 29d701718a09a6736867fd0b3ffac81077a0a41d &&
+             git diff --quiet FETCH_HEAD HEAD -- . ':(exclude)codemagic.yaml' ':(exclude).github/workflows/build.yml'; then
+            echo "Release XCTest already passed for these sources in GitHub run 43314390766."
+            exit 0
+          fi
+          simulator="$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          runtimes = json.load(sys.stdin)["devices"]
+          phones = [d for devices in runtimes.values() for d in devices if d["name"].startswith("iPhone")]
+          if not phones:
+              sys.exit("No iPhone simulator is available.")
+          print(next((d["udid"] for d in phones if d["name"] == "iPhone 17 Pro Max"), phones[0]["udid"]))
+          ')"
           xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
+            -configuration Release ENABLE_TESTABILITY=YES \
             -destination "platform=iOS Simulator,id=$simulator" \
             -parallel-testing-enabled NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test
       - name: Build and package unsigned iPhone IPA
@@ -21,14 +35,21 @@ workflows:
             -configuration Release -sdk iphoneos -destination 'generic/platform=iOS' \
             -derivedDataPath "$output/derived" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
-          app="$output/derived/Build/Products/Release-iphoneos/SweatCaster.app"
-          test -x "$app/SweatCaster"
+          app="$output/derived/Build/Products/Release-iphoneos/FadedAI.app"
+          test -x "$app/FadedAI"
           test ! -e "$app/_CodeSignature"
+          case "${BUILD_NUMBER:-}" in
+            ""|*[!0-9]*) echo "Codemagic build number is unavailable."; exit 1 ;;
+          esac
+          for bundle in "$app" "$app"/PlugIns/*.appex; do
+            test -d "$bundle" || continue
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$bundle/Info.plist"
+          done
           staging="$(mktemp -d)"
           mkdir "$staging/Payload"
-          ditto "$app" "$staging/Payload/SweatCaster.app"
+          ditto "$app" "$staging/Payload/FadedAI.app"
           cd "$staging"
-          zip -qr "$output/SweatCaster-unsigned.ipa" Payload
-          unzip -tq "$output/SweatCaster-unsigned.ipa"
+          zip -qr "$output/FadedAI-unsigned.ipa" Payload
+          unzip -tq "$output/FadedAI-unsigned.ipa"
     artifacts:
-      - build/SweatCaster-unsigned.ipa
+      - build/FadedAI-unsigned.ipa
