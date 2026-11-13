@@ -775,6 +775,7 @@ final class VillageLifeSimulator: ObservableObject {
         }
         if bot.needs.energy <= 0.22 { return .sleep }
         if night && bot.needs.energy < 0.80 { return .sleep }
+        if night { return bot.zoneID }
 
         // 5. Soft rest
         if bot.needs.energy <= 0.36 || (isPauseWindow(clockHour) && bot.needs.energy < 0.65) {
@@ -826,10 +827,15 @@ final class VillageLifeSimulator: ObservableObject {
         }
 
         if target == bots[i].zoneID {
-            let needsSleep = bots[i].needs.energy <= 0.22 || isSleepWindow(clockHour)
+            let energy = bots[i].needs.energy
+            let sleepWindow = isSleepWindow(clockHour)
+            let needsSleep = energy <= 0.22 || (sleepWindow && energy < 0.80)
             if target == .sleep && needsSleep {
                 bots[i].walkIntentRest = false
                 startSleep(index: i, now: now)
+            } else if target == .sleep && sleepWindow {
+                bots[i].activity = .rest
+                bots[i].pose = .rest
             } else if target == .cafe && bots[i].cafePartnerID != nil {
                 bots[i].activity = .idle
                 bots[i].pose = .idle

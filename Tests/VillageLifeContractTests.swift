@@ -80,6 +80,24 @@ final class VillageLifeContractTests: XCTestCase {
     }
 
     @MainActor
+    func testRestedBotStaysAwakeInSleepNookAtNight() throws {
+        let start = Date()
+        let life = VillageLifeSimulator(now: start)
+        var bot = try XCTUnwrap(life.bots.first)
+        bot.zoneID = .sleep
+        bot.needs.energy = 0.90
+        bot.needs.social = 0.10
+        life.replaceBotForTesting(bot)
+
+        life.tick(now: start, hour: 23, reduceMotion: false)
+
+        let rested = try XCTUnwrap(life.bots.first)
+        XCTAssertEqual(rested.zoneID, .sleep)
+        XCTAssertEqual(rested.activity, .rest)
+        XCTAssertNil(rested.sleepSessionStarted)
+    }
+
+    @MainActor
     func testDelBQueuedJobKeepsSleepPriority() throws {
         let life = VillageLifeSimulator()
         var bot = try XCTUnwrap(life.bots.first { $0.id == "adam" })
