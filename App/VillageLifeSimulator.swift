@@ -212,14 +212,19 @@ final class VillageLifeSimulator: ObservableObject {
         bots = Array(next.prefix(10))
     }
 
-    /// Drop confirmed PC job markers without treating it as a disconnect (e.g. PC switch).
-    func clearPCJobMarkers() {
+    /// Drop confirmed PC job markers without treating it as a disconnect (e.g. PC switch / hub glitch).
+    /// When `resetOfflineState` is true, also clear `lastWasOffline` so the next online apply
+    /// does not emit `pc_reconnected` (use on PC switch after a prior offline).
+    func clearPCJobMarkers(resetOfflineState: Bool = false) {
         for i in bots.indices {
             bots[i].pcJobRunning = false
             bots[i].pcJobQueued = false
             bots[i].pcJobZone = nil
             bots[i].pcLiveLabel = nil
             bots[i].workStartedAnnounced = false
+        }
+        if resetOfflineState {
+            lastWasOffline = false
         }
     }
 

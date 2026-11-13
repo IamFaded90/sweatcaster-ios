@@ -234,12 +234,12 @@ final class VillageLifeContractTests: XCTestCase {
         bot.pcLiveLabel = "Render"
         bot.pcJobQueued = true
         life.replaceBotForTesting(bot)
-        let before = life.banner
-        life.clearPCJobMarkers()
+        life.applyHubAgents([], offline: true)
+        XCTAssertEqual(life.banner, VillageCopy.speech("offline_rest"))
+        life.clearPCJobMarkers(resetOfflineState: true)
         XCTAssertFalse(life.bots[0].pcJobRunning)
         XCTAssertFalse(life.bots[0].pcJobQueued)
         XCTAssertNil(life.bots[0].pcLiveLabel)
-        XCTAssertEqual(life.banner, before)
         life.applyHubAgents([], offline: false)
         XCTAssertNotEqual(life.banner, VillageCopy.speech("pc_reconnected"))
     }

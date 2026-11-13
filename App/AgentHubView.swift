@@ -251,7 +251,7 @@ struct AgentHub: View {
                     Spacer(minLength: 0)
                 }
                 .contentShape(Rectangle())
-                .onTapGesture { openLifeBot(bot) }
+                .onTapGesture { openLifeBotChooser(bot) }
                 lifeBotActions(bot)
             }
         }
@@ -557,8 +557,8 @@ struct AgentHub: View {
             } catch {
                 AppDiagnostics.record(error)
                 guard !Task.isCancelled, remoteTarget == target else { return }
-                // Any hub fetch failure means PC jobs are no longer confirmed — clear markers.
-                offline = true
+                // Transient hub errors: drop unconfirmed jobs without offline_rest / pc_reconnected.
+                life.clearPCJobMarkers()
                 failure = "Kunne ikke hente Agent-Hub. Tjek forbindelsen til PC’en."
             }
             do { try await Task.sleep(for: .seconds(delay)) }
@@ -578,8 +578,10 @@ struct AgentHub: View {
             wasOffline = true
             offline = true
         } else {
-            // PC switch / new target: clear stale markers without faking offline_rest → pc_reconnected.
-            life.clearPCJobMarkers()
+            // PC switch / new target: clear markers and quiet any prior offline flag so the
+            // next successful apply does not emit a fake pc_reconnected.
+            life.clearPCJobMarkers(resetOfflineState: true)
+            wasOffline = false
             offline = false
         }
         failure = nil
