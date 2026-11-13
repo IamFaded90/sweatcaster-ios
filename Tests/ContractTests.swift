@@ -631,7 +631,7 @@ private final class Stub: URLProtocol {
         } else if url.path == "/api/v2/chat", request.httpMethod == "POST", url.host == "192.168.1.29" {
             status = 200
             mime = "text/event-stream"
-            body = "data: {\"type\":\"text\",\"content\":\"Hej fra PC\"}\n\ndata: {\"type\":\"done\",\"content\":\"\"}\n\n"
+            body = "data: {\"type\":\"text\",\"content\":\"Hej fra PC\"}\n\ndata: {\"type\":\"done\",\"content\":\"\",\"message_id\":\"test-message\",\"model_id\":\"test-model\"}\n\n"
         } else if url.path == "/api/v1/chat", request.httpMethod == "POST",
                   request.value(forHTTPHeaderField: "Accept") == "text/event-stream" {
             status = 200

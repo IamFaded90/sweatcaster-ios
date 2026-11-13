@@ -109,7 +109,7 @@ struct VillageMapView: View {
 
     private var mapStatus: some View {
         VStack(spacing: 8) {
-            if offline {
+            if offline && banner != VillageCopy.speech("offline_rest") {
                 Text(VillageCopy.pcUnavailable)
                     .font(.caption2.weight(.semibold))
                     .padding(8)
@@ -124,7 +124,7 @@ struct VillageMapView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .padding(.top, 10)
+        .padding(.top, 56)
         .padding(.horizontal, 12)
         .allowsHitTesting(false)
     }

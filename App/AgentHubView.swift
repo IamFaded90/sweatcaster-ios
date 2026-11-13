@@ -168,7 +168,7 @@ import SwiftUI
         let hour = Calendar.current.component(.hour, from: life.virtualClock)
         return VillageMapView(bots: life.bots, night: hour < 7 || hour >= 22,
                               cinematic: cinematic, reduceMotion: reduceMotion || calmMotion,
-                              offline: offline, banner: life.banner, paused: life.paused,
+                              offline: api == nil || offline, banner: life.banner, paused: life.paused,
                               onSelect: openLifeComputer)
             .overlay(alignment: .topTrailing) {
                 HStack(spacing: 8) {
@@ -582,8 +582,7 @@ import SwiftUI
         remoteTarget = target
         storedSnapshot = nil
         life.resetPCProjection()
-        if target == nil { life.setPCOffline(true) }
-        if target != nil { offline = false }
+        offline = target == nil
         failure = nil
         details = nil
         achievements = false
