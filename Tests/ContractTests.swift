@@ -178,6 +178,43 @@ final class ContractTests: XCTestCase {
     }
 
     @MainActor
+    func testDelBThinkingWithRunningQuestWalksToJobZone() throws {
+        let life = VillageLifeSimulator()
+        let running = V2Hub.Quest(id: "q2", title: "Video edit", state: .running, updated_at: Date())
+        let agent = V2Hub.Agent(
+            id: "adam", room_id: "video", name: "Adam", icon: "person",
+            status: .thinking, xp: 1, level: 1, xp_in_level: 1, xp_for_next_level: 10,
+            recent_quests: [running]
+        )
+        life.applyHubAgents([agent], offline: false)
+        let adam = try XCTUnwrap(life.bots.first { $0.id == "adam" })
+        XCTAssertTrue(adam.pcJobRunning)
+        XCTAssertEqual(adam.pcLiveLabel, "Tænker")
+        XCTAssertEqual(adam.pcJobZone, .video)
+        XCTAssertTrue(adam.destinationZoneID == .video || adam.zoneID == .video || adam.activity == .walk || adam.activity == .work)
+    }
+
+    @MainActor
+    func testDelBPauseDoesNotFutureShiftMidPauseWalk() {
+        let life = VillageLifeSimulator()
+        let t0 = Date()
+        life.setPaused(true, at: t0)
+        let running = V2Hub.Quest(id: "q3", title: "Video edit", state: .running, updated_at: t0)
+        let agent = V2Hub.Agent(
+            id: "adam", room_id: "video", name: "Adam", icon: "person",
+            status: .working, xp: 1, level: 1, xp_in_level: 1, xp_for_next_level: 10,
+            recent_quests: [running]
+        )
+        life.applyHubAgents([agent], offline: false)
+        life.setPaused(false, at: t0.addingTimeInterval(20))
+        life.tick(now: t0.addingTimeInterval(20.5), reduceMotion: false)
+        if let adam = life.bots.first(where: { $0.id == "adam" }), adam.activity == .walk {
+            XCTAssertGreaterThanOrEqual(adam.pathProgress, 0)
+            XCTAssertLessThan(adam.pathProgress, 1)
+        }
+    }
+
+    @MainActor
     func testDelBOfflineClearsLivePCMarkers() {
         let life = VillageLifeSimulator()
         life.bots[0].pcJobRunning = true

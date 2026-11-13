@@ -48,7 +48,8 @@ final class VillageLifeSimulator: ObservableObject {
         }
         guard paused else { return }
         if let pausedAt {
-            shiftActiveTimers(by: now.timeIntervalSince(pausedAt), now: now)
+            let delta = now.timeIntervalSince(pausedAt)
+            shiftActiveTimers(by: delta, pauseStarted: pausedAt)
         }
         self.pausedAt = nil
         paused = false
@@ -56,30 +57,42 @@ final class VillageLifeSimulator: ObservableObject {
         if banner == VillageCopy.paused { banner = nil }
     }
 
-    private func shiftActiveTimers(by delta: TimeInterval, now: Date) {
+    /// Wall clock for stamping while paused: freeze at pause start so resume-shift is correct.
+    private func stampNow(_ now: Date = .now) -> Date {
+        if paused, let pausedAt { return pausedAt }
+        return now
+    }
+
+    private func shiftActiveTimers(by delta: TimeInterval, pauseStarted: Date) {
         guard delta > 0 else { return }
-        func shift(_ date: Date?) -> Date? {
-            date.map { $0.addingTimeInterval(delta) }
+        // Only shift timestamps that existed at/before pause. Mid-pause hub stamps use
+        // `stampNow` (= pauseStarted), so they move to resume time; true post-pause
+        // wall-clock stamps (if any) stay put.
+        func shift(_ date: Date) -> Date {
+            date <= pauseStarted ? date.addingTimeInterval(delta) : date
         }
-        lastDecision = lastDecision.addingTimeInterval(delta)
-        cafePairCooldownUntil = cafePairCooldownUntil.addingTimeInterval(delta)
-        for key in walkStartedAt.keys { walkStartedAt[key] = walkStartedAt[key]!.addingTimeInterval(delta) }
-        for key in cafeEndsAt.keys { cafeEndsAt[key] = cafeEndsAt[key]!.addingTimeInterval(delta) }
-        for key in restEndsAt.keys { restEndsAt[key] = restEndsAt[key]!.addingTimeInterval(delta) }
-        for key in practiceEndsAt.keys { practiceEndsAt[key] = practiceEndsAt[key]!.addingTimeInterval(delta) }
-        for key in speechClearAt.keys { speechClearAt[key] = speechClearAt[key]!.addingTimeInterval(delta) }
+        func shiftOpt(_ date: Date?) -> Date? { date.map(shift) }
+
+        if lastDecision <= pauseStarted { lastDecision = shift(lastDecision) }
+        if cafePairCooldownUntil <= pauseStarted {
+            cafePairCooldownUntil = shift(cafePairCooldownUntil)
+        }
+        for key in walkStartedAt.keys { walkStartedAt[key] = shift(walkStartedAt[key]!) }
+        for key in cafeEndsAt.keys { cafeEndsAt[key] = shift(cafeEndsAt[key]!) }
+        for key in restEndsAt.keys { restEndsAt[key] = shift(restEndsAt[key]!) }
+        for key in practiceEndsAt.keys { practiceEndsAt[key] = shift(practiceEndsAt[key]!) }
+        for key in speechClearAt.keys { speechClearAt[key] = shift(speechClearAt[key]!) }
         for i in bots.indices {
-            bots[i].arrivedAt = shift(bots[i].arrivedAt)
-            bots[i].sleepSessionStarted = shift(bots[i].sleepSessionStarted)
-            bots[i].restBonusReadyAt = bots[i].restBonusReadyAt.addingTimeInterval(delta)
-            bots[i].practiceBonusReadyAt = bots[i].practiceBonusReadyAt.addingTimeInterval(delta)
-            bots[i].sleepBonusReadyAt = bots[i].sleepBonusReadyAt.addingTimeInterval(delta)
-            bots[i].cafeCooldownUntil = bots[i].cafeCooldownUntil.addingTimeInterval(delta)
+            bots[i].arrivedAt = shiftOpt(bots[i].arrivedAt)
+            bots[i].sleepSessionStarted = shiftOpt(bots[i].sleepSessionStarted)
+            bots[i].restBonusReadyAt = shift(bots[i].restBonusReadyAt)
+            bots[i].practiceBonusReadyAt = shift(bots[i].practiceBonusReadyAt)
+            bots[i].sleepBonusReadyAt = shift(bots[i].sleepBonusReadyAt)
+            bots[i].cafeCooldownUntil = shift(bots[i].cafeCooldownUntil)
         }
         for i in activeEvents.indices {
-            activeEvents[i].startedAt = activeEvents[i].startedAt.addingTimeInterval(delta)
+            activeEvents[i].startedAt = shift(activeEvents[i].startedAt)
         }
-        _ = now
     }
 
     init(isDemoClock: Bool = true, now: Date = .now) {
@@ -318,34 +331,23 @@ final class VillageLifeSimulator: ObservableObject {
             bots[idx].displayName = agent.name
             switch agent.status {
             case .working:
-                interruptLocalSessions(botIndex: idx, bots: &bots)
-                bots[idx].pcJobQueued = false
-                bots[idx].pcJobRunning = true
-                bots[idx].pcJobZone = jobZone
-                bots[idx].pcLiveLabel = running?.title ?? "Arbejder på PC’en"
-                if bots[idx].zoneID != jobZone {
-                    if bots[idx].destinationZoneID != jobZone || bots[idx].activity != .walk {
-                        beginWalk(&bots[idx], to: jobZone, now: .now, reduceMotion: false)
-                    }
-                } else {
-                    bots[idx].destinationZoneID = nil
-                    bots[idx].activity = .work
-                    bots[idx].pose = .work
-                    if !bots[idx].workStartedAnnounced {
-                        say(&bots[idx], "work_started", now: .now)
-                        bots[idx].workStartedAnnounced = true
-                    }
-                }
+                engageConfirmedPCJob(
+                    botIndex: idx,
+                    bots: &bots,
+                    jobZone: jobZone,
+                    label: running?.title ?? "Arbejder på PC’en",
+                    announceStart: true
+                )
             case .thinking:
                 if running != nil {
-                    bots[idx].pcJobRunning = true
-                    bots[idx].pcJobZone = jobZone
-                    bots[idx].pcJobQueued = false
-                    bots[idx].pcLiveLabel = "Tænker"
-                    if bots[idx].zoneID == jobZone {
-                        bots[idx].activity = .work
-                        bots[idx].pose = .work
-                    }
+                    // Confirmed running quest under thinking → same as PC work, with "Tænker" label.
+                    engageConfirmedPCJob(
+                        botIndex: idx,
+                        bots: &bots,
+                        jobZone: jobZone,
+                        label: "Tænker",
+                        announceStart: false
+                    )
                 } else {
                     bots[idx].pcJobRunning = false
                     bots[idx].pcJobQueued = queued
@@ -390,6 +392,35 @@ final class VillageLifeSimulator: ObservableObject {
                     workStartedAnnounced: agent.status == .working
                 )
             )
+        }
+    }
+
+    private func engageConfirmedPCJob(
+        botIndex idx: Int,
+        bots: inout [VillageLifeBot],
+        jobZone: VillageZoneID,
+        label: String,
+        announceStart: Bool
+    ) {
+        let now = stampNow()
+        interruptLocalSessions(botIndex: idx, bots: &bots)
+        bots[idx].pcJobQueued = false
+        bots[idx].pcJobRunning = true
+        bots[idx].pcJobZone = jobZone
+        bots[idx].pcLiveLabel = label
+        if bots[idx].zoneID != jobZone {
+            if bots[idx].destinationZoneID != jobZone || bots[idx].activity != .walk {
+                beginWalk(&bots[idx], to: jobZone, now: now, reduceMotion: false)
+            }
+        } else {
+            bots[idx].destinationZoneID = nil
+            walkStartedAt[bots[idx].id] = nil
+            bots[idx].activity = .work
+            bots[idx].pose = .work
+            if announceStart, !bots[idx].workStartedAnnounced {
+                say(&bots[idx], "work_started", now: now)
+                bots[idx].workStartedAnnounced = true
+            }
         }
     }
 
@@ -1023,8 +1054,9 @@ final class VillageLifeSimulator: ObservableObject {
     // MARK: - Speech / events / day-night
 
     private func say(_ bot: inout VillageLifeBot, _ key: String, now: Date) {
+        let stamped = stampNow(now)
         bot.speechHint = key
-        speechClearAt[bot.id] = now.addingTimeInterval(4)
+        speechClearAt[bot.id] = stamped.addingTimeInterval(4)
     }
 
     private func expireSpeech(now: Date) {
@@ -1056,13 +1088,14 @@ final class VillageLifeSimulator: ObservableObject {
         banner: String?,
         now: Date
     ) {
+        let stamped = stampNow(now)
         let occurrence = VillageEventOccurrence(
-            id: "\(eventID)-\(Int(now.timeIntervalSince1970))-\(botIDs.joined(separator: "-"))",
+            id: "\(eventID)-\(Int(stamped.timeIntervalSince1970))-\(botIDs.joined(separator: "-"))",
             eventID: eventID,
             botIDs: botIDs,
             zoneID: zone,
             speechHint: speech,
-            startedAt: now,
+            startedAt: stamped,
             durationSeconds: duration,
             bannerText: banner
         )
