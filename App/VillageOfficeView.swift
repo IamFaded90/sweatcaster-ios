@@ -2,7 +2,11 @@ import SwiftUI
 
 struct VillageOfficeView: View {
     let bots: [VillageLifeBot]
-    var onSelect: (VillageLifeBot) -> Void
+    var onOpenProfile: (VillageLifeBot) -> Void
+    var onOpenComputer: (VillageLifeBot) -> Void
+
+    @Environment(\.fadedPalette) private var palette
+    @State private var chosenBot: VillageLifeBot?
 
     private let deskPositions: [CGPoint] = {
         var points: [CGPoint] = []
@@ -41,35 +45,16 @@ struct VillageOfficeView: View {
                 .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.08)))
                 .accessibilityLabel("Kontoret")
 
-                Text("Arbejdsstationer")
+                Text("Personlige computere")
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
-                Text("Op til otte synlige pladser. Alle bots findes i listen. Tryk for profil eller computer.")
+                Text("Hver bot har sin egen plads. Tryk for at vælge profil eller computer.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 10)], spacing: 10) {
+                LazyVStack(spacing: 10) {
                     ForEach(bots) { bot in
-                        Button { onSelect(bot) } label: {
-                            HStack(spacing: 10) {
-                                VillageBotSprite(bot: bot, size: 36)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(bot.displayName).font(.subheadline.bold()).lineLimit(1)
-                                    Text(bot.poseLabel + " · " + bot.zoneID.title)
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(2)
-                                    if bot.pcJobRunning, let live = bot.pcLiveLabel {
-                                        Text(live).font(.caption2).foregroundStyle(.mint).lineLimit(1)
-                                    }
-                                }
-                                Spacer(minLength: 0)
-                            }
-                            .padding(10)
-                            .fadedGlassSurface(radius: FadedRadius.medium)
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel("\(bot.displayName), \(bot.poseLabel)")
+                        officeBotRow(bot)
                     }
                 }
             }
@@ -80,6 +65,98 @@ struct VillageOfficeView: View {
         .background { FadedBackground(variant: .village) }
         .navigationTitle("Kontoret")
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $chosenBot) { bot in
+            botActionSheet(bot)
+                .presentationDetents([.height(280)])
+                .presentationDragIndicator(.visible)
+        }
+    }
+
+    private func officeBotRow(_ bot: VillageLifeBot) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 12) {
+                VillageBotSprite(bot: bot, size: 44)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(bot.displayName).font(FadedTypography.section).lineLimit(1)
+                    Text(bot.poseLabel + " · " + bot.zoneID.title)
+                        .font(.caption)
+                        .foregroundStyle(palette.secondary)
+                        .lineLimit(2)
+                    if bot.pcJobRunning, let live = bot.pcLiveLabel {
+                        Text(live).font(.caption2).foregroundStyle(FadedBrand.mint).lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 8) {
+                Button {
+                    onOpenProfile(bot)
+                } label: {
+                    Label("Profil", systemImage: "person.crop.circle")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .fadedGlassSurface(radius: FadedRadius.medium)
+                .accessibilityLabel("Åbn profil for \(bot.displayName)")
+
+                Button {
+                    onOpenComputer(bot)
+                } label: {
+                    Label("Computer", systemImage: "desktopcomputer")
+                        .font(.subheadline.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
+                }
+                .buttonStyle(.plain)
+                .fadedGlassSurface(radius: FadedRadius.medium, tint: FadedBrand.mint.opacity(0.16),
+                                   border: FadedBrand.mint.opacity(0.45))
+                .accessibilityLabel("Åbn computer for \(bot.displayName)")
+            }
+        }
+        .padding(12)
+        .fadedGlassSurface(radius: FadedRadius.card)
+        .accessibilityElement(children: .contain)
+    }
+
+    private func botActionSheet(_ bot: VillageLifeBot) -> some View {
+        VStack(spacing: FadedSpacing.m) {
+            VillageBotSprite(bot: bot, size: 56)
+            Text(bot.displayName).font(FadedTypography.title)
+            Text(bot.poseLabel)
+                .font(.subheadline)
+                .foregroundStyle(palette.secondary)
+            HStack(spacing: 10) {
+                Button {
+                    chosenBot = nil
+                    onOpenProfile(bot)
+                } label: {
+                    Label("Profil", systemImage: "person.crop.circle")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                }
+                .buttonStyle(.plain)
+                .fadedGlassSurface(radius: FadedRadius.medium)
+
+                Button {
+                    chosenBot = nil
+                    onOpenComputer(bot)
+                } label: {
+                    Label("Computer", systemImage: "desktopcomputer")
+                        .font(.headline)
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                        .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
+                }
+                .buttonStyle(.plain)
+                .fadedGlassSurface(radius: FadedRadius.medium, tint: FadedBrand.mint.opacity(0.18),
+                                   border: FadedBrand.mint.opacity(0.5))
+            }
+            Button("Annuller") { chosenBot = nil }
+                .frame(minHeight: 44)
+        }
+        .padding(FadedSpacing.edge)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background { FadedBackground(variant: .village) }
     }
 
     @ViewBuilder
@@ -95,12 +172,12 @@ struct VillageOfficeView: View {
                     .offset(x: 18, y: -2)
             }
             if let bot {
-                Button { onSelect(bot) } label: {
+                Button { chosenBot = bot } label: {
                     VillageBotSprite(bot: bot, size: 28)
                         .offset(y: 4)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(bot.displayName)
+                .accessibilityLabel("\(bot.displayName), vælg profil eller computer")
             }
         }
         .frame(width: 56, height: 56)

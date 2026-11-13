@@ -368,7 +368,8 @@ struct Home: View {
                 .frame(maxWidth: 640, alignment: .leading)
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, FadedSpacing.edge)
-                .background(palette.background)
+                .padding(.vertical, 8)
+                .background(.ultraThinMaterial)
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -401,13 +402,12 @@ struct Home: View {
                     } label: {
                         Image(systemName: "ellipsis")
                             .frame(width: 40, height: 40)
-                            .background(palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.small))
-                            .overlay { RoundedRectangle(cornerRadius: FadedRadius.small).strokeBorder(palette.border) }
+                            .fadedGlassSurface(radius: FadedRadius.small)
                             .frame(minWidth: 44, minHeight: 44)
                     }.accessibilityLabel("Flere muligheder")
                 }
             }
-            .toolbarBackground(palette.background, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
         }
     }
 

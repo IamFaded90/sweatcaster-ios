@@ -178,8 +178,22 @@ struct VillageBotProfile: View {
     }
 
     private func profileActions(_ bot: VillageBot, canDuplicate: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            FadedSecondaryButton("Chat med botten", icon: "lock.shield") {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                speechBox.stop()
+                showPrivateChat = true
+            } label: {
+                Label("Åbn computer", systemImage: "desktopcomputer")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
+            }
+            .buttonStyle(.plain)
+            .fadedGlassSurface(radius: FadedRadius.medium, tint: FadedBrand.mint.opacity(0.16),
+                               border: FadedBrand.mint.opacity(0.45))
+            .accessibilityHint("Åbner botens personlige computer og chat")
+
+            FadedSecondaryButton("Privat chat", icon: "lock.shield") {
                 speechBox.stop()
                 showPrivateChat = true
             }

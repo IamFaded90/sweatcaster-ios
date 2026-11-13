@@ -36,44 +36,55 @@ extension Home {
         }
     }
 
+    /// Hjem sits in the middle of the dock: Chat · Video · Hjem · Landsby · Code Bot · Mere
+    private var dockSpaces: [Space] {
+        [.notes, .gallery, .brain, .tasks, .library]
+    }
+
     private var tabButtons: some View {
         HStack(spacing: 2) {
-            ForEach(Space.allCases) { item in
-                let selected = selectedModuleTab == nil && space == item
-                Button {
-                    if reduceMotion { selectTab(item) }
-                    else { withAnimation(.spring(response: calmMotion ? 0.70 : 0.35, dampingFraction: 0.8)) { selectTab(item) } }
-                } label: {
-                    VStack(spacing: 3) {
-                        Image(systemName: spaceIcon(item)).font(.body)
-                        Text(spaceTitle(item)).font(.caption2.bold()).fixedSize(horizontal: true, vertical: false)
-                        Capsule()
-                            .fill(selected ? FadedBrand.mint : Color.clear)
-                            .frame(width: selected ? 16 : 0, height: 3)
-                            .accessibilityHidden(true)
-                    }
-                    .padding(.horizontal, 4)
-                    .foregroundStyle(selected ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
-                    .frame(minWidth: 44, maxWidth: .infinity, minHeight: 48)
-                    .background(selected ? FadedBrand.mint.opacity(palette.isDark ? 0.18 : 0.28) : Color.clear,
-                                in: RoundedRectangle(cornerRadius: FadedRadius.medium))
-                    .overlay {
-                        if selected {
-                            RoundedRectangle(cornerRadius: FadedRadius.medium)
-                                .strokeBorder(FadedBrand.mint.opacity(0.45), lineWidth: 1)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Åbn " + spaceTitle(item))
-                .accessibilityAddTraits(selected ? .isSelected : [])
-                .accessibilityValue(selected ? "Valgt" : "")
+            ForEach(dockSpaces) { item in
+                dockTab(item)
             }
             moreDestinations
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Faner · \(currentTabAccessibilityName)")
+    }
+
+    private func dockTab(_ item: Space) -> some View {
+        let selected = selectedModuleTab == nil && space == item
+        let isHome = item == .brain
+        return Button {
+            if reduceMotion { selectTab(item) }
+            else { withAnimation(.spring(response: calmMotion ? 0.70 : 0.35, dampingFraction: 0.8)) { selectTab(item) } }
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: spaceIcon(item))
+                    .font(isHome ? .title3.weight(.semibold) : .body)
+                Text(spaceTitle(item)).font(.caption2.bold()).fixedSize(horizontal: true, vertical: false)
+                Capsule()
+                    .fill(selected ? FadedBrand.mint : Color.clear)
+                    .frame(width: selected ? (isHome ? 22 : 16) : 0, height: 3)
+                    .accessibilityHidden(true)
+            }
+            .padding(.horizontal, 4)
+            .foregroundStyle(selected ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
+            .frame(minWidth: isHome ? 56 : 44, maxWidth: .infinity, minHeight: 48)
+            .background(selected ? FadedBrand.mint.opacity(palette.isDark ? 0.18 : 0.28) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: FadedRadius.medium))
+            .overlay {
+                if selected {
+                    RoundedRectangle(cornerRadius: FadedRadius.medium)
+                        .strokeBorder(FadedBrand.mint.opacity(0.45), lineWidth: 1)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Åbn " + spaceTitle(item))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityValue(selected ? "Valgt" : "")
     }
 
     private var currentTabAccessibilityName: String {

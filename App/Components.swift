@@ -203,6 +203,7 @@ struct FadedCard<Content: View>: View {
     let content: Content
     @Environment(\.fadedPalette) private var palette
     @Environment(\.fadedLookPreset) private var lookPreset
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     init(size: FadedCardSize = .standard, accent: Color? = nil, @ViewBuilder content: () -> Content) {
         self.size = size
@@ -212,16 +213,25 @@ struct FadedCard<Content: View>: View {
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: size.radius)
+        let tint = lookPreset?.cardColor(in: palette) ?? palette.card
+        let border = lookPreset?.borderColor(in: palette) ?? palette.border
         content
             .padding(size.inset)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(lookPreset?.cardColor(in: palette) ?? palette.card, in: shape)
+            .background {
+                if reduceTransparency || palette.theme != .faded {
+                    shape.fill(tint)
+                } else {
+                    shape.fill(.regularMaterial)
+                        .overlay { shape.fill(tint.opacity(0.28)) }
+                }
+            }
             .overlay(alignment: .leading) {
                 if let accent { Rectangle().fill(accent).frame(width: FadedSpacing.xs).accessibilityHidden(true) }
             }
             .clipShape(shape)
-            .overlay { shape.strokeBorder(lookPreset?.borderColor(in: palette) ?? palette.border, lineWidth: 1).allowsHitTesting(false) }
-            .shadow(color: .black.opacity(palette.theme == .faded ? 0.18 : palette.isDark ? 0.35 : 0.08),
+            .overlay { shape.strokeBorder(border, lineWidth: 1).allowsHitTesting(false) }
+            .shadow(color: .black.opacity(palette.theme == .faded ? 0.14 : palette.isDark ? 0.35 : 0.08),
                     radius: 10, y: 4)
     }
 }

@@ -58,7 +58,8 @@ struct AgentHub: View {
             VStack(spacing: 0) {
                 if !cinematic { hubHeader }
                 if showOffice && !cinematic {
-                    VillageOfficeView(bots: life.bots, onSelect: openLifeBot)
+                    VillageOfficeView(bots: life.bots, onOpenProfile: openLifeBotProfile,
+                                      onOpenComputer: openLifeBotComputer)
                         .refreshable { attempt += 1 }
                 } else {
                     ScrollView {
@@ -194,7 +195,7 @@ struct AgentHub: View {
                 reduceMotion: reduceMotion || calmMotion,
                 offline: offline,
                 banner: life.banner,
-                onSelect: openLifeBot
+                onSelect: openLifeBotChooser
             )
             if cinematic {
                 HStack(spacing: 8) {
@@ -263,12 +264,10 @@ struct AgentHub: View {
     }
 
     @ViewBuilder private func lifeBotActionButtons(_ bot: VillageLifeBot) -> some View {
-        FadedSecondaryButton("Profil", icon: "person.crop.circle") { openLifeBot(bot) }
+        FadedSecondaryButton("Profil", icon: "person.crop.circle") { openLifeBotProfile(bot) }
             .accessibilityLabel("Åbn profil for \(bot.displayName)")
-        if let local = matchedLocalBot(bot) {
-            FadedSecondaryButton("Chat", icon: "bubble.left") { villageChatBot = local }
-                .accessibilityLabel("Start privat chat med \(bot.displayName)")
-        }
+        FadedSecondaryButton("Computer", icon: "desktopcomputer") { openLifeBotComputer(bot) }
+            .accessibilityLabel("Åbn computer for \(bot.displayName)")
     }
 
     private func matchedLocalBot(_ bot: VillageLifeBot) -> VillageBot? {
@@ -278,17 +277,42 @@ struct AgentHub: View {
         }
     }
 
-    private func openLifeBot(_ bot: VillageLifeBot) {
-        if let agent = snapshot?.agents.first(where: {
+    private func matchedHubAgent(_ bot: VillageLifeBot) -> V2Hub.Agent? {
+        snapshot?.agents.first(where: {
             $0.id == bot.linkedAgentID ||
             $0.id == bot.id ||
             $0.name.localizedCaseInsensitiveCompare(bot.displayName) == .orderedSame
-        }) {
+        })
+    }
+
+    /// Map tap: prefer computer when a local/hub target exists, else profile/inspector.
+    private func openLifeBotChooser(_ bot: VillageLifeBot) {
+        if matchedLocalBot(bot) != nil || matchedHubAgent(bot) != nil {
+            openLifeBotComputer(bot)
+        } else {
+            openLifeBotProfile(bot)
+        }
+    }
+
+    private func openLifeBotProfile(_ bot: VillageLifeBot) {
+        if let local = matchedLocalBot(bot) {
+            localBot = local
+            return
+        }
+        if let agent = matchedHubAgent(bot) {
             details = agent
             return
         }
+        inspectedLifeBot = bot
+    }
+
+    private func openLifeBotComputer(_ bot: VillageLifeBot) {
         if let local = matchedLocalBot(bot) {
-            localBot = local
+            villageChatBot = local
+            return
+        }
+        if let agent = matchedHubAgent(bot) {
+            details = agent
             return
         }
         inspectedLifeBot = bot
@@ -310,7 +334,11 @@ struct AgentHub: View {
                 if bot.carrying != nil {
                     Section("Bærer") { Text(bot.carrying?.label ?? "Pakke") }
                 }
-                Section {
+                Section("Åbn") {
+                    FadedSecondaryButton("Computer", icon: "desktopcomputer") {
+                        inspectedLifeBot = nil
+                        openLifeBotComputer(bot)
+                    }
                     FadedSecondaryButton("Mine bots", icon: "person.2") {
                         inspectedLifeBot = nil
                         showBuilder = true
