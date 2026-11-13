@@ -508,10 +508,8 @@ struct AgentHub: View {
             } catch {
                 AppDiagnostics.record(error)
                 guard !Task.isCancelled, remoteTarget == target else { return }
-                if let networkError = error as? URLError {
-                    offline = [.notConnectedToInternet, .cannotConnectToHost, .networkConnectionLost,
-                               .timedOut, .cannotFindHost].contains(networkError.code)
-                }
+                // Any hub fetch failure means PC jobs are no longer confirmed — clear markers.
+                offline = true
                 failure = "Kunne ikke hente Agent-Hub. Tjek forbindelsen til PC’en."
             }
             do { try await Task.sleep(for: .seconds(delay)) }
@@ -525,7 +523,10 @@ struct AgentHub: View {
         guard remoteTarget != target else { return }
         remoteTarget = target
         storedSnapshot = nil
-        if target != nil { offline = false }
+        // Drop previous hub’s PC markers immediately on disconnect or PC switch.
+        life.applyHubAgents([], offline: true)
+        wasOffline = true
+        offline = (target == nil)
         failure = nil
         details = nil
         achievements = false

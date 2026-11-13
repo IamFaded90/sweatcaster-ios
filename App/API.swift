@@ -187,9 +187,20 @@ struct LiveAPI: SweatAPI, ChatAPI {
     }
 
     private func checkRenderBeforeChat() async throws {
-        let current = try await jobs()
-        guard !current.jobs.contains(where: { $0.status == .rendering }) else {
-            throw AppDiagnostics.record(APIError.http(503, nil))
+        // Only a confirmed `.rendering` job should block chat. Jobs-list failures,
+        // timeouts, or cancels must not fail the send when chat itself is healthy.
+        do {
+            let current = try await jobs()
+            guard !current.jobs.contains(where: { $0.status == .rendering }) else {
+                throw AppDiagnostics.record(APIError.http(503, nil))
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as APIError {
+            if case .http(503, _) = error { throw error }
+            AppDiagnostics.record(error)
+        } catch {
+            AppDiagnostics.record(error)
         }
     }
     private func redact(_ text: String) -> String {
