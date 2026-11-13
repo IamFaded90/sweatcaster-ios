@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -114,6 +115,17 @@ def fill_rect(img: Image.Image, x0: int, y0: int, x1: int, y1: int, color):
 
 def blend(a, b, t: float):
     return tuple(int(a[i] * (1 - t) + b[i] * t) for i in range(4))
+
+
+def blend_rgb_keep_alpha(dst, src_rgb, t: float):
+    """Wash RGB toward src_rgb while keeping destination alpha opaque."""
+    t = max(0.0, min(1.0, t))
+    return (
+        int(dst[0] * (1 - t) + src_rgb[0] * t),
+        int(dst[1] * (1 - t) + src_rgb[1] * t),
+        int(dst[2] * (1 - t) + src_rgb[2] * t),
+        dst[3],
+    )
 
 
 def iso_diamond_fill(img: Image.Image, cx: int, cy: int, w: int, h: int, color, noise=None):
@@ -897,8 +909,10 @@ def compose_village(night: bool = False) -> Image.Image:
                     d = math.hypot(gx - (sx + 15), gy - (sy + 16))
                     if d < 18:
                         cur = img.getpixel((gx, gy))
-                        glow = (255, 210, 120, int(55 * (1 - d / 18)))
-                        img.putpixel((gx, gy), blend(cur, glow, glow[3] / 255))
+                        if cur[3] == 0:
+                            continue
+                        strength = 0.22 * (1 - d / 18)
+                        img.putpixel((gx, gy), blend_rgb_keep_alpha(cur, (255, 210, 120), strength))
 
     adam = draw_character("adam", "idle")
     eva = draw_character("eva", "work")
@@ -1026,19 +1040,19 @@ def main():
     save(phone_frame(night, "night"), PREVIEW / "preview_iphone_village_night.png")
     save(phone_frame(office, "office"), PREVIEW / "preview_iphone_office.png")
 
-    # also copy key previews to artifacts for walkthrough
+    # Optional walkthrough copy — only when the host exposes this path.
     art = Path("/opt/cursor/artifacts")
-    art.mkdir(parents=True, exist_ok=True)
-    for name in (
-        "preview_iphone_village_day.png",
-        "preview_iphone_village_night.png",
-        "preview_iphone_office.png",
-        "preview_village_day.png",
-        "preview_village_night.png",
-    ):
-        src = PREVIEW / name
-        Image.open(src).save(art / name)
-        print(f"artifact {name}")
+    if art.is_dir() and os.access(art, os.W_OK):
+        for name in (
+            "preview_iphone_village_day.png",
+            "preview_iphone_village_night.png",
+            "preview_iphone_office.png",
+            "preview_village_day.png",
+            "preview_village_night.png",
+        ):
+            src = PREVIEW / name
+            Image.open(src).save(art / name)
+            print(f"artifact {name}")
 
 
 if __name__ == "__main__":
