@@ -7,10 +7,13 @@ struct VillageMapView: View {
     let cinematic: Bool
     let reduceMotion: Bool
     let offline: Bool
+    var banner: String? = nil
     var onSelect: (VillageLifeBot) -> Void
 
     @State private var zoom: CGFloat = 1
     @State private var offset: CGSize = .zero
+    @State private var magnifyStart: CGFloat = 1
+    @State private var dragStart: CGSize = .zero
 
     var body: some View {
         GeometryReader { geometry in
@@ -21,40 +24,103 @@ struct VillageMapView: View {
                           ? Color(red: 0.03, green: 0.06, blue: 0.14)
                           : Color(red: 0.12, green: 0.28, blue: 0.38))
 
-                // Terrain wash
                 terrainLayer(size: size)
-
-                // Paths (simple cross using path tiles)
                 pathLayer(size: size)
 
-                // Buildings back-to-front by y
                 ForEach(buildingsSorted) { building in
                     buildingStack(building, size: size)
                 }
 
-                // Props
                 propLayer(size: size)
 
-                // Bots
                 ForEach(bots.sorted(by: { botY($0, size: size) < botY($1, size: size) })) { bot in
                     botNode(bot, size: size)
                 }
 
-                if offline {
-                    Text("PC offline — lokal landsby kører videre")
-                        .font(.caption2.weight(.semibold))
-                        .padding(8)
-                        .background(.ultraThinMaterial, in: Capsule())
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        .padding(.top, 10)
+                VStack(spacing: 8) {
+                    if offline {
+                        Text("PC’en er afbrudt. Landsbyen fortsætter.")
+                            .font(.caption2.weight(.semibold))
+                            .padding(8)
+                            .background(.ultraThinMaterial, in: Capsule())
+                    }
+                    if let banner, !banner.isEmpty {
+                        Text(banner)
+                            .font(.caption2.weight(.semibold))
+                            .padding(8)
+                            .background(.black.opacity(0.55), in: Capsule())
+                            .foregroundStyle(.white)
+                    }
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .padding(.top, 10)
+                .allowsHitTesting(false)
             }
             .scaleEffect(zoom)
             .offset(offset)
-            .gesture(MagnifyGesture().onChanged { zoom = min(2.2, max(1, $0.magnification)) })
-            .simultaneousGesture(DragGesture().onChanged { offset = $0.translation })
+            .gesture(
+                MagnifyGesture()
+                    .onChanged { value in
+                        let next = min(2.2, max(1, magnifyStart * value.magnification))
+                        zoom = next
+                        offset = VillageCamera.clampOffset(offset, zoom: next, frame: size)
+                    }
+                    .onEnded { _ in
+                        magnifyStart = zoom
+                        if zoom <= 1.001 {
+                            zoom = 1
+                            offset = .zero
+                            magnifyStart = 1
+                        } else {
+                            offset = VillageCamera.clampOffset(offset, zoom: zoom, frame: size)
+                        }
+                    }
+            )
+            .simultaneousGesture(
+                DragGesture()
+                    .onChanged { value in
+                        guard zoom > 1.001 else {
+                            offset = .zero
+                            return
+                        }
+                        let proposed = CGSize(
+                            width: dragStart.width + value.translation.width,
+                            height: dragStart.height + value.translation.height
+                        )
+                        offset = VillageCamera.clampOffset(proposed, zoom: zoom, frame: size)
+                    }
+                    .onEnded { _ in
+                        dragStart = offset
+                        if zoom <= 1.001 {
+                            offset = .zero
+                            dragStart = .zero
+                        }
+                    }
+            )
+            .onChange(of: size) { _, newSize in
+                offset = VillageCamera.clampOffset(offset, zoom: zoom, frame: newSize)
+            }
             .clipShape(RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.white.opacity(0.08)))
+            .overlay(alignment: .bottomTrailing) {
+                if zoom > 1.001 {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.2)) {
+                            zoom = 1
+                            offset = .zero
+                            magnifyStart = 1
+                            dragStart = .zero
+                        }
+                    } label: {
+                        Label(VillageCopy.cameraReset, systemImage: "arrow.up.left.and.down.right.magnifyingglass")
+                            .labelStyle(.iconOnly)
+                            .padding(10)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                    .padding(10)
+                    .accessibilityLabel(VillageCopy.cameraReset)
+                }
+            }
         }
         .frame(height: cinematic ? 520 : 420)
         .accessibilityElement(children: .contain)
@@ -174,6 +240,11 @@ struct VillageMapView: View {
                     if bot.carrying != nil {
                         Circle().fill(Color.orange).frame(width: 8, height: 8).offset(x: 4, y: -2)
                     }
+                    if bot.pcJobRunning {
+                        Circle().fill(Color.green).frame(width: 8, height: 8).offset(x: -4, y: -2)
+                    } else if bot.pcJobQueued {
+                        Circle().fill(Color.yellow).frame(width: 8, height: 8).offset(x: -4, y: -2)
+                    }
                     if let speech = VillageCopy.speech(bot.speechHint) {
                         Text(speech)
                             .font(.system(size: 8, weight: .bold))
@@ -185,6 +256,9 @@ struct VillageMapView: View {
                 if !cinematic {
                     Text(bot.displayName).font(.caption2.bold()).lineLimit(1)
                     Text(bot.poseLabel).font(.system(size: 8)).foregroundStyle(.white.opacity(0.85))
+                    if let live = bot.pcLiveLabel, bot.pcJobRunning || bot.pcJobQueued {
+                        Text(live).font(.system(size: 7)).foregroundStyle(.mint)
+                    }
                     needDots(bot.needs)
                 }
             }
@@ -193,9 +267,16 @@ struct VillageMapView: View {
         .buttonStyle(.plain)
         .foregroundStyle(.white)
         .position(point)
-        .accessibilityLabel("\(bot.displayName), \(bot.poseLabel), \(bot.zoneID.title)")
+        .accessibilityLabel(accessibilityText(for: bot))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: bot.zoneID)
         .animation(reduceMotion ? nil : .linear(duration: 0.25), value: bot.pathProgress)
+    }
+
+    private func accessibilityText(for bot: VillageLifeBot) -> String {
+        var parts = ["\(bot.displayName), \(bot.poseLabel) på \(bot.zoneID.title)"]
+        if bot.pcJobRunning { parts.append("PC-opgave i gang") }
+        else if bot.pcJobQueued { parts.append("Venter på en opgave") }
+        return parts.joined(separator: ", ")
     }
 
     private func needDots(_ needs: VillageNeeds) -> some View {

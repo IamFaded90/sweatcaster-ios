@@ -15,59 +15,70 @@ struct VillageOfficeView: View {
     }()
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            ZStack(alignment: .topLeading) {
-                VillagePixelImage(name: "office_background", folder: "office")
-                    .frame(maxWidth: .infinity)
-                    .clipped()
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                ZStack(alignment: .topLeading) {
+                    VillagePixelImage(name: "office_background", folder: "office")
+                        .frame(maxWidth: .infinity)
+                        .clipped()
 
-                // Scale office art into view; draw furniture in 320×180 logical space
-                GeometryReader { geo in
-                    let scale = min(geo.size.width / 320, geo.size.height / 180)
-                    let offsetX = (geo.size.width - 320 * scale) / 2
-                    let offsetY = (geo.size.height - 180 * scale) / 2
-                    ZStack(alignment: .topLeading) {
-                        ForEach(Array(deskPositions.enumerated()), id: \.offset) { index, desk in
-                            station(at: desk, bot: bots.indices.contains(index) ? bots[index] : nil)
-                                .position(x: offsetX + desk.x * scale, y: offsetY + desk.y * scale)
-                                .scaleEffect(scale, anchor: .center)
-                        }
-                    }
-                    .frame(width: geo.size.width, height: geo.size.height)
-                }
-            }
-            .frame(height: 200)
-            .clipShape(RoundedRectangle(cornerRadius: 16))
-            .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.08)))
-
-            Text("Arbejdsstationer")
-                .font(.headline)
-            Text("Op til otte pladser. Tryk på en bot for at åbne dens computer.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 10)], spacing: 10) {
-                ForEach(bots) { bot in
-                    Button { onSelect(bot) } label: {
-                        HStack(spacing: 10) {
-                            VillageBotSprite(bot: bot, size: 36)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(bot.displayName).font(.subheadline.bold()).lineLimit(1)
-                                Text(bot.poseLabel + " · " + bot.zoneID.title)
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
+                    GeometryReader { geo in
+                        let scale = min(geo.size.width / 320, geo.size.height / 180)
+                        let offsetX = (geo.size.width - 320 * scale) / 2
+                        let offsetY = (geo.size.height - 180 * scale) / 2
+                        ZStack(alignment: .topLeading) {
+                            ForEach(Array(deskPositions.enumerated()), id: \.offset) { index, desk in
+                                station(at: desk, bot: bots.indices.contains(index) ? bots[index] : nil)
+                                    .position(x: offsetX + desk.x * scale, y: offsetY + desk.y * scale)
+                                    .scaleEffect(scale, anchor: .center)
                             }
-                            Spacer(minLength: 0)
                         }
-                        .padding(10)
-                        .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+                        .frame(width: geo.size.width, height: geo.size.height)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("\(bot.displayName), \(bot.poseLabel)")
+                }
+                .frame(height: 240)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(.white.opacity(0.08)))
+                .accessibilityLabel("Kontoret")
+
+                Text("Arbejdsstationer")
+                    .font(.headline)
+                    .accessibilityAddTraits(.isHeader)
+                Text("Op til otte synlige pladser. Alle bots findes i listen. Tryk for profil eller computer.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 10)], spacing: 10) {
+                    ForEach(bots) { bot in
+                        Button { onSelect(bot) } label: {
+                            HStack(spacing: 10) {
+                                VillageBotSprite(bot: bot, size: 36)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(bot.displayName).font(.subheadline.bold()).lineLimit(1)
+                                    Text(bot.poseLabel + " · " + bot.zoneID.title)
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                    if bot.pcJobRunning, let live = bot.pcLiveLabel {
+                                        Text(live).font(.caption2).foregroundStyle(.mint).lineLimit(1)
+                                    }
+                                }
+                                Spacer(minLength: 0)
+                            }
+                            .padding(10)
+                            .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(bot.displayName), \(bot.poseLabel)")
+                    }
                 }
             }
+            .padding(20)
+            .frame(maxWidth: 640)
+            .frame(maxWidth: .infinity)
         }
+        .navigationTitle("Kontoret")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     @ViewBuilder

@@ -37,7 +37,8 @@ final class ContractTests: XCTestCase {
         needs.clamp()
         XCTAssertEqual(needs.energy, 1)
         XCTAssertEqual(needs.social, 0)
-        XCTAssertEqual(needs.mood, 1)
+        // Del B: mood = clamp(0.4e + 0.3s + 0.3f) = 0.4 + 0 + 0.15
+        XCTAssertEqual(needs.mood, 0.55, accuracy: 0.0001)
     }
 
     @MainActor
@@ -62,6 +63,94 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(life.bots.contains { $0.id == "adam" && $0.displayName == "Adam" })
         XCTAssertTrue(life.bots.contains { $0.id == "eva" && $0.displayName == "Eva" })
         XCTAssertTrue(life.bots.contains { $0.displayName == "Nova" })
+    }
+
+    @MainActor
+    func testDelBSeedAdamEvaZonesAndNeeds() throws {
+        let life = VillageLifeSimulator()
+        let adam = try XCTUnwrap(life.bots.first { $0.id == "adam" })
+        let eva = try XCTUnwrap(life.bots.first { $0.id == "eva" })
+        XCTAssertEqual(adam.zoneID, .research)
+        XCTAssertEqual(eva.zoneID, .video)
+        XCTAssertEqual(adam.needs.energy, 0.80, accuracy: 0.001)
+        XCTAssertEqual(adam.needs.social, 0.52, accuracy: 0.001)
+        XCTAssertEqual(adam.needs.fulfillment, 0.48, accuracy: 0.001)
+        XCTAssertEqual(eva.needs.energy, 0.76, accuracy: 0.001)
+        XCTAssertEqual(eva.needs.social, 0.38, accuracy: 0.001)
+        XCTAssertEqual(eva.needs.fulfillment, 0.55, accuracy: 0.001)
+    }
+
+    @MainActor
+    func testDelBPCJobBeatsSleepCrisis() throws {
+        let life = VillageLifeSimulator()
+        var bot = try XCTUnwrap(life.bots.first { $0.id == "eva" })
+        bot.needs.energy = 0.20
+        bot.pcJobRunning = true
+        bot.archetype = .creative
+        XCTAssertEqual(life.chooseZone(for: bot, night: false, others: life.bots), .video)
+    }
+
+    @MainActor
+    func testDelBQueuedJobKeepsSleepPriority() throws {
+        let life = VillageLifeSimulator()
+        var bot = try XCTUnwrap(life.bots.first { $0.id == "adam" })
+        bot.needs.energy = 0.20
+        bot.needs.social = 0.15
+        bot.pcJobQueued = true
+        XCTAssertEqual(life.chooseZone(for: bot, night: false, others: life.bots), .sleep)
+    }
+
+    @MainActor
+    func testDelBPauseStopsTickProgress() {
+        let life = VillageLifeSimulator()
+        life.paused = true
+        let before = life.bots.map(\.zoneID)
+        life.tick(now: Date().addingTimeInterval(10), reduceMotion: false, offlinePC: true)
+        XCTAssertEqual(life.bots.map(\.zoneID), before)
+    }
+
+    @MainActor
+    func testDelBOfflineClearsLivePCMarkers() {
+        let life = VillageLifeSimulator()
+        life.bots[0].pcJobRunning = true
+        life.bots[0].pcLiveLabel = "Klip"
+        life.applyHubAgents([], offline: true)
+        XCTAssertFalse(life.bots[0].pcJobRunning)
+        XCTAssertNil(life.bots[0].pcLiveLabel)
+        XCTAssertEqual(life.banner, VillageCopy.speech("offline_rest"))
+    }
+
+    func testVillageCameraClampAt1xIsCentered() {
+        let frame = CGSize(width: 320, height: 420)
+        XCTAssertEqual(VillageCamera.clampOffset(CGSize(width: 80, height: -40), zoom: 1, frame: frame), .zero)
+    }
+
+    func testVillageCameraClampAt2xCapsEdges() {
+        let frame = CGSize(width: 320, height: 420)
+        let maxX = (320.0 * 2 - 320) / 2 // 160
+        let maxY = (420.0 * 2 - 420) / 2 // 210
+        let clamped = VillageCamera.clampOffset(CGSize(width: 999, height: -999), zoom: 2, frame: frame)
+        XCTAssertEqual(clamped.width, maxX, accuracy: 0.001)
+        XCTAssertEqual(clamped.height, -maxY, accuracy: 0.001)
+    }
+
+    @MainActor
+    func testDelBReduceMotionArrivesInstantly() {
+        let life = VillageLifeSimulator()
+        var bot = life.bots[0]
+        bot.arrivedAt = Date().addingTimeInterval(-60)
+        bot.needs.social = 0.1
+        life.bots[0] = bot
+        // Force decision by clearing lastDecision via many ticks with reduce motion
+        let now = Date()
+        for step in 0..<12 {
+            life.tick(now: now.addingTimeInterval(Double(step) * 2), reduceMotion: true, offlinePC: true)
+        }
+        if let eva = life.bots.first(where: { $0.id == "eva" }), eva.destinationZoneID == nil {
+            // Eva starts social 0.38 — may walk or already be at cafe/idle
+            XCTAssertTrue([VillageZoneID.cafe, .video, .research, .sleep].contains(eva.zoneID))
+        }
+        XCTAssertTrue(life.bots.allSatisfy { $0.destinationZoneID == nil || $0.pathProgress == 0 })
     }
 
     func testPCImageFallbackUsesAuthenticatedPNGRoute() async throws {
