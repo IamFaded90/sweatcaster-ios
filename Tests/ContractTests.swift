@@ -105,7 +105,7 @@ final class ContractTests: XCTestCase {
         let life = VillageLifeSimulator()
         life.paused = true
         let before = life.bots.map(\.zoneID)
-        life.tick(now: Date().addingTimeInterval(10), reduceMotion: false, offlinePC: true)
+        life.tick(now: Date().addingTimeInterval(10), reduceMotion: false)
         XCTAssertEqual(life.bots.map(\.zoneID), before)
     }
 
@@ -144,7 +144,7 @@ final class ContractTests: XCTestCase {
         // Force decision by clearing lastDecision via many ticks with reduce motion
         let now = Date()
         for step in 0..<12 {
-            life.tick(now: now.addingTimeInterval(Double(step) * 2), reduceMotion: true, offlinePC: true)
+            life.tick(now: now.addingTimeInterval(Double(step) * 2), reduceMotion: true)
         }
         if let eva = life.bots.first(where: { $0.id == "eva" }), eva.destinationZoneID == nil {
             // Eva starts social 0.38 — may walk or already be at cafe/idle

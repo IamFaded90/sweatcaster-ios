@@ -319,7 +319,7 @@ final class VillageLifeSimulator: ObservableObject {
 
     // MARK: - Tick
 
-    func tick(now: Date = Date(), hour: Int? = nil, reduceMotion: Bool, offlinePC: Bool) {
+    func tick(now: Date = Date(), hour: Int? = nil, reduceMotion: Bool) {
         guard !paused else {
             banner = VillageCopy.paused
             return
@@ -333,9 +333,8 @@ final class VillageLifeSimulator: ObservableObject {
         advanceClock(activeDelta: activeDt)
         let clockHour = hour ?? calendar.component(.hour, from: virtualClock)
 
-        if offlinePC && !lastWasOffline {
-            applyHubAgents([], offline: true)
-        }
+        // Offline ↔ online transitions are applied by AgentHub onChange / applyHubAgents,
+        // not from a captured flag inside the long-running tick task.
 
         driftNeeds(activeDt: activeDt, clockHour: clockHour)
         advanceWalks(now: now, reduceMotion: reduceMotion, clockHour: clockHour)
@@ -349,7 +348,7 @@ final class VillageLifeSimulator: ObservableObject {
 
         if now.timeIntervalSince(lastDecision) >= (reduceMotion ? decisionEvery * 1.25 : decisionEvery) {
             lastDecision = now
-            decideAll(now: now, clockHour: clockHour, reduceMotion: reduceMotion, offlinePC: offlinePC)
+            decideAll(now: now, clockHour: clockHour, reduceMotion: reduceMotion)
         }
 
         objectWillChange.send()
@@ -428,17 +427,17 @@ final class VillageLifeSimulator: ObservableObject {
 
     // MARK: - Decision table (§4)
 
-    private func decideAll(now: Date, clockHour: Int, reduceMotion: Bool, offlinePC: Bool) {
+    private func decideAll(now: Date, clockHour: Int, reduceMotion: Bool) {
         tryReserveCafe(now: now, clockHour: clockHour, reduceMotion: reduceMotion)
 
         // Stable id order
         let order = bots.indices.sorted { bots[$0].id < bots[$1].id }
         for i in order {
-            decide(index: i, now: now, clockHour: clockHour, reduceMotion: reduceMotion, offlinePC: offlinePC)
+            decide(index: i, now: now, clockHour: clockHour, reduceMotion: reduceMotion)
         }
     }
 
-    private func decide(index i: Int, now: Date, clockHour: Int, reduceMotion: Bool, offlinePC: Bool) {
+    private func decide(index i: Int, now: Date, clockHour: Int, reduceMotion: Bool) {
         if bots[i].destinationZoneID != nil { return }
         if bots[i].activity == .talk { return }
         if restEndsAt[bots[i].id] != nil { return }
@@ -446,7 +445,6 @@ final class VillageLifeSimulator: ObservableObject {
 
         let target = chooseZone(for: bots[i], night: isSleepWindow(clockHour), others: bots, clockHour: clockHour, now: now)
         applyDecision(index: i, target: target, now: now, clockHour: clockHour, reduceMotion: reduceMotion)
-        _ = offlinePC
     }
 
     /// Public for contract tests — Del B priority table condensed.

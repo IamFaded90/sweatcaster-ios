@@ -1476,12 +1476,12 @@ private struct AgentHub: View {
                 }
             }
             .task(id: attempt) { await followHub() }
-            .task(id: reduceMotion) {
-                // Drive life sim off the view body to avoid republishing during TimelineView evaluation.
+            .task(id: "\(reduceMotion)-\(offline)") {
+                // Key on offline too so reconnect/disconnect is not stuck in a stale @Sendable capture.
+                // PC live markers are applied via onChange(offline) / hub apply; tick only advances local life.
                 let nanos: UInt64 = reduceMotion ? 2_000_000_000 : 1_000_000_000
                 while !Task.isCancelled {
-                    let now = Date()
-                    life.tick(now: now, reduceMotion: reduceMotion, offlinePC: offline)
+                    life.tick(now: Date(), reduceMotion: reduceMotion)
                     try? await Task.sleep(nanoseconds: nanos)
                 }
             }
