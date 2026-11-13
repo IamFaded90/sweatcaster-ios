@@ -304,8 +304,12 @@ struct ConnectionsView: View {
                         PCServicesView(api: embyAPI)
                     } label: {
                         FadedCard {
-                            Label("Tjenester på PC’en", systemImage: "desktopcomputer")
-                                .frame(minHeight: 44)
+                            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                                Label("Tjenester på PC’en", systemImage: "desktopcomputer")
+                                    .font(FadedTypography.action)
+                                FadedDetailText("YouTube og websøgning. Se, hvad der skal sættes op på PC’en.")
+                            }
+                            .frame(minHeight: 44)
                         }
                     }
                     .buttonStyle(.plain)
@@ -334,7 +338,7 @@ struct ConnectionsView: View {
                     .foregroundStyle(palette.secondary)
                 pickerCard(photos, detail: "Vælg op til tre billeder i Apples billedvælger. Her vises små lokale forhåndsvisninger.")
                 pickerCard(files, detail: "Vælg én fil op til 5 MB fra iCloud Drive eller en anden placering i Filer. Se billeder og uddrag fra tekstfiler her.")
-                DisclosureGroup("Eksterne tjenester · \(providers.count)") {
+                DisclosureGroup("Tjenester uden direkte forbindelse") {
                     VStack(spacing: 10) { ForEach(providers) { providerCard($0) } }
                         .padding(.top, 10)
                 }

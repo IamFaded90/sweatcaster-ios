@@ -29,6 +29,9 @@ struct AppleConnectionsView: View {
                     NavigationLink {
                         FadedAlarmView()
                     } label: { Label("Alarmer", systemImage: "alarm") }
+                } else {
+                    Label("Alarmer kræver iOS 26", systemImage: "alarm")
+                        .foregroundStyle(.secondary)
                 }
                 #endif
                 Button("Åbn Genveje", systemImage: "square.on.square") {
@@ -47,6 +50,12 @@ struct AppleConnectionsView: View {
                 Text("Kontakter og kladder")
             } footer: {
                 Text("Du vælger modtager og sender selv fra Apples skrivevindue.")
+                if !MFMailComposeViewController.canSendMail() {
+                    Text("Tilføj en mailkonto i Apples Mail for at skrive en mail her.")
+                }
+                if !MFMessageComposeViewController.canSendText() {
+                    Text("Skriv besked kræver en iPhone, der kan sende SMS eller iMessage.")
+                }
             }
         }
         .navigationTitle("Apple og iPhone")
@@ -79,6 +88,8 @@ private struct AppleScheduleView: View {
     @State private var entries: [Entry] = []
     @State private var showCalendarEditor = false
     @State private var reminderTitle = ""
+    @State private var reminderHasDate = false
+    @State private var reminderDate = Date.now.addingTimeInterval(3_600)
     @State private var busy = false
     @State private var status: String?
 
@@ -89,6 +100,10 @@ private struct AppleScheduleView: View {
                     Button("Opret aftale", systemImage: "calendar.badge.plus") { showCalendarEditor = true }
                 } else {
                     TextField("Ny påmindelse", text: $reminderTitle)
+                    Toggle("Med tidspunkt", isOn: $reminderHasDate)
+                    if reminderHasDate {
+                        DatePicker("Tidspunkt", selection: $reminderDate, in: Date.now...)
+                    }
                     Button("Gem påmindelse", systemImage: "plus.circle") { Task { await saveReminder() } }
                         .disabled(busy || reminderTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
@@ -114,7 +129,7 @@ private struct AppleScheduleView: View {
                         }
                     }
                 }
-                if EKEventStore.authorizationStatus(for: kind == .calendar ? .event : .reminder) == .denied {
+                if canChangeAccessInSettings {
                     Button("Åbn iPhone-indstillinger") {
                         if let url = URL(string: UIApplication.openSettingsURLString) { openURL(url) }
                     }
@@ -174,14 +189,20 @@ private struct AppleScheduleView: View {
         status = "Giv FadedAI adgang i iPhone-indstillinger for at bruge denne funktion."
     }
 
+    private var canChangeAccessInSettings: Bool {
+        let access = EKEventStore.authorizationStatus(for: kind == .calendar ? .event : .reminder)
+        return access == .denied || access == .restricted || (kind == .calendar && access == .writeOnly)
+    }
+
     private func saveReminder() async {
         let title = reminderTitle.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !busy, !title.isEmpty else { return }
         busy = true
         defer { busy = false }
         do {
-            try await PhoneActions.saveReminder(title: title, due: nil, store: store)
+            try await PhoneActions.saveReminder(title: title, due: reminderHasDate ? reminderDate : nil, store: store)
             reminderTitle = ""
+            reminderHasDate = false
             entries = []
             status = "Påmindelsen er gemt."
         } catch {

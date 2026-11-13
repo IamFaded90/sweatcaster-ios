@@ -417,8 +417,7 @@ extension Home {
             openStudio(.chat)
         case "chat": showChat = true
         case "images": openStudio(.images)
-        case "connection":
-            if !model.address.isEmpty || model.isDemo { showLogin = true }
+        case "connection": showLogin = true
         case "video": openVideoClips()
         case "video-jobs": openVideoJobs()
         case "code": selectSpace(.library)
