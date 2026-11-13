@@ -212,6 +212,17 @@ final class VillageLifeSimulator: ObservableObject {
         bots = Array(next.prefix(10))
     }
 
+    /// Drop confirmed PC job markers without treating it as a disconnect (e.g. PC switch).
+    func clearPCJobMarkers() {
+        for i in bots.indices {
+            bots[i].pcJobRunning = false
+            bots[i].pcJobQueued = false
+            bots[i].pcJobZone = nil
+            bots[i].pcLiveLabel = nil
+            bots[i].workStartedAnnounced = false
+        }
+    }
+
     func applyHubAgents(_ agents: [V2Hub.Agent], offline: Bool) {
         if offline {
             if !lastWasOffline {
@@ -227,13 +238,7 @@ final class VillageLifeSimulator: ObservableObject {
                 )
             }
             lastWasOffline = true
-            for i in bots.indices {
-                bots[i].pcJobRunning = false
-                bots[i].pcJobQueued = false
-                bots[i].pcJobZone = nil
-                bots[i].pcLiveLabel = nil
-                bots[i].workStartedAnnounced = false
-            }
+            clearPCJobMarkers()
             return
         }
 

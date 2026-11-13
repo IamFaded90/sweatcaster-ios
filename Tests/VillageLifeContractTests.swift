@@ -226,6 +226,24 @@ final class VillageLifeContractTests: XCTestCase {
         XCTAssertEqual(life.banner, VillageCopy.speech("offline_rest"))
     }
 
+    @MainActor
+    func testDelBPCSwitchClearsMarkersWithoutOfflineRest() {
+        let life = VillageLifeSimulator()
+        var bot = life.bots[0]
+        bot.pcJobRunning = true
+        bot.pcLiveLabel = "Render"
+        bot.pcJobQueued = true
+        life.replaceBotForTesting(bot)
+        let before = life.banner
+        life.clearPCJobMarkers()
+        XCTAssertFalse(life.bots[0].pcJobRunning)
+        XCTAssertFalse(life.bots[0].pcJobQueued)
+        XCTAssertNil(life.bots[0].pcLiveLabel)
+        XCTAssertEqual(life.banner, before)
+        life.applyHubAgents([], offline: false)
+        XCTAssertNotEqual(life.banner, VillageCopy.speech("pc_reconnected"))
+    }
+
     func testVillageCameraClampAt1xIsCentered() {
         let frame = CGSize(width: 320, height: 420)
         XCTAssertEqual(VillageCamera.clampOffset(CGSize(width: 80, height: -40), zoom: 1, frame: frame), .zero)

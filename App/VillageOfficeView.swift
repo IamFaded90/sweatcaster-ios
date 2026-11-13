@@ -7,6 +7,13 @@ struct VillageOfficeView: View {
 
     @Environment(\.fadedPalette) private var palette
     @State private var chosenBot: VillageLifeBot?
+    /// Run after the chooser sheet dismisses so parent sheets can present cleanly.
+    @State private var pendingOpen: PendingOpen?
+
+    private enum PendingOpen {
+        case profile(VillageLifeBot)
+        case computer(VillageLifeBot)
+    }
 
     private let deskPositions: [CGPoint] = {
         var points: [CGPoint] = []
@@ -65,10 +72,19 @@ struct VillageOfficeView: View {
         .background { FadedBackground(variant: .village) }
         .navigationTitle("Kontoret")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(item: $chosenBot) { bot in
+        .sheet(item: $chosenBot, onDismiss: runPendingOpen) { bot in
             botActionSheet(bot)
                 .presentationDetents([.height(280)])
                 .presentationDragIndicator(.visible)
+        }
+    }
+
+    private func runPendingOpen() {
+        guard let pending = pendingOpen else { return }
+        pendingOpen = nil
+        switch pending {
+        case .profile(let bot): onOpenProfile(bot)
+        case .computer(let bot): onOpenComputer(bot)
         }
     }
 
@@ -128,8 +144,8 @@ struct VillageOfficeView: View {
                 .foregroundStyle(palette.secondary)
             HStack(spacing: 10) {
                 Button {
+                    pendingOpen = .profile(bot)
                     chosenBot = nil
-                    onOpenProfile(bot)
                 } label: {
                     Label("Profil", systemImage: "person.crop.circle")
                         .font(.headline)
@@ -139,8 +155,8 @@ struct VillageOfficeView: View {
                 .fadedGlassSurface(radius: FadedRadius.medium)
 
                 Button {
+                    pendingOpen = .computer(bot)
                     chosenBot = nil
-                    onOpenComputer(bot)
                 } label: {
                     Label("Computer", systemImage: "desktopcomputer")
                         .font(.headline)

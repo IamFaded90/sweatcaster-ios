@@ -27,12 +27,13 @@ struct AgentHub: View {
     @State private var completions = 0
     @StateObject private var life = VillageLifeSimulator()
     @State private var inspectedLifeBot: VillageLifeBot?
+    /// Present after the life-bot inspector dismisses (avoids SwiftUI sheet races).
+    @State private var pendingInspectorFollowup: InspectorFollowup?
     @Environment(\.accessibilityReduceMotion) var reduceMotion
     @Environment(\.dynamicTypeSize) private var hubTypeSize
     @AppStorage(AppStorageKeys.qolReduceMotion) var calmMotion = false
     @State var details: V2Hub.Agent?
     @State private var achievements = false
-
     @State private var remoteTarget: String?
     @State private var storedSnapshot: V2Hub?
     var snapshot: V2Hub? { hasCurrentRemote ? storedSnapshot : nil }
@@ -79,7 +80,7 @@ struct AgentHub: View {
                 OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
                               initialPage: .chat, initialBotID: bot.id)
             }
-            .sheet(item: $inspectedLifeBot, content: lifeBotInspector)
+            .sheet(item: $inspectedLifeBot, onDismiss: runPendingInspectorFollowup, content: lifeBotInspector)
             .task(id: "\(attempt):\(hubPhase == .active):\(api?.queueTargetID ?? "offline")") {
                 resetRemoteIfNeeded()
                 if hubPhase == .active { await followHub() }
@@ -285,6 +286,11 @@ struct AgentHub: View {
         })
     }
 
+    private enum InspectorFollowup {
+        case openComputer(VillageLifeBot)
+        case openBuilder
+    }
+
     /// Map tap: prefer computer when a local/hub target exists, else profile/inspector.
     private func openLifeBotChooser(_ bot: VillageLifeBot) {
         if matchedLocalBot(bot) != nil || matchedHubAgent(bot) != nil {
@@ -315,11 +321,24 @@ struct AgentHub: View {
             details = agent
             return
         }
+        // No computer target yet — show status inspector instead of a no-op reopen.
         inspectedLifeBot = bot
     }
 
+    private func runPendingInspectorFollowup() {
+        guard let pending = pendingInspectorFollowup else { return }
+        pendingInspectorFollowup = nil
+        switch pending {
+        case .openComputer(let bot):
+            openLifeBotComputer(bot)
+        case .openBuilder:
+            showBuilder = true
+        }
+    }
+
     private func lifeBotInspector(_ bot: VillageLifeBot) -> some View {
-        NavigationStack {
+        let hasComputer = matchedLocalBot(bot) != nil || matchedHubAgent(bot) != nil
+        return NavigationStack {
             List {
                 Section("Status") {
                     Text(bot.poseLabel)
@@ -335,13 +354,15 @@ struct AgentHub: View {
                     Section("Bærer") { Text(bot.carrying?.label ?? "Pakke") }
                 }
                 Section("Åbn") {
-                    FadedSecondaryButton("Computer", icon: "desktopcomputer") {
-                        inspectedLifeBot = nil
-                        openLifeBotComputer(bot)
+                    if hasComputer {
+                        FadedSecondaryButton("Computer", icon: "desktopcomputer") {
+                            pendingInspectorFollowup = .openComputer(bot)
+                            inspectedLifeBot = nil
+                        }
                     }
                     FadedSecondaryButton("Mine bots", icon: "person.2") {
+                        pendingInspectorFollowup = .openBuilder
                         inspectedLifeBot = nil
-                        showBuilder = true
                     }
                 }
             }
@@ -551,10 +572,16 @@ struct AgentHub: View {
         guard remoteTarget != target else { return }
         remoteTarget = target
         storedSnapshot = nil
-        // Drop previous hub’s PC markers immediately on disconnect or PC switch.
-        life.applyHubAgents([], offline: true)
-        wasOffline = true
-        offline = (target == nil)
+        if target == nil {
+            // Real disconnect — emit offline_rest once via applyHubAgents.
+            life.applyHubAgents([], offline: true)
+            wasOffline = true
+            offline = true
+        } else {
+            // PC switch / new target: clear stale markers without faking offline_rest → pc_reconnected.
+            life.clearPCJobMarkers()
+            offline = false
+        }
         failure = nil
         details = nil
         achievements = false
