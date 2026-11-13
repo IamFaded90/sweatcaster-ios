@@ -16,6 +16,8 @@ Når brugeren åbner Landsbyen (også i demo uden PC), ser Adam og Eva *leve*: g
 
 **Merge-regel:** Intet merges til `main`, før ejeren eksplicit godkender.
 
+**Del B er klar til Del A:** [Livsdesign v1](UNIVERSIM-LIFE-DESIGN.md) og [JSON-skema](UNIVERSIM-LIFE-SCHEMA.json). Erstat de midlertidige `LIFE-DESIGN`-regler i Del A med den låste beslutningstabel. Behold zoom, og begræns træk til kortets ramme. Ved modstrid går livsdesignet forud for eksemplerne i denne arbejdsbeskrivelse.
+
 ---
 
 ## Fælles kontrakt (skal begge dele respektere)
@@ -143,7 +145,7 @@ Tilføj gerne assets til `Assets.xcassets` som imagesets, eller load via bundle-
 6. **Behovsdriven valg af destination** (efter Del B; ellers simpel energi→sleep, social→cafe, fulfillment→work zone).
 7. **Kontor-view** + navigation Landsby ↔ Kontor.
 8. **Én relation:** talk-boble *eller* carrying-pakke mellem bots.
-9. **Hub-spejl:** online status mapper til activity (working→work, ready→idle/rest, offline→sleep), uden at slå demo-livet helt ihjel.
+9. **Hub-spejl:** online status mapper til activity (working→work, ready/offline→lokal plan), uden at slå demo-livet helt ihjel.
 10. **Polish:** filmtilstand default i landsby-sheet, Reduce Motion respekteres.
 
 ## Tekniske krav
@@ -265,7 +267,7 @@ Mindst:
 | working | work | nej (mens job aktivt) |
 | thinking | work eller talk | begrænset |
 | ready | idle/rest/cafe | ja |
-| offline | sleep/rest | ja |
+| offline | Lokal dagsrytme og behov | ja |
 
 ### 9. Fase 2-forslag (ikke blocker)
 Nye API-felter (mood/energy), server-side simulation, push “Eva er færdig”, CloudKit sync, osv.
@@ -343,7 +345,7 @@ Bevar min PR-beskrivelse ved opdateringer.
 # Hurtig checklist til ejeren
 
 - [ ] Send Del B-prompten til ChatGPT.  
-- [ ] Læg `UNIVERSIM-LIFE-DESIGN.md` ind i repoet/`docs/`.  
+- [x] Læg `UNIVERSIM-LIFE-DESIGN.md` ind i repoet/`docs/`.  
 - [ ] Send Del A-prompten til Cursor.  
 - [ ] Review previews + demo i simulator.  
 - [ ] Godkend PR først, når begge deles acceptkriterier er mødt.
