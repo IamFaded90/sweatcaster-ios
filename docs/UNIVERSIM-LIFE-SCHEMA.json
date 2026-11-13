@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FadedAI Living Village bot state",
+  "description": "Phase 1 bot-state snapshot from the village simulation. Use the event definition to validate an event occurrence separately.",
+  "$ref": "#/$defs/bot_state",
+  "$defs": {
+    "nonempty_string": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:([0-5][0-9]|60)(\\.[0-9]+)?Z$",
+      "description": "RFC 3339 UTC timestamp. The simulation sets it when it updates a bot state or starts an event."
+    },
+    "zone_id": {
+      "enum": ["research", "video", "cafe", "sleep"]
+    },
+    "activity": {
+      "enum": ["idle", "walk", "work", "talk", "rest", "sleep"]
+    },
+    "fraction": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "needs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["energy", "social", "fulfillment", "mood"],
+      "properties": {
+        "energy": { "$ref": "#/$defs/fraction" },
+        "social": { "$ref": "#/$defs/fraction" },
+        "fulfillment": { "$ref": "#/$defs/fraction" },
+        "mood": { "$ref": "#/$defs/fraction" }
+      }
+    },
+    "carry_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "label_key", "from_bot_id", "to_bot_id"],
+      "properties": {
+        "kind": { "const": "file_share" },
+        "label_key": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Local display key such as shared_clip or shared_file. This is a visual handoff and does not grant access to a file."
+        },
+        "from_bot_id": { "$ref": "#/$defs/nonempty_string" },
+        "to_bot_id": { "$ref": "#/$defs/nonempty_string" }
+      }
+    },
+    "bot_state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "display_name",
+        "archetype",
+        "sprite_id",
+        "zone_id",
+        "activity",
+        "pose",
+        "needs",
+        "destination_zone_id",
+        "path_progress",
+        "speech_hint",
+        "carrying",
+        "last_event_id",
+        "updated_at"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/nonempty_string" },
+        "display_name": { "$ref": "#/$defs/nonempty_string" },
+        "archetype": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Bot behavior key. Phase 1 uses logic, creative, care and playful."
+        },
+        "sprite_id": { "$ref": "#/$defs/nonempty_string" },
+        "zone_id": { "$ref": "#/$defs/zone_id" },
+        "activity": { "$ref": "#/$defs/activity" },
+        "pose": { "$ref": "#/$defs/activity" },
+        "needs": { "$ref": "#/$defs/needs" },
+        "destination_zone_id": {
+          "anyOf": [{ "$ref": "#/$defs/zone_id" }, { "type": "null" }]
+        },
+        "path_progress": {
+          "$ref": "#/$defs/fraction",
+          "description": "Progress along the current route, from 0 at departure to 1 at arrival. Use 0 when there is no route."
+        },
+        "speech_hint": { "$ref": "#/$defs/speech_hint" },
+        "carrying": {
+          "anyOf": [{ "$ref": "#/$defs/carry_item" }, { "type": "null" }]
+        },
+        "last_event_id": {
+          "anyOf": [{ "$ref": "#/$defs/nonempty_string" }, { "type": "null" }],
+          "description": "Identifier of the latest event occurrence for this bot."
+        },
+        "updated_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "speech_hint": {
+      "anyOf": [{ "$ref": "#/$defs/nonempty_string" }, { "type": "null" }],
+      "description": "Key for a short localized speech bubble."
+    },
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "event_id", "bot_ids", "zone_id", "speech_hint", "started_at", "duration_seconds"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/nonempty_string",
+          "description": "Unique identifier for this occurrence of the event."
+        },
+        "event_id": {
+          "enum": [
+            "morning_startup",
+            "night_wind_down",
+            "needs_break",
+            "rested",
+            "cafe_chat",
+            "file_handoff",
+            "inspired",
+            "stuck_on_task",
+            "offline_rest",
+            "pc_reconnected",
+            "work_started",
+            "work_finished",
+            "sleep_started",
+            "awake"
+          ],
+          "description": "Stable key in the phase 1 event catalog."
+        },
+        "bot_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/nonempty_string" }
+        },
+        "zone_id": {
+          "anyOf": [{ "$ref": "#/$defs/zone_id" }, { "type": "null" }]
+        },
+        "speech_hint": { "$ref": "#/$defs/speech_hint" },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "duration_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Active simulation seconds, unscaled by the accelerated day/night clock."
+        }
+      }
+    }
+  }
+}

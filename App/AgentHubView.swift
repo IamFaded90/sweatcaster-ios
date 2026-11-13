@@ -14,18 +14,19 @@ struct AgentHub: View {
     var experimentalWork = ExperimentalVillageWork()
     var onExperimentalAction: (ExperimentalVillageAction) -> Void = { _ in }
     @State private var selectedRoom = "research"
-    @AppStorage(AppStorageKeys.villageShowOffice) private var showOffice = true
+    @AppStorage(AppStorageKeys.villageShowOffice) private var showOffice = false
     @AppStorage(AppStorageKeys.villageExperimentalEnabled) private var experimentalVillageEnabled = false
     var localBotsData: Data { MigratedAppData.shared.villageBots }
     @State var localBot: VillageBot?
     @State private var villageChatBot: VillageBot?
     @State var villagePause = false
     @State var cinematic = false
-    @State var villageZoom: CGFloat = 1
-    @State var villageOffset: CGSize = .zero
     @State private var showBuilder = false
     @State var offline = false
+    @State private var wasOffline = false
     @State private var completions = 0
+    @StateObject private var life = VillageLifeSimulator()
+    @State private var inspectedLifeBot: VillageLifeBot?
     @Environment(\.accessibilityReduceMotion) var reduceMotion
     @Environment(\.dynamicTypeSize) private var hubTypeSize
     @AppStorage(AppStorageKeys.qolReduceMotion) var calmMotion = false
@@ -56,14 +57,19 @@ struct AgentHub: View {
         NavigationStack {
             VStack(spacing: 0) {
                 if !cinematic { hubHeader }
-                ScrollView {
-                    hubContent
+                if showOffice && !cinematic {
+                    VillageOfficeView(bots: life.bots, onSelect: openLifeBot)
+                        .refreshable { attempt += 1 }
+                } else {
+                    ScrollView {
+                        hubContent
+                    }
+                    .refreshable { attempt += 1 }
                 }
-                .refreshable { attempt += 1 }
             }
             .background { FadedBackground(variant: .village) }
             .foregroundStyle(palette.text)
-            .navigationTitle("Landsbyen")
+            .navigationTitle(showOffice && !cinematic ? "Kontoret" : "Landsbyen")
             .toolbarVisibility(cinematic ? .hidden : .visible, for: .navigationBar)
             .sensoryFeedback(.success, trigger: completions)
             .sheet(isPresented: $showBuilder) { botLibrary }
@@ -72,13 +78,53 @@ struct AgentHub: View {
                 OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
                               initialPage: .chat, initialBotID: bot.id)
             }
+            .sheet(item: $inspectedLifeBot, content: lifeBotInspector)
             .task(id: "\(attempt):\(hubPhase == .active):\(api?.queueTargetID ?? "offline")") {
                 resetRemoteIfNeeded()
                 if hubPhase == .active { await followHub() }
             }
+            .task(id: "life:\(villageVisible):\(reduceMotion || calmMotion):\(offline)") {
+                guard villageVisible else { return }
+                let calm = reduceMotion || calmMotion
+                let nanos: UInt64 = calm ? 2_000_000_000 : 1_000_000_000
+                while !Task.isCancelled {
+                    life.tick(now: .now, reduceMotion: calm)
+                    try? await Task.sleep(nanoseconds: nanos)
+                }
+            }
+            .onAppear {
+                life.mergeLocalProfiles(localVillageBots)
+                life.setPaused(villagePause)
+                life.filmMode = cinematic
+                if api == nil {
+                    offline = true
+                    life.applyHubAgents([], offline: true)
+                    wasOffline = true
+                }
+            }
+            .onChange(of: villagePause) { _, value in life.setPaused(value) }
+            .onChange(of: cinematic) { _, value in life.filmMode = value }
+            .onChange(of: showBuilder) { _, open in
+                if !open { life.mergeLocalProfiles(localVillageBots) }
+            }
+            .onChange(of: localBot) { _, _ in life.mergeLocalProfiles(localVillageBots) }
+            .onChange(of: offline) { _, value in
+                if value {
+                    life.applyHubAgents([], offline: true)
+                    wasOffline = true
+                } else if wasOffline, let snapshot {
+                    life.applyHubAgents(snapshot.agents, offline: false)
+                    wasOffline = false
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Tilbage", systemImage: "chevron.left", action: onBack)
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(cinematic ? "Vis menu" : "Filmtilstand",
+                           systemImage: cinematic ? "eye" : "video") { cinematic.toggle() }
+                    .accessibilityLabel(cinematic ? "Afslut filmtilstand" : "Start filmtilstand")
                 }
             }
             .sheet(item: $details) { agent in
@@ -108,20 +154,19 @@ struct AgentHub: View {
 
     private var hubContent: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.action) {
-            if showOffice && !cinematic {
-                PixelOfficeView(workers: officeWorkers, isVisible: villageVisible, onSelect: openOfficeWorker)
-            } else {
-                village
-            }
+            villageMapChrome
             if !cinematic {
-                if !showOffice && ExperimentalVillageGate.available && experimentalVillageEnabled {
+                if ExperimentalVillageGate.available && experimentalVillageEnabled {
                     ExperimentalVillageView(bots: localVillageBots, work: experimentalWork, paused: villagePause,
                                             isVisible: villageVisible, openProfile: { localBot = $0 },
                                             openWork: onExperimentalAction)
                 }
                 if offline {
-                    Label("PC’en er offline. Botsene hviler.", systemImage: "cloud.rain")
+                    Label(VillageCopy.pcUnavailable, systemImage: "cloud.rain")
                         .font(.subheadline).foregroundStyle(palette.secondary)
+                }
+                if let banner = life.banner, !banner.isEmpty {
+                    Text(banner).font(.subheadline).foregroundStyle(palette.secondary)
                 }
                 villageActivity
                 hubAgents
@@ -135,55 +180,146 @@ struct AgentHub: View {
             Text("Kontoret").tag(true)
             Text("Landsbyen").tag(false)
         }
+        .accessibilityLabel("Visning · \(showOffice ? "Kontoret" : "Landsbyen")")
+    }
+
+    private var villageMapChrome: some View {
+        let hour = Calendar.current.component(.hour, from: life.virtualClock)
+        let night = hour < 7 || hour >= 22
+        return ZStack(alignment: .topTrailing) {
+            VillageMapView(
+                bots: life.bots,
+                night: night,
+                cinematic: cinematic,
+                reduceMotion: reduceMotion || calmMotion,
+                offline: offline,
+                banner: life.banner,
+                onSelect: openLifeBot
+            )
+            if cinematic {
+                HStack(spacing: 8) {
+                    Button("Kontor") { showOffice = true; cinematic = false }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 12).padding(.vertical, 10)
+                        .foregroundStyle(palette.text)
+                        .fadedGlassSurface(radius: FadedRadius.medium)
+                    Button {
+                        cinematic = false
+                    } label: {
+                        Label("Vis menu", systemImage: "eye").labelStyle(.iconOnly)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .foregroundStyle(palette.text)
+                            .fadedGlassSurface()
+                    }
+                    .accessibilityLabel("Afslut filmtilstand")
+                }
+                .padding(12)
+            }
+        }
     }
 
     private var villageActivity: some View {
         FadedCard {
             VStack(alignment: .leading, spacing: 12) {
                 FadedSectionLabel("Aktivitet i landsbyen")
-                Toggle("Lad lokale bots hvile", isOn: $villagePause).tint(palette.lime)
-                if villageVisible {
-                    TimelineView(.periodic(from: .now, by: 60)) { timeline in
-                        villageBotRows(hour: Calendar.current.component(.hour, from: timeline.date))
-                    }
-                } else {
-                    villageBotRows(hour: Calendar.current.component(.hour, from: .now))
-                }
+                Toggle("Pause landsbyen", isOn: $villagePause).tint(palette.lime)
+                Text("Lokale bots lever på telefonen. Bekræftede PC-opgaver vises, når hub’en er online.")
+                    .font(.caption).foregroundStyle(palette.secondary)
+                lifeBotRows
                 FadedSecondaryButton("Mine bots", icon: "person.2") { showBuilder = true }
             }
         }
     }
 
-    @ViewBuilder private func villageBotRows(hour: Int) -> some View {
-        if localVillageBots.isEmpty {
-            Text("Opret en bot under Mine bots, så kan du følge dens hverdag her.")
+    @ViewBuilder private var lifeBotRows: some View {
+        if life.bots.isEmpty {
+            Text("Adam og Eva vågner, når landsbyen starter.")
                 .font(.subheadline).foregroundStyle(palette.secondary)
         }
-        ForEach(Array(localVillageBots.enumerated()), id: \.element.id) { item in
-            let bot = item.element
-            let activity = botActivity(bot, routine: (hour + item.offset) % 3, sleeping: villageBotsSleep(hour: hour))
+        ForEach(life.bots) { bot in
             Divider().overlay(palette.border)
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 12) {
-                    VillageBotAvatar(bot: bot, size: 44, radius: FadedRadius.small)
+                    VillageBotSprite(bot: bot, size: 44)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(bot.name).font(FadedTypography.section)
-                        Text(activity).font(.subheadline).foregroundStyle(palette.secondary)
+                        Text(bot.displayName).font(FadedTypography.section)
+                        Text(bot.poseLabel + " · " + bot.zoneID.title)
+                            .font(.subheadline).foregroundStyle(palette.secondary)
                     }
+                    Spacer(minLength: 0)
                 }
-                ViewThatFits(in: .horizontal) {
-                    HStack { villageBotActions(bot) }
-                    VStack(alignment: .leading) { villageBotActions(bot) }
-                }
+                .contentShape(Rectangle())
+                .onTapGesture { openLifeBot(bot) }
+                lifeBotActions(bot)
             }
         }
     }
 
-    @ViewBuilder private func villageBotActions(_ bot: VillageBot) -> some View {
-        FadedSecondaryButton("Profil", icon: "person.crop.circle") { localBot = bot }
-            .accessibilityLabel("Åbn profil for \(bot.name)")
-        FadedSecondaryButton("Chat", icon: "bubble.left") { villageChatBot = bot }
-            .accessibilityLabel("Start privat chat med \(bot.name)")
+    @ViewBuilder private func lifeBotActions(_ bot: VillageLifeBot) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack { lifeBotActionButtons(bot) }
+            VStack(alignment: .leading) { lifeBotActionButtons(bot) }
+        }
+    }
+
+    @ViewBuilder private func lifeBotActionButtons(_ bot: VillageLifeBot) -> some View {
+        FadedSecondaryButton("Profil", icon: "person.crop.circle") { openLifeBot(bot) }
+            .accessibilityLabel("Åbn profil for \(bot.displayName)")
+        if let local = matchedLocalBot(bot) {
+            FadedSecondaryButton("Chat", icon: "bubble.left") { villageChatBot = local }
+                .accessibilityLabel("Start privat chat med \(bot.displayName)")
+        }
+    }
+
+    private func matchedLocalBot(_ bot: VillageLifeBot) -> VillageBot? {
+        localVillageBots.first {
+            $0.id.uuidString == bot.id ||
+            $0.name.localizedCaseInsensitiveCompare(bot.displayName) == .orderedSame
+        }
+    }
+
+    private func openLifeBot(_ bot: VillageLifeBot) {
+        if let agent = snapshot?.agents.first(where: {
+            $0.id == bot.linkedAgentID ||
+            $0.id == bot.id ||
+            $0.name.localizedCaseInsensitiveCompare(bot.displayName) == .orderedSame
+        }) {
+            details = agent
+            return
+        }
+        if let local = matchedLocalBot(bot) {
+            localBot = local
+            return
+        }
+        inspectedLifeBot = bot
+    }
+
+    private func lifeBotInspector(_ bot: VillageLifeBot) -> some View {
+        NavigationStack {
+            List {
+                Section("Status") {
+                    Text(bot.poseLabel)
+                    Text(bot.zoneID.title)
+                    Text("Energi \(Int(bot.needs.energy * 100))%")
+                    Text("Social \(Int(bot.needs.social * 100))%")
+                    Text("Arbejdsglæde \(Int(bot.needs.fulfillment * 100))%")
+                    if bot.pcJobRunning { Text("PC-opgave i gang") }
+                    if bot.pcJobQueued { Text("Venter på en opgave") }
+                    if let live = bot.pcLiveLabel { Text(live) }
+                }
+                if bot.carrying != nil {
+                    Section("Bærer") { Text(bot.carrying?.label ?? "Pakke") }
+                }
+                Section {
+                    FadedSecondaryButton("Mine bots", icon: "person.2") {
+                        inspectedLifeBot = nil
+                        showBuilder = true
+                    }
+                }
+            }
+            .navigationTitle(bot.displayName)
+            .toolbar { Button("Luk") { inspectedLifeBot = nil } }
+        }
     }
 
     @ViewBuilder private var hubAgents: some View {
@@ -412,7 +548,9 @@ struct AgentHub: View {
             if !next.subtracting(previous).isEmpty { completions += 1 }
         }
         offline = false
+        wasOffline = false
         storedSnapshot = value
+        life.applyHubAgents(value.agents, offline: false)
         if !value.rooms.contains(where: { $0.id == selectedRoom }) {
             selectedRoom = value.rooms.first?.id ?? ""
         }
