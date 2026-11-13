@@ -544,7 +544,13 @@ final class VillageLifeSimulator: ObservableObject {
             return
         }
 
-        guard canLeave(bots[i], now: now) || bots[i].needs.energy <= 0.22 || bots[i].pcJobRunning else { return }
+        // Crisis, PC work, and strong social need may leave before min stay.
+        let socialCrisis = bots[i].needs.social <= 0.40 && target == .cafe
+        guard canLeave(bots[i], now: now)
+                || bots[i].needs.energy <= 0.22
+                || bots[i].pcJobRunning
+                || socialCrisis
+        else { return }
         beginWalk(&bots[i], to: target, now: now, reduceMotion: reduceMotion)
     }
 

@@ -153,6 +153,31 @@ final class ContractTests: XCTestCase {
         XCTAssertTrue(life.bots.allSatisfy { $0.destinationZoneID == nil || $0.pathProgress == 0 })
     }
 
+    @MainActor
+    func testDelBFirstDecisionSendsEvaTowardCafe() {
+        let life = VillageLifeSimulator()
+        let now = Date()
+        // First tick runs a decision immediately (lastDecision starts distantPast).
+        life.tick(now: now, reduceMotion: false)
+        let eva = life.bots.first { $0.id == "eva" }
+        let adam = life.bots.first { $0.id == "adam" }
+        XCTAssertNotNil(eva)
+        XCTAssertNotNil(adam)
+        // Eva social 0.38 → café reservation / walk; Adam may practice in Research Lab.
+        let evaMovingToCafe = eva?.destinationZoneID == .cafe
+            || eva?.zoneID == .cafe
+            || eva?.cafePartnerID != nil
+            || eva?.activity == .walk
+        XCTAssertTrue(evaMovingToCafe, "Eva should head toward café on first decision")
+        XCTAssertEqual(adam?.zoneID, .research)
+        XCTAssertNotEqual(adam?.destinationZoneID, .cafe, "Adam should not leave for café before min stay")
+    }
+
+    func testDelBSleepKeepsQueuedLabel() {
+        let label = VillageCopy.activityLabel(.sleep, zone: .sleep, pcJob: false, queued: true, localWork: false)
+        XCTAssertTrue(label.contains("Venter"))
+    }
+
     func testPCImageFallbackUsesAuthenticatedPNGRoute() async throws {
         let api = try stubAPI()
         let data = try await api.v2GenerateImage(prompt: "Blue star")

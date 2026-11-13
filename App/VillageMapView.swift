@@ -64,6 +64,7 @@ struct VillageMapView: View {
                         let next = min(2.2, max(1, magnifyStart * value.magnification))
                         zoom = next
                         offset = VillageCamera.clampOffset(offset, zoom: next, frame: size)
+                        dragStart = offset
                     }
                     .onEnded { _ in
                         magnifyStart = zoom
@@ -71,8 +72,10 @@ struct VillageMapView: View {
                             zoom = 1
                             offset = .zero
                             magnifyStart = 1
+                            dragStart = .zero
                         } else {
                             offset = VillageCamera.clampOffset(offset, zoom: zoom, frame: size)
+                            dragStart = offset
                         }
                     }
             )
@@ -99,6 +102,7 @@ struct VillageMapView: View {
             )
             .onChange(of: size) { _, newSize in
                 offset = VillageCamera.clampOffset(offset, zoom: zoom, frame: newSize)
+                dragStart = offset
             }
             .clipShape(RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.white.opacity(0.08)))

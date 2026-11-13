@@ -1489,6 +1489,11 @@ private struct AgentHub: View {
                 life.mergeLocalProfiles(localVillageBots)
                 life.paused = villagePause
                 life.filmMode = cinematic
+                if api == nil {
+                    offline = true
+                    life.applyHubAgents([], offline: true)
+                    wasOffline = true
+                }
             }
             .onChange(of: villagePause) { _, value in life.paused = value }
             .onChange(of: cinematic) { _, value in life.filmMode = value }
@@ -1683,10 +1688,10 @@ private struct AgentHub: View {
             }
         } catch {
             if !Task.isCancelled {
-                if let networkError = error as? URLError {
-                    offline = [.notConnectedToInternet, .cannotConnectToHost, .networkConnectionLost,
-                               .timedOut, .cannotFindHost].contains(networkError.code)
-                }
+                // Any hub failure → local village continues without live PC markers.
+                offline = true
+                life.applyHubAgents([], offline: true)
+                wasOffline = true
                 failure = "Kunne ikke hente Agent-Hub. Tjek forbindelsen til PC’en."
             }
         }

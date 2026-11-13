@@ -179,11 +179,11 @@ enum VillageCopy {
         queued: Bool,
         localWork: Bool
     ) -> String {
-        if queued && activity != .work && activity != .sleep {
+        if queued && activity != .work && activity != .sleep && activity != .idle {
             return "Venter på en opgave"
         }
         switch activity {
-        case .idle: return "Klar"
+        case .idle: return queued ? "Venter på en opgave" : "Klar"
         case .walk: return "På vej til \(zone.title)"
         case .work:
             if pcJob { return "Arbejder på PC’en" }
@@ -191,7 +191,7 @@ enum VillageCopy {
             return "Arbejder"
         case .talk: return "Taler"
         case .rest: return "Holder pause"
-        case .sleep: return "Sover"
+        case .sleep: return queued ? "Sover · Venter på en opgave" : "Sover"
         }
     }
 
