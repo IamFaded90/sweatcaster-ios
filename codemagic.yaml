@@ -4,7 +4,7 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 60
     environment:
-      xcode: latest
+      xcode: 26.3
     scripts:
       - name: Verify prior Release test or run XCTest
         script: |
