@@ -1326,7 +1326,7 @@ final class VillageLifeSimulator: ObservableObject {
         // Positions correspond to the four original FadedAI buildings on the new 1536×1024 map.
         let points: [CGPoint] = [CGPoint(x: 768, y: 380), CGPoint(x: 1080, y: 520),
                                  CGPoint(x: 450, y: 520), CGPoint(x: 768, y: 710)]
-        let pixelScale = min(size.width / 1536, size.height / 1024) * 1.35
+        let pixelScale = max(size.width / 1536, size.height / 1024)
         let point = points[zone.pointIndex]
         return CGPoint(x: size.width / 2 + (point.x - 768) * pixelScale,
                        y: size.height / 2 + (point.y - 512) * pixelScale)

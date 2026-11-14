@@ -87,11 +87,16 @@ struct VillageMapView: View {
     private func mapContent(size: CGSize) -> some View {
         let placements = botPlacements(size: size)
         return ZStack {
-            VillagePixelImage(name: night ? "map-night" : "map-day", folder: "new")
-                .frame(width: size.width, height: size.height)
-                .scaleEffect(1.35)
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
+            if let map = VillageAssets.image(named: night ? "map-night" : "map-day", subdirectory: "new") {
+                Image(uiImage: map)
+                    .resizable()
+                    .interpolation(.none)
+                    .scaledToFill()
+                    .frame(width: size.width, height: size.height)
+                    .clipped()
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
             ForEach(placements) { placement in
                 botNode(placement.bot, at: placement.foot)
             }
