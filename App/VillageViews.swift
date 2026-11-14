@@ -11,6 +11,15 @@ import UniformTypeIdentifiers
 
 struct VillageBot: Codable, Identifiable, Equatable {
     static let defaultTraits = ["Rolig", "Nysgerrig", "Tålmodig"]
+    static let lumiID = UUID(uuidString: "ecba4ff7-69b2-5a9c-a028-d93ef6ec7983")!
+
+    static func lumi() -> VillageBot {
+        VillageBot(id: lumiID, name: "Lumi", color: "Lilla",
+                   prompt: "Privat, voksen og flirtende samtale. Forstår dansk, uperfekt engelsk og blandinger.",
+                   personality: "Legesyg og flirtende", language: "auto",
+                   specialty: "Privat ledsager", responsibility: "Samtale og kreativt studie",
+                   traits: ["Varm", "Legesyg", "Direkte"])
+    }
 
     var id: UUID
     var name: String
@@ -633,6 +642,11 @@ struct VillageBotLibrary: View {
                 FadedPrimaryButton("Ny bot", icon: "plus") { showBuilder = true }
                     .disabled(bots.count >= 10)
                     .listRowInsets(rowInsets).listRowSeparator(.hidden).listRowBackground(Color.clear)
+                if !bots.contains(where: { $0.id == VillageBot.lumiID }) {
+                    FadedSecondaryButton("Tilføj Lumi · 18+", icon: "sparkles") { addLumi() }
+                        .disabled(bots.count >= 10)
+                        .listRowInsets(rowInsets).listRowSeparator(.hidden).listRowBackground(Color.clear)
+                }
                 if bots.isEmpty {
                     FadedEmptyState(icon: "person.crop.circle.badge.plus", title: "Du har ingen bots endnu",
                                     detail: "Opret din første bot med et navn, en stemme og en personlighed.")
@@ -671,13 +685,25 @@ struct VillageBotLibrary: View {
                 VillageBotBuilder(api: api, bot: bot, onBack: { editingBot = nil })
             }
             .sheet(item: $chattingBot) { bot in
-                OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
-                              initialPage: .chat, initialBotID: bot.id)
+                if bot.id == VillageBot.lumiID {
+                    LumiStudio(api: api)
+                } else {
+                    OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
+                                  initialPage: .chat, initialBotID: bot.id)
+                }
             }
         }
     }
 
     private var rowInsets: EdgeInsets { EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16) }
+
+    private func addLumi() {
+        var updated = bots
+        guard updated.count < 10, !updated.contains(where: { $0.id == VillageBot.lumiID }) else { return }
+        updated.append(.lumi())
+        do { try MigratedAppData.shared.saveVillageBots(JSONEncoder().encode(updated)) }
+        catch { AppDiagnostics.record(error) }
+    }
 
     private func botRow(_ bot: VillageBot) -> some View {
         FadedCard {

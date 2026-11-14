@@ -119,6 +119,7 @@ def collection_answer(settings, message: str) -> str | None:
 
 def register_modules(app: FastAPI, settings, authorize) -> None:
     from sweatcaster.bot_computer_routes import register_bot_computers
+    from sweatcaster.lumi_companion import register_lumi
     from sweatcaster.bot_computers import BotComputerError, BotComputerWorker, wire_uuid
     from sweatcaster.code_batch import BatchWorker, configured_batch
     from sweatcaster.repository_library import RepositoryError
@@ -126,6 +127,7 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
     workspace = Path(os.environ.get("SWEATCASTER_WORKSPACE_DIR", "workspace"))
     batch = configured_batch(settings, workspace)
     computers = register_bot_computers(app, settings, authorize)
+    register_lumi(app, settings, authorize)
     workflows = batch.workflows
     original_lifespan = app.router.lifespan_context
     mcp = None

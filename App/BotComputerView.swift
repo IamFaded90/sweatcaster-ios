@@ -41,6 +41,13 @@ import UniformTypeIdentifiers
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: FadedSpacing.action) {
+                VillagePixelImage(name: "room-" + VillageAssets.newArtName(name: bot.name, id: bot.id.uuidString),
+                                  folder: "new")
+                    .frame(height: 180)
+                    .frame(maxWidth: .infinity)
+                    .background(palette.card, in: .rect(cornerRadius: 18))
+                    .clipShape(.rect(cornerRadius: 18))
+                    .accessibilityLabel("Personligt rum for \(bot.name)")
                 statusCard
                 if let client {
                     desktop(client)
