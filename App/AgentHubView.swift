@@ -91,8 +91,12 @@ import SwiftUI
             .sheet(item: $computerBot, content: botComputer)
             .sheet(item: $inspectedLifeBot, content: lifeBotInspector)
             .sheet(item: $villageChatBot) { bot in
-                OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
-                              initialPage: .chat, initialBotID: bot.id)
+                if bot.id == VillageBot.lumiID {
+                    LumiStudio(api: api)
+                } else {
+                    OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
+                                  initialPage: .chat, initialBotID: bot.id)
+                }
             }
             .task(id: "\(attempt):\(hubPhase == .active):\(api?.queueTargetID ?? "offline")") {
                 resetRemoteIfNeeded()

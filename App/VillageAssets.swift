@@ -4,6 +4,34 @@ import UIKit
 enum VillageAssets {
     private static let images = NSCache<NSString, UIImage>()
     private static let sheets = NSCache<NSString, SpriteSheet>()
+    private static let newFrames = NSCache<NSString, UIImage>()
+    private static let newNames = ["adam", "eva", "atlas", "luna", "milo", "iris", "noah", "nova", "saga", "theo"]
+
+    static func newArtName(name: String, id: String) -> String {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if newNames.contains(name) {
+            return name
+        }
+        let hash = id.utf8.reduce(UInt64(14695981039346656037)) {
+            ($0 ^ UInt64($1)) &* 1099511628211
+        }
+        return newNames[Int(hash % UInt64(newNames.count))]
+    }
+
+    static func newBotFrame(_ bot: VillageLifeBot, at time: Date? = nil) -> UIImage? {
+        let stable = newArtName(name: bot.displayName, id: bot.id)
+        let pose = bot.pose.rawValue
+        let frame = time.map { Int($0.timeIntervalSinceReferenceDate * (pose == "walk" || pose == "work" || pose == "talk" ? 8 : 4)) % 8 } ?? 0
+        let key = "\(stable)-\(pose)-\(frame)" as NSString
+        if let cached = newFrames.object(forKey: key) { return cached }
+        guard let sheet = image(named: "bot-\(stable)-\(pose)", subdirectory: "new")?.cgImage,
+              let crop = sheet.cropping(to: CGRect(x: frame * 96, y: 0, width: 96, height: 96)) else {
+            return nil
+        }
+        let image = UIImage(cgImage: crop)
+        newFrames.setObject(image, forKey: key, cost: 96 * 96 * 4)
+        return image
+    }
 
     static func image(named name: String, subdirectory: String) -> UIImage? {
         let key = "\(subdirectory)/\(name)" as NSString
@@ -117,16 +145,12 @@ struct VillageBotSprite: View {
         Group {
             if let data = bot.customSprite, let image = UIImage(data: data) {
                 pixelArt(image)
-            } else if let sheet = VillageAssets.spriteSheet(named: bot.spriteID) {
-                if bot.pose == .walk && animateWalk {
-                    TimelineView(.animation(minimumInterval: 1 / sheet.fps)) { context in
-                        poseImage(sheet.image(for: bot.pose, at: context.date))
-                    }
-                } else {
-                    poseImage(sheet.image(for: bot.pose))
+            } else if animateWalk && (bot.pose == .walk || bot.pose == .work || bot.pose == .talk) {
+                TimelineView(.animation(minimumInterval: 0.125)) { context in
+                    poseImage(VillageAssets.newBotFrame(bot, at: context.date))
                 }
             } else {
-                poseImage(nil)
+                poseImage(VillageAssets.newBotFrame(bot))
             }
         }
         .frame(width: size, height: size)

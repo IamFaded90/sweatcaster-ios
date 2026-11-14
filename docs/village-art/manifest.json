@@ -1,0 +1,1491 @@
+{
+  "license": "CC0-1.0",
+  "projection": "isometric 2:1; x=(u-v)*30, y=(u+v)*15-z*30",
+  "assets": [
+    {
+      "name": "map-night",
+      "dimensions": [
+        1536,
+        1024
+      ],
+      "anchor": [
+        768,
+        480
+      ],
+      "layers": [
+        "background",
+        "ground",
+        "paths",
+        "trees",
+        "buildings"
+      ],
+      "note": "No text or status; bots are separate overlays"
+    },
+    {
+      "name": "map-day",
+      "dimensions": [
+        1536,
+        1024
+      ],
+      "anchor": [
+        768,
+        480
+      ],
+      "layers": [
+        "background",
+        "ground",
+        "paths",
+        "trees",
+        "buildings"
+      ],
+      "note": "No text or status; bots are separate overlays"
+    },
+    {
+      "name": "room-adam",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ],
+      "bot": 0
+    },
+    {
+      "name": "bot-adam-idle",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-adam-walk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-adam-work",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-adam-talk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-adam-rest",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-adam-sleep",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "room-eva",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ],
+      "bot": 1
+    },
+    {
+      "name": "bot-eva-idle",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-eva-walk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-eva-work",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-eva-talk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-eva-rest",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-eva-sleep",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "room-atlas",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ],
+      "bot": 2
+    },
+    {
+      "name": "bot-atlas-idle",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-atlas-walk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-atlas-work",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-atlas-talk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-atlas-rest",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-atlas-sleep",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "room-luna",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ],
+      "bot": 3
+    },
+    {
+      "name": "bot-luna-idle",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-luna-walk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-luna-work",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-luna-talk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-luna-rest",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-luna-sleep",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "room-milo",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ],
+      "bot": 4
+    },
+    {
+      "name": "bot-milo-idle",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-milo-walk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-milo-work",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-milo-talk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-milo-rest",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-milo-sleep",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "room-iris",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ],
+      "bot": 5
+    },
+    {
+      "name": "bot-iris-idle",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-iris-walk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-iris-work",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-iris-talk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-iris-rest",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-iris-sleep",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "room-noah",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ],
+      "bot": 6
+    },
+    {
+      "name": "bot-noah-idle",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-noah-walk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-noah-work",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-noah-talk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-noah-rest",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-noah-sleep",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "room-nova",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ],
+      "bot": 7
+    },
+    {
+      "name": "bot-nova-idle",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-nova-walk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-nova-work",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-nova-talk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-nova-rest",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-nova-sleep",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "room-saga",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ],
+      "bot": 8
+    },
+    {
+      "name": "bot-saga-idle",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-saga-walk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-saga-work",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-saga-talk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-saga-rest",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-saga-sleep",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "room-theo",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ],
+      "bot": 9
+    },
+    {
+      "name": "bot-theo-idle",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-theo-walk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-theo-work",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-theo-talk",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 8,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-theo-rest",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "bot-theo-sleep",
+      "dimensions": [
+        768,
+        1536
+      ],
+      "anchor": [
+        48,
+        82
+      ],
+      "cell": [
+        96,
+        96
+      ],
+      "columns": 8,
+      "rows": 16,
+      "fps": 4,
+      "directions": "row 0 south; clockwise in 22.5 degree increments; stylized shared silhouettes"
+    },
+    {
+      "name": "building-research",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ]
+    },
+    {
+      "name": "building-atelier",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ]
+    },
+    {
+      "name": "building-social",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ]
+    },
+    {
+      "name": "building-rest",
+      "dimensions": [
+        320,
+        256
+      ],
+      "anchor": [
+        160,
+        180
+      ]
+    },
+    {
+      "name": "tree",
+      "dimensions": [
+        128,
+        192
+      ],
+      "anchor": [
+        64,
+        160
+      ]
+    },
+    {
+      "name": "icon-map",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-office",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-tasks",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-computer",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-files",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-settings",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-home",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-chat",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-share",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-retry",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-cancel",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    },
+    {
+      "name": "icon-live",
+      "dimensions": [
+        48,
+        48
+      ],
+      "anchor": [
+        24,
+        24
+      ]
+    }
+  ]
+}

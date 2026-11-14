@@ -1323,10 +1323,13 @@ final class VillageLifeSimulator: ObservableObject {
     // MARK: - Geometry
 
     static func mapPoint(zone: VillageZoneID, size: CGSize) -> CGPoint {
-        let columns: [CGFloat] = [0.27, 0.73, 0.27, 0.73]
-        let rows: [CGFloat] = [0.28, 0.37, 0.65, 0.74]
-        let i = zone.pointIndex
-        return CGPoint(x: size.width * columns[i], y: size.height * rows[i])
+        // Positions correspond to the four original FadedAI buildings on the new 1536×1024 map.
+        let points: [CGPoint] = [CGPoint(x: 768, y: 380), CGPoint(x: 1080, y: 520),
+                                 CGPoint(x: 450, y: 520), CGPoint(x: 768, y: 710)]
+        let pixelScale = min(size.width / 1536, size.height / 1024) * 1.35
+        let point = points[zone.pointIndex]
+        return CGPoint(x: size.width / 2 + (point.x - 768) * pixelScale,
+                       y: size.height / 2 + (point.y - 512) * pixelScale)
     }
 
     static func interpolatedPoint(bot: VillageLifeBot, size: CGSize) -> CGPoint {

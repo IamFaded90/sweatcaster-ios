@@ -1,6 +1,7 @@
 // Bot profile, local voice previews and a private chat entry point.
 
 import Foundation
+import AVKit
 import SwiftUI
 
 struct VillageBotProfile: View {
@@ -42,7 +43,7 @@ struct VillageBotProfile: View {
                     computerLink(bot, roster: localBots)
                     voiceCard(bot)
                     personalityCard(bot)
-                    testCard(bot)
+                    if bot.id != VillageBot.lumiID { testCard(bot) }
                     NavigationLink { TeamBotNotebook(botID: bot.id) } label: {
                         FadedCard(accent: palette.purple) {
                             Label("Hukommelse, skills og vejledninger", systemImage: "books.vertical")
@@ -79,8 +80,12 @@ struct VillageBotProfile: View {
         }
         .sheet(isPresented: $showModels) { PhoneModelsView() }
         .sheet(isPresented: $showPrivateChat) {
-            OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
-                          initialPage: .chat, initialBotID: botID)
+            if botID == VillageBot.lumiID {
+                LumiStudio(api: api)
+            } else {
+                OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
+                              initialPage: .chat, initialBotID: botID)
+            }
         }
         .task(id: deletedBot?.id) {
             guard let id = deletedBot?.id else { return }
@@ -195,7 +200,7 @@ struct VillageBotProfile: View {
 
     private func profileActions(_ bot: VillageBot, canDuplicate: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            FadedSecondaryButton("Chat med botten", icon: "lock.shield") {
+            FadedSecondaryButton(bot.id == VillageBot.lumiID ? "Åbn Lumis private studie" : "Chat med botten", icon: "lock.shield") {
                 speechBox.stop()
                 showPrivateChat = true
             }
@@ -292,5 +297,120 @@ struct VillageBotProfile: View {
             self.deletedBot = nil
             notice = nil
         } catch { AppDiagnostics.record(error); notice = "Botten kunne ikke gendannes." }
+    }
+}
+
+/// Lumi has a separate screen and a fixed PC route; ordinary bot chats never select her models.
+struct LumiStudio: View {
+    let api: LiveAPI?
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.fadedPalette) private var palette
+    @State private var mode = 0
+    @State private var draft = ""
+    @State private var messages: [[String: String]] = []
+    @State private var picture: Data?
+    @State private var videoPlayer: AVPlayer?
+    @State private var busy = false
+    @State private var notice: String?
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 12) {
+                Picker("Vælg", selection: $mode) {
+                    Text("Samtale").tag(0)
+                    Text("Billeder").tag(1)
+                    Text("Video").tag(2)
+                }.pickerStyle(.segmented)
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Lumi · privat 18+")
+                            .font(.title2.bold())
+                        Text("Skriv på dansk, engelsk eller en blanding. Du behøver ikke skrive perfekt.")
+                            .font(.subheadline).foregroundStyle(palette.secondary)
+                        if mode == 0 {
+                            ForEach(Array(messages.enumerated()), id: \.offset) { _, item in
+                                Text(item["content"] ?? "")
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .padding(12)
+                                    .background(item["role"] == "user" ? palette.raised : palette.card,
+                                                in: .rect(cornerRadius: 14))
+                            }
+                        } else if mode == 1 {
+                            if let picture, let image = UIImage(data: picture) {
+                                Image(uiImage: image).resizable().scaledToFit()
+                                    .clipShape(.rect(cornerRadius: 16))
+                                    .accessibilityLabel("Billede lavet af Lumi")
+                            }
+                        } else if let videoPlayer {
+                            VideoPlayer(player: videoPlayer).frame(height: 300)
+                        } else {
+                            Text("Lav et kort klip med PC’en. Det kan tage flere minutter.")
+                                .font(.subheadline).foregroundStyle(palette.secondary)
+                        }
+                        if let notice {
+                            Text(notice).font(.footnote).foregroundStyle(palette.coralText)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                TextField(mode == 0 ? "Skriv til Lumi" : mode == 1 ? "Beskriv dit billede" : "Beskriv din video", text: $draft,
+                          axis: .vertical)
+                    .lineLimit(2...5)
+                    .padding(12)
+                    .background(palette.raised, in: .rect(cornerRadius: 14))
+                FadedPrimaryButton(busy ? "Arbejder på PC’en…" : mode == 0 ? "Send" : mode == 1 ? "Lav billede" : "Lav video",
+                                   icon: mode == 0 ? "arrow.up" : mode == 1 ? "photo" : "film") { send() }
+                    .disabled(busy || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || api == nil)
+                if api == nil { Text("Forbind din PC for at bruge Lumi.").font(.footnote) }
+            }
+            .padding(16)
+            .background { FadedBackground() }
+            .foregroundStyle(palette.text)
+            .navigationTitle("Lumi")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Luk") { dismiss() } } }
+        }
+    }
+
+    private func send() {
+        guard let api, !busy else { return }
+        let input = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { return }
+        let selectedMode = mode
+        let previous = Array(messages.suffix(16))
+        draft = ""
+        notice = nil
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                if selectedMode == 0 {
+                    let reply = try await api.lumiChat(message: input, history: previous)
+                    messages.append(["role": "user", "content": input])
+                    messages.append(["role": "assistant", "content": reply])
+                } else if selectedMode == 1 {
+                    picture = try await api.lumiImage(prompt: input)
+                } else {
+                    let receipt = try await api.lumiStartVideo(prompt: input)
+                    guard let id = UUID(uuidString: receipt.id) else { throw APIError.malformed }
+                    var status = receipt
+                    while status.status == "working" {
+                        try await Task.sleep(for: .seconds(12))
+                        status = try await api.lumiVideoStatus(id: id)
+                    }
+                    guard status.status == "ready" else { throw APIError.malformed }
+                    let data = try await api.lumiVideoFile(id: id)
+                    let file = FileManager.default.temporaryDirectory.appendingPathComponent("lumi-\(id.uuidString).mp4")
+                    try data.write(to: file, options: .atomic)
+                    videoPlayer = AVPlayer(url: file)
+                }
+            } catch {
+                AppDiagnostics.record(error)
+                draft = input
+                notice = "PC’en kunne ikke svare. Tjek at Ollama og ComfyUI kører, og prøv igen."
+            }
+        }
     }
 }

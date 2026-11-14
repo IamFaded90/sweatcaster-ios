@@ -65,7 +65,81 @@ final class NoRedirects: NSObject, URLSessionTaskDelegate, Sendable {
                     newRequest request: URLRequest) async -> URLRequest? { nil }
 }
 
+struct LumiVideoJob: Decodable {
+    let id: String
+    let status: String
+    let message: String?
+}
+
 struct LiveAPI: SweatAPI, ChatAPI {
+    func lumiChat(message: String, history: [[String: String]]) async throws -> String {
+        struct Reply: Decodable { let reply: String }
+        let body = try JSONSerialization.data(withJSONObject: ["message": message, "history": history])
+        let result: Reply = try await lumiRequest("chat", body: body, timeout: 190)
+        return result.reply
+    }
+
+    func lumiImage(prompt: String) async throws -> Data {
+        let body = try JSONSerialization.data(withJSONObject: ["prompt": prompt])
+        let (data, response) = try await lumiData("image", body: body, timeout: 290)
+        try checked(response, expected: 200, data: data)
+        guard data.count <= 15_000_000, data.starts(with: [0x89, 0x50, 0x4e, 0x47]) else {
+            throw APIError.malformed
+        }
+        return data
+    }
+
+    func lumiStartVideo(prompt: String) async throws -> LumiVideoJob {
+        let body = try JSONSerialization.data(withJSONObject: ["prompt": prompt])
+        return try await lumiRequest("video", body: body, timeout: 30)
+    }
+
+    func lumiVideoStatus(id: UUID) async throws -> LumiVideoJob {
+        let url = try lumiURL("video/" + id.uuidString.lowercased())
+        let (data, response) = try await loggedData(for: request(url))
+        try checked(response, expected: 200, data: data)
+        guard data.count <= 10_000 else { throw APIError.malformed }
+        return try loggedDecode(LumiVideoJob.self, from: data, decoder: JSONDecoder())
+    }
+
+    func lumiVideoFile(id: UUID) async throws -> Data {
+        let url = try lumiURL("video/" + id.uuidString.lowercased() + "/file")
+        var endpoint = request(url)
+        endpoint.timeoutInterval = 90
+        let (data, response) = try await loggedData(for: endpoint)
+        try checked(response, expected: 200, data: data)
+        guard data.count <= 40_000_000, data.count >= 8,
+              Data(data[4..<8]) == Data("ftyp".utf8) else { throw APIError.malformed }
+        return data
+    }
+
+    private func lumiRequest<T: Decodable>(_ action: String, body: Data,
+                                           timeout: TimeInterval) async throws -> T {
+        let (data, response) = try await lumiData(action, body: body, timeout: timeout)
+        try checked(response, expected: 200, data: data)
+        guard data.count <= 100_000 else { throw APIError.malformed }
+        return try loggedDecode(T.self, from: data, decoder: JSONDecoder())
+    }
+
+    private func lumiData(_ action: String, body: Data,
+                          timeout: TimeInterval) async throws -> (Data, URLResponse) {
+        guard ["chat", "image", "video"].contains(action) else { throw APIError.input }
+        let url = try lumiURL(action)
+        var endpoint = request(url, method: "POST")
+        endpoint.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        endpoint.httpBody = body
+        endpoint.timeoutInterval = timeout
+        return try await loggedData(for: endpoint)
+    }
+
+    private func lumiURL(_ suffix: String) throws -> URL {
+        guard let url = URL(string: server.origin.absoluteString + "/api/modules/v1/lumi/" +
+                            VillageBot.lumiID.uuidString.lowercased() + "/" + suffix) else {
+            throw APIError.input
+        }
+        return url
+    }
+
     private func moduleJSON<T: Decodable>(_ path: String, upload: Data? = nil, timeout: TimeInterval? = nil,
                                           query: [URLQueryItem] = []) async throws -> T {
         var endpoint = try v2Request("modules")
