@@ -20,8 +20,10 @@ All routes proxy through the paired FadedAI PC server. Ollama and ComfyUI stay o
 localhost. Images are returned as PNG; short WebM renders are converted to MP4
 with the locally installed FFmpeg before the phone fetches them. Video jobs run
 on the PC after the phone starts them, so rendering does not depend on a long
-open phone request. Render results live in PC memory until the next video job or
-PC restart; durable gallery storage is a separate feature.
+open phone request. The phone remembers an unfinished video job across app restarts
+and offers a share sheet to save an image or video to Photos or Files. Render
+results remain in PC memory until the next video job or PC restart; a PC restart
+while a video is rendering means the job must be started again.
 
 Installation and verification:
 

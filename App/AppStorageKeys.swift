@@ -51,6 +51,7 @@ enum AppStorageKeys {
     static let dashboardChatPreviews = "dashboard.chat.previews"
     static let diagnosticsApiV1 = "diagnostics.api.v1"
     static let liveActivityEnabled = "liveActivity.enabled"
+    static let lumiPendingVideoJob = "lumi.pendingVideoJob"
     static let notificationsEnabledCode = "notifications.enabled.code"
     static let notificationsEnabledImageModel = "notifications.enabled.image-model"
     static let notificationsEnabledVideo = "notifications.enabled.video"

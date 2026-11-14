@@ -305,11 +305,14 @@ struct LumiStudio: View {
     let api: LiveAPI?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
+    @AppStorage(AppStorageKeys.lumiPendingVideoJob) private var pendingVideoJobID = ""
     @State private var mode = 0
     @State private var draft = ""
     @State private var messages: [[String: String]] = []
     @State private var picture: Data?
+    @State private var pictureFile: URL?
     @State private var videoPlayer: AVPlayer?
+    @State private var videoFile: URL?
     @State private var busy = false
     @State private var notice: String?
 
@@ -342,8 +345,20 @@ struct LumiStudio: View {
                                     .clipShape(.rect(cornerRadius: 16))
                                     .accessibilityLabel("Billede lavet af Lumi")
                             }
+                            if let pictureFile {
+                                ShareLink(item: pictureFile) {
+                                    Label("Gem eller del billede", systemImage: "square.and.arrow.up")
+                                        .frame(minHeight: 44)
+                                }
+                            }
                         } else if let videoPlayer {
                             VideoPlayer(player: videoPlayer).frame(height: 300)
+                            if let videoFile {
+                                ShareLink(item: videoFile) {
+                                    Label("Gem eller del video", systemImage: "square.and.arrow.up")
+                                        .frame(minHeight: 44)
+                                }
+                            }
                         } else {
                             Text("Lav et kort klip med PC’en. Det kan tage flere minutter.")
                                 .font(.subheadline).foregroundStyle(palette.secondary)
@@ -370,7 +385,8 @@ struct LumiStudio: View {
             .foregroundStyle(palette.text)
             .navigationTitle("Lumi")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Luk") { dismiss() } } }
+            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Luk") { dismiss() } }
+            .task { await resumeVideoIfNeeded() }
         }
     }
 
@@ -391,26 +407,73 @@ struct LumiStudio: View {
                     messages.append(["role": "user", "content": input])
                     messages.append(["role": "assistant", "content": reply])
                 } else if selectedMode == 1 {
-                    picture = try await api.lumiImage(prompt: input)
+                    let data = try await api.lumiImage(prompt: input)
+                    let file = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("lumi-\(UUID().uuidString).png")
+                    try data.write(to: file, options: .atomic)
+                    picture = data
+                    pictureFile = file
                 } else {
                     let receipt = try await api.lumiStartVideo(prompt: input)
                     guard let id = UUID(uuidString: receipt.id) else { throw APIError.malformed }
-                    var status = receipt
-                    while status.status == "working" {
-                        try await Task.sleep(for: .seconds(12))
-                        status = try await api.lumiVideoStatus(id: id)
-                    }
-                    guard status.status == "ready" else { throw APIError.malformed }
-                    let data = try await api.lumiVideoFile(id: id)
-                    let file = FileManager.default.temporaryDirectory.appendingPathComponent("lumi-\(id.uuidString).mp4")
-                    try data.write(to: file, options: .atomic)
-                    videoPlayer = AVPlayer(url: file)
+                    pendingVideoJobID = id.uuidString
+                    try await finishVideo(id: id, api: api)
                 }
             } catch {
                 AppDiagnostics.record(error)
-                draft = input
-                notice = "PC’en kunne ikke svare. Tjek at Ollama og ComfyUI kører, og prøv igen."
+                if selectedMode != 2 || pendingVideoJobID.isEmpty { draft = input }
+                show(error)
             }
         }
     }
+
+    private func resumeVideoIfNeeded() async {
+        guard !pendingVideoJobID.isEmpty else { return }
+        guard let id = UUID(uuidString: pendingVideoJobID) else {
+            pendingVideoJobID = ""
+            return
+        }
+        guard let api, !busy else { return }
+        mode = 2
+        busy = true
+        defer { busy = false }
+        do { try await finishVideo(id: id, api: api) }
+        catch {
+            AppDiagnostics.record(error)
+            if let apiError = error as? APIError, case .http(404, _) = apiError {
+                pendingVideoJobID = ""
+            }
+            show(error)
+        }
+    }
+
+    private func finishVideo(id: UUID, api: LiveAPI) async throws {
+        var status = try await api.lumiVideoStatus(id: id)
+        while status.status == "working" {
+            try await Task.sleep(for: .seconds(12))
+            status = try await api.lumiVideoStatus(id: id)
+        }
+        guard status.status == "ready" else {
+            pendingVideoJobID = ""
+            throw LumiJobFailure(message: status.message ?? "Videoen fejlede på PC’en.")
+        }
+        let data = try await api.lumiVideoFile(id: id)
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("lumi-\(id.uuidString).mp4")
+        try data.write(to: file, options: .atomic)
+        videoFile = file
+        videoPlayer = AVPlayer(url: file)
+        pendingVideoJobID = ""
+    }
+
+    private func show(_ error: Error) {
+        if let failure = error as? LumiJobFailure { notice = failure.message }
+        else if let apiError = error as? APIError,
+                case let .http(_, problem) = apiError,
+                let message = problem?.message { notice = message }
+        else { notice = AppErrorPresentation(error).title }
+    }
+}
+
+private struct LumiJobFailure: Error {
+    let message: String
 }
