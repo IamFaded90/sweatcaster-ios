@@ -385,7 +385,11 @@ struct LumiStudio: View {
             .foregroundStyle(palette.text)
             .navigationTitle("Lumi")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarLeading) { Button("Luk") { dismiss() } }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Luk") { dismiss() }
+                }
+            }
             .task { await resumeVideoIfNeeded() }
         }
     }
