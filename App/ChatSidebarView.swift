@@ -5,7 +5,9 @@ import SwiftUI
 
 struct ChatSidebarView: View {
     @Environment(\.fadedPalette) private var palette
+    @Environment(\.dynamicTypeSize) private var typeSize
     @Binding var query: String
+    let mascot: String
     let sessions: [SavedAgentSession]
     let selectedID: UUID
     let isBusy: Bool
@@ -15,46 +17,130 @@ struct ChatSidebarView: View {
     let jumpToTurn: (UUID) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: FadedSpacing.m) {
-            FadedSecondaryButton("Ny chat", icon: "square.and.pencil", action: newChat)
-                .disabled(isBusy)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: FadedSpacing.m) {
+                historyHeader
+                searchField
+                let rows = visibleSessions
+                if rows.isEmpty {
+                    if searchText.isEmpty {
+                        historyEmptyState(icon: "bubble.left.and.bubble.right", title: "Ingen samtaler endnu",
+                                          detail: "Dine samtaler og kladder kommer frem her.")
+                    } else {
+                        historyEmptyState(icon: "magnifyingglass", title: "Ingen samtaler fundet",
+                                          detail: "Prøv et andet ord.")
+                    }
+                } else if searchText.isEmpty {
+                    messageIndex
+                    let favorites = rows.filter { $0.turns.contains { $0.favorite == true } }
+                    let other = rows.filter { !$0.turns.contains { $0.favorite == true } }
+                    section("Favoritter", sessions: favorites)
+                    section("I dag", sessions: other.filter { age(of: $0) == .today })
+                    section("Seneste uge", sessions: other.filter { age(of: $0) == .week })
+                    section("Ældre", sessions: other.filter { age(of: $0) == .earlier })
+                } else {
+                    section("Søgeresultater", sessions: rows)
+                }
+            }
+            .padding(FadedSpacing.edge)
+            .frame(maxWidth: 620)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .foregroundStyle(palette.text)
+        .background { FadedBackground() }
+    }
+
+    private var historyHeader: some View {
+        let layout = typeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: FadedSpacing.m))
+            : AnyLayout(HStackLayout(alignment: .center, spacing: FadedSpacing.m))
+        return VStack(alignment: .leading, spacing: FadedSpacing.m) {
+            layout {
+                ZStack {
+                    Image(mascot)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 62, height: 62)
+                        .id(mascot)
+                        .transition(.opacity)
+                }
+                .clipShape(Circle())
+                .overlay { Circle().strokeBorder(brandGradient, lineWidth: 2) }
+                .animation(.easeInOut(duration: 0.3), value: mascot)
+                .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+                    Text("Samtaler").font(FadedTypography.title)
+                        .foregroundStyle(brandGradient)
+                        .accessibilityAddTraits(.isHeader)
+                    Text("Find en samtale, eller start en ny.")
+                        .font(.subheadline)
+                        .foregroundStyle(palette.secondary)
+                }
+            }
+            Button(action: newChat) {
+                Label("Ny chat", systemImage: "square.and.pencil")
+                    .font(FadedTypography.action)
+                    .foregroundStyle(brandGradient)
+                    .padding(.horizontal, FadedSpacing.m)
+                    .frame(minHeight: 44)
+                    .fadedGlassSurface(border: palette.cyan.opacity(0.5))
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("history-new-chat")
+            .disabled(isBusy)
+        }
+        .padding(FadedSpacing.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            let shape = RoundedRectangle(cornerRadius: FadedRadius.card)
+            shape.fill(brandGradient).opacity(palette.isDark ? 0.22 : 0.10)
+        }
+        .fadedGlassSurface(radius: FadedRadius.card, border: palette.cyan.opacity(0.38))
+    }
+
+    private var searchField: some View {
+        HStack(spacing: FadedSpacing.s) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(brandGradient)
+                .accessibilityHidden(true)
             TextField("Søg i alle samtaler", text: Binding(
                 get: { query }, set: { query = FadedSearchIndex.boundedQuery($0) }
             ))
-            .textFieldStyle(.roundedBorder).frame(minHeight: 44)
+            .textFieldStyle(.plain)
+            .accessibilityIdentifier("history-search")
             .autocorrectionDisabled()
-            let rows = visibleSessions
-            if rows.isEmpty {
-                if searchText.isEmpty {
-                    FadedEmptyState(icon: "bubble.left.and.bubble.right", title: "Ingen samtaler endnu",
-                                    detail: "Samtaler og kladder ligger her, når du har skrevet noget.")
-                } else {
-                    FadedEmptyState(icon: "magnifyingglass", title: "Ingen samtaler fundet",
-                                    detail: "Prøv et andet ord.", actionTitle: "Ryd søgning") { query = "" }
-                }
-                Spacer(minLength: 0)
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: FadedSpacing.s) {
-                        if searchText.isEmpty {
-                            messageIndex
-                            let favorites = rows.filter { $0.turns.contains { $0.favorite == true } }
-                            let other = rows.filter { !$0.turns.contains { $0.favorite == true } }
-                            section("Favoritter", sessions: favorites)
-                            section("I dag", sessions: other.filter { age(of: $0) == .today })
-                            section("Seneste uge", sessions: other.filter { age(of: $0) == .week })
-                            section("Ældre", sessions: other.filter { age(of: $0) == .earlier })
-                        } else {
-                            section("Søgeresultater", sessions: rows)
-                        }
-                    }
-                }
-                .scrollDismissesKeyboard(.interactively)
+            if !query.isEmpty {
+                Button("Ryd søgning", systemImage: "xmark.circle.fill") { query = "" }
+                    .labelStyle(.iconOnly)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(palette.secondary)
+                    .frame(width: 44, height: 44)
             }
         }
-        .padding(FadedSpacing.edge)
-        .foregroundStyle(palette.text)
-        .background(palette.background)
+        .padding(.leading, FadedSpacing.m)
+        .padding(.trailing, FadedSpacing.s)
+        .frame(minHeight: 46)
+        .fadedGlassSurface()
+    }
+
+    private var brandGradient: LinearGradient {
+        LinearGradient(colors: palette.isDark ? [FadedBrand.mint, FadedBrand.blue] : [palette.cyan, palette.text],
+                       startPoint: .leading, endPoint: .trailing)
+    }
+
+    private func historyEmptyState(icon: String, title: String, detail: String) -> some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.s) {
+            Image(systemName: icon)
+                .font(.largeTitle)
+                .foregroundStyle(brandGradient)
+                .accessibilityHidden(true)
+            Text(title).font(FadedTypography.section)
+            FadedDetailText(detail)
+        }
+        .padding(FadedSpacing.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .fadedGlassSurface(radius: FadedRadius.card, border: palette.cyan.opacity(0.25))
     }
 
     private enum Age: Equatable { case today, week, earlier }
@@ -70,7 +156,10 @@ struct ChatSidebarView: View {
                             .lineLimit(2).frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                     }.buttonStyle(.plain).disabled(isBusy)
                 }
-            }.frame(minHeight: 44, alignment: .leading)
+            }
+            .padding(.horizontal, FadedSpacing.s)
+            .frame(minHeight: 44, alignment: .leading)
+            .fadedGlassSurface()
         }
     }
 
@@ -124,8 +213,9 @@ struct ChatSidebarView: View {
             }
             .padding(FadedSpacing.s)
             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-            .background(selected ? palette.raised : palette.card, in: RoundedRectangle(cornerRadius: FadedRadius.medium))
-            .contentShape(Rectangle())
+            .fadedGlassSurface(radius: FadedRadius.medium,
+                               tint: selected ? palette.cyan.opacity(0.24) : nil,
+                               border: selected ? palette.cyan.opacity(0.55) : nil)
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(selected ? .isSelected : [])
@@ -164,7 +254,8 @@ extension ChatView {
     private func switchConversation(to session: SavedAgentSession) -> Bool {
         guard checkpointConversation() else { return false }
         let opened = recoverPending(session)
-        let nextDraft = MigratedAppData.shared.chatDraft(AppStorageKeys.chatSession(session.id.uuidString))
+        let existingDraft = MigratedAppData.shared.chatDraft(AppStorageKeys.chatSession(session.id.uuidString))
+        let nextDraft = existingDraft.isEmpty ? recoveredImageDraft(from: opened, wasPending: session.pending) ?? "" : existingDraft
         guard persistCurrentSlot(opened) else { return false }
 
         dictation.stop()
@@ -251,6 +342,9 @@ extension ChatView {
         sessionID = recovered.id
         turns = recovered.turns
         searchSteps = recovered.toolSteps
+        if savedDraft.isEmpty, let prompt = recoveredImageDraft(from: recovered, wasPending: session.pending) {
+            savedDraft = prompt
+        }
 
         // A queued reply can finish in the archive while a different slot still holds its placeholder.
         var repaired = session.pending
@@ -269,7 +363,22 @@ extension ChatView {
     private func recoverPending(_ session: SavedAgentSession) -> SavedAgentSession {
         guard session.pending, !session.turns.isEmpty else { return session }
         var interrupted = session.turns
-        interrupted[interrupted.count - 1].notice = "Forbindelsen blev afbrudt, før svaret var færdigt."
+        let index = interrupted.count - 1
+        if interrupted[index].imageRequest == true {
+            if let name = interrupted[index].imageName, StudioImageFiles.hasSavedPNG(name) {
+                interrupted[index].reply = "Billede klar."
+            } else {
+                interrupted[index].imageName = nil
+                interrupted[index].notice = "Billedgenereringen blev afbrudt. Din beskrivelse er klar til et nyt forsøg."
+            }
+        } else {
+            interrupted[index].notice = "Forbindelsen blev afbrudt, før svaret var færdigt."
+        }
         return SavedAgentSession(id: session.id, turns: interrupted, toolSteps: session.toolSteps, pending: false)
+    }
+
+    private func recoveredImageDraft(from session: SavedAgentSession, wasPending: Bool) -> String? {
+        guard wasPending, let last = session.turns.last, last.imageRequest == true, last.notice != nil else { return nil }
+        return last.prompt
     }
 }

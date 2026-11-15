@@ -22,15 +22,37 @@ enum VillageAssets {
         let stable = newArtName(name: bot.displayName, id: bot.id)
         let pose = bot.pose.rawValue
         let frame = time.map { Int($0.timeIntervalSinceReferenceDate * (pose == "walk" || pose == "work" || pose == "talk" ? 8 : 4)) % 8 } ?? 0
-        let key = "\(stable)-\(pose)-\(frame)" as NSString
+        let direction = directionRow(for: bot)
+        let key = "\(stable)-\(pose)-\(direction)-\(frame)" as NSString
         if let cached = newFrames.object(forKey: key) { return cached }
         guard let sheet = image(named: "bot-\(stable)-\(pose)", subdirectory: "new")?.cgImage,
-              let crop = sheet.cropping(to: CGRect(x: frame * 96, y: 0, width: 96, height: 96)) else {
+              let crop = sheet.cropping(to: CGRect(x: frame * 96, y: direction * 96, width: 96, height: 96)) else {
             return nil
         }
         let image = UIImage(cgImage: crop)
         newFrames.setObject(image, forKey: key, cost: 96 * 96 * 4)
         return image
+    }
+
+    private static func directionRow(for bot: VillageLifeBot) -> Int {
+        guard bot.pose == .walk, let destination = bot.destinationZoneID else { return 0 }
+        func point(_ zone: VillageZoneID) -> (Double, Double) {
+            switch zone {
+            case .research: (768, 380)
+            case .video: (1080, 520)
+            case .cafe: (450, 520)
+            case .sleep: (768, 710)
+            }
+        }
+        let plaza = (768.0, 512.0)
+        let from = bot.pathProgress < 0.5 ? point(bot.zoneID) : plaza
+        let to = bot.pathProgress < 0.5 ? plaza : point(destination)
+        let dx = to.0 - from.0
+        let dy = to.1 - from.1
+        guard dx != 0 || dy != 0 else { return 0 }
+        let clockwiseFromSouth = atan2(-dx, dy)
+        let turns = clockwiseFromSouth / (2 * Double.pi)
+        return (Int((turns * 16).rounded()) + 16) % 16
     }
 
     static func image(named name: String, subdirectory: String) -> UIImage? {
@@ -143,9 +165,7 @@ struct VillageBotSprite: View {
 
     var body: some View {
         Group {
-            if let data = bot.customSprite, let image = UIImage(data: data) {
-                pixelArt(image)
-            } else if animateWalk && (bot.pose == .walk || bot.pose == .work || bot.pose == .talk) {
+            if animateWalk && (bot.pose == .walk || bot.pose == .work || bot.pose == .talk) {
                 TimelineView(.animation(minimumInterval: 0.125)) { context in
                     poseImage(VillageAssets.newBotFrame(bot, at: context.date))
                 }

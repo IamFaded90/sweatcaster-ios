@@ -30,7 +30,6 @@ extension Home {
         .padding(.horizontal, 12).padding(.bottom, 4)
         .sheet(isPresented: $showMoreDestinations, onDismiss: openMoreDestination) {
             FadedMoreScreen(modules: visibleModuleTarget == nil ? [] : moduleTabs,
-                            embyAPI: model.isDemo || privateStudioPresented ? nil : model.api as? LiveAPI,
                             lookPreset: lookPresetBinding) { destination in
                 pendingMoreDestination = destination
                 showMoreDestinations = false
@@ -38,7 +37,7 @@ extension Home {
         }
     }
 
-    /// Hjem sits in the middle of the dock: Chat · Video · Hjem · Landsby · Code Bot · Mere
+    /// Hjem sits in the middle of the dock: Chat · Video · Hjem · Agenter · Code Bot · Mere
     private var dockSpaces: [Space] {
         [.notes, .gallery, .brain, .tasks, .library]
     }
@@ -142,6 +141,7 @@ extension Home {
         case .settings: showSettings = true
         case .connections: showConnections = true
         case .pcStatus: showPCStatus = true
+        case .codeAddOns: showCodeAddOns = true
         case .search: openSearch()
         case .module(let id): selectModule("module:" + id)
         }
@@ -152,7 +152,7 @@ extension Home {
         case .brain: "Hjem"
         case .notes: "Chat"
         case .gallery: "Video"
-        case .tasks: "Landsby"
+        case .tasks: "Agenter"
         case .library: "Code Bot"
         }
     }
@@ -162,7 +162,7 @@ extension Home {
         case .brain: "house.fill"
         case .notes: "bubble.left.fill"
         case .gallery: "play.rectangle.fill"
-        case .tasks: "house.lodge.fill"
+        case .tasks: "person.2.fill"
         case .library: "chevron.left.forwardslash.chevron.right"
         }
     }
@@ -197,7 +197,7 @@ struct DeferredHomeTab: View {
 
 
 enum FadedMoreDestination {
-    case chat, code, village
+    case chat, code, village, codeAddOns
     case holdchat, activity
     case imageBrief(String)
     case video, images, privateStudio, notes, projects, backup, savedVideos, team, models, settings, connections, pcStatus, search
@@ -211,10 +211,9 @@ enum FadedMoreDestination {
 }
 
 private struct FadedMoreScreen: View {
-    private enum Page: Hashable { case lookbook, emby, powerHub, atlas, help, creativeStudio, memory, safety, vault }
+    private enum Page: Hashable { case lookbook, films, powerHub, atlas, help, creativeStudio, memory, safety, vault }
 
     let modules: [ModuleTab]
-    let embyAPI: LiveAPI?
     @Binding var lookPreset: V0LookPreset?
     let open: (FadedMoreDestination) -> Void
     @State private var path = NavigationPath()
@@ -225,10 +224,9 @@ private struct FadedMoreScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
 
-    init(modules: [ModuleTab], embyAPI: LiveAPI?, lookPreset: Binding<V0LookPreset?>,
+    init(modules: [ModuleTab], lookPreset: Binding<V0LookPreset?>,
          open: @escaping (FadedMoreDestination) -> Void) {
         self.modules = modules
-        self.embyAPI = embyAPI
         _lookPreset = lookPreset
         self.open = open
     }
@@ -260,11 +258,11 @@ private struct FadedMoreScreen: View {
                     row("Noter", "Skriv og genfind noter", "note.text", .notes)
                     row("Projekter", "Find og redigér dine kladder", "folder", .projects)
                     row("Gemte videoer", "Afspil dine færdige videoer", "film.stack", .savedVideos)
+                    link("Film & serier", "Åbn dit bibliotek i browseren", "play.rectangle", .films)
                 }
                 Section("Gør det til dit") {
-                    link("Vault", "Gem personlige oplysninger på telefonen", "lock.doc", .vault)
+                    link("Fælles Vault", "Gem logins til dig selv og dine agenter", "lock.doc", .vault)
                     link("Hukommelse", "Vælg selv, hvad dine bots skal huske", "brain.head.profile", .memory)
-                    link("Emby & bibliotek", "Find film, serier og musik", "play.rectangle", .emby)
                     row("Holdet", "Se dine AI’er og deres roller", "person.2", .team)
                     row("Modeller", "Administrér modeller på telefon og PC", "sparkles", .models)
                     link("Lookbook", "Skift baggrund, kort og bundmenu", "paintpalette", .lookbook)
@@ -284,11 +282,10 @@ private struct FadedMoreScreen: View {
                     }
                     row("Søg med det samme", "Find et område eller en funktion", "magnifyingglass", .search)
                 }
-                if !modules.isEmpty {
-                    Section("Udvidelser") {
-                        ForEach(modules) { tab in
-                            row(tab.title, "Åbn på din tilsluttede PC", "square.grid.2x2", .module(tab.id))
-                        }
+                Section("Udvidelser") {
+                    row("Tilføjelser", "Dine installerede sider og værktøjer fra Code Bot", "square.stack.3d.up", .codeAddOns)
+                    ForEach(modules) { tab in
+                        row(tab.title, "Åbn på din tilsluttede PC", "square.grid.2x2", .module(tab.id))
                     }
                 }
                 Section("Opdag mere") {
@@ -318,10 +315,7 @@ private struct FadedMoreScreen: View {
             .navigationDestination(for: Page.self) { page in
                 switch page {
                 case .lookbook: V0LookbookView(selection: $lookPreset)
-                case .emby:
-                    EmbyLibraryView(api: embyAPI, openNotes: { open(.notes) }, openProjects: { open(.projects) },
-                                    openExport: { open(.backup) }, openConnections: { open(.connections) })
-                        .id(embyAPI?.queueTargetID)
+                case .films: FilmLibraryLinkView()
                 case .powerHub:
                     V0PowerHubView(actions: powerActions, openLookbook: { path.append(Page.lookbook) },
                        tryAuroraGlass: { lookPreset = .auroraGlass },
@@ -391,9 +385,9 @@ private struct FadedMoreScreen: View {
 
     private var powerActions: [V0PowerHubView.Action] {
         let destinations: [(String, String, String, FadedMoreDestination)] = [
-            ("chat", "AI-chat", "bubble.left", .chat),
+            ("chat", "Chat", "bubble.left", .chat),
             ("code", "Code Bot", "terminal", .code),
-            ("village", "Landsbyen", "house.lodge", .village),
+            ("village", "Agenter og landsby", "person.2", .village),
             ("video", "Video Studio", "film", .video),
             ("images", "Billeder", "photo", .images),
             ("private", "Privat Studio", "lock.shield", .privateStudio),

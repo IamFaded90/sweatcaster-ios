@@ -163,7 +163,7 @@ class AIORuntime:
                 or labels.get(MANAGED_LABEL) != "1" or labels.get(BOT_LABEL) != bot):
             raise AIORuntimeError(409, "Den eksisterende filplads matcher ikke bottens miljø.")
 
-    def _image_available(self) -> bool:
+    def image_available(self) -> bool:
         result = self._call(["image", "inspect", "--format", "{{.Id}}", AIO_IMAGE])
         if result.returncode:
             if any(text in result.stderr.lower() for text in (b"no such image", b"no such object")):
@@ -184,7 +184,7 @@ class AIORuntime:
         with self._lock(bot):
             try:
                 state = self._inspect(bot)
-                if state is None and not self._image_available():
+                if state is None and not self.image_available():
                     return {"state": "unavailable", "detail": "AIO Sandbox skal hentes under PC-opsætning."}
                 return self._desktop_status(bot, state)
             except AIORuntimeError as exc:
@@ -212,7 +212,7 @@ class AIORuntime:
             with self._capacity:
                 self._check_capacity()
                 if state is None:
-                    if not self._image_available():
+                    if not self.image_available():
                         raise AIORuntimeError(503, "AIO Sandbox skal hentes under PC-opsætning.")
                     self._ensure_volume(bot)
                     result = self._call([

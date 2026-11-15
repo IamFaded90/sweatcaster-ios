@@ -7,13 +7,47 @@ import Observation
 import SwiftUI
 import UIKit
 
-extension OfflineStudio {
-    func downloadImageModel() {
-        guard !privateSession, task == nil, let selected = StudioImageModel(rawValue: imageModel) else { return }
-        StudioImageDownloads.shared.start(selected)
+@MainActor enum StudioImageGeneration {
+    static func render(model: StudioImageModel, prompt: String, negative: String = "", lora: String = "",
+                       seed: UInt32, source: Data? = nil, variation: Bool = false, destination: URL? = nil,
+                       onLoaded: () throws -> Void = {}) async throws -> Data? {
+        try Task.checkCancellation()
+        guard model.isInstalled else { throw PhoneModelError.unavailable }
+        LocalCompute.beginModelLoad()
+        var pipeline = try await MediaGenerationPipeline.fromPretrained(model.id, backend: .local)
+        LocalCompute.didLoadModel()
+        try Task.checkCancellation()
+        try onLoaded()
+        model.applyRenderProfile(to: &pipeline.configuration)
+        pipeline.configuration.batchCount = 1
+        pipeline.configuration.batchSize = 1
+        pipeline.configuration.seed = seed
+        pipeline.configuration.loras = lora.isEmpty ? [] : [.init(file: lora, weight: 1, mode: .base)]
+        var inputs: [MediaGenerationPipeline.Input] = []
+        if let source {
+            inputs = [MediaGenerationPipeline.data(source)]
+            pipeline.configuration.strength = variation ? 0.32 : 0.55
+        }
+        let results = try await pipeline.generate(prompt: prompt, negativePrompt: negative, inputs: inputs)
+        try Task.checkCancellation()
+        guard let result = results.first else { throw PhoneModelError.emptyResponse }
+        return try autoreleasepool { () -> Data? in
+            if let destination {
+                try result.write(to: destination, type: .png, options: [.atomic, .completeFileProtection])
+                return nil
+            }
+            guard result.width > 0, result.height > 0, let png = UIImage(result).pngData() else {
+                throw PhoneModelError.emptyResponse
+            }
+            return png
+        }
     }
+}
 
-    func prepareImageFolder(_ url: URL) throws {
+enum StudioImageFiles {
+    static var library: URL { URL.applicationSupportDirectory.appending(path: "StudioImages", directoryHint: .isDirectory) }
+
+    static func prepare(_ url: URL) throws {
         guard url.isFileURL else { throw CocoaError(.fileWriteUnsupportedScheme) }
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         var folder = url
@@ -22,9 +56,37 @@ extension OfflineStudio {
         try folder.setResourceValues(values)
     }
 
-    func imageDestination(in folder: URL) -> URL {
+    static func destination(in folder: URL) -> URL {
         let timestamp = Int(Date().timeIntervalSince1970 * 1_000)
         return folder.appendingPathComponent("\(timestamp)-\(UUID()).png")
+    }
+
+    static func savedImage(_ name: String) -> URL? {
+        guard name.utf8.count < 80,
+              name.range(of: #"^[0-9]{1,20}-[0-9a-fA-F-]{36}\.png$"#, options: .regularExpression) != nil else { return nil }
+        return try? LocalFileStore.safeWriteURL(library.appendingPathComponent(name), within: library)
+    }
+
+    static func hasSavedPNG(_ name: String) -> Bool {
+        guard let file = savedImage(name),
+              let header = try? LocalFileStore.readPrefix(from: file, count: 8, maximumBytes: 15_000_000)
+        else { return false }
+        return header.elementsEqual([137, 80, 78, 71, 13, 10, 26, 10])
+    }
+}
+
+extension OfflineStudio {
+    func downloadImageModel() {
+        guard !privateSession, task == nil, let selected = StudioImageModel(rawValue: imageModel) else { return }
+        StudioImageDownloads.shared.start(selected)
+    }
+
+    func prepareImageFolder(_ url: URL) throws {
+        try StudioImageFiles.prepare(url)
+    }
+
+    func imageDestination(in folder: URL) -> URL {
+        StudioImageFiles.destination(in: folder)
     }
 
     var isImageThermallyConstrained: Bool {
@@ -221,43 +283,24 @@ extension OfflineStudio {
                         group.addTask { @MainActor in
                             try Task.checkCancellation()
                             if requireOffline && !canRenderPrivateImages { throw StudioImageInterruption.network }
-                            guard model.isInstalled else { throw PhoneModelError.unavailable }
-                            LocalCompute.beginModelLoad()
                             status = "Indlæser \(model.title) på telefonen…"
-                            var pipeline = try await MediaGenerationPipeline.fromPretrained(model.id, backend: .local)
-                            LocalCompute.didLoadModel()
-                            try Task.checkCancellation()
-                            if requireOffline && !canRenderPrivateImages { throw StudioImageInterruption.network }
-                            status = label
-                            model.applyRenderProfile(to: &pipeline.configuration)
-                            pipeline.configuration.batchCount = 1
-                            pipeline.configuration.batchSize = 1
-                            pipeline.configuration.seed = seed
-                            pipeline.configuration.loras = lora.isEmpty ? [] : [.init(file: lora, weight: 1, mode: .base)]
-                            var inputs: [MediaGenerationPipeline.Input] = []
+                            let input: Data?
+                            let isVariation: Bool
                             if let variation, let bytes = privateImages[variation] {
-                                inputs = [MediaGenerationPipeline.data(bytes)]
-                                pipeline.configuration.strength = 0.32
+                                input = bytes
+                                isVariation = true
                             } else if let variation, variation.isFileURL, !requireOffline {
-                                let bytes = try LocalFileStore.readBytes(from: variation, maximumBytes: 80_000_000)
-                                inputs = [MediaGenerationPipeline.data(bytes)]
-                                pipeline.configuration.strength = 0.32
-                            } else if let sourceImage {
-                                inputs = [MediaGenerationPipeline.data(sourceImage)]
-                                pipeline.configuration.strength = 0.55
+                                input = try LocalFileStore.readBytes(from: variation, maximumBytes: 80_000_000)
+                                isVariation = true
+                            } else {
+                                input = sourceImage
+                                isVariation = false
                             }
-                            let results = try await pipeline.generate(prompt: prompt, negativePrompt: negativePrompt, inputs: inputs)
-                            try Task.checkCancellation()
-                            guard let result = results.first else { throw PhoneModelError.emptyResponse }
-                            return try autoreleasepool { () -> Data? in
-                                if let destination {
-                                    try result.write(to: destination, type: .png, options: [.atomic, .completeFileProtection])
-                                    return nil
-                                }
-                                guard result.width > 0, result.height > 0, let png = UIImage(result).pngData() else {
-                                    throw PhoneModelError.emptyResponse
-                                }
-                                return png
+                            return try await StudioImageGeneration.render(model: model, prompt: prompt, negative: negativePrompt,
+                                                                          lora: lora, seed: seed, source: input,
+                                                                          variation: isVariation, destination: destination) {
+                                if requireOffline && !canRenderPrivateImages { throw StudioImageInterruption.network }
+                                status = label
                             }
                         }
                         group.addTask { @MainActor in

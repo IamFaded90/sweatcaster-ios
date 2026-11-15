@@ -232,7 +232,7 @@ struct ConnectionsView: View {
     private let title: String
     private let pcConnected: Bool?
     private let openPairing: (() -> Void)?
-    private let embyAPI: LiveAPI?
+    private let pcAPI: LiveAPI?
     @Environment(\.fadedPalette) private var palette
     @State private var photos = PickerConnector(source: .photos)
     @State private var files = PickerConnector(source: .files)
@@ -240,12 +240,12 @@ struct ConnectionsView: View {
     @State private var photoToAnalyze: PickerConnector.Record?
 
     init(title: String = "Forbindelser", pcConnected: Bool? = nil, openPairing: (() -> Void)? = nil,
-         embyAPI: LiveAPI? = nil,
+         pcAPI: LiveAPI? = nil,
          onChooseNote: ((String) -> Void)? = nil) {
         self.title = title
         self.pcConnected = pcConnected
         self.openPairing = openPairing
-        self.embyAPI = embyAPI
+        self.pcAPI = pcAPI
         self.onChooseNote = onChooseNote
     }
 
@@ -298,22 +298,30 @@ struct ConnectionsView: View {
                         }
                     }
                 }
-                if openPairing != nil || embyAPI != nil { embyLink }
-                if openPairing != nil || embyAPI != nil {
+                if openPairing != nil || pcAPI != nil {
                     NavigationLink {
-                        PCServicesView(api: embyAPI)
+                        PCServicesView(api: pcAPI)
                     } label: {
                         FadedCard {
                             VStack(alignment: .leading, spacing: FadedSpacing.s) {
                                 Label("Tjenester på PC’en", systemImage: "desktopcomputer")
                                     .font(FadedTypography.action)
-                                FadedDetailText("YouTube og websøgning. Se, hvad der skal sættes op på PC’en.")
+                                FadedDetailText("Composio, YouTube, websøgning og PC-måler.")
                             }
                             .frame(minHeight: 44)
                         }
                     }
                     .buttonStyle(.plain)
                 }
+                NavigationLink {
+                    FilmLibraryLinkView()
+                } label: {
+                    FadedCard {
+                        Label("Film & serier", systemImage: "play.rectangle")
+                            .frame(minHeight: 44)
+                    }
+                }
+                .buttonStyle(.plain)
                 NavigationLink {
                     AppleConnectionsView(onChooseNote: onChooseNote)
                 } label: {
@@ -323,12 +331,12 @@ struct ConnectionsView: View {
                     }
                 }
                 .buttonStyle(.plain)
-                if onChooseNote == nil && (openPairing != nil || embyAPI != nil) {
+                if onChooseNote == nil && (openPairing != nil || pcAPI != nil) {
                     NavigationLink {
                         PersonalVaultView()
                     } label: {
                         FadedCard {
-                            Label("Vault", systemImage: "lock.shield")
+                            Label("Fælles Vault", systemImage: "lock.shield")
                                 .frame(minHeight: 44)
                         }
                     }
@@ -361,18 +369,6 @@ struct ConnectionsView: View {
                 LocalImageAnalysisView(data: preview, onChooseNote: onChooseNote)
             }
         }
-    }
-
-    private var embyLink: some View {
-        NavigationLink {
-            EmbyLibraryView(api: embyAPI).id(embyAPI?.queueTargetID)
-        } label: {
-            FadedCard {
-                Label("Emby & bibliotek", systemImage: "play.rectangle")
-                    .frame(minHeight: 44)
-            }
-        }
-        .buttonStyle(.plain)
     }
 
     private func pickerCard(_ connector: PickerConnector, detail: String) -> some View {
@@ -436,5 +432,59 @@ struct ConnectionsView: View {
                 Text(provider.detail).font(.subheadline).foregroundStyle(palette.secondary)
             }
         }
+    }
+}
+
+struct FilmLibraryLinkView: View {
+    @AppStorage(AppStorageKeys.filmLibraryAddress) private var savedAddress = ""
+    @Environment(\.fadedPalette) private var palette
+    @Environment(\.openURL) private var openURL
+    @State private var address = ""
+
+    private var libraryURL: URL? {
+        let value = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let parts = URLComponents(string: value),
+              let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = parts.host, !host.isEmpty,
+              parts.user == nil, parts.password == nil, parts.query == nil, parts.fragment == nil else { return nil }
+        return parts.url
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Label("Dit filmbibliotek", systemImage: "play.rectangle")
+                    .font(FadedTypography.title)
+                    .foregroundStyle(palette.text)
+                FadedDetailText("Indsæt adressen til biblioteket. Log ind på bibliotekets egen side.")
+                TextField("Bibliotekets webadresse", text: $address)
+                    .textContentType(.URL)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding(.horizontal, 12)
+                    .frame(minHeight: 48)
+                    .fadedGlassSurface()
+                FadedPrimaryButton("Åbn bibliotek", icon: "arrow.up.right") {
+                    guard let libraryURL else { return }
+                    savedAddress = libraryURL.absoluteString
+                    openURL(libraryURL)
+                }
+                .disabled(libraryURL == nil)
+                if !savedAddress.isEmpty {
+                    FadedSecondaryButton("Fjern gemt adresse", icon: "xmark") {
+                        address = ""
+                        savedAddress = ""
+                    }
+                }
+            }
+            .padding(FadedSpacing.edge)
+            .frame(maxWidth: 640)
+            .frame(maxWidth: .infinity)
+        }
+        .background { FadedBackground() }
+        .navigationTitle("Film & serier")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { address = savedAddress }
     }
 }

@@ -94,6 +94,45 @@ def test_repeated_submission_and_running_cancellation(tmp_path):
     assert service.files(bot) == {"files": []}
 
 
+def test_web_job_uses_only_its_prompt_for_search_and_records_sources(tmp_path):
+    bot, job = uid(), uid()
+    calls = []
+    sources = [{"title": "Offentlig kilde", "url": "https://example.org/", "readPage": True}]
+
+    def query(prompt, source):
+        assert prompt == "Undersøg offentlige transportdata" and source is None
+        calls.append("query")
+        return '{"query":"offentlige transportdata Danmark"}'
+
+    def lookup(text, *, cancelled):
+        assert text == "offentlige transportdata Danmark" and not cancelled()
+        calls.append("lookup")
+        return "[1] Kildetekst", sources
+
+    def answer(prompt, evidence, *, profile=None, research=False):
+        if research:
+            assert profile == "Anvend dansk stil" and evidence == "[1] Kildetekst"
+        return "Rapport [1]" if research else "Lokalt svar"
+
+    service = BotComputers(tmp_path / "bots.sqlite", Desktop(), answer, derive_query=query, research_sources=lookup)
+    service.prepare()
+    service.enqueue(bot, uid(), "Almindeligt spørgsmål", None)
+    assert service.work_once()
+    assert not calls
+    with pytest.raises(BotComputerError, match="vedhæftede"):
+        service.enqueue(bot, job, "Undersøg offentlige transportdata", None, web_search=True, task_context="Privat kilde")
+    args = {"web_search": True, "agent_profile": "Anvend dansk stil"}
+    receipt = service.enqueue(bot, job, "Undersøg offentlige transportdata", None, **args)
+    assert service.enqueue(bot, job, "Undersøg offentlige transportdata", None, **args) == receipt
+    with pytest.raises(BotComputerError, match="allerede"):
+        service.enqueue(bot, job, "Undersøg offentlige transportdata", None, agent_profile=args["agent_profile"])
+    assert service.work_once()
+    report = service.jobs(bot)["jobs"][0]
+    assert calls == ["query", "lookup"]
+    assert report["webSources"] == sources
+    assert report["result"].endswith("[1] Offentlig kilde · https://example.org/")
+
+
 def test_rejects_foreign_sources_and_stops_pending_jobs(tmp_path):
     service = create_service(tmp_path / "bots.sqlite3")
     adam, eva = uid(), uid()
@@ -173,7 +212,7 @@ def test_undated_reminder_and_rejecting_unsupported_phone_action(tmp_path):
     service = BotComputers(tmp_path / "bots.sqlite3", Desktop(), None, lambda *_: (
         '{"title":"Køb kaffe","localDate":null,"question":null}'))
     service.prepare()
-    with pytest.raises(BotComputerError, match="Vælg alarm eller påmindelse"):
+    with pytest.raises(BotComputerError, match="Vælg en iPhone-handling"):
         service.enqueue(bot, uid(), "Send en mail", None, phone_kind="mail", phone_time="2026-11-12T14:00")
     service.enqueue(bot, uid(), "Mind mig om at købe kaffe", None,
                     phone_kind="reminder", phone_time="2026-11-12T14:00")
@@ -197,6 +236,31 @@ def test_lookup_is_used_once_and_not_exposed_as_a_bot_file(tmp_path):
     assert service.enqueue(bot, job, "Vurdér mulighederne", None, task_context=context)["status"] == "completed"
     with pytest.raises(BotComputerError, match="allerede"):
         service.enqueue(bot, job, "Vurdér mulighederne", None, task_context="Et andet opslag")
+
+
+
+def test_agent_profile_is_one_job_snapshot_separate_from_approved_data(tmp_path):
+    database = tmp_path / "bots.sqlite3"
+    observed = []
+
+    def report(prompt, source, *, profile=None):
+        observed.append((prompt, source, profile))
+        return "Klar"
+
+    service = create_service(database, generate=report)
+    bot, job = uid(), uid()
+    options = {"task_context": "Godkendt mail", "agent_profile": "Besvar i tre linjer."}
+    service.enqueue(bot, job, "Opsummér", None, **options)
+    assert service.work_once()
+    assert observed == [("Opsummér", "Godkendt mail", "Besvar i tre linjer.")]
+    assert service.enqueue(bot, job, "Opsummér", None, **options)["status"] == "completed"
+    with pytest.raises(BotComputerError, match="allerede"):
+        service.enqueue(bot, job, "Opsummér", None, task_context="Godkendt mail", agent_profile="Et andet format")
+    db = sqlite3.connect(database)
+    try:
+        assert db.execute("SELECT task_context, agent_profile FROM jobs WHERE id = ?", (job,)).fetchone() == (None, None)
+    finally:
+        db.close()
 
 
 def test_cancelled_lookup_is_cleared_and_incompatible_inputs_are_rejected(tmp_path):

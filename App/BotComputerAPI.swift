@@ -18,15 +18,18 @@ struct BotComputerStatus: Decodable, Sendable {
     let message: String?
     let phoneActions: Bool?
     let taskContext: Bool?
+    let agentProfile: Bool?
+    let webSearch: Bool?
 }
 
 enum BotPhoneActionKind: String, Codable, CaseIterable, Sendable {
-    case alarm, reminder
+    case alarm, reminder, calendar
 
     var title: String {
         switch self {
         case .alarm: "Alarm"
         case .reminder: "Påmindelse"
+        case .calendar: "Kalenderaftale"
         }
     }
 }
@@ -35,6 +38,9 @@ struct BotPhoneAction: Decodable, Sendable {
     let kind: BotPhoneActionKind
     let title: String
     let localDate: String?
+    var location: String? = nil
+    var endDate: String? = nil
+    var needsDate: Bool? = nil
 
     static func localFormatter() -> DateFormatter {
         let formatter = DateFormatter()
@@ -48,6 +54,12 @@ struct BotPhoneAction: Decodable, Sendable {
 }
 
 struct BotComputerJob: Decodable, Identifiable, Sendable {
+    struct WebSource: Decodable, Identifiable, Sendable {
+        let title: String
+        let url: URL
+        let readPage: Bool
+        var id: URL { url }
+    }
     enum State: String, Decodable, Sendable {
         case queued, running, completed, failed, cancelled
 
@@ -74,6 +86,8 @@ struct BotComputerJob: Decodable, Identifiable, Sendable {
     let phoneKind: BotPhoneActionKind?
     let phoneAction: BotPhoneAction?
     let hasTaskContext: Bool?
+    let webSearch: Bool?
+    let webSources: [WebSource]?
 }
 
 struct BotComputerFile: Decodable, Identifiable, Sendable {
@@ -169,6 +183,8 @@ struct BotComputerClient: Sendable {
         let phoneKind: BotPhoneActionKind?
         let phoneTime: String?
         let taskContext: String?
+        let agentProfile: String?
+        let webSearch: Bool?
     }
     private struct Import: Encodable { let name: String; let content: String }
     private struct Share: Encodable { let sourceBotID: String; let fileID: String }
@@ -193,10 +209,11 @@ struct BotComputerClient: Sendable {
     }
 
     func submit(prompt: String, fileID: UUID?, requestID: UUID,
-                phoneKind: BotPhoneActionKind?, phoneTime: String?, taskContext: String?) async throws -> BotComputerJob {
+                phoneKind: BotPhoneActionKind?, phoneTime: String?, taskContext: String?,
+                agentProfile: String?, webSearch: Bool) async throws -> BotComputerJob {
         let draft = Draft(requestID: requestID.uuidString.lowercased(), prompt: prompt,
                           fileID: fileID?.uuidString.lowercased(), phoneKind: phoneKind, phoneTime: phoneTime,
-                          taskContext: taskContext)
+                          taskContext: taskContext, agentProfile: agentProfile, webSearch: webSearch ? true : nil)
         return try await json(.submitJob, body: JSONEncoder().encode(draft))
     }
 

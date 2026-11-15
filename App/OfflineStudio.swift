@@ -164,7 +164,7 @@ struct OfflineStudio: View {
         "Åbn Kontrolcenter, slå flytilstand til og Wi-Fi fra. Gå tilbage hertil, og tryk Lav billede."
     }
 
-    var historyFolder: URL { URL.applicationSupportDirectory.appending(path: "StudioImages", directoryHint: .isDirectory) }
+    var historyFolder: URL { StudioImageFiles.library }
     var privateImageFolder: URL {
         URL(string: "fadedai-private://studio/\(temporaryImagesID.uuidString)")!
     }

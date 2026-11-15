@@ -1,7 +1,9 @@
 import SwiftUI
 import UIKit
 
-struct VillageMapView: View {
+@MainActor struct VillageMapView: View {
+    @AppStorage(AppStorageKeys.villageMapNames) private var showNames = true
+    @AppStorage(AppStorageKeys.villageMapZoom) private var zoom = 1.0
     let bots: [VillageLifeBot]
     let night: Bool
     let cinematic: Bool
@@ -10,8 +12,10 @@ struct VillageMapView: View {
     var banner: String? = nil
     var paused = false
     var onSelect: (VillageLifeBot) -> Void
+    var onSelectBuilding: (VillageZoneID) -> Void = { _ in }
+    var onSelectCemetery: () -> Void = {}
+    var onSelectCreator: () -> Void = {}
 
-    @State private var zoom: CGFloat = 1
     @State private var offset: CGSize = .zero
     @GestureState private var magnification: CGFloat = 1
     @GestureState private var translation: CGSize = .zero
@@ -19,7 +23,7 @@ struct VillageMapView: View {
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
-            let scale = min(2.2, max(1, zoom * magnification))
+            let scale = min(2.2, max(1, CGFloat(zoom) * magnification))
             let pan = clampedPan(adding: translation, zoom: scale, size: size)
             ZStack {
                 mapContent(size: size)
@@ -35,9 +39,9 @@ struct VillageMapView: View {
                         current = value.magnification
                     }
                     .onEnded { value in
-                        let finalScale = min(2.2, max(1, zoom * value.magnification))
-                        zoom = finalScale > 1.001 ? finalScale : 1
-                        offset = VillageCamera.clampOffset(offset, zoom: zoom, frame: size)
+                        let finalScale = min(2.2, max(1, CGFloat(zoom) * value.magnification))
+                        zoom = finalScale > 1.001 ? Double(finalScale) : 1
+                        offset = VillageCamera.clampOffset(offset, zoom: CGFloat(zoom), frame: size)
                     }
             )
             .simultaneousGesture(
@@ -49,7 +53,10 @@ struct VillageMapView: View {
                 including: scale > 1.001 ? .all : .subviews
             )
             .onChange(of: size) { _, newSize in
-                offset = VillageCamera.clampOffset(offset, zoom: zoom, frame: newSize)
+                offset = VillageCamera.clampOffset(offset, zoom: CGFloat(zoom), frame: newSize)
+            }
+            .onChange(of: zoom) { _, value in
+                offset = value <= 1.001 ? .zero : VillageCamera.clampOffset(offset, zoom: CGFloat(value), frame: size)
             }
             .clipShape(RoundedRectangle(cornerRadius: 20))
             .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.white.opacity(0.08)))
@@ -97,6 +104,27 @@ struct VillageMapView: View {
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
             }
+            ForEach(VillageZoneID.allCases, id: \.self) { zone in
+                Button { onSelectBuilding(zone) } label: {
+                    Rectangle().fill(.clear).frame(width: 80, height: 76)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .position(buildingCenter(BuildingSpot(id: zone), size: size))
+                .accessibilityLabel("Åbn \(zone.title)")
+            }
+            Button(action: onSelectCemetery) {
+                VillageChurchLandmark(count: VillageHistory.shared.memorials.count)
+            }
+            .buttonStyle(.plain)
+            .position(x: size.width * 0.80, y: size.height * 0.77)
+            .accessibilityLabel("Åbn Kirkegården")
+            Button(action: onSelectCreator) {
+                VillageCreatorMonument()
+            }
+            .buttonStyle(.plain)
+            .position(x: size.width * 0.55, y: size.height * 0.50)
+            .accessibilityLabel("Åbn Skaberens kontor")
             ForEach(placements) { placement in
                 botNode(placement.bot, at: placement.foot)
             }
@@ -261,10 +289,11 @@ struct VillageMapView: View {
     }
 
     private func botNode(_ bot: VillageLifeBot, at foot: CGPoint) -> some View {
-        Button {
+        let young = UUID(uuidString: bot.id).map { VillageHistory.shared.isYoung($0) } ?? false
+        return Button {
             onSelect(bot)
         } label: {
-            VillageBotSprite(bot: bot, size: 48, animateWalk: !paused && !reduceMotion)
+            VillageBotSprite(bot: bot, size: young ? 34 : 48, animateWalk: !paused && !reduceMotion)
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
                 .overlay(alignment: .topTrailing) {
@@ -295,14 +324,16 @@ struct VillageMapView: View {
                     }
                 }
                 .overlay(alignment: .bottom) {
-                    if !cinematic {
+                    if showNames {
                         VStack(spacing: 2) {
                             Text(bot.displayName).font(.caption2.bold()).lineLimit(1)
-                            Text(bot.poseLabel).font(.system(size: 8)).foregroundStyle(.white.opacity(0.85))
-                            if let live = bot.pcLiveLabel, bot.pcJobRunning || bot.pcJobQueued {
-                                Text(live).font(.system(size: 7)).foregroundStyle(.mint)
+                            if !cinematic {
+                                Text(bot.poseLabel).font(.system(size: 8)).foregroundStyle(.white.opacity(0.85))
+                                if let live = bot.pcLiveLabel, bot.pcJobRunning || bot.pcJobQueued {
+                                    Text(live).font(.system(size: 7)).foregroundStyle(.mint)
+                                }
+                                needDots(bot.needs)
                             }
-                            needDots(bot.needs)
                         }
                         .frame(width: 86)
                         .alignmentGuide(.bottom) { $0[.top] }
@@ -313,7 +344,7 @@ struct VillageMapView: View {
         .buttonStyle(.plain)
         .foregroundStyle(.white)
         // The 64px frames share foot y=60, i.e. 21pt below the center at this size.
-        .position(x: foot.x, y: foot.y - 21)
+        .position(x: foot.x, y: foot.y - (young ? 15 : 21))
         .accessibilityLabel(accessibilityText(for: bot))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: bot.zoneID)
         .animation(reduceMotion ? nil : .linear(duration: 0.25), value: bot.pathProgress)
@@ -333,5 +364,67 @@ struct VillageMapView: View {
             Circle().fill(needs.fulfillment < 0.35 ? .yellow : .blue).frame(width: 4, height: 4)
         }
         .accessibilityHidden(true)
+    }
+}
+
+private struct VillageChurchLandmark: View {
+    let count: Int
+
+    var body: some View {
+        ZStack {
+            Canvas { context, size in
+                let sx = size.width / 112
+                let sy = size.height / 92
+                func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: x * sx, y: y * sy) }
+                var island = Path()
+                island.move(to: point(5, 56)); island.addLine(to: point(54, 34))
+                island.addLine(to: point(108, 56)); island.addLine(to: point(58, 82))
+                island.closeSubpath()
+                context.fill(island, with: .color(Color(red: 0.25, green: 0.43, blue: 0.40)))
+                let church = CGRect(x: 54 * sx, y: 30 * sy, width: 29 * sx, height: 31 * sy)
+                context.fill(Path(church), with: .color(Color(red: 0.70, green: 0.75, blue: 0.66)))
+                var roof = Path()
+                roof.move(to: point(49, 31)); roof.addLine(to: point(67, 17))
+                roof.addLine(to: point(88, 31)); roof.closeSubpath()
+                context.fill(roof, with: .color(Color(red: 0.22, green: 0.36, blue: 0.42)))
+                context.fill(Path(CGRect(x: 65 * sx, y: 43 * sy, width: 8 * sx, height: 18 * sy)),
+                             with: .color(Color(red: 0.72, green: 0.50, blue: 0.30)))
+                for x in [CGFloat(27), CGFloat(43)] {
+                    context.fill(Path(roundedRect: CGRect(x: x * sx, y: 47 * sy,
+                                                          width: 10 * sx, height: 17 * sy), cornerRadius: 4 * sx),
+                                 with: .color(Color(red: 0.67, green: 0.74, blue: 0.71)))
+                }
+            }
+            VStack {
+                Spacer()
+                Text("Kirkegård · \(count)")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(.black.opacity(0.65), in: Capsule())
+            }
+        }
+        .frame(width: 112, height: 92)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct VillageCreatorMonument: View {
+    var body: some View {
+        VStack(spacing: 0) {
+            if let image = VillageAssets.image(named: "creator", subdirectory: "new") {
+                Image(uiImage: image).resizable().scaledToFill()
+                    .frame(width: 32, height: 32).clipShape(Circle())
+                    .overlay(Circle().strokeBorder(FadedBrand.mint.opacity(0.7), lineWidth: 2))
+            }
+            RoundedRectangle(cornerRadius: 3)
+                .fill(Color(red: 0.38, green: 0.52, blue: 0.52))
+                .frame(width: 38, height: 8)
+            Text("SKABEREN").font(.system(size: 7, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 3).background(.black.opacity(0.65))
+        }
+        .frame(width: 52, height: 54)
+        .contentShape(Rectangle())
     }
 }

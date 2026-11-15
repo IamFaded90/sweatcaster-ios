@@ -2,9 +2,11 @@
 
 import Foundation
 import AVKit
+import AVFAudio
+import PhotosUI
 import SwiftUI
 
-struct VillageBotProfile: View {
+@MainActor struct VillageBotProfile: View {
     let botID: UUID
     let api: LiveAPI?
     @Binding var studioUnlocked: Bool
@@ -15,6 +17,7 @@ struct VillageBotProfile: View {
     @AppStorage(AppStorageKeys.phoneModel) private var phoneModel = "apple"
     @State private var editingBot: VillageBot?
     @State private var showPrivateChat = false
+    @State private var showPhoneChat = false
     @State private var showModels = false
     @State private var fullPrompt = false
     @State private var deletedBot: VillageBot?
@@ -25,6 +28,7 @@ struct VillageBotProfile: View {
     @State private var testMemoryTitle: String?
     @State private var testTask: Task<Void, Never>?
     @State private var notice: String?
+    @State private var confirmRetirement = false
     @StateObject private var speechBox = SpeechBox()
 
     private var bots: [VillageBot] { VillageBot.list(from: savedBots) }
@@ -40,9 +44,25 @@ struct VillageBotProfile: View {
             VStack(spacing: 16) {
                 if let bot = localBots.first(where: { $0.id == botID }) {
                     hero(bot)
+                    FadedSecondaryButton("Chat på iPhone", icon: "iphone") {
+                        speechBox.stop()
+                        showPhoneChat = true
+                    }
+                    roomCard(bot)
                     computerLink(bot, roster: localBots)
+                    NavigationLink {
+                        BotMailView(api: api, bot: bot)
+                    } label: {
+                        FadedCard(accent: palette.cyan) {
+                            Label("E-mail", systemImage: "envelope")
+                                .font(FadedTypography.action)
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        }
+                    }
+                    .buttonStyle(.plain)
                     voiceCard(bot)
                     personalityCard(bot)
+                    relationsCard(bot, roster: localBots)
                     if bot.id != VillageBot.lumiID { testCard(bot) }
                     NavigationLink { TeamBotNotebook(botID: bot.id) } label: {
                         FadedCard(accent: palette.purple) {
@@ -79,6 +99,9 @@ struct VillageBotProfile: View {
             VillageBotBuilder(api: api, bot: selection, onBack: { editingBot = nil })
         }
         .sheet(isPresented: $showModels) { PhoneModelsView() }
+        .sheet(isPresented: $showPhoneChat) {
+            if let bot = localBots.first(where: { $0.id == botID }) { AgentPhoneChat(bot: bot) }
+        }
         .sheet(isPresented: $showPrivateChat) {
             if botID == VillageBot.lumiID {
                 LumiStudio(api: api)
@@ -86,6 +109,11 @@ struct VillageBotProfile: View {
                 OfflineStudio(api: api, sessionUnlocked: $studioUnlocked, onPrivateSessionEnded: onPrivateSessionEnded,
                               initialPage: .chat, initialBotID: botID)
             }
+        }
+        .confirmationDialog("Slet bot og gem minde?", isPresented: $confirmRetirement, titleVisibility: .visible) {
+            Button("Slet bot", role: .destructive, action: deleteBot)
+        } message: {
+            Text("Botten fjernes fra telefonen. Et minde med navn og rolle bliver i Kirkegården.")
         }
         .task(id: deletedBot?.id) {
             guard let id = deletedBot?.id else { return }
@@ -110,6 +138,8 @@ struct VillageBotProfile: View {
 
     private func hero(_ bot: VillageBot) -> some View {
         VStack(spacing: 10) {
+            Text(VillageHistory.shared.ageLabel(for: bot.id))
+                .font(.caption.weight(.semibold)).foregroundStyle(FadedBrand.mint)
             VillageBotAvatar(bot: bot, size: 120, radius: 28)
             Text(bot.name).font(.largeTitle.bold()).multilineTextAlignment(.center).accessibilityAddTraits(.isHeader)
             Text(bot.specialtyTitle).font(FadedTypography.action).foregroundStyle(palette.secondary)
@@ -119,6 +149,31 @@ struct VillageBotProfile: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 12)
+    }
+
+    private func roomCard(_ bot: VillageBot) -> some View {
+        VillagePixelImage(name: "room-" + VillageAssets.newArtName(name: bot.name, id: bot.id.uuidString),
+                          folder: "new")
+            .frame(height: 180)
+            .frame(maxWidth: .infinity)
+            .background(palette.card, in: RoundedRectangle(cornerRadius: 18))
+            .clipShape(RoundedRectangle(cornerRadius: 18))
+            .accessibilityLabel("Personligt område for \(bot.name)")
+    }
+
+    private func relationsCard(_ bot: VillageBot, roster: [VillageBot]) -> some View {
+        FadedCard(accent: palette.green) {
+            VStack(alignment: .leading, spacing: 8) {
+                FadedSectionLabel("Relationer og rytme")
+                if let friend = roster.first(where: { $0.id == bot.bestFriendID }) {
+                    Text("Nær ven: \(friend.name)").font(.subheadline)
+                } else {
+                    Text("Ingen relation er valgt endnu.").font(.subheadline).foregroundStyle(palette.secondary)
+                }
+                Text("Fokus 09–17 · fællesskab 17–21 · hvile 21–09")
+                    .font(.caption).foregroundStyle(palette.secondary)
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private func voiceCard(_ bot: VillageBot) -> some View {
@@ -200,7 +255,7 @@ struct VillageBotProfile: View {
 
     private func profileActions(_ bot: VillageBot, canDuplicate: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            FadedSecondaryButton(bot.id == VillageBot.lumiID ? "Åbn Lumis private studie" : "Chat med botten", icon: "lock.shield") {
+            FadedSecondaryButton(bot.id == VillageBot.lumiID ? "Åbn Lumis private studie" : "Åbn i Studio", icon: "lock.shield") {
                 speechBox.stop()
                 showPrivateChat = true
             }
@@ -211,7 +266,7 @@ struct VillageBotProfile: View {
             FadedSecondaryButton("Duplikér bot", icon: "plus.square.on.square", action: duplicateBot)
                 .disabled(!canDuplicate)
             if !canDuplicate { FadedDetailText("Der er plads til op til 10 bots.") }
-            FadedSecondaryButton("Slet bot", icon: "trash", role: .destructive, action: deleteBot)
+            FadedSecondaryButton("Slet bot", icon: "trash", role: .destructive) { confirmRetirement = true }
         }.frame(maxWidth: .infinity, alignment: .leading).disabled(testTask != nil)
     }
 
@@ -249,6 +304,7 @@ struct VillageBotProfile: View {
         }
         do {
             try MigratedAppData.shared.saveVillageBots(remaining)
+            VillageHistory.shared.retired(bots[index])
             speechBox.stop()
             deletedBot = bots[index]
             deletedIndex = index
@@ -276,6 +332,7 @@ struct VillageBotProfile: View {
         updated.append(copy)
         do {
             try MigratedAppData.shared.saveVillageBots(JSONEncoder().encode(updated))
+            VillageHistory.shared.created(copy)
             speechBox.stop()
             notice = nil
             editingBot = copy
@@ -294,6 +351,7 @@ struct VillageBotProfile: View {
         bots.insert(deletedBot, at: min(deletedIndex, bots.count))
         do {
             try MigratedAppData.shared.saveVillageBots(JSONEncoder().encode(bots))
+            VillageHistory.shared.restored(deletedBot.id)
             self.deletedBot = nil
             notice = nil
         } catch { AppDiagnostics.record(error); notice = "Botten kunne ikke gendannes." }
@@ -301,16 +359,43 @@ struct VillageBotProfile: View {
 }
 
 /// Lumi has a separate screen and a fixed PC route; ordinary bot chats never select her models.
-struct LumiStudio: View {
+@MainActor struct LumiStudio: View {
+    private enum SceneSheet: String, Identifiable {
+        case library, new, edit, saveAs
+        var id: String { rawValue }
+    }
+
     let api: LiveAPI?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
     @AppStorage(AppStorageKeys.lumiPendingVideoJob) private var pendingVideoJobID = ""
     @State private var mode = 0
     @State private var draft = ""
-    @State private var messages: [[String: String]] = []
+    @State private var imageDraft = ""
+    @State private var videoDraft = ""
+    @State private var language = "da-DK"
+    @State private var dictation = ChatDictation()
+    @StateObject private var speech = SpeechBox()
+    @StateObject private var christel = ChristelPlayer()
+    @State private var showChristelSettings = false
+    @State private var showEverydayTools = false
+    @State private var christelReady = false
+    @State private var christelPCReady = false
+    @Environment(\.scenePhase) private var phase
+    @State private var messages: [LumiSceneMessage] = []
+    @State private var sceneCard: LumiSceneCard?
+    @State private var initiative: LumiInitiative = .together
+    @State private var scenes: [LumiSavedScene] = []
+    @State private var libraryNotice: String?
+    @State private var sceneSheet: SceneSheet?
+    @State private var nextSceneSheet: SceneSheet?
+    @State private var pendingScene: LumiSavedScene?
+    @State private var confirmSceneSwitch = false
     @State private var picture: Data?
     @State private var pictureFile: URL?
+    @State private var referenceSelection: PhotosPickerItem?
+    @State private var imageReference: Data?
+    @State private var loadingReference = false
     @State private var videoPlayer: AVPlayer?
     @State private var videoFile: URL?
     @State private var busy = false
@@ -327,17 +412,10 @@ struct LumiStudio: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
-                        Text("Lumi · privat 18+")
-                            .font(.title2.bold())
-                        Text("Skriv på dansk, engelsk eller en blanding. Du behøver ikke skrive perfekt.")
-                            .font(.subheadline).foregroundStyle(palette.secondary)
                         if mode == 0 {
-                            ForEach(Array(messages.enumerated()), id: \.offset) { _, item in
-                                Text(item["content"] ?? "")
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(12)
-                                    .background(item["role"] == "user" ? palette.raised : palette.card,
-                                                in: .rect(cornerRadius: 14))
+                            sceneControls
+                            LazyVStack(alignment: .leading, spacing: 12) {
+                                ForEach(messages) { item in messageCard(item) }
                             }
                         } else if mode == 1 {
                             if let picture, let image = UIImage(data: picture) {
@@ -370,14 +448,18 @@ struct LumiStudio: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
-                TextField(mode == 0 ? "Skriv til Lumi" : mode == 1 ? "Beskriv dit billede" : "Beskriv din video", text: $draft,
+                if mode == 0 { voiceControls }
+                if mode == 1 { referencePicker }
+                TextField(mode == 0 ? "Skriv til Lumi" : mode == 1 ? "Beskriv dit billede" : "Beskriv din video", text: promptDraft(for: mode),
                           axis: .vertical)
                     .lineLimit(2...5)
                     .padding(12)
                     .background(palette.raised, in: .rect(cornerRadius: 14))
                 FadedPrimaryButton(busy ? "Arbejder på PC’en…" : mode == 0 ? "Send" : mode == 1 ? "Lav billede" : "Lav video",
                                    icon: mode == 0 ? "arrow.up" : mode == 1 ? "photo" : "film") { send() }
-                    .disabled(busy || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || api == nil)
+                    .disabled(busy || (mode == 1 && loadingReference) || dictation.active ||
+                              !isValidPrompt(promptDraft(for: mode).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)) ||
+                              api == nil)
                 if api == nil { Text("Forbind din PC for at bruge Lumi.").font(.footnote) }
             }
             .padding(16)
@@ -385,33 +467,387 @@ struct LumiStudio: View {
             .foregroundStyle(palette.text)
             .navigationTitle("Lumi")
             .navigationBarTitleDisplayMode(.inline)
+            .privacySensitive()
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Luk") { dismiss() }
                 }
+                if mode == 0 {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button("Hverdagsværktøjer", systemImage: "wrench.and.screwdriver") { showEverydayTools = true }
+                            .disabled(busy || dictation.active)
+                    }
+                }
             }
-            .task { await resumeVideoIfNeeded() }
+            .sheet(isPresented: $showEverydayTools) {
+                NavigationStack {
+                    EverydayToolsView(draftTitle: "Brug i chat") { text in
+                        guard !busy, !dictation.active,
+                              let updated = EverydayDraft.appending(text, to: draft, limit: 4_000) else { return false }
+                        draft = updated
+                        showEverydayTools = false
+                        return true
+                    }
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) { Button("Luk") { showEverydayTools = false } }
+                    }
+                }
+            }
+            .sheet(isPresented: $showChristelSettings, onDismiss: refreshChristel) {
+                ChristelSettingsView(pcReady: christelPCReady)
+            }
+            .sheet(item: $sceneSheet, onDismiss: finishSceneSheet, content: sceneSheetContent)
+            .alert("Skift scene?", isPresented: $confirmSceneSwitch) {
+                Button("Skift uden at gemme", role: .destructive) {
+                    if let pendingScene { openScene(pendingScene) }
+                }
+                Button("Bliv her", role: .cancel) { pendingScene = nil }
+            } message: {
+                Text("Du har nye beskeder eller ændringer i denne scene. Du kan blive her og gemme dem først.")
+            }
+            .task(id: "\(api?.queueTargetID ?? ""):\(phase == .active)") {
+                if phase == .active { await refreshChristelPC() }
+            }
+            .task {
+                refreshChristel()
+                await resumeVideoIfNeeded()
+            }
+            .onChange(of: mode) { stopAudio() }
+            .onChange(of: phase) { if phase != .active { stopAudio() } }
+            .onDisappear { stopAudio() }
         }
     }
 
-    private func send() {
-        guard let api, !busy else { return }
-        let input = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !input.isEmpty else { return }
+    private func messageCard(_ message: LumiSceneMessage) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(message.role == .user ? "Dig" : "Lumi")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(palette.secondary)
+            Text(message.text).textSelection(.enabled)
+            if message.role == .assistant {
+                replyAudio(message.text, language: message.language)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(message.role == .user ? palette.raised : palette.card, in: .rect(cornerRadius: 14))
+    }
+
+    private var sceneControls: some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(sceneCard?.title ?? "Lumi · privat 18+")
+                    .font(FadedTypography.action)
+                if let sceneCard {
+                    FadedDetailText(sceneCard.mood.title)
+                }
+                Picker("Initiativ", selection: $initiative) {
+                    ForEach(LumiInitiative.allCases) { kind in Text(kind.title).tag(kind) }
+                }
+                .pickerStyle(.segmented)
+                ViewThatFits(in: .horizontal) {
+                    HStack {
+                        leadButton
+                        libraryButton
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        leadButton
+                        libraryButton
+                    }
+                }
+                HStack {
+                    Button("Gem scenen", systemImage: "bookmark") {
+                        if let sceneCard { saveScene(sceneCard) }
+                        else { sceneSheet = .saveAs }
+                    }
+                    .frame(minHeight: 44)
+                    .disabled(sceneCard == nil && messages.isEmpty && draft.isEmpty)
+                    Spacer()
+                    if sceneCard != nil {
+                        Button("Redigér scenekort", systemImage: "pencil") { sceneSheet = .edit }
+                            .labelStyle(.iconOnly)
+                            .frame(minWidth: 44, minHeight: 44)
+                    }
+                }
+            }
+        }
+        .disabled(busy || dictation.active)
+    }
+
+    private var leadButton: some View {
+        FadedSecondaryButton("Tag føringen", icon: "sparkles") { send(opening: true) }
+            .disabled(api == nil)
+    }
+
+    private var libraryButton: some View {
+        FadedSecondaryButton("Scenebibliotek", icon: "books.vertical") {
+            loadScenes()
+            sceneSheet = .library
+        }
+    }
+
+    @ViewBuilder private func sceneSheetContent(_ sheet: SceneSheet) -> some View {
+        switch sheet {
+        case .library:
+            LumiSceneLibraryView(scenes: scenes, notice: libraryNotice, onOpen: { pendingScene = $0 },
+                                 onRemove: removeScene, onNew: { nextSceneSheet = .new })
+        case .new:
+            LumiSceneCardEditor(card: LumiSceneCard(), actionTitle: "Start scenen") { card in
+                pendingScene = .snapshot(card: card, initiative: .together, language: language, messages: [], draft: "")
+            }
+        case .edit:
+            if let sceneCard {
+                LumiSceneCardEditor(card: sceneCard, actionTitle: "Brug scenekort") { self.sceneCard = $0 }
+            }
+        case .saveAs:
+            LumiSceneCardEditor(card: LumiSceneCard(), actionTitle: "Gem scenen") { saveScene($0) }
+        }
+    }
+
+    private func finishSceneSheet() {
+        if let nextSceneSheet {
+            self.nextSceneSheet = nil
+            sceneSheet = nextSceneSheet
+            return
+        }
+        guard let pendingScene else { return }
+        if sceneHasEdits {
+            confirmSceneSwitch = true
+        } else {
+            openScene(pendingScene)
+        }
+    }
+
+    private var sceneHasEdits: Bool {
+        guard let sceneCard else { return !messages.isEmpty || !draft.isEmpty }
+        guard let saved = scenes.first(where: { $0.id == sceneCard.id }) else { return true }
+        return !saved.matches(sceneSnapshot(sceneCard))
+    }
+
+    private func sceneSnapshot(_ card: LumiSceneCard) -> LumiSavedScene {
+        .snapshot(card: card, initiative: initiative, language: language, messages: messages, draft: draft)
+    }
+
+    private func openScene(_ scene: LumiSavedScene) {
+        stopAudio()
+        sceneCard = scene.card
+        initiative = scene.initiative
+        language = scene.language == "en-US" ? "en-US" : "da-DK"
+        messages = scene.messages
+        draft = scene.draft
+        pendingScene = nil
+        notice = nil
+    }
+
+    private func loadScenes() {
+        do {
+            scenes = try LumiSceneLibrary.load()
+            libraryNotice = nil
+        } catch {
+            libraryNotice = "Scenebiblioteket kunne ikke læses. Lås iPhone op, og prøv igen."
+        }
+    }
+
+    private func saveScene(_ card: LumiSceneCard) {
+        do {
+            let current = try LumiSceneLibrary.load()
+            guard current.count < LumiSceneLibrary.maximumScenes || current.contains(where: { $0.id == card.id }) else {
+                notice = "Scenebiblioteket er fuldt. Fjern en gammel scene, før du gemmer en ny."
+                return
+            }
+            let updated = [sceneSnapshot(card)] + current.filter { $0.id != card.id }
+            try LumiSceneLibrary.save(updated)
+            scenes = updated
+            sceneCard = card
+            notice = "Scenen er gemt på denne iPhone."
+        } catch {
+            notice = "Scenen kunne ikke gemmes. Lås iPhone op, og prøv igen."
+        }
+    }
+
+    private func removeScene(_ id: UUID) {
+        do {
+            let updated = try LumiSceneLibrary.load().filter { $0.id != id }
+            try LumiSceneLibrary.save(updated)
+            scenes = updated
+            libraryNotice = nil
+        } catch {
+            libraryNotice = "Scenen kunne ikke slettes. Prøv igen."
+        }
+    }
+
+    private func refreshChristel() {
+        christelReady = ChristelConfiguration.load() != nil
+        Task { await refreshChristelPC() }
+    }
+
+    private func refreshChristelPC() async {
+        let available = (try? await api?.christelConfigured()) == true
+        if !Task.isCancelled { christelPCReady = available }
+    }
+
+    private func replyAudio(_ text: String, language: String) -> some View {
+        let locale = LocalSpeechVoice.detectedReplyLanguage(text) ?? language
+        return VStack(alignment: .leading, spacing: 2) {
+            Button("Læs op på iPhone", systemImage: "speaker.wave.2") {
+                dictation.stop()
+                christel.stop()
+                let voice = LocalSpeechVoice.preferred(language: locale)
+                speech.play(LocalSpeechVoice.utterance(LocalSpeechVoice.replyText(text), voice: voice, rate: 1), as: .preview)
+            }
+            .frame(minHeight: 44)
+            if locale == "da-DK" && (christelReady || christelPCReady) {
+                Button("Læs med Christel · online", systemImage: "waveform") {
+                    dictation.stop()
+                    speech.stop()
+                    christel.play(text: LocalSpeechVoice.replyText(text), pc: christelPCReady ? api : nil)
+                }
+                .frame(minHeight: 44)
+            }
+        }
+    }
+
+    private var voiceControls: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Picker("Sprog", selection: $language) {
+                    Text("Dansk").tag("da-DK")
+                    Text("English").tag("en-US")
+                }
+                .disabled(dictation.active)
+                Spacer()
+                Button(dictation.active ? "Stop" : "Diktér", systemImage: dictation.active ? "stop.circle" : "mic") {
+                    if dictation.active {
+                        dictation.stop()
+                    } else {
+                        speech.stop()
+                        christel.stop()
+                        let locale = language
+                        let prefix = draft.isEmpty ? "" : draft + " "
+                        Task { await dictation.start(language: locale) { draft = prefix + $0 } }
+                    }
+                }
+                .frame(minHeight: 44)
+                if speech.playback != nil || christel.loading || christel.playing {
+                    Button("Stop oplæsning", systemImage: "speaker.slash") {
+                        speech.stop()
+                        christel.stop()
+                    }
+                        .labelStyle(.iconOnly)
+                        .frame(minWidth: 44, minHeight: 44)
+                }
+            }
+            Button(christelReady || christelPCReady ? "Christel · indstillinger" : "Sæt Christel op", systemImage: "waveform") {
+                stopAudio()
+                showChristelSettings = true
+            }
+            .font(.footnote)
+            .frame(minHeight: 44)
+            if christel.loading {
+                ProgressView("Christel gør oplæsningen klar…").font(.caption)
+            }
+            if let notice = christel.notice {
+                FadedDetailText(notice)
+            }
+            if let problem = dictation.problem {
+                Text(problem).font(.caption).foregroundStyle(palette.secondary)
+            } else if dictation.hasTranscript {
+                Text("Du kan rette teksten, før du sender.").font(.caption).foregroundStyle(palette.secondary)
+            }
+        }
+    }
+
+    private func stopAudio() {
+        dictation.stop()
+        speech.stop()
+        christel.stop()
+    }
+
+    private var referencePicker: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                if let imageReference, let preview = UIImage(data: imageReference) {
+                    Image(uiImage: preview).resizable().scaledToFill()
+                        .frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 8))
+                        .accessibilityLabel("Valgt referencebillede")
+                }
+                PhotosPicker(selection: $referenceSelection, matching: .images) {
+                    Label(imageReference == nil ? "Tilføj referencebillede" : "Skift referencebillede",
+                          systemImage: "photo.badge.plus").frame(minHeight: 44)
+                }
+                .disabled(busy)
+                if loadingReference { ProgressView() }
+                if imageReference != nil || loadingReference {
+                    Button("Fjern referencebillede", systemImage: "xmark") {
+                        referenceSelection = nil
+                        imageReference = nil
+                    }.labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(busy)
+                }
+            }
+            if imageReference != nil {
+                Text("Referencebilledet sendes til ComfyUI på din PC, når du trykker Lav billede.")
+                    .font(.caption).foregroundStyle(palette.secondary)
+            }
+        }
+        .task(id: referenceSelection) {
+            guard let item = referenceSelection else { loadingReference = false; return }
+            imageReference = nil
+            loadingReference = true
+            defer { if referenceSelection == item { loadingReference = false } }
+            do {
+                guard let input = try await item.loadTransferable(type: StudioPhotoInput.self),
+                      (1...1_000_000).contains(input.data.count) else { throw APIError.input }
+                try Task.checkCancellation()
+                if referenceSelection == item { imageReference = input.data }
+            } catch {
+                if !Task.isCancelled && referenceSelection == item {
+                    notice = "Referencebilledet kunne ikke åbnes."
+                }
+            }
+        }
+    }
+
+    private func promptDraft(for mode: Int) -> Binding<String> {
+        switch mode {
+        case 1: $imageDraft
+        case 2: $videoDraft
+        default: $draft
+        }
+    }
+
+    private func isValidPrompt(_ prompt: String) -> Bool {
+        (1...4_000).contains(prompt.unicodeScalars.count)
+    }
+
+    private func send(opening: Bool = false) {
+        guard let api, !busy, !dictation.active else { return }
         let selectedMode = mode
-        let previous = Array(messages.suffix(16))
-        draft = ""
+        guard !opening || selectedMode == 0 else { return }
+        let selectedDraft = promptDraft(for: selectedMode)
+        let input = opening ? (language == "da-DK" ? "Tag føringen" : "Take the lead")
+            : selectedDraft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard isValidPrompt(input) else { return }
+        let reference = selectedMode == 1 ? imageReference : nil
+        let replyLanguage = language
+        let selectedScene = sceneCard
+        let selectedInitiative: LumiInitiative = opening ? .lumi : initiative
+        dictation.clearReview()
+        let previous = modelHistory
+        if !opening { selectedDraft.wrappedValue = "" }
         notice = nil
         busy = true
         Task {
             defer { busy = false }
             do {
                 if selectedMode == 0 {
-                    let reply = try await api.lumiChat(message: input, history: previous)
-                    messages.append(["role": "user", "content": input])
-                    messages.append(["role": "assistant", "content": reply])
+                    let reply = try await api.lumiChat(message: input, history: previous, language: replyLanguage,
+                                                      scene: selectedScene, initiative: selectedInitiative, opening: opening)
+                    if opening { initiative = .lumi }
+                    messages.append(LumiSceneMessage(role: .user, text: input, language: replyLanguage))
+                    messages.append(LumiSceneMessage(role: .assistant, text: String(reply.unicodeScalars.prefix(4_000)),
+                                                     language: replyLanguage))
                 } else if selectedMode == 1 {
-                    let data = try await api.lumiImage(prompt: input)
+                    let data = try await api.lumiImage(prompt: input, reference: reference)
                     let file = FileManager.default.temporaryDirectory
                         .appendingPathComponent("lumi-\(UUID().uuidString).png")
                     try data.write(to: file, options: .atomic)
@@ -425,10 +861,30 @@ struct LumiStudio: View {
                 }
             } catch {
                 AppDiagnostics.record(error)
-                if selectedMode != 2 || pendingVideoJobID.isEmpty { draft = input }
-                show(error)
+                if !opening && selectedDraft.wrappedValue.isEmpty && (selectedMode != 2 || pendingVideoJobID.isEmpty) {
+                    selectedDraft.wrappedValue = input
+                }
+                if selectedMode == 0, selectedScene != nil || selectedInitiative != .together || opening,
+                   let apiError = error as? APIError, case .http(404, _) = apiError {
+                    notice = "Opdatér FadedAI på PC’en for at bruge scenekort og initiativ."
+                } else {
+                    show(error)
+                }
             }
         }
+    }
+
+    private var modelHistory: [[String: String]] {
+        var remaining = 9_000
+        var selected: [[String: String]] = []
+        for message in messages.suffix(16).reversed() {
+            guard remaining >= 80 else { break }
+            let text = String(decoding: message.text.utf8.prefix(remaining), as: UTF8.self)
+            selected.append(["role": message.role.rawValue, "content": text])
+            remaining -= text.utf8.count
+        }
+        if selected.last?["role"] == "assistant" { selected.removeLast() }
+        return Array(selected.reversed())
     }
 
     private func resumeVideoIfNeeded() async {

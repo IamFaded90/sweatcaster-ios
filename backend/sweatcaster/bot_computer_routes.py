@@ -10,7 +10,8 @@ from sweatcaster.dto import ApiError
 def register_bot_computers(app: FastAPI, settings, authorize, service=None):
     if service is None:
         service = BotComputers(settings.output_root / "bot-computers.sqlite3", AIORuntime(), ollama_reports(settings),
-                               propose=ollama_reports(settings, phone_actions=True))
+                               propose=ollama_reports(settings, phone_actions=True),
+                               derive_query=ollama_reports(settings, web_query=True))
 
     def paired(request: Request, response: Response):
         authorize(request, settings)
@@ -31,7 +32,8 @@ def register_bot_computers(app: FastAPI, settings, authorize, service=None):
 
     @router.get("/{bot_id}")
     def status(bot=Depends(computer_id)):
-        return {**run(service.status, bot), "phoneActions": service.propose is not None, "taskContext": True}
+        return {**run(service.status, bot), "phoneActions": service.propose is not None, "taskContext": True,
+                "agentProfile": True, "webSearch": service.derive_query is not None}
 
     @router.post("/{bot_id}/start")
     def start(bot=Depends(computer_id)):
@@ -72,7 +74,8 @@ def register_bot_computers(app: FastAPI, settings, authorize, service=None):
         source_id = run(wire_uuid, source) if source is not None else None
         return run(lambda: service.enqueue(bot, request_id, payload.get("prompt"), source_id,
                                            phone_kind=payload.get("phoneKind"), phone_time=payload.get("phoneTime"),
-                                           task_context=payload.get("taskContext")))
+                                           task_context=payload.get("taskContext"), agent_profile=payload.get("agentProfile"),
+                                           web_search=payload.get("webSearch", False)))
 
     @router.post("/{bot_id}/jobs/{job_id}/cancel")
     def cancel(job_id: str, bot=Depends(computer_id)):

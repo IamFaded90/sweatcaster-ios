@@ -1,5 +1,128 @@
 import SwiftUI
 
+struct AttentionQueue: Decodable {
+    struct Video: Decodable, Identifiable {
+        let id: String
+        let previewReady: Bool
+    }
+    struct Mail: Decodable {
+        let botID: UUID
+        let appointments: [MailAppointmentState.Appointment]
+    }
+
+    let code: [CodeBatchList.Job]
+    let video: [Video]
+    let mail: Mail?
+}
+
+@MainActor struct DashboardAttentionView: View {
+    let api: LiveAPI?
+    let openVideoJobs: () -> Void
+    @Environment(\.scenePhase) private var phase
+    @AppStorage("fadedai.phone-job.applied") private var applied = ""
+    @State private var queue: AttentionQueue?
+    @State private var notice: String?
+
+    var body: some View {
+        List {
+            if let api, let queue {
+                entries(queue, api: api)
+            } else if let notice {
+                FadedDetailText(notice)
+            } else {
+                ProgressView("Tjekker godkendelser på din PC…")
+            }
+        }
+        .scrollContentBackground(.hidden)
+        .background { FadedBackground() }
+        .navigationTitle("Afventer dig")
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable { await reload() }
+        .task(id: "\(api?.queueTargetID ?? ""):\(phase == .active)") {
+            guard phase == .active else { return }
+            await reload()
+        }
+        .privacySensitive()
+    }
+
+    @ViewBuilder private func entries(_ queue: AttentionQueue, api: LiveAPI) -> some View {
+        let proposals = mailEntries(queue.mail)
+        if queue.code.isEmpty && queue.video.isEmpty && proposals.isEmpty {
+            ContentUnavailableView("Intet afventer dig", systemImage: "checkmark.circle")
+        }
+        if !queue.code.isEmpty {
+            Section("Code Bot") {
+                ForEach(queue.code) { job in
+                    NavigationLink {
+                        BatchProposalView(api: api, id: job.id)
+                    } label: { Label(job.goal, systemImage: "chevron.left.forwardslash.chevron.right").frame(minHeight: 44) }
+                }
+            }
+        }
+        if !queue.video.isEmpty {
+            Section("Video Studio") {
+                ForEach(queue.video) { video in
+                    NavigationLink {
+                        VideoReviewScreen(api: api, resumeID: video.id, onFinished: openVideoJobs)
+                    } label: {
+                        Label(video.previewReady ? "Se videoprøve" : "Gennemgå speak", systemImage: "film")
+                            .frame(minHeight: 44)
+                    }
+                }
+            }
+        }
+        if let botID = queue.mail?.botID,
+           let bot = VillageBot.list(from: MigratedAppData.shared.villageBots).first(where: { $0.id == botID }),
+           !proposals.isEmpty {
+            Section("Gmail-aftaler") {
+                ForEach(proposals) { appointment in
+                    NavigationLink {
+                        MailAppointmentsView(api: api, bot: bot, appointmentID: appointment.id)
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Label(appointment.title, systemImage: "calendar")
+                            if let date = appointment.date { Text(date, format: .dateTime.day().month().hour().minute()).font(.caption) }
+                        }.frame(minHeight: 44)
+                    }
+                }
+            }
+        } else if !proposals.isEmpty {
+            FadedDetailText("Mailforslagene tilhører en agent, der mangler på denne iPhone.")
+        }
+    }
+
+    private func mailEntries(_ mail: AttentionQueue.Mail?) -> [MailAppointmentState.Appointment] {
+        let handled = Set(applied.split(separator: ",").compactMap { UUID(uuidString: String($0)) })
+        return mail?.appointments.filter { proposal in
+            proposal.canApply && !BotPhoneActionKind.allCases.contains {
+                handled.contains(MailAppointmentsView.actionID(proposal.id, $0))
+            }
+        } ?? []
+    }
+
+    private func reload() async {
+        guard let api else {
+            queue = nil
+            notice = "Forbind din PC for at se, hvad der afventer."
+            return
+        }
+        do {
+            let result = try await api.attentionQueue()
+            try Task.checkCancellation()
+            queue = result
+            notice = nil
+        } catch let APIError.http(status, _) where status == 404 {
+            guard !Task.isCancelled else { return }
+            queue = nil
+            notice = "Opdatér FadedAI på PC’en for at se den samlede liste."
+        } catch {
+            guard !Task.isCancelled else { return }
+            queue = nil
+            notice = "PC’en kunne ikke hente listen. Træk ned for at prøve igen."
+        }
+    }
+}
+
 struct DashboardActivityScreen: View {
     let connection: DashboardConnectionStatus
     let queue: DashboardActivityQueue

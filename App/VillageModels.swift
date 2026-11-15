@@ -3,7 +3,7 @@ import SwiftUI
 
 /// Bot-life contract from docs/UNIVERSIM-LIFE-DESIGN.md + UNIVERSIM-LIFE-SCHEMA.json.
 
-enum VillageZoneID: String, Codable, CaseIterable, Sendable {
+enum VillageZoneID: String, Codable, CaseIterable, Hashable, Sendable {
     case research, video, cafe, sleep
 
     var title: String {

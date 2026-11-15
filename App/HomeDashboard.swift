@@ -83,6 +83,9 @@ extension Home {
         FadedDashboardHero(openVillage: openDashboardVillage)
         dashboardMainActions
         quickActions
+        if !model.isDemo {
+            FadedSecondaryButton("Afventer dig", icon: "tray.full") { showAttentionQueue = true }
+        }
         if model.isDemo {
             FadedBadge("Demo · Kun testdata", tone: .info)
         }

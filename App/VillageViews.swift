@@ -227,7 +227,7 @@ private struct VillageSpritePhoto: Transferable {
     }
 }
 
-struct VillageBotBuilder: View {
+@MainActor struct VillageBotBuilder: View {
     private enum Page: String, CaseIterable {
         case profile = "Profil", voice = "Stemme", test = "Prøv bot"
     }
@@ -245,6 +245,8 @@ struct VillageBotBuilder: View {
     @State private var draftLoaded = false
     @StateObject private var voicePreviewBox = SpeechBox()
     @State private var importing = false
+    @State private var showGrokTemplate = false
+    @State private var confirmReplaceDraft = false
     @State private var selectedSprite: PhotosPickerItem?
     @State private var exporting = false
     @State private var exportFile: VillageBotFile?
@@ -274,6 +276,16 @@ struct VillageBotBuilder: View {
         NavigationStack {
             Form {
                 if !fixedProfile {
+                    Button("Brug en Grok-skabelon", systemImage: "doc.on.doc") {
+                        let editingExisting = bots.contains { $0.id == draft.id }
+                        if !editingExisting && !savedEditorDraft.isEmpty {
+                            confirmReplaceDraft = true
+                        } else {
+                            showGrokTemplate = true
+                        }
+                    }
+                    .disabled(bots.count >= 10 || testing)
+                    .listRowBackground(palette.card)
                     DisclosureGroup("Gemte bots · \(bots.count) af 10") {
                         ForEach(bots) { bot in Button(bot.name) { selectDraft(bot) } }
                         Button("Ny bot") { selectDraft(VillageBot()) }.disabled(bots.count >= 10)
@@ -307,6 +319,15 @@ struct VillageBotBuilder: View {
                     }.fontWeight(.semibold)
                 }
             }
+            .sheet(isPresented: $showGrokTemplate) {
+                GrokBotTemplateView(api: api) { bot in
+                    selectDraft(bot)
+                }
+            }
+            .confirmationDialog("Erstat din kladde med en skabelon?", isPresented: $confirmReplaceDraft,
+                                titleVisibility: .visible) {
+                Button("Vælg skabelon") { showGrokTemplate = true }
+            }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.json], onCompletion: importBot)
             .fileExporter(isPresented: $exporting, document: exportFile, contentType: .json,
                           defaultFilename: "FadedAI-bot") { result in
@@ -315,6 +336,7 @@ struct VillageBotBuilder: View {
             .confirmationDialog("Slet botprofil?", isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Slet bot", role: .destructive) {
                     guard persist(bots.filter { $0.id != draft.id }) else { return }
+                    VillageHistory.shared.retired(draft)
                     if fixedProfile { close() } else { selectDraft(VillageBot()) }
                 }
             } message: {
@@ -353,14 +375,15 @@ struct VillageBotBuilder: View {
             TextField("Ansvar og grænser", text: Binding(
                 get: { draft.responsibility ?? "" }, set: { draft.responsibility = String($0.prefix(400)) }
             ), axis: .vertical).lineLimit(2...4)
-            PhotosPicker("Vælg figur fra Fotos", selection: $selectedSprite, matching: .images)
+            Text("Profilbilledet vises ved botten. Landsbyfiguren bruger sit eget pixelbillede.").font(.footnote).foregroundStyle(.secondary)
+            PhotosPicker("Vælg profilbillede fra Fotos", selection: $selectedSprite, matching: .images)
                 .onChange(of: selectedSprite) { _, item in
                     guard let item else { return }
                     let id = draft.id
                     Task { await loadSprite(item, botID: id) }
                 }
             if let api {
-                Button(generatingSprite ? "PC’en tegner figuren…" : "Generér pixelfigur på PC’en") {
+                Button(generatingSprite ? "PC’en tegner profilbilledet…" : "Generér profilbillede på PC’en") {
                     Task { await generateSprite(api) }
                 }
                 .disabled(generatingSprite)
@@ -369,8 +392,8 @@ struct VillageBotBuilder: View {
                 Image(uiImage: image).resizable().interpolation(.none)
                     .scaledToFill().frame(width: 112, height: 112).clipShape(Circle())
                     .frame(maxWidth: .infinity)
-                    .accessibilityLabel("Bottens figur")
-                Button("Fjern figur") { draft.sprite = nil }
+                    .accessibilityLabel("Bottens profilbillede")
+                Button("Fjern profilbillede") { draft.sprite = nil }
             }
             Picker("Farve", selection: $draft.color) {
                 ForEach(["Blå", "Lilla", "Grøn"], id: \.self) { Text($0) }
@@ -523,12 +546,14 @@ struct VillageBotBuilder: View {
             return false
         }
         var updated = bots
+        let isNew = !updated.contains(where: { $0.id == bot.id })
         if let index = updated.firstIndex(where: { $0.id == bot.id }) { updated[index] = bot }
         else {
             guard updated.count < 10 else { notice = "Du kan gemme op til 10 bots."; return false }
             updated.append(bot)
         }
         guard persist(updated) else { return false }
+        if isNew { VillageHistory.shared.created(bot) }
         savedEditorDraft = Data()
         return true
     }
@@ -623,7 +648,7 @@ struct VillageBotAvatar: View {
     }
 }
 
-struct VillageBotLibrary: View {
+@MainActor struct VillageBotLibrary: View {
     let api: LiveAPI?
     @Binding var studioUnlocked: Bool
     let onPrivateSessionEnded: () -> Void
@@ -701,7 +726,10 @@ struct VillageBotLibrary: View {
         var updated = bots
         guard updated.count < 10, !updated.contains(where: { $0.id == VillageBot.lumiID }) else { return }
         updated.append(.lumi())
-        do { try MigratedAppData.shared.saveVillageBots(JSONEncoder().encode(updated)) }
+        do {
+            try MigratedAppData.shared.saveVillageBots(JSONEncoder().encode(updated))
+            if let lumi = updated.last { VillageHistory.shared.created(lumi) }
+        }
         catch { AppDiagnostics.record(error) }
     }
 

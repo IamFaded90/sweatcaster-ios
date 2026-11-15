@@ -34,7 +34,7 @@ extension ChatView {
     private func phoneHistory(for message: String) -> [PhoneModels.ChatExchange] {
         var remaining = max(0, 3_000 - message.count)
         var history: [PhoneModels.ChatExchange] = []
-        for turn in turns.suffix(6).reversed() where turn.notice == nil && !turn.reply.isEmpty {
+        for turn in turns.suffix(6).reversed() where turn.imageRequest != true && turn.notice == nil && !turn.reply.isEmpty {
             let size = turn.prompt.count + turn.reply.count + 24
             guard size <= remaining else { break }
             history.append(.init(prompt: turn.prompt, reply: turn.reply))
@@ -165,6 +165,95 @@ extension ChatView {
 
     private func turnIndex(_ id: UUID) -> Int? { turns.firstIndex { $0.id == id } }
 
+    @MainActor func generateChatImage(onPC: Bool) {
+        let original = draft
+        let prompt = original.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !demo, task == nil, !dictation.active, !prompt.isEmpty else { return }
+        if stagedPhoto != nil || attachedNote != nil || attachedQuote != nil {
+            chatNotice = "Fjern vedhæftninger, før du bruger teksten til et billede."
+            return
+        }
+        guard prompt.count <= (onPC ? 1_000 : 2_000) else {
+            chatNotice = "Forkort din billedbeskrivelse."
+            return
+        }
+        let model: StudioImageModel? = if onPC {
+            nil
+        } else {
+            StudioImageModel(rawValue: chatImageModel).flatMap { $0.isInstalled ? $0 : nil }
+                ?? StudioImageModel.allCases.first(where: \.isInstalled)
+        }
+        let pc = api as? LiveAPI
+        if onPC && pc == nil {
+            chatNotice = "Forbind PC’en for at bruge dens billedmodel."
+            return
+        }
+        if !onPC && model == nil {
+            chatNotice = "Hent en billedmodel til iPhone under Lokale modeller → Billeder."
+            composerFocused = false
+            showPhoneModelSetup = true
+            return
+        }
+        let source = onPC ? "PC" : "Telefon"
+        let id = UUID()
+        let directory = StudioImageFiles.library
+        let destination = StudioImageFiles.destination(in: directory)
+        turns.append(ChatTurn(id: id, prompt: prompt, source: source, createdAt: .now,
+                              replyModelID: onPC ? nil : model?.id, imageName: destination.lastPathComponent,
+                              imageRequest: true))
+        draft = ""
+        savedDraft = ""
+        composerFocused = false
+        status = onPC ? "PC’en laver dit billede…" : "iPhone laver dit billede…"
+        chatNotice = nil
+        responseDuration = nil
+        searchSteps = []
+        streamedText = ""
+        save(pending: true)
+        task = Task {
+            defer { status = nil; task = nil; save() }
+            do {
+                try StudioImageFiles.prepare(directory)
+                let file = try LocalFileStore.safeWriteURL(destination, within: directory)
+                var saved = false
+                defer { if !saved { try? FileManager.default.removeItem(at: file) } }
+                if onPC, let pc {
+                    let data = try await pc.v2GenerateImage(prompt: prompt)
+                    try Task.checkCancellation()
+                    try LocalFileStore.writeBytes(data, to: file, within: directory)
+                } else if let model {
+                    try await LocalCompute.run(minimumMiB: model.minimumWorkingMemoryMiB) {
+                        let thermal = ProcessInfo.processInfo.thermalState
+                        guard thermal != .serious, thermal != .critical else { throw StudioImageInterruption.heat }
+                        _ = try await StudioImageGeneration.render(model: model, prompt: prompt,
+                                                                   seed: UInt32.random(in: 1...UInt32.max), destination: file)
+                    }
+                } else {
+                    throw PhoneModelError.unavailable
+                }
+                try Task.checkCancellation()
+                guard let index = turnIndex(id) else { return }
+                turns[index].reply = "Billede klar."
+                saved = true
+                completedReplies += 1
+            } catch {
+                if let index = turnIndex(id) {
+                    turns[index].imageName = nil
+                    if Task.isCancelled || error is CancellationError {
+                        turns[index].notice = "Billedgenereringen blev stoppet."
+                    } else if case .heat? = error as? StudioImageInterruption {
+                        turns[index].notice = "iPhone er varm. Vent til den er kølet af, og prøv igen."
+                    } else {
+                        turns[index].notice = onPC
+                            ? "PC’en kunne ikke lave billedet. Tjek PC-forbindelsen og ComfyUI."
+                            : "iPhone kunne ikke lave billedet. Tjek modellen og ledig plads, og prøv igen."
+                    }
+                }
+                if draft.isEmpty { draft = original; savedDraft = original }
+            }
+        }
+    }
+
     private func queuePCMessage(_ prompt: String, outgoing: String, address: String, modelID: String?) {
         guard canQueuePC, pcTargetAddress == address, let pcQueueTargetID else { return }
         do {
@@ -207,6 +296,12 @@ extension ChatView {
 
     func replyAttribution(for turn: ChatTurn) -> String {
         let source = turn.source ?? "AI"
+        if turn.imageRequest == true {
+            if let id = turn.replyModelID, let model = StudioImageModel(rawValue: id) {
+                return "\(source) · \(model.title)"
+            }
+            return "\(source) · Billedgenerering"
+        }
         guard let id = turn.replyModelID else {
             return turn.source == nil ? source : "\(source) · Model ikke oplyst"
         }

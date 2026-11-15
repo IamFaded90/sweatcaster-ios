@@ -24,10 +24,30 @@ def read_source(path: Path, package: Path) -> bytes | None:
     return path.read_bytes() if path.exists() else None
 
 
+def install_launcher_status(package: Path) -> None:
+    path = package / "fadedai.py"
+    if not path.is_file():
+        return
+    code = path.read_text(encoding="utf-8")
+    start = '    command = (\n        "$shortcut = Join-Path'
+    end = "\n\ndef main() -> None:"
+    health_helper = "def _open_qr_when_ready(io: BootIO) -> None:"
+    if health_helper not in code or "    show_startup_status(io.root)" in code:
+        return
+    if code.count(start) != 1 or code.count(end) != 1:
+        return
+    code = code.replace(start, '    print("Klar til at forbinde · Åbn FadedAI på iPhone.", flush=True)\n' + start, 1)
+    code = code.replace(end, "\n    from sweatcaster.pc_metrics import show_startup_status\n"
+                        "    show_startup_status(io.root)\n" + end, 1)
+    compile(code, str(path), "exec")
+    path.write_bytes(code.encode("utf-8"))
+
+
 def install(root: Path, *, apply: bool = True) -> list[Path]:
     from install_module_tabs import install as install_modules
     from install_pc_video_voice import install as install_voice
     from install_video_commentary import install as install_commentary
+    from install_video_review import install as install_review
 
     root = root.resolve(strict=True)
     package = root / "sweatcaster"
@@ -46,6 +66,8 @@ def install(root: Path, *, apply: bool = True) -> list[Path]:
         install_modules(staged_root)
         install_commentary(staged_root, apply=True)
         install_voice(staged_root, apply=True)
+        install_review(staged_root)
+        install_launcher_status(staged_package)
 
         changes = {}
         for path in sorted(staged_package.glob("*.py")):

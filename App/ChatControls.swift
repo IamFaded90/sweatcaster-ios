@@ -357,6 +357,11 @@ extension ChatView {
                     if choosingNote {
                         noteChoices
                     } else {
+                        NavigationLink {
+                            everydayTools(close: { showComposerTools = false })
+                        } label: {
+                            Label("Hverdagsværktøjer", systemImage: "wrench.and.screwdriver").frame(minHeight: 44)
+                        }
                         if openImageStudio != nil {
                             FadedSecondaryButton("Lav billede", icon: "photo") {
                                 imageHandoff = draft

@@ -145,8 +145,10 @@ class SetupWindow:
         self.install_button.grid(sticky="w")
         connections = ttk.Frame(frame)
         connections.grid(sticky="ew", pady=(12, 0))
-        ttk.Button(connections, text="Forbind Emby", command=lambda: self.open_setup("setup_emby_windows.pyw")).pack(side="left")
+        ttk.Button(connections, text="Forbind AgentMail", command=lambda: self.open_setup("setup_agentmail_windows.pyw")).pack(side="left")
+        ttk.Button(connections, text="Forbind Composio", command=lambda: self.open_setup("setup_composio_windows.pyw")).pack(side="left")
         ttk.Button(connections, text="Forbind YouTube", command=lambda: self.open_setup("setup_youtube_windows.pyw")).pack(side="left", padx=(8, 0))
+        ttk.Button(connections, text="Forbind Christel", command=lambda: self.open_setup("setup_christel_windows.pyw")).pack(side="left", padx=(8, 0))
         ttk.Label(frame, textvariable=self.detail, wraplength=470).grid(sticky="w", pady=(10, 0))
         ttk.Label(frame, text="Lad igangværende FadedAI-opgaver afslutte før opdateringen.",
                   wraplength=470).grid(sticky="w", pady=(4, 0))

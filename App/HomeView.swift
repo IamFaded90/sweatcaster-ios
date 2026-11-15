@@ -99,6 +99,7 @@ struct Home: View {
     @State var enteredWithoutPC = false
     @State var showSettings = false
     @State var showPCStatus = false
+    @State var showCodeAddOns = false
     @State var showingBackupTools = false
     @State var settingsPath: [SettingsCategory] = []
     @State var showConnections = false
@@ -106,6 +107,7 @@ struct Home: View {
     @State var showTeam = false
     @State var teamSidebarCompact = false
     @State var dashboardApproval: DashboardApproval?
+    @State var showAttentionQueue = false
     @Environment(\.horizontalSizeClass) var horizontalSizeClass
     var teamPinned: Bool { UIDevice.current.userInterfaceIdiom == .pad && horizontalSizeClass == .regular }
     @State var settingsFollowup: SettingsFollowup?
@@ -162,7 +164,7 @@ struct Home: View {
     @State var studioImagePrompt = ""
     @State var imagePromptAfterChat: String?
     @State var privateStudioAfterChat = false
-    @State var botsAfterChat = false
+    @State var agentsAfterChat = false
     @State var studioToast: StudioToast?
     @State var nsfwSessionUnlocked = false
     @State var showSavedVideos = false
@@ -193,6 +195,7 @@ struct Home: View {
     @State var handledVideoJobRequest: Int?
     @State var saveVideoNotice: String?
     @State var hiddenJobs = Set<String>()
+    @AppStorage(AppStorageKeys.videoHiddenUnavailableJobs) var archivedVideoJobsData = Data()
     @AppStorage(AppStorageKeys.spacesOnboarded) var onboarded = false
     @AppStorage(AppStorageKeys.spacesFont) var font = "Standard"
     @AppStorage(AppStorageKeys.spacesMotion) var motion = false
@@ -294,7 +297,7 @@ struct Home: View {
                                  experimentalWork: experimentalVillageWork, onExperimentalAction: openExperimentalVillageWork))
             }
                 .toolbarVisibility(.hidden, for: .tabBar)
-                .tabItem { Label("Landsby", systemImage: "house.lodge.fill") }.tag(Space.tasks.rawValue)
+                .tabItem { Label("Agenter", systemImage: "person.2.fill") }.tag(Space.tasks.rawValue)
             DeferredHomeTab(isSelected: selectedHomeTab == Space.library.rawValue) {
                 AnyView(CodeWorkspaceView(api: privateStudioPresented ? nil : model.api as? LiveAPI, onBack: goBack))
             }

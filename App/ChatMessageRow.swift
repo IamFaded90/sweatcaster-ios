@@ -1,6 +1,7 @@
 // Renders each prompt and reply together with message-level actions and source attribution.
 
 import Foundation
+import ImageIO
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -38,12 +39,16 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
                 let replyShape = RoundedRectangle(cornerRadius: 18)
                 VStack(alignment: .leading, spacing: FadedSpacing.s) {
                     messageHeading(attribution, icon: icon, accent: palette.isDark ? accent : palette.text)
-                    ChatTranscriptView(reply: turn.reply)
-                    if let readAlong { ChatReadAlong(progress: readAlong) }
-                    if showsWordCount {
-                        FadedDetailText("\(turn.reply.split(whereSeparator: \.isWhitespace).count) ord")
+                    if let name = turn.imageName {
+                        ChatGeneratedImage(name: name)
+                    } else {
+                        ChatTranscriptView(reply: turn.reply)
+                        if let readAlong { ChatReadAlong(progress: readAlong) }
+                        if showsWordCount {
+                            FadedDetailText("\(turn.reply.split(whereSeparator: \.isWhitespace).count) ord")
+                        }
+                        replyActions()
                     }
-                    replyActions()
                 }
                 .padding(.horizontal, 16).padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -86,6 +91,51 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
             }
         }
         .foregroundStyle(accent)
+    }
+}
+
+private struct ChatGeneratedImage: View {
+    let name: String
+    @State private var photo: UIImage?
+    @State private var file: URL?
+    @State private var loaded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let photo, let file {
+                Image(uiImage: photo)
+                    .resizable().scaledToFit()
+                    .clipShape(.rect(cornerRadius: 12))
+                    .accessibilityLabel("AI-genereret billede")
+                ShareLink(item: file) { Label("Del billede", systemImage: "square.and.arrow.up") }
+                    .frame(minHeight: 44)
+            } else if loaded {
+                Text("Billedet er ikke længere i galleriet.").foregroundStyle(.secondary)
+            } else {
+                ProgressView("Åbner billede…")
+            }
+        }
+        .task(id: name) {
+            loaded = false
+            photo = nil
+            file = nil
+            guard let url = StudioImageFiles.savedImage(name) else { loaded = true; return }
+            let thumbnail = await Task.detached(priority: .utility) { Self.thumbnail(url) }.value
+            guard !Task.isCancelled else { return }
+            photo = thumbnail.map { UIImage(cgImage: $0) }
+            file = url
+            loaded = true
+        }
+    }
+
+    private nonisolated static func thumbnail(_ file: URL) -> CGImage? {
+        guard let data = try? LocalFileStore.readBytes(from: file, maximumBytes: 15_000_000),
+              let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true, kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1_024
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 }
 
@@ -166,7 +216,9 @@ extension ChatView {
 
     @ViewBuilder private func noticeActions(_ turn: ChatTurn) -> some View {
         if !isQueued(turn) {
-            if busyPCTurn == turn.id {
+            if turn.imageRequest == true {
+                retryImageControls(turn)
+            } else if busyPCTurn == turn.id {
                 FadedSecondaryButton("Brug Telefon imens", icon: "iphone") {
                     if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { restoreDraft(turn) }
                     chooseModelForNextMessage(.phone)
@@ -179,6 +231,21 @@ extension ChatView {
                     .disabled(task != nil)
             }
         }
+    }
+
+    @ViewBuilder private func retryImageControls(_ turn: ChatTurn) -> some View {
+        let currentDraft = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canRetry = task == nil && (currentDraft.isEmpty || currentDraft == turn.prompt)
+        if turn.source == "PC" && api is LiveAPI {
+            FadedSecondaryButton("Prøv billedet igen på PC", icon: "arrow.clockwise") {
+                draft = turn.prompt
+                generateChatImage(onPC: true)
+            }.disabled(!canRetry)
+        }
+        FadedSecondaryButton("Prøv billedet på iPhone", icon: "iphone") {
+            draft = turn.prompt
+            generateChatImage(onPC: false)
+        }.disabled(!canRetry)
     }
 
     private func isQueued(_ turn: ChatTurn) -> Bool {
@@ -234,6 +301,12 @@ extension ChatView {
             .disabled(task != nil || isQueued(turn))
         Button("Kopiér besked", systemImage: "doc.on.doc") { copyText(turn.prompt) }
         if !turn.reply.isEmpty {
+            if api is LiveAPI {
+                Button("Lav agentopgave af svar", systemImage: "person.crop.circle.badge.plus") {
+                    composerFocused = false
+                    agentTaskDraft = AgentTaskDraft(text: turn.reply)
+                }.disabled(task != nil || turn.imageRequest == true)
+            }
             Button("Svar med citat", systemImage: "quote.opening") { quoteReply(turn) }.disabled(task != nil)
             Button("Kopiér svar", systemImage: "doc.on.doc") { copyText(turn.reply) }
             ShareLink(item: turn.reply) { Label("Del svar", systemImage: "square.and.arrow.up") }
@@ -242,7 +315,8 @@ extension ChatView {
     }
 
     private func canRetryOnPhone(_ turn: ChatTurn) -> Bool {
-        !demo && turn.source == "Telefon" && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !demo && turn.imageRequest != true && turn.source == "Telefon" &&
+            draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func retryOnPhone(_ turn: ChatTurn) {

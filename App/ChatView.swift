@@ -37,6 +37,11 @@ struct ChatView: View {
         let preview: UIImage
     }
 
+    struct AgentTaskDraft: Identifiable {
+        let id = UUID()
+        let text: String
+    }
+
     struct ResolvedRoute {
         let source: ReplySource
         let modelID: String?
@@ -101,6 +106,7 @@ struct ChatView: View {
     @State var pcEngineOffline = false
     @State var completedReplies = 0
     @AppStorage(AppStorageKeys.phoneModel) var phoneModel = "apple"
+    @AppStorage(AppStorageKeys.offlineStudioImageModel) var chatImageModel = StudioImageModel.stableDiffusion.id
     @AppStorage(AppStorageKeys.phoneModelFavorites) var phoneFavorites = ""
     @AppStorage(AppStorageKeys.chatAutoModelRouter) var autoRouterEnabled = false
     @State var phoneBatteryLevel = UIDevice.current.batteryLevel
@@ -119,6 +125,8 @@ struct ChatView: View {
     @State var scrollRequest = 0
     @State private var messageJumpID: UUID?
     @State var showComposerTools = false
+    @State private var showEverydayTools = false
+    @State var agentTaskDraft: AgentTaskDraft?
     @State var showPhoneModelSetup = false
     @State var showPCModelSetup = false
     @State var stagedPhoto: DroppedPhoto?
@@ -241,6 +249,19 @@ struct ChatView: View {
         }
         .sheet(isPresented: $showChatSettings) { chatSettingsSheet }
         .sheet(isPresented: $showComposerTools, onDismiss: finishComposerTools) { composerToolsSheet }
+        .sheet(item: $agentTaskDraft) { input in
+            agentHandoff(input.text)
+        }
+        .sheet(isPresented: $showEverydayTools) {
+            NavigationStack {
+                everydayTools(close: { showEverydayTools = false })
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Luk") { showEverydayTools = false }
+                        }
+                    }
+            }
+        }
         .sheet(item: $droppedPhoto) { photo in
             LocalImageAnalysisView(data: photo.data, onChooseNote: attachPhotoExcerpt, api: api as? LiveAPI)
         }
@@ -266,11 +287,19 @@ struct ChatView: View {
             )) {
                 NavigationStack {
                     historySidebar
-                        .navigationTitle("Samtaler")
                         .navigationBarTitleDisplayMode(.inline)
                         .toolbar {
                             ToolbarItem(placement: .confirmationAction) {
-                                Button("Luk") { showHistory = false }
+                                Button {
+                                    showHistory = false
+                                } label: {
+                                    Text("Luk")
+                                        .font(FadedTypography.action)
+                                        .padding(.horizontal, FadedSpacing.m)
+                                        .frame(minHeight: 44)
+                                        .fadedGlassSurface()
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
                 }
@@ -283,7 +312,7 @@ struct ChatView: View {
     }
 
     private var historySidebar: some View {
-        ChatSidebarView(query: $chatSearch, sessions: historySessions, selectedID: sessionID,
+        ChatSidebarView(query: $chatSearch, mascot: chatPortraitName, sessions: historySessions, selectedID: sessionID,
                         isBusy: task != nil, activeTurns: turns) {
             let previous = sessionID
             newConversation()
@@ -345,7 +374,7 @@ struct ChatView: View {
                 }
             }
             transcriptScroll(userBubbleWidth: userBubbleWidth)
-            composer(compact: compactEditing).layoutPriority(1)
+            composer(compact: compactEditing, showHistoryShortcut: !wide).layoutPriority(1)
             if !composerFocused && !compactHeight {
                 chatBrandFooter
             }
@@ -482,15 +511,12 @@ struct ChatView: View {
                 }
             }
             if chatTypeSize.isAccessibilitySize { quickModelPicker }
+            if !wide { chatHistoryShortcut }
             if !composerFocused {
                 HStack(spacing: FadedSpacing.xs) {
                     Text(connection).font(.caption).foregroundStyle(palette.secondary)
                     Spacer(minLength: FadedSpacing.xs)
                     if !wide {
-                        headerButton("Samtaler og søgning", icon: "sidebar.left") {
-                            refreshHistorySessions()
-                            showHistory = true
-                        }
                         headerButton("Ny samtale", icon: "square.and.pencil") { newConversation() }
                             .disabled(task != nil)
                     }
@@ -515,6 +541,24 @@ struct ChatView: View {
         .foregroundStyle(palette.text)
     }
 
+    func openChatHistory() {
+        composerFocused = false
+        refreshHistorySessions()
+        showHistory = true
+    }
+
+    private var chatHistoryShortcut: some View {
+        Button(action: openChatHistory) {
+            Label("Samtaler", systemImage: "bubble.left.and.bubble.right")
+                .font(.subheadline.weight(.semibold))
+                .padding(.horizontal, FadedSpacing.m)
+                .frame(minHeight: 44)
+                .fadedGlassSurface(border: palette.cyan.opacity(0.38))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("open-chat-history")
+    }
+
     private var chatNavigationMenu: some View {
         Menu {
             if !demo {
@@ -530,6 +574,20 @@ struct ChatView: View {
     }
 
     @ViewBuilder private var chatShortcuts: some View {
+        Button("Hverdagsværktøjer", systemImage: "wrench.and.screwdriver") {
+            composerFocused = false
+            showEverydayTools = true
+        }
+        .frame(minHeight: 44)
+        .disabled(task != nil || dictation.active)
+        if let openBots {
+            Button("Agenter", systemImage: "person.2") {
+                composerFocused = false
+                openBots()
+            }
+            .accessibilityHint("Åbner agentlisten og deres opgaver")
+            .frame(minHeight: 44).disabled(task != nil)
+        }
         if openPrivateStudio != nil {
             Button("Privat", systemImage: "lock.shield", action: goToPrivateStudio)
                 .accessibilityHint("Åbner privat chat på telefonen")
@@ -542,12 +600,46 @@ struct ChatView: View {
             }
             .frame(minHeight: 44).disabled(task != nil)
         }
-        if let openBots {
-            Button("Mine bots", systemImage: "person.2") {
-                composerFocused = false
-                openBots()
+    }
+
+    func everydayTools(close: @escaping () -> Void) -> some View {
+        EverydayToolsView(api: demo ? nil : api as? LiveAPI, showAppleApps: !demo, draftTitle: "Brug i chat") { text in
+            let existing = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+            let contextSize = transportMessage.unicodeScalars.count - existing.unicodeScalars.count
+            guard task == nil, !dictation.active,
+                  let updated = EverydayDraft.appending(text, to: draft, limit: 2_000 - contextSize) else { return false }
+            draft = updated
+            close()
+            return true
+        }
+    }
+
+    private func agentHandoff(_ text: String) -> some View {
+        let bots = VillageBot.list(from: MigratedAppData.shared.villageBots)
+        return NavigationStack {
+            List {
+                Section {
+                    FadedDetailText("Vælg, hvem der får teksten som en kladde, og ret den før du sender.")
+                    if text.unicodeScalars.count > 2_000 {
+                        FadedDetailText("De første 2.000 tegn følger med. Hele svaret er stadig i Chat.")
+                    }
+                    if bots.isEmpty { FadedDetailText("Opret en agent under fanen Agenter først.") }
+                    ForEach(bots) { bot in
+                        NavigationLink {
+                            BotComputerView(bot: bot, roster: bots, api: api as? LiveAPI,
+                                            initialPrompt: String(text.unicodeScalars.prefix(2_000)))
+                        } label: {
+                            Label(bot.name, systemImage: "person.crop.circle")
+                        }.frame(minHeight: 44)
+                    }
+                }
             }
-            .frame(minHeight: 44).disabled(task != nil)
+            .scrollContentBackground(.hidden)
+            .background { FadedBackground() }
+            .navigationTitle("Opgave til agent")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Luk") { agentTaskDraft = nil } }
+            }
         }
     }
 
@@ -572,7 +664,14 @@ struct ChatView: View {
                     voiceControls
                     aiBoostControls
                     if demo { Text("Demotilstand · Ingen rigtige job").font(.headline) }
-                    FadedDetailText("Researcher bruger internettet, når en websøgning er nødvendig.")
+                    if let pc = api as? LiveAPI, !demo {
+                        NavigationLink {
+                            PCServiceLookupView(api: pc, service: .web, onUse: nil)
+                        } label: {
+                            Label("Søg på nettet via PC’en", systemImage: "magnifyingglass")
+                                .frame(minHeight: 44)
+                        }
+                    }
                     Toggle("Vis kun favoritter", isOn: $favoritesOnly)
                     ShareLink(item: conversationText) {
                         Label("Eksportér samtale", systemImage: "square.and.arrow.up")

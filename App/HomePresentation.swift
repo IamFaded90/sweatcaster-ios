@@ -152,6 +152,12 @@ extension Home {
                     .toolbar { Button("Luk") { showPCStatus = false } }
             }
         }
+        .sheet(isPresented: $showCodeAddOns) {
+            NavigationStack {
+                CodeAddOnsView(api: studioAPI)
+                    .toolbar { Button("Luk") { showCodeAddOns = false } }
+            }
+        }
         .sheet(isPresented: $showConnections, onDismiss: {
             guard pairAfterConnections else { return }
             pairAfterConnections = false
@@ -162,7 +168,7 @@ extension Home {
                     guard !switchDisabled else { return }
                     pairAfterConnections = true
                     showConnections = false
-                }, embyAPI: model.isDemo || privateStudioPresented ? nil : model.api as? LiveAPI)
+                }, pcAPI: model.isDemo || privateStudioPresented ? nil : model.api as? LiveAPI)
                 .toolbar { Button("Luk") { showConnections = false } }
             }
         }
@@ -229,6 +235,15 @@ extension Home {
                     }
                 }
                 .toolbar { Button("Luk") { dashboardApproval = nil } }
+            }
+        }
+        .sheet(isPresented: $showAttentionQueue) {
+            NavigationStack {
+                DashboardAttentionView(api: studioAPI) {
+                    showAttentionQueue = false
+                    openVideoJobs()
+                }
+                .toolbar { Button("Luk") { showAttentionQueue = false } }
             }
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
@@ -307,9 +322,9 @@ extension Home {
             openStudio(.images, prompt: prompt)
             return
         }
-        if botsAfterChat {
-            botsAfterChat = false
-            showBots = true
+        if agentsAfterChat {
+            agentsAfterChat = false
+            openLandingDestination(.tasks)
             return
         }
         guard !model.isDemo else { return }
@@ -370,9 +385,9 @@ extension Home {
                         newConversationRequest: newChatRequest,
                         onConsumeNewConversation: { newChatRequest = nil },
                         openBots: {
-                            if embedded { showBots = true }
+                            if embedded { selectSpace(.tasks) }
                             else {
-                                botsAfterChat = true
+                                agentsAfterChat = true
                                 showChat = false
                             }
                         }, onConsumeSearch: { searchChatQuery = "" },

@@ -3,6 +3,7 @@
 import Foundation
 
 enum AppStorageKeys {
+    static let videoHiddenUnavailableJobs = "video.hidden-unavailable-jobs"
     static let aiActions = "ai.actions"
     static let aiAssumptions = "ai.assumptions"
     static let aiBullets = "ai.bullets"
@@ -113,6 +114,11 @@ enum AppStorageKeys {
     static let villageExperimentalFounders = "village.experimental.founders"
     static let villageExperimentalJobs = "village.experimental.completed"
     static let villageShowOffice = "village.showOffice"
+    static let villageLightMode = "village.light.mode"
+    static let villageMapNames = "village.map.names"
+    static let filmLibraryAddress = "fadedai.film-library.address"
+    static let villageBasicMode = "village.basic.mode"
+    static let villageMapZoom = "village.map.zoom"
 
     static let chatSessionPrefix = "spaces.chat."
 

@@ -9,6 +9,7 @@ struct PCStatusView: View {
     @Environment(\.fadedPalette) private var palette
     @State private var refreshCount = 0
     @State private var snapshot: Snapshot?
+    @State private var setupResult: PCSetup?
     @State private var samples: [ConnectionSample] = []
 
     private struct Request: Equatable {
@@ -40,17 +41,23 @@ struct PCStatusView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: FadedSpacing.section) {
                 FadedSignature()
-                FadedSectionHeader("PC-status", detail: "Et øjebliksbillede fra din parrede PC. Statusmålingen starter ingen job.")
-                if api == nil {
+                ShareLink(item: statusReport) {
+                    Label("Del fejlstatus", systemImage: "square.and.arrow.up").frame(minHeight: 44)
+                }
+                if let api {
+                    PCLiveMetrics(api: api, refreshCount: refreshCount)
+                    PCSetupOverview(api: api, refreshCount: refreshCount, status: $setupResult)
+                    if let snapshot, snapshot.request == request {
+                        if let latest = samples.first { connectionRow(latest) }
+                        ForEach(snapshot.rows) { row in featureRow(row) }
+                        Text("Tjekket \(snapshot.checkedAt.formatted(date: .omitted, time: .shortened))")
+                            .font(.caption).foregroundStyle(palette.secondary)
+                    } else {
+                        LoadingSkeleton(label: "Tjekker øvrige funktioner på PC’en…")
+                    }
+                } else {
                     FadedEmptyState(icon: "desktopcomputer", title: "Ingen parret PC",
                                     detail: "Forbind til din PC under Indstillinger → Forbindelse. Demo har ingen PC-status.")
-                } else if let snapshot, snapshot.request == request {
-                    if let latest = samples.first { connectionRow(latest) }
-                    ForEach(snapshot.rows) { row in featureRow(row) }
-                    Text("Tjekket \(snapshot.checkedAt.formatted(date: .omitted, time: .shortened))")
-                        .font(.caption).foregroundStyle(palette.secondary)
-                } else {
-                    LoadingSkeleton(label: "Tjekker funktionerne på PC’en…")
                 }
             }
             .padding(FadedSpacing.edge)
@@ -61,10 +68,24 @@ struct PCStatusView: View {
         .navigationTitle("PC-status")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            Button("Opdatér status", systemImage: "arrow.clockwise") { refreshCount += 1 }
-                .disabled(api == nil || snapshot?.request != request)
+            Button("Tjek opsætning igen", systemImage: "arrow.clockwise") { refreshCount += 1 }
+                .disabled(api == nil)
         }
         .task(id: request) { await refresh() }
+    }
+
+    private var statusReport: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "ukendt"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "ukendt"
+        let pcVersion = (setupResult?.pcVersion).flatMap { value in
+            value.range(of: #"^[0-9]+(?:\.[0-9]+){0,3}$"#, options: .regularExpression) == nil ? nil : value
+        }
+        let details = snapshot?.request == request ? snapshot?.rows ?? [] : []
+        var lines = ["FadedAI · Fejlstatus", "iPhone \(version) (build \(build))",
+                     "PC-version \(pcVersion ?? "ukendt")", "Forbindelse · \(samples.first?.status ?? "ikke målt")"]
+        lines += details.map { "\($0.feature.title) · \($0.status)" }
+        if let setupResult { lines += setupResult.reportLines }
+        return lines.joined(separator: "\n")
     }
 
     private func connectionRow(_ latest: ConnectionSample) -> some View {
@@ -118,6 +139,107 @@ struct PCStatusView: View {
         } catch {
             if !Task.isCancelled { AppDiagnostics.record(error) }
             return .init(profile: server.profile, milliseconds: nil)
+        }
+    }
+}
+
+struct PCSetup: Decodable, Sendable {
+    let desktops, image, lumiImage, web, gmail: String
+    let pcVersion: String?
+
+    var reportLines: [String] {
+        let known = ["ready": "Klar", "responding": "Svarer", "missingImage": "AIO Sandbox mangler",
+                     "missingModel": "Model mangler", "offline": "Intet svar", "missingProject": "Composio mangler",
+                     "signIn": "Kræver login", "enableAgent": "Vælg agent", "unsupported": "Kræver opdatering"]
+        return [("Agentcomputere", desktops), ("Chatbilleder", image), ("Lumi-billeder", lumiImage),
+                ("Websøgning", web), ("Gmail", gmail)].map { "\($0.0) · \(known[$0.1] ?? "Ukendt")" }
+    }
+}
+
+private struct PCSetupOverview: View {
+    let api: LiveAPI
+    let refreshCount: Int
+    @Environment(\.scenePhase) private var phase
+    @Binding var status: PCSetup?
+    @State private var notice: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.s) {
+            FadedSectionHeader("Tjek opsætning", detail: "Se, hvilke tjenester der er klar, og hvad du kan gøre, hvis noget mangler.")
+            if let status {
+                FadedCard(size: .compact) {
+                    VStack(alignment: .leading, spacing: FadedSpacing.m) {
+                        service("Agenternes computere", icon: "desktopcomputer", state: status.desktops,
+                                detail: "Docker og AIO Sandbox er tilgængelige.",
+                                offline: "Åbn Docker Desktop på PC’en, og vent til den er klar.")
+                        service("Billeder fra Chat", icon: "photo", state: status.image, detail: "ComfyUI kan se Stable Diffusion 1.5.")
+                        service("Lumis billedmodel", icon: "photo.on.rectangle", state: status.lumiImage, detail: "ComfyUI kan se Lumis billedmodel.")
+                        service("Websøgning", icon: "magnifyingglass", state: status.web, detail: "SearXNG svarer på PC’en.",
+                                offline: "Tjek, at SearXNG kører i Docker på PC’en.")
+                        service("Gmail-aftaler", icon: "calendar.badge.envelope", state: status.gmail, detail: "Gmail er tilsluttet, og en agent er valgt.")
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else if let notice {
+                FadedDetailText(notice)
+            } else {
+                LoadingSkeleton(label: "Tjekker Docker, billedmodeller, websøgning og Gmail…")
+            }
+        }
+        .task(id: "\(api.queueTargetID):\(phase == .active):\(refreshCount)") {
+            guard phase == .active else { return }
+            await refresh()
+        }
+        .onDisappear { status = nil }
+    }
+
+    private func service(_ title: String, icon: String, state: String, detail: String,
+                         offline: String = "Start ComfyUI på PC’en, og prøv igen.") -> some View {
+        let message: String
+        let label: String
+        let tone: FadedStatusTone
+        switch state {
+        case "ready":
+            (label, message, tone) = ("Klar", detail, .success)
+        case "responding":
+            (label, message, tone) = ("Svarer", detail, .success)
+        case "missingImage":
+            (label, message, tone) = ("AIO Sandbox mangler", "Hent AIO Sandbox fra FadedAI-opsætningen på PC’en.", .warning)
+        case "missingModel":
+            (label, message, tone) = ("Model mangler", "Hent den valgte model til ComfyUI på PC’en.", .warning)
+        case "offline":
+            (label, message, tone) = ("Intet svar", offline, .warning)
+        case "missingProject":
+            (label, message, tone) = ("Kræver opsætning", "Åbn Forbind Composio i FadedAI på PC’en.", .warning)
+        case "signIn":
+            (label, message, tone) = ("Kræver login", "Åbn agentens computer, vælg Gmail-aftaler, og log ind.", .warning)
+        case "enableAgent":
+            (label, message, tone) = ("Vælg en agent", "Åbn Gmail-aftaler på agentens computer, og slå aftalesøgning til.", .info)
+        case "unsupported":
+            (label, message, tone) = ("Kræver opdatering", "Opdatér FadedAI på PC’en.", .warning)
+        default:
+            (label, message, tone) = ("Kunne ikke tjekkes", "Tjek forbindelsen på PC’en, og prøv igen.", .info)
+        }
+        return VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            Label(title, systemImage: icon).font(FadedTypography.action)
+            FadedBadge(label, tone: tone)
+            FadedDetailText(message)
+        }
+    }
+
+    @MainActor private func refresh() async {
+        status = nil
+        notice = nil
+        do {
+            let result = try await api.pcSetup()
+            guard !Task.isCancelled else { return }
+            status = result
+        } catch let APIError.http(code, _) where code == 404 {
+            guard !Task.isCancelled else { return }
+            notice = "Opdatér FadedAI på PC’en for at bruge opsætningstjekket."
+        } catch {
+            guard !Task.isCancelled else { return }
+            notice = "PC’en kunne ikke tjekke opsætningen. Tjek forbindelsen, og prøv igen."
         }
     }
 }

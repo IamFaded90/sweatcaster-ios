@@ -254,7 +254,7 @@ extension Home {
                     pingSetting
                     Button("Skift forbindelse") { closeSettings(for: .login) }.disabled(switchDisabled)
                     NavigationLink("Forbindelser") {
-                        ConnectionsView(embyAPI: model.isDemo || privateStudioPresented ? nil : model.api as? LiveAPI)
+                        ConnectionsView(pcAPI: model.isDemo || privateStudioPresented ? nil : model.api as? LiveAPI)
                     }
                 }
                 Section("Status og opdatering") {

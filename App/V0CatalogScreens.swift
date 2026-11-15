@@ -284,8 +284,151 @@ private struct V0CatalogButton: View {
     }
 }
 
-private struct V0LocalToolSheet: View {
+enum EverydayDraft {
+    static func appending(_ text: String, to draft: String, limit: Int) -> String? {
+        let addition = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let existing = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !addition.isEmpty else { return nil }
+        let merged = existing.isEmpty ? addition : existing + "\n\n" + addition
+        return merged.unicodeScalars.count <= limit ? merged : nil
+    }
+}
+
+struct EverydayToolsView: View {
+    var api: LiveAPI? = nil
+    var showAppleApps = false
+    var draftTitle = "Sæt i kladden"
+    var onPhoneDraft: ((BotPhoneActionKind) -> Void)? = nil
+    var onResearchDraft: (() -> Void)? = nil
+    var onDraft: ((String) -> Bool)? = nil
+    @State private var selectedTool: V0LocalTool?
+    @State private var notice: String?
+
+    private struct Prompt: Identifiable {
+        let title: String
+        let icon: String
+        let text: String
+        var id: String { title }
+    }
+
+    private static let prompts: [Prompt] = [
+        .init(title: "Få overblik over en tekst", icon: "doc.text.magnifyingglass",
+         text: "Opsummér teksten kort. Find de vigtigste punkter, datoer og ting, jeg skal gøre. Bed mig om teksten, hvis den mangler."),
+        .init(title: "Skriv et svar", icon: "envelope",
+         text: "Lav et kort, naturligt udkast til et svar ud fra min besked. Spørg om modtageren eller sammenhængen, hvis det mangler."),
+        .init(title: "Lav en dagsplan", icon: "calendar",
+         text: "Lav en realistisk dagsplan ud fra mine opgaver. Prioritér de vigtigste, og giv plads til pauser og transport."),
+        .init(title: "Lav en indkøbsliste", icon: "cart",
+         text: "Lav en indkøbsliste efter kategori ud fra det, jeg nævner. Saml dubletter, og spørg om antal personer, hvis det ændrer mængderne."),
+        .init(title: "Oversæt eller forklar", icon: "character.bubble",
+         text: "Gør teksten nem at forstå. Oversæt til dansk, hvis den er på et andet sprog, og behold navne og datoer præcist."),
+        .init(title: "Sammenlign muligheder", icon: "list.bullet.rectangle",
+         text: "Sammenlign mine muligheder efter det, der betyder mest for mig. Brug mine tal og oplysninger, og markér, hvad der mangler.")
+    ]
+    private static let local = ["discount", "split", "percent", "days", "checklist", "stats"]
+        .compactMap { id in V0LocalTool.all.first { $0.id == id } }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: FadedSpacing.m) {
+                if let onDraft { promptTools(onDraft) }
+                localTools
+                if let onPhoneDraft { phoneTools(onPhoneDraft) }
+                if api != nil || showAppleApps || onResearchDraft != nil { connectedTools }
+            }
+            .padding(FadedSpacing.edge)
+            .frame(maxWidth: 640)
+            .frame(maxWidth: .infinity)
+        }
+        .background { FadedBackground() }
+        .navigationTitle("Hverdagsværktøjer")
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(item: $selectedTool) { tool in
+            V0LocalToolSheet(tool: tool, useTitle: draftTitle, onUse: onDraft.map { insert in
+                { result in insert(tool.title + "\n" + result) }
+            })
+        }
+    }
+
+    private func promptTools(_ insert: @escaping (String) -> Bool) -> some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 4) {
+                FadedSectionLabel("Få hjælp af AI")
+                FadedDetailText("Vælg en skabelon, og udfyld dine oplysninger, før du sender.")
+                if let notice { FadedToast(notice, tone: .warning) }
+                ForEach(Self.prompts) { item in
+                    Button(item.title, systemImage: item.icon) {
+                        if !insert(item.text) { notice = "Der er ikke plads i kladden. Gør den kortere, og prøv igen." }
+                    }
+                    .frame(minHeight: 44)
+                }
+            }
+        }
+    }
+
+    private var localTools: some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 4) {
+                FadedSectionLabel("Regn og gør klar på iPhone")
+                FadedDetailText("Virker også uden PC og internet.")
+                ForEach(Self.local) { tool in
+                    Button(tool.title, systemImage: tool.category.icon) { selectedTool = tool }
+                        .frame(minHeight: 44)
+                }
+            }
+        }
+    }
+
+    private func phoneTools(_ prepare: @escaping (BotPhoneActionKind) -> Void) -> some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 4) {
+                FadedSectionLabel("Få agenten til at foreslå")
+                FadedDetailText("Du ser forslaget og godkender på din iPhone.")
+                Button("Påmindelse", systemImage: "checklist") { prepare(.reminder) }
+                    .frame(minHeight: 44)
+                Button("Kalenderaftale", systemImage: "calendar.badge.plus") { prepare(.calendar) }
+                    .frame(minHeight: 44)
+                if BotPhoneActionReview.supportsAlarms {
+                    Button("Alarm", systemImage: "alarm") { prepare(.alarm) }
+                        .frame(minHeight: 44)
+                }
+            }
+        }
+    }
+
+    private var connectedTools: some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 4) {
+                FadedSectionLabel("Oplysninger og handlinger")
+                if let onResearchDraft {
+                    Button("Bed agenten finde kilder", systemImage: "globe", action: onResearchDraft)
+                        .frame(minHeight: 44)
+                }
+                if showAppleApps {
+                    NavigationLink {
+                        AppleConnectionsView(onChooseNote: nil)
+                    } label: {
+                        Label("Kalender, påmindelser og alarmer", systemImage: "calendar")
+                            .frame(minHeight: 44, alignment: .leading)
+                    }
+                }
+                if let api {
+                    NavigationLink {
+                        PCServiceLookupView(api: api, service: .web, onUse: onDraft, useWebSourceTitle: draftTitle)
+                    } label: {
+                        Label("Søg på nettet via PC", systemImage: "magnifyingglass")
+                            .frame(minHeight: 44)
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct V0LocalToolSheet: View {
     let tool: V0LocalTool
+    var useTitle = "Sæt i kladden"
+    var onUse: ((String) -> Bool)? = nil
     @Environment(\.dismiss) private var dismiss
     @State private var values: [String: String] = [:]
     @State private var output: String?
@@ -309,6 +452,14 @@ private struct V0LocalToolSheet: View {
                         if output.isEmpty { FadedDetailText("Resultatet er tomt.") }
                         else {
                             Text(verbatim: output).textSelection(.enabled)
+                            if let onUse {
+                                Button(useTitle, systemImage: "text.append") {
+                                    if !onUse(output) {
+                                        failure = "Der er ikke plads i kladden. Kopiér resultatet for at bruge et kortere uddrag."
+                                    }
+                                }
+                                .frame(minHeight: 44)
+                            }
                             Button(copied ? "Resultat kopieret" : "Kopiér resultat",
                                    systemImage: copied ? "checkmark" : "doc.on.doc") {
                                 copyCatalogText(output)

@@ -2,6 +2,43 @@ import XCTest
 @testable import SweatCaster
 
 final class VillageLifeContractTests: XCTestCase {
+    @MainActor
+    func testMemorialSurvivesReloadAndUndoPreservesAge() throws {
+        let suite = "village.history.test.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let born = Date(timeIntervalSince1970: 1_000_000)
+        let bot = VillageBot(name: "Milo", specialty: "Research")
+        let history = VillageHistory(defaults: defaults)
+        history.created(bot, at: born)
+        XCTAssertTrue(history.isYoung(bot.id, now: born.addingTimeInterval(6 * 86_400)))
+        XCTAssertEqual(history.ageLabel(for: bot.id, now: born.addingTimeInterval(7 * 86_400)), "Voksen · 7 dage")
+        history.retired(bot, at: born.addingTimeInterval(8 * 86_400))
+        let reopened = VillageHistory(defaults: defaults)
+        XCTAssertEqual(reopened.memorials.first?.name, "Milo")
+        XCTAssertEqual(reopened.memorials.first?.role, "Research")
+        reopened.restored(bot.id)
+        XCTAssertTrue(VillageHistory(defaults: defaults).memorials.isEmpty)
+        XCTAssertEqual(reopened.ageLabel(for: bot.id, now: born.addingTimeInterval(8 * 86_400)), "Voksen · 8 dage")
+    }
+
+    @MainActor
+    func testGrokTemplatesOnlyOpenOfficialHTTPSLinks() {
+        XCTAssertNotNil(GrokBotTemplateView.officialURL("https://x.ai/bot/example"))
+        XCTAssertNotNil(GrokBotTemplateView.officialURL("https://grok.com/example"))
+        XCTAssertNil(GrokBotTemplateView.officialURL("http://grok.com/example"))
+        XCTAssertNil(GrokBotTemplateView.officialURL("https://x.ai.other.example/bot"))
+        XCTAssertNil(GrokBotTemplateView.officialURL("https://name:password@x.ai/bot"))
+    }
+
+    @MainActor
+    func testChristelReadsUserTextAsText() {
+        let ssml = ChristelSpeech.markup("5 < 6 & 7 > 3")
+        XCTAssertTrue(ssml.contains("5 &lt; 6 &amp; 7 &gt; 3"))
+        XCTAssertTrue(ssml.contains("da-DK-ChristelNeural"))
+        XCTAssertFalse(ChristelConfiguration(region: "westeurope.example", key: "test").valid)
+    }
+
     func testVillageZoneMappingAndNeedClamp() {
         XCTAssertEqual(VillageZoneID.fromHubRoom("video-studio"), .video)
         XCTAssertEqual(VillageZoneID.fromHubRoom("research"), .research)
@@ -22,6 +59,20 @@ final class VillageLifeContractTests: XCTestCase {
         bot.needs.energy = 0.9
         bot.needs.social = 0.1
         XCTAssertEqual(life.chooseZone(for: bot, night: false, others: life.bots), .cafe)
+    }
+
+    @MainActor
+    func testChangingPortraitKeepsVillageFigure() throws {
+        let life = VillageLifeSimulator()
+        var profile = VillageBot(name: "Nova")
+        life.mergeLocalProfiles([profile], keepDemoFounders: false)
+        let before = try XCTUnwrap(life.bots.first)
+        profile.sprite = Data([1, 2, 3])
+        life.mergeLocalProfiles([profile], keepDemoFounders: false)
+        let after = try XCTUnwrap(life.bots.first)
+        XCTAssertEqual(after.id, before.id)
+        XCTAssertEqual(after.spriteID, before.spriteID)
+        XCTAssertNil(after.customSprite)
     }
 
     @MainActor

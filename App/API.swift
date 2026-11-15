@@ -72,16 +72,29 @@ struct LumiVideoJob: Decodable {
 }
 
 struct LiveAPI: SweatAPI, ChatAPI {
-    func lumiChat(message: String, history: [[String: String]]) async throws -> String {
+    func lumiChat(message: String, history: [[String: String]], language: String,
+                  scene: LumiSceneCard? = nil, initiative: LumiInitiative = .together, opening: Bool = false) async throws -> String {
         struct Reply: Decodable { let reply: String }
-        let body = try JSONSerialization.data(withJSONObject: ["message": message, "history": history])
-        let result: Reply = try await lumiRequest("chat", body: body, timeout: 190)
+        var input: [String: Any] = ["message": message, "history": history, "language": language]
+        let hasSceneSettings = scene != nil || initiative != .together || opening
+        if hasSceneSettings {
+            if let scene { input["scene"] = scene.wire }
+            input["initiative"] = initiative.rawValue
+            input["opening"] = opening
+        }
+        let body = try JSONSerialization.data(withJSONObject: input)
+        let result: Reply = try await lumiRequest(hasSceneSettings ? "scene-chat" : "chat", body: body, timeout: 190)
         return result.reply
     }
 
-    func lumiImage(prompt: String) async throws -> Data {
-        let body = try JSONSerialization.data(withJSONObject: ["prompt": prompt])
-        let (data, response) = try await lumiData("image", body: body, timeout: 290)
+    func lumiImage(prompt: String, reference: Data? = nil) async throws -> Data {
+        var input = ["prompt": prompt]
+        if let reference {
+            guard (1...1_000_000).contains(reference.count) else { throw APIError.input }
+            input["reference"] = reference.base64EncodedString()
+        }
+        let body = try JSONEncoder().encode(input)
+        let (data, response) = try await lumiData("image", body: body, timeout: 330)
         try checked(response, expected: 200, data: data)
         guard data.count <= 15_000_000, data.starts(with: [0x89, 0x50, 0x4e, 0x47]) else {
             throw APIError.malformed
@@ -123,7 +136,7 @@ struct LiveAPI: SweatAPI, ChatAPI {
 
     private func lumiData(_ action: String, body: Data,
                           timeout: TimeInterval) async throws -> (Data, URLResponse) {
-        guard ["chat", "image", "video"].contains(action) else { throw APIError.input }
+        guard ["chat", "scene-chat", "image", "video"].contains(action) else { throw APIError.input }
         let url = try lumiURL(action)
         var endpoint = request(url, method: "POST")
         endpoint.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -141,7 +154,7 @@ struct LiveAPI: SweatAPI, ChatAPI {
     }
 
     private func moduleJSON<T: Decodable>(_ path: String, upload: Data? = nil, timeout: TimeInterval? = nil,
-                                          query: [URLQueryItem] = []) async throws -> T {
+                                          query: [URLQueryItem] = [], maximumBytes: Int = 2_000_000) async throws -> T {
         var endpoint = try v2Request("modules")
         guard let url = endpoint.url,
               var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
@@ -161,16 +174,147 @@ struct LiveAPI: SweatAPI, ChatAPI {
         }
         let (data, response) = try await loggedData(for: endpoint)
         try checked(response, expected: 200, data: data)
-        guard data.count <= 2_000_000 else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
+        guard data.count <= maximumBytes else { throw AppDiagnostics.record(V2Failure.invalidResponse) }
         return try loggedDecode(T.self, from: data, decoder: JSONDecoder())
     }
 
     func moduleManifest() async throws -> ModuleManifest { try await moduleJSON("manifest") }
-    func embyLibrary(parent: String?, search: String, offset: Int) async throws -> EmbyLibraryPage {
-        var query = [URLQueryItem(name: "offset", value: String(offset))]
-        if let parent { query.append(.init(name: "parent", value: parent)) }
-        if !search.isEmpty { query.append(.init(name: "search", value: search)) }
-        return try await moduleJSON("emby/library", query: query)
+
+    func grokTemplate(_ link: String) async throws -> GrokTemplateReceipt {
+        try await moduleJSON("grok-template", upload: JSONEncoder().encode(["url": link]), timeout: 50)
+    }
+
+    func christelConfigured() async throws -> Bool {
+        struct Status: Decodable { let configured: Bool }
+        let status: Status = try await moduleJSON("christel", timeout: 7)
+        return status.configured
+    }
+
+    func christelAudio(_ text: String) async throws -> Data {
+        struct Speech: Decodable { let audio: Data }
+        let result: Speech = try await moduleJSON("christel", upload: JSONEncoder().encode(["text": text]), timeout: 35)
+        guard !result.audio.isEmpty, result.audio.count <= 1_400_000 else { throw APIError.malformed }
+        return result.audio
+    }
+
+    func beginVideoReview(_ batch: Batch) async throws -> PCVideoReview {
+        try batch.validate(limit: 1)
+        return try await moduleJSON("video-review", upload: JSONEncoder().encode(batch))
+    }
+
+    func videoReview(_ id: String) async throws -> PCVideoReview {
+        guard validWireID(id) else { throw APIError.input }
+        return try await moduleJSON("video-review/\(id)")
+    }
+
+    func renderVideoReview(_ id: String, lines: [String], preview: Bool) async throws -> PCVideoReview {
+        struct Input: Encodable { let lines: [String]; let preview: Bool }
+        guard validWireID(id) else { throw APIError.input }
+        let data = try JSONEncoder().encode(Input(lines: lines, preview: preview))
+        return try await moduleJSON("video-review/\(id)/render", upload: data)
+    }
+
+    func downloadVideoReview(_ id: String) async throws -> URL {
+        guard validWireID(id),
+              let url = URL(string: server.origin.absoluteString + "/api/modules/v1/video-review/\(id)/preview")
+        else { throw APIError.input }
+        return try await downloadVideo(at: url)
+    }
+
+    func botMailbox(_ botID: UUID, createFor name: String? = nil) async throws -> BotMailboxState {
+        let body = try name.map { try JSONEncoder().encode(["name": $0]) }
+        return try await moduleJSON("agentmail/\(botID.uuidString.lowercased())", upload: body, timeout: 48)
+    }
+
+    func enrollAgentMail(_ botID: UUID, email: String) async throws -> BotMailboxState {
+        try await moduleJSON("agentmail/\(botID.uuidString.lowercased())/enroll",
+                             upload: JSONEncoder().encode(["email": email]), timeout: 35)
+    }
+
+    func verifyAgentMail(_ botID: UUID, code: String) async throws -> BotMailboxState {
+        try await moduleJSON("agentmail/\(botID.uuidString.lowercased())/verify",
+                             upload: JSONEncoder().encode(["code": code]), timeout: 45)
+    }
+
+    func resendAgentMailCode(_ botID: UUID) async throws -> BotMailboxState {
+        try await moduleJSON("agentmail/\(botID.uuidString.lowercased())/resend",
+                             upload: Data("{}".utf8), timeout: 30)
+    }
+
+    func botMailMessages(_ botID: UUID) async throws -> BotMailMessages {
+        try await moduleJSON("agentmail/\(botID.uuidString.lowercased())/messages", timeout: 34)
+    }
+
+    func botMailMessage(_ botID: UUID, id: String) async throws -> BotMailContent {
+        try await moduleJSON("agentmail/\(botID.uuidString.lowercased())/message", timeout: 34,
+                             query: [.init(name: "message_id", value: id)])
+    }
+
+    func mailAppointments(_ botID: UUID, enabled: Bool? = nil) async throws -> MailAppointmentState {
+        let upload = try enabled.map { value in
+            struct Input: Encodable { let enabled: Bool; let zone: String }
+            return try JSONEncoder().encode(Input(enabled: value, zone: TimeZone.current.identifier))
+        }
+        return try await moduleJSON("mail-appointments/\(botID.uuidString.lowercased())", upload: upload, timeout: 48)
+    }
+
+    func scanMailAppointments(_ botID: UUID) async throws -> MailAppointmentState {
+        try await moduleJSON("mail-appointments/\(botID.uuidString.lowercased())/scan", upload: Data("{}".utf8))
+    }
+
+    func hideMailAppointment(_ botID: UUID, id: UUID) async throws -> MailAppointmentState {
+        try await moduleJSON("mail-appointments/\(botID.uuidString.lowercased())/hide",
+                             upload: JSONEncoder().encode(["id": id.uuidString.lowercased()]))
+    }
+
+    func pcMetrics() async throws -> PCMetrics { try await moduleJSON("pc-metrics", timeout: 10) }
+
+    func pcSetup() async throws -> PCSetup { try await moduleJSON("pc-setup", timeout: 52) }
+
+    func attentionQueue() async throws -> AttentionQueue { try await moduleJSON("attention", timeout: 12) }
+
+    func codeAddOns() async throws -> CodeAddOn.Library { try await moduleJSON("addons", timeout: 10) }
+
+    func draftCodeAddOn(_ brief: String) async throws -> CodeAddOn {
+        try await moduleJSON("addons/draft", upload: JSONEncoder().encode(["brief": brief]), timeout: 190)
+    }
+
+    func findGitHubAddOn(_ url: String, local: Bool) async throws -> CodeAddOn {
+        struct Input: Encodable { let url: String; let local: Bool }
+        return try await moduleJSON("addons/github", upload: JSONEncoder().encode(Input(url: url, local: local)), timeout: 80)
+    }
+
+    func installCodeAddOn(_ addOn: CodeAddOn) async throws -> CodeAddOn {
+        try await moduleJSON("addons", upload: JSONEncoder().encode(addOn), timeout: addOn.source?.kind == .staticFiles ? 40 : 15)
+    }
+
+    func codeAddOnWebFiles(_ id: UUID) async throws -> CodeAddOnWebFiles {
+        try await moduleJSON("addons/\(id.uuidString.lowercased())/files", timeout: 25, maximumBytes: 8_500_000)
+    }
+
+    func removeCodeAddOn(_ id: UUID) async throws {
+        struct Receipt: Decodable { let ok: Bool }
+        let result: Receipt = try await moduleJSON("addons/\(id.uuidString.lowercased())/remove",
+                                                   upload: Data("{}".utf8), timeout: 15)
+        guard result.ok else { throw APIError.malformed }
+    }
+
+    func composioProviders() async throws -> ComposioProviders {
+        try await moduleJSON("composio", timeout: 85)
+    }
+
+    func composioLink(_ provider: String) async throws -> ComposioLink {
+        let empty = Data("{}".utf8)
+        return try await moduleJSON("composio/\(Server.segment(provider))/link", upload: empty, timeout: 65)
+    }
+
+    func composioItems(_ provider: String) async throws -> ComposioItems {
+        try await moduleJSON("composio/\(Server.segment(provider))/items", timeout: 45)
+    }
+
+    func composioContext(_ provider: String, item: String) async throws -> ComposioContext {
+        let data = try JSONEncoder().encode(["item": item])
+        return try await moduleJSON("composio/\(Server.segment(provider))/context", upload: data, timeout: 85)
     }
 
     func youtubeChannels() async throws -> YouTubeChannels {
@@ -431,7 +575,10 @@ struct LiveAPI: SweatAPI, ChatAPI {
         }
     }
     func video(_ job: Job) async throws -> URL {
-        let url = try server.videoURL(job)
+        try await downloadVideo(at: server.videoURL(job))
+    }
+
+    private func downloadVideo(at url: URL) async throws -> URL {
         do {
             let (temporary, response) = try await session.download(for: request(url))
             defer { try? FileManager.default.removeItem(at: temporary) }

@@ -9,6 +9,7 @@ import os
 import re
 import sqlite3
 import unicodedata
+from asyncio import gather
 from collections import Counter
 from contextlib import AsyncExitStack, asynccontextmanager, closing
 from datetime import datetime, timezone
@@ -17,9 +18,10 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import Body, FastAPI, Request, Response
+from starlette.concurrency import run_in_threadpool
 
+from sweatcaster import __version__
 from sweatcaster.dto import ApiError
-from sweatcaster.emby_library import EmbyLibraryError, read_library
 from sweatcaster.searxng_search import SearXNGError, search_web
 from sweatcaster.youtube_connection import YouTubeError, read_channels
 
@@ -120,14 +122,72 @@ def collection_answer(settings, message: str) -> str | None:
 def register_modules(app: FastAPI, settings, authorize) -> None:
     from sweatcaster.bot_computer_routes import register_bot_computers
     from sweatcaster.lumi_companion import register_lumi
-    from sweatcaster.bot_computers import BotComputerError, BotComputerWorker, wire_uuid
+    from sweatcaster.bot_computers import BotComputerError, BotComputerWorker, ollama_reports, wire_uuid
     from sweatcaster.code_batch import BatchWorker, configured_batch
     from sweatcaster.repository_library import RepositoryError
 
     workspace = Path(os.environ.get("SWEATCASTER_WORKSPACE_DIR", "workspace"))
     batch = configured_batch(settings, workspace)
     computers = register_bot_computers(app, settings, authorize)
+    from sweatcaster.agentmail_inboxes import register_agentmail
+    from sweatcaster.addons import register_addons
+    from sweatcaster.composio_library import register_composio
+    from sweatcaster.grok_templates import register_grok_templates
+    from sweatcaster.mail_appointments import register_mail_appointments
+    from sweatcaster.microsoft_voice import register_christel
+    from sweatcaster.pc_metrics import desktop_setup, gmail_setup, image_setup, read_metrics, web_setup
+    from sweatcaster.store import Store
+    from sweatcaster.video_review import register_video_review
+
     register_lumi(app, settings, authorize)
+    library = register_composio(app, settings, authorize)
+    appointments = register_mail_appointments(app, settings, authorize, library,
+                                              ollama_reports(settings, mail_appointments=True))
+    register_grok_templates(app, settings, authorize)
+    register_christel(app, settings, authorize)
+    register_agentmail(app, settings, authorize)
+    register_addons(app, settings, authorize, ollama_reports(settings, add_on=True))
+    waiting_for_video_review = register_video_review(app, settings, authorize)
+
+    @app.get("/api/modules/v1/attention", include_in_schema=False)
+    def attention(request: Request, response: Response):
+        authorize(request, settings)
+        response.headers["Cache-Control"] = "no-store"
+        selected = appointments.settings()
+        mail = None
+        if selected:
+            bot = selected[0]
+            suggestions = appointments.status(bot)["appointments"]
+            mail = {"botID": bot, "appointments": [
+                item for item in suggestions if item.get("revisionStatus") in (None, "active")
+            ]}
+        return {"code": [job for job in batch.list() if job["status"] == "review"],
+                "video": waiting_for_video_review(), "mail": mail}
+
+    @app.get("/api/modules/v1/pc-metrics", include_in_schema=False)
+    def pc_metrics(request: Request, response: Response):
+        authorize(request, settings)
+        response.headers["Cache-Control"] = "no-store"
+        metrics = read_metrics(settings.output_root)
+        jobs = Store(settings.output_root / "state.sqlite3").list_jobs()
+        metrics["videoJobs"] = sum(job["status"] in {"queued", "analyzing", "commentating", "synthesizing", "rendering"} for job in jobs)
+        metrics["botJobs"] = computers.active_jobs()
+        return metrics
+
+    @app.get("/api/modules/v1/pc-setup", include_in_schema=False)
+    async def pc_setup(request: Request, response: Response):
+        authorize(request, settings)
+        response.headers["Cache-Control"] = "no-store"
+        supports_images = any(getattr(route, "path", None) == "/api/v2/images/generate"
+                              and "POST" in (getattr(route, "methods", None) or ()) for route in app.routes)
+        desktops, images, web, gmail = await gather(
+            run_in_threadpool(desktop_setup, computers.runtime),
+            run_in_threadpool(image_setup, supports_images),
+            run_in_threadpool(web_setup),
+            run_in_threadpool(gmail_setup, library, appointments),
+        )
+        return {"desktops": desktops, **images, "web": web, "gmail": gmail, "pcVersion": __version__}
+
     workflows = batch.workflows
     original_lifespan = app.router.lifespan_context
     mcp = None
@@ -179,21 +239,11 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             stack.callback(worker.stop)
             computers_worker.start()
             stack.callback(computers_worker.stop)
+            appointments.start()
+            stack.callback(appointments.stop)
             yield
 
     app.router.lifespan_context = lifespan
-
-    @app.get("/api/modules/v1/emby/library", include_in_schema=False)
-    def emby_library(request: Request, response: Response, parent: str | None = None,
-                     search: str = "", offset: int = 0):
-        authorize(request, settings)
-        try:
-            library = read_library(parent=parent, search=search, offset=offset)
-        except EmbyLibraryError as exc:
-            code = "INVALID_INPUT" if exc.status == 422 else "NOT_READY"
-            raise ApiError(exc.status, code, str(exc)) from exc
-        response.headers["Cache-Control"] = "no-store"
-        return library
 
     @app.get("/api/modules/v1/youtube/channels", include_in_schema=False)
     def youtube_channels(request: Request, response: Response):

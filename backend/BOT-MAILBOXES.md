@@ -1,3 +1,11 @@
+# Agenternes e-mail i FadedAI
+
+Åbn **Landsbyen → agentens profil → E-mail**. Ved første opsætning indtaster du din egen e-mailadresse og bekræfter engangskoden fra AgentMail. FadedAI gemmer den oprettede nøgle på den parrede PC. Hvis du allerede har en AgentMail-konto, kan du bruge dens eksisterende nøgle i **Forbind AgentMail** i Windows-opdateringen. Miljøvariablen `AGENTMAIL_API_KEY` går forud for den gemte nøgle.
+
+For en ekstra agent vælger du **Opret e-mailadresse** på agentens egen e-mailside. Hver postkasse er knyttet til agentens ID, også efter et navneskift. Fra agentens computer kan du vælge **Brug en e-mail** og vedhæfte én gennemlæst mail til en opgave.
+
+AgentMail-konto og postkasser administreres i AgentMail. Denne integration viser indgående tekst og opretter postkasser efter godkendelse i appen.
+
 # Opret en botpostkasse i Google Workspace
 
 Opsætningen opretter en Workspace-bruger på dit eget domæne og bruger bottens ID til at genkende kontoen ved senere opslag. Gmail-postkassen bliver klar, når Workspace har givet kontoen en licens og slået Gmail til. Det er en separat postkasse med eget login. Botjob kan endnu ikke læse eller sende mail fra den.

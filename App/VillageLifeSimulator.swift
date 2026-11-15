@@ -192,12 +192,12 @@ final class VillageLifeSimulator: ObservableObject {
                     zoneID: role.workZone, activity: .idle, pose: .idle,
                     needs: isDemoClock ? demoNeeds : .balanced, destinationZoneID: nil, pathProgress: 0,
                     speechHint: nil, carrying: nil, lastEventID: nil,
-                    customSprite: profile.sprite, linkedAgentID: nil, updatedAt: now, arrivedAt: now
+                    customSprite: nil, linkedAgentID: nil, updatedAt: now, arrivedAt: now
                 )
                 bot.displayName = name
                 bot.archetype = role
                 bot.spriteID = sprite
-                bot.customSprite = profile.sprite
+                bot.customSprite = nil
                 next.append(bot)
             }
             if next != bots { bots = next }
@@ -229,8 +229,8 @@ final class VillageLifeSimulator: ObservableObject {
             if let idx = next.firstIndex(where: { $0.id == profile.id.uuidString }) {
                 next[idx].displayName = name
                 next[idx].archetype = archetype
-                next[idx].customSprite = profile.sprite
-                if profile.sprite == nil { next[idx].spriteID = sprite }
+                next[idx].customSprite = nil
+                next[idx].spriteID = sprite
                 continue
             }
 
@@ -239,8 +239,8 @@ final class VillageLifeSimulator: ObservableObject {
                 $0.displayName.localizedCaseInsensitiveCompare(name) == .orderedSame
             }) {
                 next[idx].archetype = archetype
-                next[idx].customSprite = profile.sprite
-                if profile.sprite == nil { next[idx].spriteID = sprite }
+                next[idx].customSprite = nil
+                next[idx].spriteID = sprite
                 continue
             }
 
@@ -252,7 +252,7 @@ final class VillageLifeSimulator: ObservableObject {
                     zoneID: archetype.workZone, activity: .idle, pose: .idle,
                     needs: .balanced, destinationZoneID: nil, pathProgress: 0,
                     speechHint: nil, carrying: nil, lastEventID: nil,
-                    customSprite: profile.sprite, linkedAgentID: nil, updatedAt: Date(),
+                    customSprite: nil, linkedAgentID: nil, updatedAt: Date(),
                     arrivedAt: Date()
                 )
             )

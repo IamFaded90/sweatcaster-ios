@@ -74,6 +74,9 @@ extension OfflineStudio {
                     }
                 studioEditorButton(forImage: true)
             }
+            if privateSession {
+                imageReferencePicker
+            }
             imageGenerationButton(request, blocked: blocker != nil)
             if let blocker { FadedDetailText(blocker).accessibilityAddTraits(.updatesFrequently) }
             if task != nil {
@@ -274,11 +277,6 @@ extension OfflineStudio {
                     Image(systemName: studioSeed == nil ? "lock.open" : "lock.fill")
                         .frame(minWidth: 44, minHeight: 44)
                 }.accessibilityLabel(studioSeed == nil ? "Lås seed" : "Lås seed op")
-                PhotosPicker(selection: $basePhoto, matching: .images, photoLibrary: .shared()) {
-                    Image(systemName: "photo.badge.plus").frame(minWidth: 44, minHeight: 44)
-                }.accessibilityLabel("Vælg basebillede fra Fotos")
-                .disabled(privateSession && !canRenderPrivateImages)
-                .task(id: basePhoto) { await loadBasePhoto() }
                 Button { saveImageFavorite() } label: {
                     Image(systemName: "star").frame(minWidth: 44, minHeight: 44)
                 }.accessibilityLabel("Gem billedprompt som favorit")
@@ -295,20 +293,37 @@ extension OfflineStudio {
                 Spacer(minLength: 0)
                 if makeFourImages { Text("4 forslag").font(.caption).foregroundStyle(.secondary) }
             }.disabled(task != nil && !generatingImages)
-            if studioSeed != nil || baseImage != nil || loadingBaseImage {
+            if !privateSession { imageReferencePicker }
+            if studioSeed != nil {
                 HStack(spacing: 10) {
                     if let studioSeed { Text("Seed: \(String(studioSeed)) låst") }
-                    if loadingBaseImage { Text("Henter basebillede…") }
-                    if baseImage != nil {
-                        Button("Fjern basebillede", systemImage: "xmark.circle") {
-                            basePhoto = nil
-                            baseImage = nil
-                        }.frame(minHeight: 44).disabled(task != nil && !generatingImages)
-                    }
                     Spacer(minLength: 0)
                 }.font(.caption).foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var imageReferencePicker: some View {
+        HStack(spacing: 8) {
+            if let baseImage, let preview = UIImage(data: baseImage) {
+                Image(uiImage: preview).resizable().scaledToFill()
+                    .frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 8))
+                    .accessibilityLabel("Valgt referencebillede")
+            }
+            PhotosPicker(selection: $basePhoto, matching: .images, photoLibrary: .shared()) {
+                Label(baseImage == nil ? "Tilføj referencebillede" : "Skift referencebillede", systemImage: "photo.badge.plus")
+                    .frame(minHeight: 44)
+            }
+            .disabled((privateSession && !canRenderPrivateImages) || (task != nil && !generatingImages))
+            if loadingBaseImage { ProgressView().accessibilityLabel("Henter referencebillede") }
+            if baseImage != nil || loadingBaseImage {
+                Button("Fjern referencebillede", systemImage: "xmark") {
+                    basePhoto = nil
+                    baseImage = nil
+                }.labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+            }
+        }
+        .task(id: basePhoto) { await loadBasePhoto() }
     }
 
     private func imageGenerationButton(_ request: StudioImageRequest, blocked: Bool) -> some View {

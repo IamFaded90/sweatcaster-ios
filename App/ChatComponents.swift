@@ -16,6 +16,8 @@ struct ChatTurn: Identifiable, Codable, Sendable {
     var createdAt: Date?
     var feedback: Int?
     var replyModelID: String?
+    var imageName: String?
+    var imageRequest: Bool?
 
     static func upsertOutbox(_ turn: Self, in turns: inout [Self]) {
         guard let index = turns.firstIndex(where: { $0.id == turn.id }) else {
@@ -98,20 +100,24 @@ struct ChatTranscriptView: View {
     private var runID = UUID()
     private(set) var active = false
     private(set) var problem: String?
+    private(set) var hasTranscript = false
 
-    func start(update: @escaping (String) -> Void) async {
+    func clearReview() { hasTranscript = false }
+
+    func start(language: String = "da-DK", update: @escaping (String) -> Void) async {
         guard !active else { return }
         let id = UUID()
         runID = id
         active = true
         problem = nil
+        hasTranscript = false
         let speechAllowed = await withCheckedContinuation { continuation in
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
         }
         guard runID == id else { return }
-        guard speechAllowed, let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "da-DK")),
+        guard speechAllowed, let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language)),
               recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
-            fail("Dansk diktering på telefonen er ikke tilgængelig. Tjek talegenkendelse i Indstillinger.")
+            fail("Diktering på det valgte sprog er ikke tilgængelig på telefonen. Tjek talegenkendelse i Indstillinger.")
             return
         }
         let micAllowed = await AVAudioApplication.requestRecordPermission()
@@ -144,7 +150,10 @@ struct ChatTranscriptView: View {
                 let failed = error != nil
                 Task { @MainActor [weak self] in
                     guard let self, self.runID == id else { return }
-                    if let text { update(text) }
+                    if let text {
+                        self.hasTranscript = !text.isEmpty
+                        update(text)
+                    }
                     if done { self.stop() }
                     else if failed { self.fail("Dikteringen stoppede. Du kan prøve igen.") }
                 }
@@ -361,9 +370,9 @@ extension ChatView {
         HStack(spacing: FadedSpacing.s) {
             chatBrandMark
             VStack(alignment: .leading, spacing: 0) {
-                Text("FadedAI").font(FadedTypography.section)
+                Text("Chat").font(FadedTypography.section)
                     .accessibilityAddTraits(.isHeader)
-                Text("AI-chat").font(.caption).foregroundStyle(palette.secondary)
+                Text("FadedAI").font(.caption).foregroundStyle(palette.secondary)
             }
             .lineLimit(1)
         }
@@ -377,7 +386,7 @@ extension ChatView {
                 .font(FadedTypography.title)
                 .foregroundStyle(palette.text)
                 .accessibilityAddTraits(.isHeader)
-            Text("Stil et spørgsmål, eller brug et forslag til at komme i gang.")
+            Text("Stil et spørgsmål, skriv en kladde, eller få hjælp til noget i hverdagen.")
                 .font(.subheadline)
                 .foregroundStyle(palette.secondary)
             if draft.isEmpty && stagedPhoto == nil && attachedNote == nil && attachedQuote == nil {

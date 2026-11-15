@@ -3,6 +3,40 @@ import XCTest
 @testable import SweatCaster
 
 extension ContractTests {
+    func testGitHubWebAddOnStagesOnlyFilesInsideItsOwnFolder() throws {
+        let temporary = FileManager.default.temporaryDirectory
+        let folder = temporary.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let html = Data("<h1>Timer</h1><script src='assets/timer.js'></script>".utf8)
+        let bundle = CodeAddOnWebFiles(files: [
+            .init(path: "index.html", data: html),
+            .init(path: "assets/timer.js", data: Data("void 0;".utf8))
+        ])
+        let staged = try bundle.stage(in: folder)
+        let content = try String(contentsOf: staged.appending(path: "index.html"), encoding: .utf8)
+        XCTAssertTrue(content.contains("connect-src 'none'"))
+        XCTAssertTrue(content.contains("<h1>Timer</h1>"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: staged.appending(path: "assets/timer.js").path))
+
+        let invalid = CodeAddOnWebFiles(files: [
+            .init(path: "index.html", data: html),
+            .init(path: "../outside.html", data: html),
+        ])
+        let invalidFolder = temporary.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: invalidFolder) }
+        XCTAssertThrowsError(try invalid.stage(in: invalidFolder))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: invalidFolder.path))
+    }
+
+    func testEverydayToolsKeepExistingDraftAndRespectSendLimits() throws {
+        let value = try XCTUnwrap(EverydayDraft.appending("  Del regningen\n150  ", to: "Skriv en besked", limit: 100))
+        XCTAssertEqual(value, "Skriv en besked\n\nDel regningen\n150")
+        XCTAssertEqual(EverydayDraft.appending("Plan", to: "  ", limit: 4), "Plan")
+        XCTAssertNil(EverydayDraft.appending("Plan", to: "Æ", limit: 6))
+        XCTAssertNil(EverydayDraft.appending("🙏🏽", to: "", limit: 1))
+        XCTAssertNil(EverydayDraft.appending("  ", to: "Kladde", limit: 100))
+    }
+
     @MainActor func testDedicatedPrivateStudioDropsSuppliedPCClient() throws {
         let pc = try LiveAPI(server: Server("192.168.1.20"), token: "fixture")
         let studio = OfflineStudio(api: pc, sessionUnlocked: .constant(false), ephemeralOnly: true)
@@ -44,15 +78,39 @@ extension ContractTests {
         let model = documents.appendingPathComponent("Models", isDirectory: true)
         let privateModels = support.appendingPathComponent(DolphinPhoneRuntime.storageRoot.lastPathComponent, isDirectory: true)
         let saved = support.appendingPathComponent("SavedVideos", isDirectory: true)
+        let lumiScenes = support.appendingPathComponent(LumiSceneLibrary.directoryName, isDirectory: true)
         let keep = support.appendingPathComponent("OtherTool", isDirectory: true)
         let scratch = temporary.appendingPathComponent(StudioScratch.prefix + UUID().uuidString, isDirectory: true)
-        for folder in [model, privateModels, saved, keep, scratch] { try files.createDirectory(at: folder, withIntermediateDirectories: true) }
+        for folder in [model, privateModels, saved, lumiScenes, keep, scratch] {
+            try files.createDirectory(at: folder, withIntermediateDirectories: true)
+        }
         let personal = documents.appendingPathComponent("Personlig.txt")
         let unrelatedPreview = temporary.appendingPathComponent("Sweat-min-fil.mp4")
         for file in [personal, unrelatedPreview] { try Data("behold".utf8).write(to: file) }
         try AppLocalReset.deleteOwnedData(documents: documents, support: support, temporary: temporary)
-        for removed in [model, privateModels, saved, scratch] { XCTAssertFalse(files.fileExists(atPath: removed.path)) }
+        for removed in [model, privateModels, saved, lumiScenes, scratch] {
+            XCTAssertFalse(files.fileExists(atPath: removed.path))
+        }
         for retained in [personal, unrelatedPreview, keep] { XCTAssertTrue(files.fileExists(atPath: retained.path)) }
+    }
+
+    func testLumiSceneRestoresCardInitiativeAndRecentDialogue() throws {
+        let card = LumiSceneCard(title: " En aftentur ", lumiRole: "Guide", userRole: "Gæst",
+                                 setting: "Ved havnen", mood: .romantic)
+        let messages = (0..<20).map { index in
+            LumiSceneMessage(role: index.isMultiple(of: 2) ? .user : .assistant, text: "Replik \(index)", language: "da-DK")
+        }
+        let saved = LumiSavedScene.snapshot(card: card, initiative: .lumi, language: "da-DK",
+                                            messages: messages, draft: "Lad os gå videre")
+        let encoded = try JSONEncoder().encode(saved)
+        let restored = try JSONDecoder().decode(LumiSavedScene.self, from: encoded)
+        XCTAssertTrue(restored.matches(saved))
+        XCTAssertEqual(restored.id, card.id)
+        XCTAssertEqual(restored.card.title, "En aftentur")
+        XCTAssertEqual(restored.card.wire["setting"], "Ved havnen")
+        XCTAssertEqual(restored.initiative, .lumi)
+        XCTAssertEqual(restored.messages, Array(messages.suffix(16)))
+        XCTAssertEqual(restored.draft, "Lad os gå videre")
     }
 }
 

@@ -31,6 +31,8 @@ import Foundation
         var bots: [VillageBot]
         var preferences: [String: Preference]
         var videoOutbox: [String: [VideoOutboxItem]]
+        var villageBirths: [UUID: Date]?
+        var villageMemorials: [VillageMemorial]?
     }
 
     private enum Preference: Codable {
@@ -70,7 +72,8 @@ import Foundation
             AppStorageKeys.qolKeepAwake, AppStorageKeys.qolReduceMotion, AppStorageKeys.qolRememberSpace,
             AppStorageKeys.qolShowDurations, AppStorageKeys.spacesMotion, AppStorageKeys.spacesOnboarded,
             AppStorageKeys.teamActiveExpanded, AppStorageKeys.teamFavoritesExpanded,
-            AppStorageKeys.teamSleepingExpanded, AppStorageKeys.villageShowOffice
+            AppStorageKeys.teamSleepingExpanded, AppStorageKeys.villageShowOffice,
+            AppStorageKeys.villageMapNames
         ]
         let strings = [
             AppStorageKeys.aiCreativity, AppStorageKeys.aiLanguage, AppStorageKeys.aiLength, AppStorageKeys.aiTone,
@@ -78,11 +81,13 @@ import Foundation
             AppStorageKeys.chatVoiceIdentifier,
             AppStorageKeys.chatVoiceLanguage, AppStorageKeys.chatVoiceBot, AppStorageKeys.codeAutonomy,
             AppStorageKeys.phoneModel, AppStorageKeys.phoneModelFavorites, AppStorageKeys.qolLastSpace,
-            AppStorageKeys.spacesFont, AppStorageKeys.teamFavorites, AppStorageKeys.videoLastMood
+            AppStorageKeys.spacesFont, AppStorageKeys.teamFavorites, AppStorageKeys.videoLastMood,
+            AppStorageKeys.villageLightMode
         ]
         var kinds = Dictionary(uniqueKeysWithValues: flags.map { ($0, PreferenceKind.flag) })
         for key in strings { kinds[key] = .text }
         kinds[AppStorageKeys.appTextScale] = .scale
+        kinds[AppStorageKeys.villageMapZoom] = .scale
         return kinds
     }()
 
@@ -134,6 +139,8 @@ import Foundation
         let oldBots = data.villageBots.isEmpty ? Data("[]".utf8) : data.villageBots
         let oldNotes = data.notes
         let oldPreviews = data.dashboardPreviews.isEmpty ? Data("[]".utf8) : data.dashboardPreviews
+        let oldBirths = VillageHistory.shared.births
+        let oldMemorials = VillageHistory.shared.memorials
         let botBytes = try encoder.encode(restored.bots)
         changes += [
             Change(apply: { try self.data.saveChatArchive(restored.sessions) }, undo: { try self.data.saveChatArchive(oldArchive) }),
@@ -142,6 +149,10 @@ import Foundation
             Change(apply: { try self.data.saveDashboardPreviews(Data("[]".utf8)) },
                    undo: { try self.data.saveDashboardPreviews(oldPreviews) })
         ]
+        if let births = restored.villageBirths, let memorials = restored.villageMemorials {
+            changes.append(Change(apply: { VillageHistory.shared.replace(births: births, memorials: memorials) },
+                                  undo: { VillageHistory.shared.replace(births: oldBirths, memorials: oldMemorials) }))
+        }
         changes += try videoChanges(restored: restored.videoOutbox, previous: existing.videoOutbox)
         try apply(changes)
         for key in Self.preferenceKinds.keys {
@@ -179,7 +190,9 @@ import Foundation
             if !saved.isEmpty { queue[address] = saved }
         }
         return Snapshot(version: 1, createdAt: .now, sessions: sessions, drafts: drafts,
-                        notes: data.notes, bots: bots, preferences: readPreferences(), videoOutbox: queue)
+                        notes: data.notes, bots: bots, preferences: readPreferences(), videoOutbox: queue,
+                        villageBirths: VillageHistory.shared.births,
+                        villageMemorials: VillageHistory.shared.memorials)
     }
 
     private func restoredSnapshot(_ incoming: Snapshot, over local: Snapshot, mode: Mode) -> Snapshot {
@@ -205,7 +218,13 @@ import Foundation
             for (address, items) in local.videoOutbox {
                 result.videoOutbox[address] = merge(items, result.videoOutbox[address, default: []], by: \.id)
             }
+            result.villageBirths = (incoming.villageBirths ?? [:]).merging(local.villageBirths ?? [:]) { incoming, _ in incoming }
+            result.villageMemorials = merge(local.villageMemorials ?? [], incoming.villageMemorials ?? [], by: \.id)
         }
+        result.villageBirths = result.villageBirths ?? local.villageBirths
+        result.villageMemorials = result.villageMemorials ?? local.villageMemorials
+        let living = Set(result.bots.map(\.id))
+        result.villageMemorials?.removeAll { living.contains($0.id) }
         return result
     }
 
@@ -223,11 +242,15 @@ import Foundation
         guard snapshot.version == 1 else { throw Failure.unsupportedVersion }
         guard snapshot.sessions.count <= 100, snapshot.bots.count <= 10, snapshot.notes.count <= 96_000,
               snapshot.videoOutbox.count <= 8, snapshot.drafts.count <= 100,
+              (snapshot.villageBirths?.count ?? 0) <= 1_000,
+              (snapshot.villageMemorials?.count ?? 0) <= 1_000,
               try encoder.encode(snapshot.bots).count <= 256_000,
               try encoder.encode(snapshot.sessions).count <= 8_388_608 else { throw Failure.tooLarge }
         let sessionIDs = Set(snapshot.sessions.map { $0.id.uuidString })
         guard sessionIDs.count == snapshot.sessions.count,
               Set(snapshot.bots.map(\.id)).count == snapshot.bots.count,
+              Set((snapshot.villageMemorials ?? []).map(\.id)).count == (snapshot.villageMemorials?.count ?? 0),
+              (snapshot.villageMemorials ?? []).allSatisfy({ $0.name.count <= 100 && $0.role.count <= 100 }),
               snapshot.drafts.allSatisfy({ sessionIDs.contains($0.key) && $0.value.count <= 12_000 }),
               snapshot.preferences.allSatisfy({ validPreference($0.value, for: $0.key) }) else { throw Failure.invalidData }
         for session in snapshot.sessions {

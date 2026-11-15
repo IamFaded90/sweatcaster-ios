@@ -151,8 +151,9 @@ extension Home {
     }
 
     var visibleJobs: [Job] {
-        model.jobs.filter { job in
-            !hiddenJobs.contains(job.id) &&
+        let hidden = hiddenJobs.union(archivedVideoJobIDs)
+        return model.jobs.filter { job in
+            !hidden.contains(job.id) &&
             (jobFilter == 0 || (jobFilter == 1 && job.status.active) ||
              (jobFilter == 2 && job.status == .completed) || (jobFilter == 3 && job.status == .failed))
         }
@@ -239,13 +240,29 @@ extension Home {
             FadedSectionLabel("Dine videojobs").accessibilityFocused($jobsFocus)
             if videoTypeSize.isAccessibilitySize { videoJobFilter.pickerStyle(.menu).frame(minHeight: 44) }
             else { videoJobFilter.pickerStyle(.segmented) }
+            let archived = archivedVideoJobIDs
+            let hidden = hiddenJobs.union(archived)
             let unavailable = model.jobs.filter {
-                $0.status == .completed && !hiddenJobs.contains($0.id) && !videoOutputAvailable($0)
+                $0.status == .completed && !hidden.contains($0.id) && !videoOutputAvailable($0)
             }
-            if unavailable.count > 1, !model.isDemo, let api = model.api as? LiveAPI {
-                FadedSecondaryButton("Fjern gamle jobkort (\(unavailable.count))", icon: "trash", role: .destructive) {
-                    unavailableJobDeletion = (unavailable.map(\.id), api)
-                }.disabled(!model.connected || deletingPCVideo || model.mediaLoading)
+            if !model.isDemo && (!unavailable.isEmpty || !archived.isEmpty) {
+                Menu {
+                    if !unavailable.isEmpty {
+                        Button("Skjul job uden video (\(unavailable.count))", systemImage: "eye.slash") {
+                            setArchivedVideoJobs(archivedVideoJobIDs.union(unavailable.map(\.id)))
+                        }
+                        if model.connected, let api = model.api as? LiveAPI {
+                            Button("Fjern jobkort fra PC’en", systemImage: "trash", role: .destructive) {
+                                unavailableJobDeletion = (unavailable.map(\.id), api)
+                            }.disabled(deletingPCVideo || model.mediaLoading)
+                        }
+                    }
+                    if !archived.isEmpty {
+                        Button("Vis skjulte job igen", systemImage: "eye") { setArchivedVideoJobs([]) }
+                    }
+                } label: {
+                    Label("Ryd op i gamle jobs", systemImage: "archivebox").frame(minHeight: 44)
+                }
             }
             if model.requiresVideoReview {
                 FadedCard(accent: palette.coral) {
@@ -261,7 +278,7 @@ extension Home {
                 }
             }
             if visibleJobs.isEmpty {
-                if jobFilter != 0, model.jobs.contains(where: { !hiddenJobs.contains($0.id) }) {
+                if jobFilter != 0, model.jobs.contains(where: { !hidden.contains($0.id) }) {
                     FadedEmptyState(icon: "line.3.horizontal.decrease", title: "Ingen jobs i dette filter",
                                     detail: "Vis hele joblisten for at se de andre jobs.", actionTitle: "Vis alle jobs") { jobFilter = 0 }
                 } else if model.refreshing {
@@ -280,6 +297,28 @@ extension Home {
                 Label("Del video", systemImage: "square.and.arrow.up").frame(minHeight: 48)
             }.buttonStyle(FadedButtonStyle(kind: .secondary)).padding()
         }
+    }
+
+    private var archivedVideoJobsByPC: [String: [String]] {
+        (try? JSONDecoder().decode([String: [String]].self, from: archivedVideoJobsData)) ?? [:]
+    }
+
+    private var archivedVideoJobIDs: Set<String> {
+        guard let target = (model.api as? LiveAPI)?.queueTargetID else { return [] }
+        return Set(archivedVideoJobsByPC[target] ?? [])
+    }
+
+    private func setArchivedVideoJobs(_ ids: Set<String>) {
+        guard let target = (model.api as? LiveAPI)?.queueTargetID else { return }
+        var byPC = archivedVideoJobsByPC
+        byPC[target] = ids.isEmpty ? nil : Array(ids.sorted().prefix(500))
+        if let data = try? JSONEncoder().encode(byPC) { archivedVideoJobsData = data }
+    }
+
+    func revealArchivedVideoJob(_ id: String) {
+        var archived = archivedVideoJobIDs
+        guard archived.remove(id) != nil else { return }
+        setArchivedVideoJobs(archived)
     }
 
     private var videoJobFilter: some View {

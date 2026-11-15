@@ -526,7 +526,7 @@ struct ResourceMonitor: View {
         let manager = FileManager.default
         let roots = [
             (documents, ["Models"]),
-            (support, ["FadedAI", "ImportedPhoneModels", "PCChatOutbox", "SavedVideos", "StudioImages",
+            (support, ["FadedAI", "ImportedPhoneModels", LumiSceneLibrary.directoryName, "PCChatOutbox", "SavedVideos", "StudioImages",
                        "StudioLoRAPreviews", "VideoStudio", DolphinPhoneRuntime.storageRoot.lastPathComponent]),
             (temporary, ["FadedAI-diagnostics", BackupService.exportDirectory])
         ]

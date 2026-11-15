@@ -12,6 +12,7 @@ private struct VaultEntry: Codable, Identifiable {
     var website: String?
     var username: String?
     var traderaAppID: String?
+    var basicRead: Bool?
 
     static func signInURL(_ text: String) -> URL? {
         let address = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -66,7 +67,7 @@ struct PersonalVaultView: View {
     var body: some View {
         List {
             Section {
-                Text("Gem logins og tokens i iPhonens nøglering. GitHub og Tradera kan bruges fra bottens computerskærm.")
+                Text("Alle dine agenter bruger samme Vault. Logins ligger i iPhonens nøglering. Du godkender hvert opslag, før resultatet deles med en agent.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -79,9 +80,10 @@ struct PersonalVaultView: View {
                         VStack(alignment: .leading) {
                             Text(entry.title)
                             if let website = entry.website, let host = VaultEntry.signInURL(website)?.host() {
-                                Text(host).font(.caption).foregroundStyle(.secondary)
+                                Text(entry.basicRead == true ? "Agentopslag · \(host)" : host)
+                                    .font(.caption).foregroundStyle(.secondary)
                             } else if entry.traderaAppID != nil {
-                                Text("Tradera · Søg efter annoncer").font(.caption).foregroundStyle(.secondary)
+                                Text("Tidligere gemt Tradera-nøgle").font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }
@@ -110,18 +112,21 @@ struct PersonalVaultView: View {
             }
             if let notice { Text(notice).font(.footnote).foregroundStyle(.secondary) }
         }
-        .navigationTitle("Vault")
+        .navigationTitle("Fælles Vault")
         .privacySensitive()
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu("Tilføj", systemImage: "plus") {
                     Button("Weblogin", systemImage: "key") { editing = VaultEntry(website: "", username: "") }
+                    Button("Agentopslag med adgangskode", systemImage: "person.badge.key") {
+                        editing = VaultEntry(website: "", username: "", basicRead: true)
+                    }
                     Button("Token eller oplysning", systemImage: "lock") { editing = VaultEntry() }
                     Button("GitHub-adgang", systemImage: "chevron.left.forwardslash.chevron.right") {
                         editing = VaultEntry(repository: "")
                     }
-                    Button("Tradera-adgang", systemImage: "cart") {
-                        editing = VaultEntry(title: "Tradera", traderaAppID: "")
+                    if let tradera = URL(string: "https://www.tradera.com/") {
+                        Link(destination: tradera) { Label("Åbn Tradera", systemImage: "safari") }
                     }
                 }
                 .disabled(!canWrite || entries.count >= 40)
@@ -197,7 +202,7 @@ private struct VaultEntryEditor: View {
 
     private var isWebsite: Bool { entry.website != nil }
     private var title: String {
-        if isWebsite { return "Weblogin" }
+        if isWebsite { return entry.basicRead == true ? "Agentopslag" : "Weblogin" }
         if entry.traderaAppID != nil { return "Tradera-adgang" }
         return entry.repository == nil ? "Token eller oplysning" : "GitHub-adgang"
     }
@@ -219,8 +224,10 @@ private struct VaultEntryEditor: View {
         guard !entry.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               entry.title.count <= 80, !entry.value.isEmpty, entry.value.utf8.count <= 2048,
               validLogin else { return false }
+        if entry.basicRead == true {
+            return VaultBasicRead.validUser(entry.username?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "")
+        }
         if let repository = entry.repository { return VaultGitHub.valid(repository, token: entry.value) }
-        if let appID = entry.traderaAppID { return VaultTradera.valid(appID: appID, key: entry.value) }
         return true
     }
 
@@ -229,6 +236,10 @@ private struct VaultEntryEditor: View {
             Form {
                 TextField("Navn", text: $entry.title)
                 if isWebsite {
+                    if entry.basicRead == true {
+                        Text("Angiv den præcise HTTPS-adresse til en tekstfil eller et API, der bruger HTTP Basic-login. Fra agentens computer godkender du ét opslag ad gangen.")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
                     TextField("https://…", text: Binding(
                         get: { entry.website ?? "" }, set: { entry.website = $0 }
                     ))
@@ -249,15 +260,6 @@ private struct VaultEntryEditor: View {
                     .autocorrectionDisabled()
                     Text("Opret en fine-grained token hos GitHub til det valgte repository med læseadgang til Metadata.")
                         .font(.footnote).foregroundStyle(.secondary)
-                } else if entry.traderaAppID != nil {
-                    TextField("Tradera-app-id", text: Binding(
-                        get: { entry.traderaAppID ?? "" }, set: { entry.traderaAppID = $0 }
-                    ))
-                    .keyboardType(.numberPad)
-                    if let developerURL = URL(string: "https://api.tradera.com/documentation/rest-getting-started") {
-                        Link("Sådan får du app-id og appnøgle", destination: developerURL)
-                            .font(.footnote)
-                    }
                 }
                 SecureField(secretLabel, text: $entry.value)
                     .textContentType(isWebsite ? .password : nil)
@@ -295,8 +297,6 @@ struct VaultJobAccessView: View {
     @Environment(\.scenePhase) private var phase
     @State private var options: [Option] = []
     @State private var preview: Preview?
-    @State private var searchOption: Option?
-    @State private var searchText = ""
     @State private var status: String?
     @State private var busy = false
     @State private var lookup: Task<Void, Never>?
@@ -313,12 +313,12 @@ struct VaultJobAccessView: View {
     }
 
     private enum Source {
-        case github(String), tradera(String)
+        case github(String), basicRead(URL)
 
         var detail: String {
             switch self {
             case .github(let repository): "GitHub · \(repository)"
-            case .tradera: "Tradera · Søg efter annoncer"
+            case .basicRead(let address): "Agentopslag · \(address.host() ?? "")"
             }
         }
     }
@@ -341,20 +341,14 @@ struct VaultJobAccessView: View {
                             }
                         }
                         .disabled(busy)
-                        if searchOption != nil {
-                            Button("Søg igen", systemImage: "magnifyingglass") {
-                                self.preview = nil
-                                status = nil
-                            }
-                            .disabled(busy)
-                        }
                     }
                 } else if options.isEmpty && status == nil {
-                    Text("Tilføj GitHub eller Tradera under Mere → Vault for at bruge en adgang her.")
+                    Text("Tilføj et agentopslag eller GitHub i Fælles Vault.")
+                    NavigationLink("Åbn Fælles Vault") { PersonalVaultView() }
                 } else {
                     Section("Hent med en gemt adgang") {
                         ForEach(options) { option in
-                            Button { select(option) } label: {
+                            Button { load(option) } label: {
                                 VStack(alignment: .leading) {
                                     Text(option.title)
                                     Text(option.source.detail).font(.caption).foregroundStyle(.secondary)
@@ -363,34 +357,25 @@ struct VaultJobAccessView: View {
                             .disabled(busy)
                         }
                     }
-                    if let searchOption {
-                        Section("Søg på Tradera") {
-                            TextField("Fx Nintendo Switch", text: $searchText)
-                                .submitLabel(.search)
-                                .onSubmit { search(searchOption) }
-                            Button("Søg efter annoncer", systemImage: "magnifyingglass") { search(searchOption) }
-                                .disabled(busy || !VaultTradera.validQuery(searchText))
-                        }
-                    }
                 }
                 if busy { ProgressView() }
                 if let status { Text(status).font(.footnote).foregroundStyle(.secondary) }
             }
-            .navigationTitle("Brug Vault")
+            .navigationTitle("Brug Fælles Vault")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Luk") { dismiss() } }
             }
         }
         .privacySensitive()
-        .task {
+        .onAppear {
             do {
                 options = try PersonalVaultStorage.load().compactMap { entry in
                     if let repository = entry.repository {
                         return Option(id: entry.id, title: entry.title, source: .github(repository))
                     }
-                    if let appID = entry.traderaAppID {
-                        return Option(id: entry.id, title: entry.title, source: .tradera(appID))
+                    if entry.basicRead == true, let address = entry.website.flatMap(VaultEntry.signInURL) {
+                        return Option(id: entry.id, title: entry.title, source: .basicRead(address))
                     }
                     return nil
                 }
@@ -404,24 +389,7 @@ struct VaultJobAccessView: View {
         .onDisappear { lookup?.cancel() }
     }
 
-    private func select(_ option: Option) {
-        status = nil
-        switch option.source {
-        case .github:
-            searchOption = nil
-            load(option)
-        case .tradera:
-            searchOption = option
-            searchText = ""
-        }
-    }
-
-    private func search(_ option: Option) {
-        guard VaultTradera.validQuery(searchText) else { return }
-        load(option, query: searchText.trimmingCharacters(in: .whitespacesAndNewlines))
-    }
-
-    private func load(_ option: Option, query: String? = nil) {
+    private func load(_ option: Option) {
         guard !busy else { return }
         busy = true
         status = nil
@@ -437,9 +405,11 @@ struct VaultJobAccessView: View {
                 switch option.source {
                 case .github(let repository) where entry.repository == repository:
                     result = Preview(provider: "GitHub", content: try await VaultGitHub.summary(repository: repository, token: entry.value))
-                case .tradera(let appID) where entry.traderaAppID == appID:
-                    guard let query else { return }
-                    result = Preview(provider: "Tradera", content: try await VaultTradera.search(query: query, appID: appID, key: entry.value))
+                case .basicRead(let address) where entry.basicRead == true && entry.website == address.absoluteString:
+                    let content = try await VaultBasicRead.fetch(
+                        address: address, username: entry.username ?? "", secret: entry.value
+                    )
+                    result = Preview(provider: address.host() ?? "forbindelsen", content: content)
                 default:
                     status = "Adgangen er ændret i Vault. Luk og prøv igen."
                     return
@@ -447,7 +417,8 @@ struct VaultJobAccessView: View {
                 if !Task.isCancelled { preview = result }
             } catch {
                 if !Task.isCancelled {
-                    status = (error as? VaultGitHub.Failure)?.message ?? (error as? VaultTradera.Failure)?.message ??
+                    status = (error as? VaultGitHub.Failure)?.message ??
+                        (error as? VaultBasicRead.Failure)?.message ??
                         "Opslaget mislykkedes. Tjek forbindelsen, og prøv igen."
                 }
             }
@@ -517,111 +488,67 @@ private enum VaultGitHub {
     }
 }
 
-private enum VaultTradera {
+private enum VaultBasicRead {
     enum Failure: Error {
-        case invalidEntry, invalidQuery, accessDenied, rateLimited, badResponse
+        case denied, response
 
         var message: String {
             switch self {
-            case .invalidEntry: "Tjek app-id og appnøglen i Vault."
-            case .invalidQuery: "Skriv et søgeord på højst 100 tegn."
-            case .accessDenied: "Tradera afviste adgangen. Tjek app-id og appnøgle i Vault."
-            case .rateLimited: "Tradera beder dig vente. Prøv igen senere."
-            case .badResponse: "Tradera returnerede et uventet svar."
+            case .denied: "Tjenesten afviste login. Tjek adressen og loginoplysningerne i Fælles Vault."
+            case .response: "Adressen skal give tekst eller JSON direkte og må ikke omdirigere."
             }
         }
     }
 
-    private struct SearchResult: Decodable {
-        struct Listing: Decodable {
-            let id: Int
-            let shortDescription: String?
-            let buyItNowPrice: Int?
-            let nextBid: Int?
-            let isEnded: Bool?
-            let itemUrl: String?
+    static func validUser(_ username: String) -> Bool {
+        !username.isEmpty && username.utf8.count <= 320 && !username.contains(":") &&
+            username.rangeOfCharacter(from: .controlCharacters) == nil
+    }
+
+    static func fetch(address: URL, username: String, secret: String) async throws -> String {
+        guard VaultEntry.signInURL(address.absoluteString) == address,
+              validUser(username), !secret.isEmpty, secret.utf8.count <= 2_048 else {
+            throw Failure.denied
         }
 
-        struct Issue: Decodable {
-            let code: String?
-        }
+        // The phone uses the credential for one HTTPS request to the exact saved address.
+        // Only a reviewed copy of the response is sent to the agent as task context.
+        let pair = "\(username):\(secret)"
+        let header = Data(pair.utf8).base64EncodedString()
+        var request = URLRequest(url: address)
+        request.httpMethod = "GET"
+        request.setValue("Basic \(header)", forHTTPHeaderField: "Authorization")
+        request.setValue("text/plain, application/json", forHTTPHeaderField: "Accept")
 
-        let totalNumberOfItems: Int?
-        let items: [Listing]?
-        let errors: [Issue]?
-    }
-
-    static func valid(appID: String, key: String) -> Bool {
-        let identifier = appID.trimmingCharacters(in: .whitespacesAndNewlines)
-        let secret = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let number = Int32(identifier), number > 0,
-              identifier.utf8.allSatisfy({ (48...57).contains($0) }) else { return false }
-        return secret.utf8.count == 36 && UUID(uuidString: secret) != nil
-    }
-
-    static func validQuery(_ input: String) -> Bool {
-        let query = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (1...100).contains(query.count) && query.utf8.count <= 400 &&
-            query.rangeOfCharacter(from: .controlCharacters) == nil
-    }
-
-    static func search(query: String, appID: String, key: String) async throws -> String {
-        guard valid(appID: appID, key: key) else { throw Failure.invalidEntry }
-        guard validQuery(query), query.range(of: key, options: .caseInsensitive) == nil else { throw Failure.invalidQuery }
-        var parts = URLComponents()
-        parts.scheme = "https"
-        parts.host = "api.tradera.com"
-        parts.path = "/v4/search"
-        parts.queryItems = [URLQueryItem(name: "query", value: query)]
-        parts.percentEncodedQuery = parts.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
-        guard let url = parts.url else { throw Failure.invalidQuery }
-
-        var request = URLRequest(url: url)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue(appID, forHTTPHeaderField: "X-App-Id")
-        request.setValue(key, forHTTPHeaderField: "X-App-Key")
         let data: Data
         do {
-            data = try await VaultLookupHTTP.get(request, maxBytes: 1_000_000)
-        } catch VaultLookupHTTP.Failure.status(let code) where [401, 403].contains(code) {
-            throw Failure.accessDenied
-        } catch VaultLookupHTTP.Failure.status(429) {
-            throw Failure.rateLimited
-        } catch is VaultLookupHTTP.Failure {
-            throw Failure.badResponse
+            data = try await VaultLookupHTTP.get(request, maxBytes: 64_000, mimeTypes: ["text/plain", "application/json"])
+        } catch let failure as VaultLookupHTTP.Failure {
+            if case .status(let status) = failure, status == 401 || status == 403 {
+                throw Failure.denied
+            }
+            throw Failure.response
         }
-        guard let result = try? JSONDecoder().decode(SearchResult.self, from: data),
-              result.errors?.isEmpty != false,
-              result.items != nil || result.totalNumberOfItems == 0 else { throw Failure.badResponse }
+        guard let decoded = String(data: data, encoding: .utf8),
+              !decoded.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw Failure.response
+        }
 
-        let active = (result.items ?? []).filter { $0.isEnded != true && $0.id > 0 }
-        var lines = ["Tradera · Aktuelle annoncer for \(query)"]
-        if active.isEmpty {
-            lines.append("Søgningen gav ingen aktuelle annoncer.")
+        var values = Set([username, secret, pair, header, Data(secret.utf8).base64EncodedString()])
+        for credential in [username, secret, pair] {
+            if let encoded = credential.addingPercentEncoding(withAllowedCharacters: .alphanumerics) {
+                values.insert(encoded)
+            }
+            if let escaped = try? JSONEncoder().encode(credential),
+               let literal = String(data: escaped, encoding: .utf8), literal.count >= 2 {
+                values.insert(String(literal.dropFirst().dropLast()))
+            }
         }
-        for listing in active.prefix(8) {
-            let title = (listing.shortDescription ?? "")
-                .replacingOccurrences(of: key, with: "[skjult]", options: .caseInsensitive)
-                .components(separatedBy: .controlCharacters).joined(separator: " ")
-                .split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            let shortTitle = String(decoding: title.prefix(120).utf8.prefix(400), as: UTF8.self)
-            var fields = [shortTitle.isEmpty ? "Annonce \(listing.id)" : shortTitle]
-            if let buy = listing.buyItNowPrice, buy > 0 { fields.append("Køb nu \(buy) SEK") }
-            if let bid = listing.nextBid, bid > 0 { fields.append("Næste bud \(bid) SEK") }
-            if let link = listing.itemUrl, let safe = safeLink(link, key: key) { fields.append(safe) }
-            lines.append(fields.joined(separator: " · "))
-        }
-        return lines.joined(separator: "\n")
-    }
-
-    private static func safeLink(_ link: String, key: String) -> String? {
-        guard link.utf8.count <= 400, link.range(of: key, options: .caseInsensitive) == nil,
-              let parts = URLComponents(string: link), parts.scheme?.lowercased() == "https",
-              let host = parts.host?.lowercased(), ["www.tradera.com", "tradera.com"].contains(host),
-              parts.user == nil, parts.password == nil, parts.port == nil,
-              parts.query == nil, parts.fragment == nil, parts.path.hasPrefix("/item/") else { return nil }
-        guard let normalized = parts.url?.absoluteString, normalized.utf8.count <= 400 else { return nil }
-        return normalized
+        let redacted = values.filter { !$0.isEmpty }.sorted { $0.utf8.count > $1.utf8.count }
+            .reduce(decoded) { value, credential in
+                value.replacingOccurrences(of: credential, with: "[skjult]")
+            }
+        return String(decoding: redacted.utf8.prefix(7_800), as: UTF8.self)
     }
 }
 
@@ -630,10 +557,11 @@ private enum VaultLookupHTTP {
         case status(Int), badResponse
     }
 
-    static func get(_ request: URLRequest, maxBytes: Int) async throws -> Data {
+    static func get(_ request: URLRequest, maxBytes: Int, mimeTypes: Set<String>? = nil) async throws -> Data {
         let config = URLSessionConfiguration.ephemeral
         config.httpShouldSetCookies = false
         config.urlCache = nil
+        config.urlCredentialStorage = nil
         config.timeoutIntervalForRequest = 12
         config.timeoutIntervalForResource = 20
         let session = URLSession(configuration: config, delegate: NoRedirects(), delegateQueue: nil)
@@ -643,6 +571,9 @@ private enum VaultLookupHTTP {
         guard let http = response as? HTTPURLResponse else { throw Failure.badResponse }
         guard http.statusCode == 200 else { throw Failure.status(http.statusCode) }
         guard response.expectedContentLength <= Int64(maxBytes) else { throw Failure.badResponse }
+        if let mimeTypes, !mimeTypes.contains(response.mimeType?.lowercased() ?? "") {
+            throw Failure.badResponse
+        }
         var data = Data()
         for try await byte in bytes {
             guard data.count < maxBytes else { throw Failure.badResponse }

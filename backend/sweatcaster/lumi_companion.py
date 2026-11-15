@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+from io import BytesIO
+import json
 import time
 import shutil
 import subprocess
@@ -22,17 +26,28 @@ VIDEO_CLIP = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 VIDEO_VAE = "wan_2.1_vae.safetensors"
 OLLAMA = "http://127.0.0.1:11434"
 COMFY = "http://127.0.0.1:8188"
+MAX_REFERENCE = 1_000_000
 _video_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lumi-video")
 _video_lock = Lock()
 _video_jobs: dict[str, dict] = {}
 INSTRUCTIONS = (
     "You are Lumi, an adult, playful and flirtatious private companion. "
     "Be warm, imaginative and direct. Understand Danish, imperfect English, "
-    "misspellings and mixed Danish/English. Infer intent from context. Reply in "
-    "the user's language or mix unless they ask otherwise. Never correct their "
+    "misspellings and mixed Danish/English. Infer intent from context. Never correct their "
     "spelling or grammar unless asked. Do not claim to have taken real-world "
     "actions or accessed accounts when you have not."
 )
+SCENE_INITIATIVES = {
+    "user": "Follow the user's lead. Wait for their next decision and do not steer the scene uninvited.",
+    "together": "Build the scene together. Offer a natural next beat while leaving room for the user's choice.",
+    "lumi": "Take initiative in character. Move one beat forward, choose a concrete detail, and leave the user's words and actions to them.",
+}
+SCENE_MOODS = {
+    "playful": "Use playful adult flirting, teasing and warmth.",
+    "romantic": "Use a romantic, affectionate tone with a slower buildup.",
+    "bold": "Use more confident and suggestive adult flirting, matching what the user brings to the scene.",
+}
+SCENE_FIELDS = {"title": 80, "lumiRole": 300, "userRole": 300, "setting": 800}
 
 
 def _message(value: object, *, limit: int = 4000) -> str:
@@ -56,13 +71,45 @@ def _client() -> requests.Session:
     return client
 
 
-def chat(message: str, history: list[dict] | None = None, *, client: requests.Session | None = None) -> str:
+def scene_instructions(card, initiative, opening):
+    if not isinstance(initiative, str) or initiative not in SCENE_INITIATIVES or type(opening) is not bool:
+        raise ApiError(422, "INVALID_INPUT", "Vælg, hvem der tager initiativ i scenen.")
+    instructions = [SCENE_INITIATIVES["lumi" if opening else initiative]]
+    if card is not None:
+        if (not isinstance(card, dict) or set(card) != set(SCENE_FIELDS) | {"mood"}
+                or not isinstance(card["mood"], str) or card["mood"] not in SCENE_MOODS):
+            raise ApiError(422, "INVALID_INPUT", "Scenekortet kunne ikke læses.")
+        scene = {}
+        for key, limit in SCENE_FIELDS.items():
+            value = card[key]
+            if not isinstance(value, str) or len(value) > limit:
+                raise ApiError(422, "INVALID_INPUT", "Forkort teksten på scenekortet.")
+            scene[key] = value.strip()
+        if not scene["title"]:
+            raise ApiError(422, "INVALID_INPUT", "Giv scenekortet et navn.")
+        instructions.append(SCENE_MOODS[card["mood"]])
+        instructions.append("Use this fictional scene card as background: " + json.dumps(scene, ensure_ascii=False))
+    if opening:
+        instructions.append("Open or continue the current scene with one short proactive in-character turn. "
+                            "If recent dialogue exists, continue from where it stopped. Do not restart or summarize. "
+                            "Keep the user's reply open for them.")
+    return " ".join(instructions)
+
+
+def chat(message: str, history: list[dict] | None = None, *, language: str = "da-DK",
+         scene=None, initiative="together", opening=False, scene_chat=False, client: requests.Session | None = None) -> str:
     message = _message(message)
     if history is None:
         history = []
     if not isinstance(history, list) or len(history) > 16:
         raise ApiError(422, "INVALID_INPUT", "Samtalen er for lang. Start en ny samtale.")
-    messages = [{"role": "system", "content": INSTRUCTIONS}]
+    if language not in ("da-DK", "en-US"):
+        raise ApiError(422, "INVALID_INPUT", "Vælg dansk eller engelsk.")
+    reply_language = "Danish" if language == "da-DK" else "English"
+    instructions = INSTRUCTIONS + f" Reply in {reply_language} unless the user explicitly requests Danish or English."
+    if scene_chat:
+        instructions += " " + scene_instructions(scene, initiative, opening)
+    messages = [{"role": "system", "content": instructions}]
     for item in history:
         if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
             raise ApiError(422, "INVALID_INPUT", "Samtalens historik er ugyldig.")
@@ -86,8 +133,35 @@ def chat(message: str, history: list[dict] | None = None, *, client: requests.Se
             client.close()
 
 
-def image(prompt: str, *, client: requests.Session | None = None, timeout: float = 300) -> bytes:
+def normalize_reference(value):
+    if not isinstance(value, str) or not 1 <= len(value) <= 4 * ((MAX_REFERENCE + 2) // 3):
+        raise ApiError(422, "INVALID_INPUT", "Vælg ét referencebillede under 1 MB.")
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise ApiError(503, "NOT_READY", "PC’en mangler billedbiblioteket Pillow.") from exc
+    try:
+        raw = base64.b64decode(value, validate=True)
+        if len(raw) > MAX_REFERENCE:
+            raise ValueError
+        with Image.open(BytesIO(raw), formats=("JPEG", "PNG")) as selected:
+            if not all(32 <= side <= 2048 for side in selected.size) or selected.is_animated:
+                raise ValueError
+            image = ImageOps.exif_transpose(selected).convert("RGB")
+            image.thumbnail((768, 768), Image.Resampling.LANCZOS)
+            size = tuple(max(8, side - side % 8) for side in image.size)
+            image = image.resize(size, Image.Resampling.LANCZOS)
+            image.info.clear()
+            output = BytesIO()
+            image.save(output, "PNG")
+        return output.getvalue()
+    except (ValueError, OSError, binascii.Error, Image.DecompressionBombError) as exc:
+        raise ApiError(422, "INVALID_INPUT", "Referencebilledet kunne ikke læses som et foto.") from exc
+
+
+def image(prompt: str, *, reference=None, client: requests.Session | None = None, timeout: float = 300) -> bytes:
     prompt = _message(prompt, limit=1000)
+    reference = normalize_reference(reference) if reference is not None else None
     owned = client is None
     client = client or _client()
     submitted = False
@@ -106,8 +180,21 @@ def image(prompt: str, *, client: requests.Session | None = None, timeout: float
                   "steps": 25, "cfg": 5.5, "sampler_name": "euler", "scheduler": "normal", "denoise": 1,
                   "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["4", 0]}},
             "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
-            "7": {"class_type": "SaveImage", "inputs": {"filename_prefix": "FadedAI_Lumi", "images": ["6", 0]}},
+            "7": {"class_type": "PreviewImage", "inputs": {"images": ["6", 0]}},
         }
+        if reference is not None:
+            name = f"fadedai-lumi-{uuid4().hex}.png"
+            uploaded = client.post(COMFY + "/upload/image", data={"type": "temp"},
+                                   files={"image": (name, reference, "image/png")}, timeout=(3, 20),
+                                   allow_redirects=False)
+            uploaded.raise_for_status()
+            receipt = uploaded.json()
+            if (not isinstance(receipt, dict) or receipt.get("type") != "temp"
+                    or receipt.get("name") != name or receipt.get("subfolder", "") != ""):
+                raise ApiError(502, "NOT_READY", "PC’en kunne ikke klargøre referencebilledet.")
+            graph["8"] = {"class_type": "LoadImage", "inputs": {"image": name + " [temp]"}}
+            graph["4"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["8", 0], "vae": ["1", 2]}}
+            graph["5"]["inputs"]["denoise"] = 0.55
         queued = client.post(COMFY + "/prompt", json={"prompt": graph}, timeout=(3, 20), allow_redirects=False)
         queued.raise_for_status()
         prompt_id = str(queued.json()["prompt_id"])
@@ -242,12 +329,19 @@ def register_lumi(app: FastAPI, settings, authorize) -> None:
     @router.post("/chat")
     def chat_route(bot_id: str, body: dict = Body(...)):
         _bot(bot_id)
-        return {"reply": chat(body.get("message"), body.get("history"))}
+        return {"reply": chat(body.get("message"), body.get("history"), language=body.get("language", "da-DK"))}
+
+    @router.post("/scene-chat")
+    def scene_chat_route(bot_id: str, body: dict = Body(...)):
+        _bot(bot_id)
+        return {"reply": chat(body.get("message"), body.get("history"), language=body.get("language", "da-DK"),
+                              scene=body.get("scene"), initiative=body.get("initiative", "together"),
+                              opening=body.get("opening", False), scene_chat=True)}
 
     @router.post("/image")
     def image_route(bot_id: str, body: dict = Body(...)):
         _bot(bot_id)
-        return Response(image(body.get("prompt")), media_type="image/png",
+        return Response(image(body.get("prompt"), reference=body.get("reference")), media_type="image/png",
                         headers={"Cache-Control": "no-store"})
 
     @router.post("/video")

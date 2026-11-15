@@ -201,6 +201,12 @@ struct CodeWorkspaceView: View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
                 CodeWorkspaceHero()
+                NavigationLink {
+                    CodeAddOnsView(api: api)
+                } label: {
+                    Label("Tilføjelser", systemImage: "square.stack.3d.up")
+                        .frame(minHeight: 44)
+                }
                 if let api {
                     FadedSectionHeader("1. Vælg en fil", detail: "Find filen på PC’en. Derefter beskriver du ændringen og gennemgår forslaget, før du godkender.")
                     if !useSplit, currentProposal != nil {

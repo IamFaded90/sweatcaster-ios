@@ -1,5 +1,6 @@
 // Viser Video Studio, spilmapper, klipvalg og start af videojobs.
 
+import AVKit
 import SwiftUI
 import UIKit
 
@@ -139,6 +140,7 @@ extension Home {
         if let jobID {
             jobFilter = 0
             hiddenJobs.remove(jobID)
+            revealArchivedVideoJob(jobID)
         }
         await Task.yield()
         guard !Task.isCancelled, videoPage == .jobs, request == showJobs else { return }
@@ -202,6 +204,20 @@ extension Home {
                 }
             }
             framingSection
+            if model.connected, !model.isDemo, model.selected.count == 1,
+               let api = model.api as? LiveAPI, let mood = availableVideoMood,
+               model.options.commentary != false, !model.blocked, let clip = model.selected.first {
+                NavigationLink {
+                    VideoReviewScreen(api: api, batch: Batch(clip_ids: [clip], mood: mood, options: model.options)) {
+                        videoPage = .jobs
+                        Task { await model.refresh() }
+                    }
+                } label: {
+                    Label("Gennemgå speak og se prøve", systemImage: "play.rectangle")
+                        .frame(minHeight: 44)
+                }
+                .disabled(!model.options.roi.valid || model.busy)
+            }
             if !model.isDemo {
                 Toggle("Kommentator", isOn: Binding(
                     get: { model.options.commentary != false },
@@ -687,4 +703,188 @@ private struct VideoClipList: View {
 private func durationLabel(_ seconds: Double) -> String {
     let value = max(0, Int(seconds.rounded()))
     return String(format: "%d:%02d", value / 60, value % 60)
+}
+
+struct PCVideoReview: Decodable {
+    struct Line: Decodable {
+        let start: Double
+        let text: String
+    }
+    let id, state: String
+    let message: String?
+    let lines: [Line]
+    let previewReady: Bool
+    let previewLines: [String]?
+
+    var busy: Bool { ["analyzing", "previewing", "rendering"].contains(state) }
+}
+
+@MainActor struct VideoReviewScreen: View {
+    let api: LiveAPI
+    var batch: Batch? = nil
+    var resumeID: String? = nil
+    let onFinished: () -> Void
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.fadedPalette) private var palette
+    @State private var review: PCVideoReview?
+    @State private var lines: [String] = []
+    @State private var previewedLines: [String]?
+    @State private var player: AVPlayer?
+    @State private var file: URL?
+    @State private var notice: String?
+    @State private var operation: Task<Void, Never>?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if let review {
+                    if review.state == "finished" {
+                        FadedPrimaryButton("Vis under Jobs", icon: "checkmark.circle") {
+                            onFinished()
+                            dismiss()
+                        }
+                    } else if review.state == "ready" {
+                        script(review)
+                    } else if review.state == "failed", operation == nil, let batch {
+                        FadedSecondaryButton("Prøv igen", icon: "arrow.clockwise") {
+                            run { try await api.beginVideoReview(batch) }
+                        }
+                    }
+                } else if operation == nil, let batch {
+                    FadedPrimaryButton("Find replikker i klippet", icon: "text.bubble") {
+                        run { try await api.beginVideoReview(batch) }
+                    }
+                } else if operation == nil, let resumeID, notice != nil {
+                    FadedSecondaryButton("Prøv igen", icon: "arrow.clockwise") {
+                        run(restoring: true) { try await api.videoReview(resumeID) }
+                    }
+                }
+                if let notice {
+                    FadedDetailText(notice)
+                }
+                if operation != nil {
+                    ProgressView(progressText)
+                }
+            }
+            .padding(FadedSpacing.edge)
+            .frame(maxWidth: 640)
+            .frame(maxWidth: .infinity)
+        }
+        .scrollDismissesKeyboard(.interactively)
+        .background { FadedBackground() }
+        .foregroundStyle(palette.text)
+        .navigationTitle("Speak og videoprøve")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            if let resumeID, review == nil {
+                run(restoring: true) { try await api.videoReview(resumeID) }
+            }
+        }
+        .onDisappear {
+            operation?.cancel()
+            clearVideo()
+        }
+    }
+
+    private var progressText: String {
+        switch review?.state {
+        case "previewing": "Laver prøve i lav opløsning…"
+        case "rendering": "Laver den færdige video…"
+        default: "Finder replikker og tidspunkter…"
+        }
+    }
+
+    private func script(_ review: PCVideoReview) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if lines.isEmpty {
+                FadedDetailText("PC’en fandt ingen replikker til klippet. Du kan stadig se en prøve af klipningen.")
+            } else {
+                FadedDetailText("Ret replikkerne. Ryd tekstfeltet for at fjerne en replik.")
+                ForEach(lines.indices, id: \.self) { index in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Ved \(review.lines[index].start.formatted(.number.precision(.fractionLength(1)))) sek.")
+                            .font(.caption)
+                        TextField("Replik \(index + 1)", text: $lines[index], axis: .vertical)
+                            .lineLimit(2...4)
+                            .padding(10)
+                            .fadedGlassSurface()
+                    }
+                }
+            }
+            if let player, previewedLines == lines {
+                VideoPlayer(player: player).frame(height: 360)
+                    .clipShape(.rect(cornerRadius: FadedRadius.card))
+            }
+            FadedSecondaryButton("Lav videoprøve", icon: "play.rectangle") {
+                let draft = lines
+                run(preview: draft) { try await api.renderVideoReview(review.id, lines: draft, preview: true) }
+            }
+            .disabled(operation != nil || lines.contains { $0.unicodeScalars.count > 280 })
+            if previewedLines == lines {
+                FadedPrimaryButton("Godkend og lav færdig video", icon: "checkmark") {
+                    let draft = lines
+                    run { try await api.renderVideoReview(review.id, lines: draft, preview: false) }
+                }
+                .disabled(operation != nil)
+            }
+        }
+    }
+
+    private func run(preview draft: [String]? = nil, restoring: Bool = false,
+                     work: @escaping @MainActor () async throws -> PCVideoReview) {
+        guard operation == nil else { return }
+        notice = nil
+        if draft != nil {
+            previewedLines = nil
+            clearVideo()
+        }
+        operation = Task {
+            defer { operation = nil }
+            do {
+                var current = try await work()
+                review = current
+                while current.busy {
+                    try await Task.sleep(for: .seconds(2))
+                    current = try await api.videoReview(current.id)
+                    try Task.checkCancellation()
+                    review = current
+                }
+                notice = current.message
+                if restoring {
+                    if let saved = current.previewLines, saved.count == current.lines.count {
+                        lines = saved
+                    } else {
+                        lines = current.lines.map(\.text)
+                    }
+                }
+                if let transcript = draft ?? (restoring ? current.previewLines : nil),
+                   transcript.count == current.lines.count, current.previewReady, current.message == nil {
+                    let downloaded = try await api.downloadVideoReview(current.id)
+                    if Task.isCancelled {
+                        try? FileManager.default.removeItem(at: downloaded)
+                        return
+                    }
+                    file = downloaded
+                    player = AVPlayer(url: downloaded)
+                    previewedLines = transcript
+                } else if draft == nil && lines.isEmpty {
+                    lines = current.lines.map(\.text)
+                }
+            } catch is CancellationError {
+                return
+            } catch {
+                if case let APIError.http(status, problem) = error {
+                    notice = status == 404 ? "Videoprøven kræver den nye PC-opdatering eller er udløbet." : problem?.message
+                }
+                if notice == nil { notice = "PC’en kunne ikke færdiggøre videoprøven. Prøv igen." }
+            }
+        }
+    }
+
+    private func clearVideo() {
+        player?.pause()
+        player = nil
+        if let file { try? FileManager.default.removeItem(at: file) }
+        file = nil
+    }
 }

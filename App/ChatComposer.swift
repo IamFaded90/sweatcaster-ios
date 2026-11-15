@@ -22,7 +22,7 @@ struct ChatComposer<Content: View>: View {
 extension ChatView {
     var quickModelPicker: some View { chatModelSelectionButton }
 
-    func composer(compact: Bool) -> some View {
+    func composer(compact: Bool, showHistoryShortcut: Bool) -> some View {
         let inputLayout = compact
             ? AnyLayout(HStackLayout(spacing: FadedSpacing.xs))
             : AnyLayout(VStackLayout(alignment: .leading, spacing: FadedSpacing.xs))
@@ -37,9 +37,14 @@ extension ChatView {
                         .dropDestination(for: StudioPhotoInput.self) { items, _ in acceptDroppedPhotos(items) }
                         .accessibilityHint("Træk et billede hertil for at analysere det")
                     if compact {
+                        if showHistoryShortcut {
+                            composerIconButton("Samtaler", icon: "bubble.left.and.bubble.right", action: openChatHistory)
+                                .accessibilityIdentifier("open-chat-history-compact")
+                        }
                         composerIconButton("Skjul tastatur", icon: "keyboard.chevron.compact.down") {
                             composerFocused = false
                         }
+                        if !demo { imageControl }
                         sendControl
                     } else {
                         composerActions
@@ -47,6 +52,8 @@ extension ChatView {
                 }
                 if !compact, let problem = dictation.problem {
                     Text(problem).font(.caption).foregroundStyle(palette.secondary)
+                } else if !compact && dictation.hasTranscript && !dictation.active && !draft.isEmpty {
+                    Text("Ret teksten, før du sender.").font(.caption).foregroundStyle(palette.secondary)
                 }
             }
             if !compact { composerStatus }
@@ -145,9 +152,25 @@ extension ChatView {
                 .disabled(task != nil)
             dictationAction.disabled(task != nil)
             composerIconButton("Chatindstillinger", icon: "slider.horizontal.3", action: openComposerSettings)
+            if !demo { imageControl }
             Spacer(minLength: 0)
             sendControl
         }
+    }
+
+    private var imageControl: some View {
+        Menu {
+            Button("Lav billede på iPhone", systemImage: "iphone") { generateChatImage(onPC: false) }
+            Button("Lav billede på PC", systemImage: "desktopcomputer") { generateChatImage(onPC: true) }
+                .disabled(!(api is LiveAPI))
+        } label: {
+            Label("Lav billede", systemImage: "photo.badge.plus")
+                .labelStyle(.iconOnly)
+                .frame(width: 38, height: 38)
+                .fadedGlassSurface()
+                .frame(width: 44, height: 44)
+        }
+        .disabled(task != nil || dictation.active || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 
     private func composerIconButton(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
@@ -194,11 +217,14 @@ extension ChatView {
 
     private var sendControl: some View {
         let sending = task != nil
-        let allowed = sending || (stagedPhoto == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let allowed = sending || (!dictation.active && stagedPhoto == nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             && transportMessage.unicodeScalars.count <= 2000 && canSendToSource)
         return Button {
             if sending { stop() }
-            else { send() }
+            else {
+                dictation.clearReview()
+                send()
+            }
         } label: {
             Image(systemName: sending ? "stop.fill" : (effectiveReplySource == .pc && canQueuePC ? "tray.and.arrow.down" : "arrow.up"))
                 .font(.body.weight(.bold)).foregroundStyle(allowed ? FadedColors.deep : palette.secondary)
@@ -257,6 +283,14 @@ extension ChatView {
                     stopVoicePreview()
                 }
                 chatVoicePicker.id(availableVoiceRevision)
+                NavigationLink {
+                    BlindVoiceTestView(language: preferredVoiceLanguage) { identifier in
+                        preferredVoiceID = identifier
+                    }
+                } label: {
+                    Label("Blind stemmetest", systemImage: "ear")
+                        .frame(minHeight: 44)
+                }
                 Slider(value: $preferredVoiceRate, in: 0.7...1.3, step: 0.05).accessibilityLabel("Talehastighed")
                 FadedDetailText("Tempo · \(preferredVoiceRate.formatted(.number.precision(.fractionLength(2))))×")
             }
@@ -424,6 +458,69 @@ private struct ChatPhoneContextButton: View {
         return { excerpt in
             onChooseNote(excerpt)
             presenting = false
+        }
+    }
+}
+
+@MainActor private struct BlindVoiceTestView: View {
+    let language: String
+    let onChoose: (String) -> Void
+    @StateObject private var speech = SpeechBox()
+    @State private var candidates: [AVSpeechSynthesisVoice] = []
+    @State private var playing: String?
+    @State private var chosen: AVSpeechSynthesisVoice?
+
+    var body: some View {
+        List {
+            Section {
+                Text(LocalSpeechVoice.previewSentence(language: language))
+                    .foregroundStyle(.secondary)
+                ForEach(Array(candidates.enumerated()), id: \.element.identifier) { index, voice in
+                    HStack {
+                        Button(playing == voice.identifier ? "Stop prøve \(index + 1)" : "Prøve \(index + 1)",
+                               systemImage: playing == voice.identifier ? "stop.circle" : "play.circle") {
+                            play(voice)
+                        }
+                        .buttonStyle(.borderless)
+                        Spacer()
+                        Button("Vælg prøve \(index + 1)", systemImage: "checkmark.circle") {
+                            chosen = voice
+                            onChoose(voice.identifier)
+                        }
+                        .labelStyle(.iconOnly)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .buttonStyle(.borderless)
+                    }
+                }
+                if candidates.count < 3 {
+                    Text(LocalSpeechVoice.downloadHint)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let chosen {
+                Section("Dit valg") {
+                    LabeledContent("Stemme", value: chosen.name)
+                }
+            }
+        }
+        .navigationTitle("Blind stemmetest")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            if candidates.isEmpty {
+                candidates = Array(LocalSpeechVoice.options(language: language).prefix(3)).shuffled()
+            }
+        }
+        .onChange(of: speech.playback) { if speech.playback == nil { playing = nil } }
+        .onDisappear { speech.stop() }
+    }
+
+    private func play(_ voice: AVSpeechSynthesisVoice) {
+        if playing == voice.identifier {
+            speech.stop()
+        } else {
+            playing = voice.identifier
+            let text = LocalSpeechVoice.previewSentence(language: voice.language)
+            speech.play(LocalSpeechVoice.utterance(text, voice: voice, rate: 1), as: .preview)
         }
     }
 }
