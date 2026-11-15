@@ -110,7 +110,7 @@ import UIKit
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .position(buildingCenter(BuildingSpot(id: zone), size: size))
+                .position(buildingCenter(zone, size: size))
                 .accessibilityLabel("Åbn \(zone.title)")
             }
             Button(action: onSelectCemetery) {
