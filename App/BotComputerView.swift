@@ -187,21 +187,40 @@ import UniformTypeIdentifiers
     }
 
     private var everydayToolsSheet: some View {
-        NavigationStack {
-            EverydayToolsView(api: api, draftTitle: "Brug i opgaven",
-                              onPhoneDraft: store.status?.phoneActions == true ? preparePhoneTask : nil,
-                              onResearchDraft: canPrepareResearch ? prepareResearch : nil) { text in
-                guard !store.busy, let updated = EverydayDraft.appending(text, to: prompt, limit: 2_000) else {
-                    return false
-                }
-                prompt = updated
-                showEverydayTools = false
-                return true
-            }
-            .toolbar {
+        let phoneDraft: ((BotPhoneActionKind) -> Void)?
+        if store.status?.phoneActions == true {
+            phoneDraft = { kind in preparePhoneTask(kind) }
+        } else {
+            phoneDraft = nil
+        }
+        let researchDraft: (() -> Void)?
+        if canPrepareResearch {
+            researchDraft = { prepareResearch() }
+        } else {
+            researchDraft = nil
+        }
+        let tools = EverydayToolsView(
+            api: api,
+            draftTitle: "Brug i opgaven",
+            onPhoneDraft: phoneDraft,
+            onResearchDraft: researchDraft,
+            onDraft: insertEverydayDraft
+        )
+
+        return NavigationStack {
+            tools.toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Luk") { showEverydayTools = false } }
             }
         }
+    }
+
+    private func insertEverydayDraft(_ text: String) -> Bool {
+        guard !store.busy, let updated = EverydayDraft.appending(text, to: prompt, limit: 2_000) else {
+            return false
+        }
+        prompt = updated
+        showEverydayTools = false
+        return true
     }
 
     private var statusCard: some View {
