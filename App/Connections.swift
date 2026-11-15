@@ -442,6 +442,10 @@ struct FilmLibraryLinkView: View {
     @State private var address = ""
 
     private var libraryURL: URL? {
+        Self.validatedURL(for: address)
+    }
+
+    nonisolated static func validatedURL(for address: String) -> URL? {
         let value = address.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let parts = URLComponents(string: value),
               let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
