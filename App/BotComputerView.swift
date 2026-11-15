@@ -45,26 +45,8 @@ import UniformTypeIdentifiers
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: FadedSpacing.action) {
-                VillagePixelImage(name: "room-" + VillageAssets.newArtName(name: bot.name, id: bot.id.uuidString),
-                                  folder: "new")
-                    .frame(height: 180)
-                    .frame(maxWidth: .infinity)
-                    .background(palette.card, in: .rect(cornerRadius: 18))
-                    .clipShape(.rect(cornerRadius: 18))
-                    .accessibilityLabel("Personligt rum for \(bot.name)")
-                statusCard
-                if let client {
-                    if !initialPrompt.isEmpty { jobs(client) }
-                    desktop(client)
-                    if initialPrompt.isEmpty { jobs(client) }
-                    files(client)
-                }
-            }
-            .padding(FadedSpacing.edge)
-            .frame(maxWidth: 700)
-            .frame(maxWidth: .infinity)
+        ScrollView(.vertical, showsIndicators: true) {
+            computerContent
         }
         .background {
             ZStack {
@@ -154,23 +136,7 @@ import UniformTypeIdentifiers
                 }
             }
         }
-        .sheet(isPresented: $showEverydayTools) {
-            NavigationStack {
-                EverydayToolsView(api: api, draftTitle: "Brug i opgaven",
-                                  onPhoneDraft: store.status?.phoneActions == true ? preparePhoneTask : nil,
-                                  onResearchDraft: canPrepareResearch ? prepareResearch : nil) { text in
-                    guard !store.busy, let updated = EverydayDraft.appending(text, to: prompt, limit: 2_000) else {
-                        return false
-                    }
-                    prompt = updated
-                    showEverydayTools = false
-                    return true
-                }
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("Luk") { showEverydayTools = false } }
-                }
-            }
-        }
+        .sheet(isPresented: $showEverydayTools) { everydayToolsSheet }
         .sheet(item: $reviewingPhoneJob) { job in
             if let action = job.phoneAction {
                 BotPhoneActionReview(action: action, jobID: job.id, botName: bot.name) {
@@ -195,6 +161,46 @@ import UniformTypeIdentifiers
             }
         } message: { file in
             Text("Modtageren får en kopi af \(file.name) i sit eget arbejdsrum.")
+        }
+    }
+
+    private var computerContent: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.action) {
+            VillagePixelImage(name: "room-" + VillageAssets.newArtName(name: bot.name, id: bot.id.uuidString),
+                              folder: "new")
+                .frame(height: 180)
+                .frame(maxWidth: .infinity)
+                .background(palette.card, in: .rect(cornerRadius: 18))
+                .clipShape(.rect(cornerRadius: 18))
+                .accessibilityLabel("Personligt rum for \(bot.name)")
+            statusCard
+            if let client {
+                if !initialPrompt.isEmpty { jobs(client) }
+                desktop(client)
+                if initialPrompt.isEmpty { jobs(client) }
+                files(client)
+            }
+        }
+        .padding(FadedSpacing.edge)
+        .frame(maxWidth: 700)
+        .frame(maxWidth: .infinity)
+    }
+
+    private var everydayToolsSheet: some View {
+        NavigationStack {
+            EverydayToolsView(api: api, draftTitle: "Brug i opgaven",
+                              onPhoneDraft: store.status?.phoneActions == true ? preparePhoneTask : nil,
+                              onResearchDraft: canPrepareResearch ? prepareResearch : nil) { text in
+                guard !store.busy, let updated = EverydayDraft.appending(text, to: prompt, limit: 2_000) else {
+                    return false
+                }
+                prompt = updated
+                showEverydayTools = false
+                return true
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Luk") { showEverydayTools = false } }
+            }
         }
     }
 
