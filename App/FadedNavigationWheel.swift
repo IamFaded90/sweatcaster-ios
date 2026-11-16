@@ -21,40 +21,10 @@ struct FadedNavigationWheel: View {
     private var still: Bool { reduceMotion || systemReduceMotion }
 
     var body: some View {
-        let motionless = still
-        return VStack(spacing: 0) {
-            HStack(spacing: 4) {
-                stepButton(-1)
-                Text("Swipe for flere · tryk for at åbne")
-                    .font(.caption2).foregroundStyle(palette.secondary)
-                    .frame(maxWidth: .infinity)
-                stepButton(1)
-            }
+        VStack(spacing: 0) {
+            controls
             GeometryReader { geometry in
-                let viewportWidth = geometry.size.width
-                ScrollView(.horizontal) {
-                    HStack(spacing: 8) {
-                        ForEach(items) { item in
-                            tab(item)
-                                .frame(width: itemWidth, height: itemHeight)
-                                .visualEffect { content, proxy in
-                                    let distance = proxy.frame(in: .named("faded-navigation-wheel")).midX - viewportWidth / 2
-                                    let position = min(1, max(-1, distance / max(viewportWidth / 2, 1)))
-                                    content
-                                        .scaleEffect(motionless ? 1 : 1 - abs(position) * 0.12)
-                                        .rotation3DEffect(.degrees(motionless ? 0 : Double(position) * -32), axis: (x: 0, y: 1, z: 0))
-                                        .offset(y: motionless ? 0 : abs(position) * 9)
-                                }
-                        }
-                    }
-                    .scrollTargetLayout()
-                    .padding(.vertical, 6)
-                }
-                .contentMargins(.horizontal, max(0, (geometry.size.width - itemWidth) / 2), for: .scrollContent)
-                .coordinateSpace(name: "faded-navigation-wheel")
-                .scrollIndicators(.hidden)
-                .scrollTargetBehavior(.viewAligned)
-                .scrollPosition(id: $centeredID, anchor: .center)
+                wheel(viewportWidth: geometry.size.width)
             }
             .frame(height: itemHeight + 12)
         }
@@ -65,6 +35,51 @@ struct FadedNavigationWheel: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Fanehjul")
+    }
+
+    private var controls: some View {
+        HStack(spacing: 4) {
+            stepButton(-1)
+            Text("Swipe for flere · tryk for at åbne")
+                .font(.caption2).foregroundStyle(palette.secondary)
+                .frame(maxWidth: .infinity)
+            stepButton(1)
+        }
+    }
+
+    private func wheel(viewportWidth: CGFloat) -> some View {
+        ScrollView(.horizontal) {
+            HStack(spacing: 8) {
+                ForEach(items) { item in
+                    wheelItem(item, viewportWidth: viewportWidth)
+                }
+            }
+            .scrollTargetLayout()
+            .padding(.vertical, 6)
+        }
+        .contentMargins(.horizontal, max(0, (viewportWidth - itemWidth) / 2), for: .scrollContent)
+        .coordinateSpace(name: "faded-navigation-wheel")
+        .scrollIndicators(.hidden)
+        .scrollTargetBehavior(.viewAligned)
+        .scrollPosition(id: $centeredID, anchor: .center)
+    }
+
+    private func wheelItem(_ item: FadedWheelItem, viewportWidth: CGFloat) -> some View {
+        let motionless = still
+        return tab(item)
+            .frame(width: itemWidth, height: itemHeight)
+            .visualEffect { content, proxy in
+                let halfWidth: CGFloat = max(viewportWidth / 2, 1)
+                let distance: CGFloat = proxy.frame(in: .named("faded-navigation-wheel")).midX - viewportWidth / 2
+                let position: CGFloat = min(1, max(-1, distance / halfWidth))
+                let scale: CGFloat = motionless ? 1 : 1 - abs(position) * 0.12
+                let angle: Double = motionless ? 0 : Double(position) * -32
+                let offset: CGFloat = motionless ? 0 : abs(position) * 9
+                return content
+                    .scaleEffect(scale)
+                    .rotation3DEffect(.degrees(angle), axis: (x: 0, y: 1, z: 0))
+                    .offset(y: offset)
+            }
     }
 
     private func tab(_ item: FadedWheelItem) -> some View {

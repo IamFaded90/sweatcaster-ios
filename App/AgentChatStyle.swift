@@ -63,11 +63,26 @@ struct FadedWorkingBeam: ViewModifier {
     let radius: CGFloat
 
     func body(content: Content) -> some View {
-        content.borderBeam(shape: .rounded(radius), style: .small,
-                           active: active && phase == .active,
-                           colors: pc ? [FadedBrand.pc, FadedBrand.blue] : [FadedBrand.mint, FadedColors.purple],
-                           intensity: 0.65, timing: BeamTiming(rotateDuration: 4.5))
-            .environment(\.accessibilityReduceMotion, reduceMotion || appReduceMotion)
+        if reduceMotion || appReduceMotion {
+            // The system preference is read-only. Keep a static work indicator
+            // instead of overriding it for the animated package.
+            content.overlay {
+                RoundedRectangle(cornerRadius: radius)
+                    .stroke(LinearGradient(colors: colors, startPoint: .topLeading,
+                                           endPoint: .bottomTrailing), lineWidth: 1)
+                    .opacity(active && phase == .active ? 0.65 : 0)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+            }
+        } else {
+            content.borderBeam(shape: .rounded(radius), style: .small,
+                               active: active && phase == .active, colors: colors,
+                               intensity: 0.65, timing: BeamTiming(rotateDuration: 4.5))
+        }
+    }
+
+    private var colors: [Color] {
+        pc ? [FadedBrand.pc, FadedBrand.blue] : [FadedBrand.mint, FadedColors.purple]
     }
 }
 
