@@ -51,5 +51,6 @@ workflows:
           cd "$staging"
           zip -qr "$output/FadedAI-unsigned.ipa" Payload
           unzip -tq "$output/FadedAI-unsigned.ipa"
+          python3 "$CM_BUILD_DIR/verify_ipa.py" "$output/FadedAI-unsigned.ipa"
     artifacts:
       - build/FadedAI-unsigned.ipa

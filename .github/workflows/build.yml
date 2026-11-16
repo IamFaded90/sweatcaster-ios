@@ -7,9 +7,11 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build:
+    if: ${{ github.ref_name != 'codex/ipa-launch-repair-a78156f' }}
     runs-on: macos-26
     timeout-minutes: 60
     env:
@@ -108,8 +110,49 @@ jobs:
           cd "$staging"
           zip -qr "$RUNNER_TEMP/FadedAI-unsigned.ipa" Payload
           unzip -tq "$RUNNER_TEMP/FadedAI-unsigned.ipa"
+          python3 "$GITHUB_WORKSPACE/verify_ipa.py" "$RUNNER_TEMP/FadedAI-unsigned.ipa"
       - uses: actions/upload-artifact@v4
         if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
+        with:
+          name: FadedAI-unsigned
+          path: ${{ runner.temp }}/FadedAI-unsigned.ipa
+          if-no-files-found: error
+
+  repair-package:
+    if: ${{ github.ref_name == 'codex/ipa-launch-repair-a78156f' }}
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify app sources match the tested build 65
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin a78156ff316bc4afba1c44119dbd70ddca2eca1c
+          git diff --exit-code FETCH_HEAD HEAD -- App Dependencies Shared Widgets Tests
+      - uses: actions/download-artifact@v4
+        with:
+          name: FadedAI-unsigned
+          path: previous-build
+          run-id: 43813191330
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Repair framework lookup and verify the final IPA
+        run: |
+          set -euo pipefail
+          staging="$(mktemp -d)"
+          unzip -q previous-build/FadedAI-unsigned.ipa -d "$staging"
+          app="$staging/Payload/FadedAI.app"
+          test -x "$app/FadedAI"
+          test ! -e "$app/_CodeSignature"
+          xcrun install_name_tool -add_rpath '@executable_path/Frameworks' "$app/FadedAI"
+          for bundle in "$app" "$app"/PlugIns/*.appex; do
+            test -d "$bundle" || continue
+            /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $GITHUB_RUN_NUMBER" "$bundle/Info.plist"
+          done
+          cd "$staging"
+          zip -qr "$RUNNER_TEMP/FadedAI-unsigned.ipa" Payload
+          unzip -tq "$RUNNER_TEMP/FadedAI-unsigned.ipa"
+          python3 "$GITHUB_WORKSPACE/verify_ipa.py" "$RUNNER_TEMP/FadedAI-unsigned.ipa"
+      - uses: actions/upload-artifact@v4
         with:
           name: FadedAI-unsigned
           path: ${{ runner.temp }}/FadedAI-unsigned.ipa

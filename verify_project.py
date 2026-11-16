@@ -18,6 +18,12 @@ for folder in ("App", "Tests"):
         build, = [key for key, row in rows.items() if f"fileRef = {ref};" in row]
         phase, = [row for row in rows.values() if "PBXSourcesBuildPhase" in row and build in row]
         assert phase
+app_configurations = [row for row in rows.values()
+                      if "isa = XCBuildConfiguration;" in row and "PRODUCT_NAME = FadedAI;" in row]
+assert len(app_configurations) == 2
+for configuration in app_configurations:
+    assert 'LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks");' in configuration
+
 scheme = ET.parse(project / "xcshareddata/xcschemes/SweatCaster.xcscheme")
 for ref in scheme.findall(".//BuildableReference"):
     assert "PBXNativeTarget" in rows[ref.attrib["BlueprintIdentifier"]]
