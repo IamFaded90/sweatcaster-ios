@@ -1,6 +1,7 @@
 // Batch jobs, multi-file proposals and explicit approval on the paired PC.
 
 import Foundation
+import LocalAuthentication
 import SwiftUI
 
 struct BatchReviewSheet: View {
@@ -25,12 +26,14 @@ struct BatchReviewView: View {
     @State private var jobs: [CodeBatchList.Job] = []
     @State private var repo = ""
     @State private var goal = ""
+    @State private var highPriority = false
     @State private var paths = ""
     @State private var failure: String?
     @State private var busy = false
     @State private var loadingJobs = false
     @State private var loadedJobs = false
     @State private var projectToClone: String?
+    @State private var showRepositorySearch = false
 
     private var projectName: String { repo.trimmingCharacters(in: .whitespacesAndNewlines) }
 
@@ -61,6 +64,10 @@ struct BatchReviewView: View {
                 TextField("Skriv én filsti pr. linje", text: $paths, axis: .vertical)
                     .textInputAutocapitalization(.never).autocorrectionDisabled()
                 FadedDetailText("En filsti er fx App/Settings.swift. Du kan vælge op til fem filer.")
+                Button("Find filer i projektet", systemImage: "magnifyingglass") { showRepositorySearch = true }
+                    .frame(minHeight: 44).disabled(projectName.isEmpty || busy || batchFiles.count >= 5)
+                Toggle("Høj prioritet", isOn: $highPriority)
+                    .disabled(busy)
                 FadedPrimaryButton("Bed om et forslag", icon: "terminal") { Task { await enqueue() } }
                     .disabled(batchBlocker != nil)
                 if let batchBlocker { FadedDetailText(batchBlocker) }
@@ -88,6 +95,12 @@ struct BatchReviewView: View {
         .navigationTitle("Forslag til flere filer")
         .navigationDestination(for: ProposalRoute.self) { proposal in
             BatchProposalView(api: api, id: proposal.id, goal: proposal.goal)
+        }
+        .sheet(isPresented: $showRepositorySearch) {
+            CodeRepositorySearchView(api: api, repository: projectName) { path in
+                guard batchFiles.count < 5, !batchFiles.contains(path) else { return }
+                paths = (batchFiles + [path]).joined(separator: "\n")
+            }
         }
         .confirmationDialog("Hent projekt fra GitHub?", isPresented: Binding(
             get: { projectToClone != nil }, set: { if !$0 { projectToClone = nil } }
@@ -120,8 +133,9 @@ struct BatchReviewView: View {
         busy = true
         defer { busy = false }
         do {
-            try await api.enqueueCodeBatch(repo: projectName, goal: goal, files: batchFiles)
+            try await api.enqueueCodeBatch(repo: projectName, goal: goal, files: batchFiles, highPriority: highPriority)
             goal = ""
+            highPriority = false
             await reload()
         } catch { AppDiagnostics.record(error); failure = pcBusyMessage(error) ?? "Opgaven kunne ikke sættes i kø. Tjek repo og filstier." }
     }
@@ -144,6 +158,7 @@ private func batchStatus(_ status: String) -> String {
     case "review": "Afventer godkendelse"
     case "applied": "Gemt på lokal gren"
     case "declined": "Intet forslag"
+    case "rejected": "Afvist"
     default: "Jobbet stoppede"
     }
 }
@@ -157,6 +172,7 @@ struct BatchProposalView: View {
     @State private var detail: CodeBatchDetail?
     @State private var fileDiffs: [CodeBatchDiff] = []
     @State private var confirm = false
+    @State private var confirmRejection = false
     @State private var busy = false
     @State private var reloading = false
     @State private var approvalNeedsReload = false
@@ -223,6 +239,10 @@ struct BatchProposalView: View {
                 Text("Forslaget gemmes på en separat gren i Agent Workspace på PC’en.")
             }
         }
+        .confirmationDialog("Afvis kodeforslaget?", isPresented: $confirmRejection, titleVisibility: .visible) {
+            Button("Afvis forslag", role: .destructive) { Task { await reject() } }
+            Button("Annuller", role: .cancel) { }
+        }
     }
 
     private var changedPaths: [String]? {
@@ -283,9 +303,25 @@ struct BatchProposalView: View {
     }
 
     @ViewBuilder private var approvalActions: some View {
-        FadedSecondaryButton("Luk uden godkendelse") { dismiss() }.disabled(busy)
+        FadedSecondaryButton("Afvis forslag") { confirmRejection = true }.disabled(busy || reloading || approvalNeedsReload)
         FadedPrimaryButton("Godkend ændringer", icon: "checkmark") { confirm = true }
             .disabled(approvalBlocker != nil)
+    }
+
+    private func reject() async {
+        guard detail?.status == "review", !busy, !reloading, !approvalNeedsReload else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            let rejected = try await api.rejectCodeBatch(id)
+            guard rejected.id == id, rejected.status == "rejected" else { throw V2Failure.invalidResponse }
+            detail = rejected
+            fileDiffs = []
+            notice = nil
+        } catch {
+            approvalNeedsReload = true
+            notice = "PC’en kunne ikke bekræfte afvisningen. Opdatér for at se den aktuelle status."
+        }
     }
 
     private func reload() async {
@@ -310,8 +346,21 @@ struct BatchProposalView: View {
     private func approve() async {
         guard detail?.status == "review", approvalBlocker == nil else { return }
         busy = true
-        approvalNeedsReload = true
         defer { busy = false }
+        let authentication = LAContext()
+        guard authentication.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) else {
+            notice = "Slå Face ID eller Touch ID til for at godkende kodeforslaget."
+            return
+        }
+        do {
+            guard try await authentication.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics,
+                                                           localizedReason: "Gem kodeforslaget på en separat gren på din PC.") else { return }
+            try Task.checkCancellation()
+        } catch {
+            notice = "Forslaget afventer stadig din godkendelse."
+            return
+        }
+        approvalNeedsReload = true
         do {
             let applied = try await api.approveCodeBatch(id)
             await reload()

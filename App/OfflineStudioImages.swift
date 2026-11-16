@@ -11,6 +11,10 @@ extension OfflineStudio {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 imageThermalWarning
+                if privateSession, imageReady, !canRenderPrivateImages {
+                    FadedEmptyState(icon: "airplane", title: "Modellen er hentet — slå netværket fra",
+                                    detail: privateImageOfflineInstructions + " Når telefonen er offline, bliver Lav billede aktiv. Bliv i appen, mens billedet bliver lavet.")
+                }
                 if generatingImages { imageShimmer }
                 if idleAsleep {
                     FadedSecondaryButton("Vis resultat igen", icon: "photo") { resetIdleTimer() }
@@ -91,7 +95,7 @@ extension OfflineStudio {
     private func imageBlocker(for request: StudioImageRequest) -> String? {
         let modelReady = isImageModelReady(request.model)
         if request.isPrivate {
-            if !modelReady { return "Hent en telefonmodel under Hjem → Billeder → Telefon → Billedindstillinger. Åbn derefter Privat Studio igen." }
+            if !modelReady { return "Billedmodellen mangler. Hent den under Hjem → ⋯ → Lokale modeller → Billeder, og åbn Privat Studio igen." }
             if privateNetworkOffline == nil { return "Tjekker, om telefonen er offline…" }
             if !canRenderPrivateImages { return privateImageOfflineInstructions }
         } else if request.route == .pc {

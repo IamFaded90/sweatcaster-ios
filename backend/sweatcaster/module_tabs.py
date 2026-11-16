@@ -137,9 +137,11 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
     from sweatcaster.microsoft_voice import register_christel
     from sweatcaster.pc_metrics import desktop_setup, gmail_setup, image_setup, read_metrics, web_setup
     from sweatcaster.store import Store
+    from sweatcaster.studio_video import register_studio_video
     from sweatcaster.video_review import register_video_review
 
     register_lumi(app, settings, authorize)
+    register_studio_video(app, settings, authorize)
     library = register_composio(app, settings, authorize)
     appointments = register_mail_appointments(app, settings, authorize, library,
                                               ollama_reports(settings, mail_appointments=True))
@@ -418,7 +420,7 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
                 or not all(isinstance(file, str) for file in files)):
             raise ApiError(422, "INVALID_INPUT", "Vælg et repo, en opgave og kildefiler.")
         try:
-            return {"id": batch.enqueue(repo, goal, files)}
+            return {"id": batch.enqueue(repo, goal, files, priority=body.get("priority", 0))}
         except RepositoryError as exc:
             raise ApiError(422, "INVALID_INPUT", str(exc)) from exc
 
@@ -437,6 +439,16 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             raise ApiError(422, "INVALID_INPUT", "Forslaget kræver en eksplicit godkendelse.")
         try:
             return batch.apply(job)
+        except RepositoryError as exc:
+            raise ApiError(409, "NOT_READY", str(exc)) from exc
+
+    @app.put("/api/modules/v1/code-batches/{job}/rejection", include_in_schema=False)
+    def reject_batch(request: Request, job: str, body: dict = Body(...)):
+        authorize(request, settings)
+        if body != {"rejected": True} or body.get("rejected") is not True:
+            raise ApiError(422, "INVALID_INPUT", "Bekræft, at du vil afvise forslaget.")
+        try:
+            return batch.reject(job)
         except RepositoryError as exc:
             raise ApiError(409, "NOT_READY", str(exc)) from exc
 

@@ -34,7 +34,7 @@ enum VillageAssets {
         return image
     }
 
-    private static func directionRow(for bot: VillageLifeBot) -> Int {
+    static func directionRow(for bot: VillageLifeBot) -> Int {
         guard bot.pose == .walk, let destination = bot.destinationZoneID else { return 0 }
         func point(_ zone: VillageZoneID) -> (Double, Double) {
             switch zone {
@@ -158,23 +158,44 @@ struct VillagePixelImage: View {
     }
 }
 
-struct VillageBotSprite: View {
+@MainActor struct VillageBotSprite: View {
     let bot: VillageLifeBot
     var size: CGFloat = 48
     var animateWalk = false
+    @ObservedObject private var speechMotion = VillageSpeechMotion.shared
+    @Environment(\.scenePhase) private var phase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @AppStorage(AppStorageKeys.qolReduceMotion) private var calmMotion = false
 
     var body: some View {
-        Group {
-            if animateWalk && (bot.pose == .walk || bot.pose == .work || bot.pose == .talk) {
-                TimelineView(.animation(minimumInterval: 0.125)) { context in
-                    poseImage(VillageAssets.newBotFrame(bot, at: context.date))
+        let moving = animateWalk && !reduceMotion && !calmMotion && phase == .active
+        TimelineView(.animation(minimumInterval: 1.0 / 12,
+                                paused: !moving || (bot.pose == .sleep && !speechMotion.isSpeaking(bot.id)))) { context in
+            let displayed = displayedBot(moving: moving)
+            let date: Date? = moving ? context.date : nil
+            let frame = date.map {
+                Int($0.timeIntervalSinceReferenceDate * ([VillageActivity.walk, .work, .talk].contains(displayed.pose) ? 8 : 4)) % 8
+            } ?? 0
+            let image = VillageAssets.newBotFrame(displayed, at: date)
+            poseImage(image)
+                .overlay {
+                    if image != nil {
+                        VillageSpriteFace(artName: VillageAssets.newArtName(name: displayed.displayName, id: displayed.id),
+                                          pose: displayed.pose, frame: frame,
+                                          direction: VillageAssets.directionRow(for: displayed),
+                                          blink: moving && VillageBlink.closed(id: bot.id, at: context.date),
+                                          mouth: moving ? speechMotion.mouth(for: bot.id, at: context.date) : 0)
+                    }
                 }
-            } else {
-                poseImage(VillageAssets.newBotFrame(bot))
             }
-        }
         .frame(width: size, height: size)
         .accessibilityHidden(true)
+    }
+
+    private func displayedBot(moving: Bool) -> VillageLifeBot {
+        var displayed = bot
+        if speechMotion.isSpeaking(bot.id), moving { displayed.pose = .talk }
+        return displayed
     }
 
     @ViewBuilder

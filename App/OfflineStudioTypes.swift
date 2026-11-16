@@ -20,6 +20,7 @@ struct PrivateChatTurn: Codable, Identifiable {
     var replyModelName: String? = nil
     var replyCard: AgentReplyCard? = nil
     var webSources: [AgentWebSources.Source]? = nil
+    var documentSources: [AgentDocumentSource]? = nil
 }
 
 struct StudioPhotoInput: Transferable {

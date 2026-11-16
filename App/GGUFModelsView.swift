@@ -76,8 +76,7 @@ import UniformTypeIdentifiers
 
     private func installedRow(_ model: GGUFPhoneModel) -> some View {
         let estimated = Int64(model.memoryEstimateMiB) * 1_048_576
-        let hint = UInt64(estimated) <= LocalCompute.headroom ?
-            "Passer til den ledige hukommelse" : "Mangler ledig hukommelse lige nu · brug PC til tunge modeller"
+        let hint = PhoneMemoryBudget.assess(model).explanation
         return VStack(alignment: .leading, spacing: 6) {
             Divider()
             Text(model.name).font(FadedTypography.action).textSelection(.enabled)

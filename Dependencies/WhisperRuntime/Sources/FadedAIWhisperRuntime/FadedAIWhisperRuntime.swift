@@ -1,8 +1,20 @@
 @_implementationOnly import whisper
 
 public enum LocalWhisperEngine {
+    public struct Segment: Sendable {
+        public let started: Double
+        public let ended: Double
+        public let text: String
+    }
+
     public static func transcribe(modelPath: String, samples: UnsafePointer<Float>,
                                   count: Int32, language: String) -> String? {
+        transcribeSegments(modelPath: modelPath, samples: samples, count: count, language: language)?
+            .map(\.text).joined()
+    }
+
+    public static func transcribeSegments(modelPath: String, samples: UnsafePointer<Float>,
+                                          count: Int32, language: String) -> [Segment]? {
         var contextParameters = whisper_context_default_params()
         #if targetEnvironment(simulator)
         contextParameters.use_gpu = false
@@ -23,10 +35,13 @@ public enum LocalWhisperEngine {
             return whisper_full(context, parameters, samples, count)
         }
         guard status == 0 else { return nil }
-        var text = ""
-        for index in 0..<whisper_full_n_segments(context) {
-            if let segment = whisper_full_get_segment_text(context, index) { text += String(cString: segment) }
+        let segments = whisper_full_n_segments(context)
+        guard segments >= 0 else { return nil }
+        return (0..<segments).compactMap { index in
+            guard let text = whisper_full_get_segment_text(context, index) else { return nil }
+            let start = Double(whisper_full_get_segment_t0(context, index)) / 100
+            let end = Double(whisper_full_get_segment_t1(context, index)) / 100
+            return Segment(started: max(0, start), ended: max(0, start, end), text: String(cString: text))
         }
-        return text
     }
 }

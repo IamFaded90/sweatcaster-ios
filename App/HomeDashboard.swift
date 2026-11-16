@@ -478,6 +478,17 @@ extension Home {
         case "video-jobs": openVideoJobs()
         case "code": selectSpace(.library)
         case OpenFadedAIHarperChat.destination: openHarperChat()
+        case OpenFadedAIVillage.destination:
+            guard !privateStudioPresented else { return }
+            UserDefaults.standard.set(false, forKey: AppStorageKeys.villageBasicMode)
+            selectSpace(.tasks)
+            if model.needsPairing { enteredWithoutPC = true }
+        case OpenFadedAIVideoBrief.destination:
+            guard !privateStudioPresented else { return }
+            selectSpace(.brain)
+            if model.needsPairing { enteredWithoutPC = true }
+            showCreativeStudioShortcut = true
+            showMoreDestinations = true
         default: break
         }
     }

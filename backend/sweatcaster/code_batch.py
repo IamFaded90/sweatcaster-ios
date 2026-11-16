@@ -24,19 +24,26 @@ class CodeBatch:
         self.workflows = workflows
         database.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS code_batch (
                 id TEXT PRIMARY KEY, repo TEXT NOT NULL, goal TEXT NOT NULL, files TEXT NOT NULL,
-                status TEXT NOT NULL, result TEXT, created REAL NOT NULL, updated REAL NOT NULL)""")
+                status TEXT NOT NULL, result TEXT, created REAL NOT NULL, updated REAL NOT NULL,
+                priority INTEGER NOT NULL DEFAULT 0)""")
+            columns = {row["name"] for row in db.execute("PRAGMA table_info(code_batch)")}
+            if "priority" not in columns:
+                db.execute("ALTER TABLE code_batch ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
 
     def _connect(self):
         db = sqlite3.connect(self.database, timeout=10)
         db.row_factory = sqlite3.Row
         return db
 
-    def enqueue(self, repo: str, goal: str, files: list[str]) -> str:
+    def enqueue(self, repo: str, goal: str, files: list[str], *, priority: int = 0) -> str:
         goal = goal.strip()
         if not 1 <= len(goal) <= 1000 or not 1 <= len(files) <= 5 or len(set(files)) != len(files):
             raise RepositoryError("Angiv en opgave og 1–5 forskellige kildefiler.")
+        if type(priority) is not int or priority not in {0, 1}:
+            raise RepositoryError("Vælg normal eller høj prioritet.")
         self.repository._head(repo)
         if not all(self.repository._allowed(path) for path in files):
             raise RepositoryError("Vælg almindelige kildefiler i projektet.")
@@ -47,8 +54,9 @@ class CodeBatch:
             count = db.execute("SELECT count(*) FROM code_batch WHERE status IN ('queued', 'running')").fetchone()[0]
             if count >= 20:
                 raise RepositoryError("Kodekøen er fuld.")
-            db.execute("INSERT INTO code_batch VALUES (?, ?, ?, ?, 'queued', NULL, ?, ?)",
-                       (job, repo.lower(), goal, json.dumps(files), now, now))
+            db.execute("""INSERT INTO code_batch (id, repo, goal, files, status, result, created, updated, priority)
+                          VALUES (?, ?, ?, ?, 'queued', NULL, ?, ?, ?)""",
+                       (job, repo.lower(), goal, json.dumps(files), now, now, priority))
         return job
 
     def get(self, job: str) -> dict:
@@ -104,6 +112,18 @@ class CodeBatch:
                        (json.dumps(result), time.time(), job))
             return result
 
+    def reject(self, job: str) -> dict:
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT status FROM code_batch WHERE id=?", (job,)).fetchone()
+            if row is None or row["status"] not in {"review", "rejected"}:
+                raise RepositoryError("Forslaget kan ikke længere afvises.")
+            if row["status"] == "review":
+                result = json.dumps({"reason": "Forslaget er afvist af brugeren.", "requires_approval": False})
+                db.execute("UPDATE code_batch SET status='rejected', result=?, updated=? WHERE id=?",
+                           (result, time.time(), job))
+        return self.get(job)
+
     def _claim(self):
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
@@ -112,7 +132,10 @@ class CodeBatch:
                        (json.dumps({"reason": "Arbejdet blev afbrudt. Opret et nyt job."}), now, now - 900))
             if db.execute("SELECT 1 FROM code_batch WHERE status='running'").fetchone():
                 return None
-            job = db.execute("SELECT * FROM code_batch WHERE status='queued' ORDER BY created, id LIMIT 1").fetchone()
+            # Older jobs eventually get the same priority, to keep regular work moving.
+            job = db.execute("""SELECT * FROM code_batch WHERE status='queued'
+                ORDER BY CASE WHEN created <= ? THEN 1 ELSE priority END DESC, created, id LIMIT 1""",
+                             (now - 1800,)).fetchone()
             if job:
                 db.execute("UPDATE code_batch SET status='running', updated=? WHERE id=?", (now, job["id"]))
             return job
@@ -248,11 +271,16 @@ class ModelBusy(Exception):
 
 
 def configured_batch(settings, workspace: Path) -> CodeBatch:
+    import os
     from sweatcaster.agent_workflows import configured_workflows
 
     root = settings.output_root / "agent-workflows"
     library = RepositoryLibrary(workspace, root / "unused.sqlite", None)
-    return CodeBatch(root / "code-batch.sqlite3", library, ollama_generator(settings), configured_workflows(settings, workspace))
+    generate = ollama_generator(settings)
+    if os.environ.get("FADEDAI_CODE_BATCH_ENGINE", "local") == "crewai":
+        from sweatcaster.crew_proposals import crew_generator
+        generate = crew_generator(generate)
+    return CodeBatch(root / "code-batch.sqlite3", library, generate, configured_workflows(settings, workspace))
 
 
 class BatchWorker:

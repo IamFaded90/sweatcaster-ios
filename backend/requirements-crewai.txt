@@ -1,0 +1,2 @@
+# Optional PC proposal flow. Install in an isolated environment before activation.
+crewai==1.15.41

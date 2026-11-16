@@ -78,7 +78,7 @@ struct Home: View {
     enum SettingsFollowup { case login, models, privateChat, bots, code, export }
     enum Space: String, CaseIterable, Identifiable {
         case brain = "Brain", notes = "Notes", gallery = "Gallery", tasks = "Tasks", library = "Library"
-        case entertainment = "Entertainment"
+        case entertainment = "Entertainment", music = "Music"
         var id: Self { self }
     }
     private enum TabDestination: Equatable {
@@ -96,6 +96,7 @@ struct Home: View {
     @State var showLogin = false
     @State var showDashboardActivity = false
     @State var showMoreDestinations = false
+    @State var showCreativeStudioShortcut = false
     @State var showProjects = false
     @State var showHoldchatFromMore = false
     @State var showBackupFromMore = false
@@ -258,6 +259,15 @@ struct Home: View {
         .onChange(of: showJobs) {
             navigate(to: .video(.jobs))
         }
+        .onChange(of: privateStudioPresented, initial: true) {
+            if phase == .active { PCChatBackgroundDelivery.setPrivateSession(privateStudioPresented) }
+        }
+        .onChange(of: phase) {
+            if phase == .active { PCChatBackgroundDelivery.setPrivateSession(privateStudioPresented) }
+            if phase == .background && !model.isDemo && !privateStudioPresented {
+                PCChatBackgroundDelivery.schedule(using: model.api as? LiveAPI)
+            }
+        }
         .task(id: "\(model.isDemo):\(model.address):\((model.api as? LiveAPI)?.queueTargetID ?? ""):\(model.connected):\(phase == .active && !privateStudioPresented)") {
             if phase == .active && !privateStudioPresented { await loadModuleTabs() }
         }
@@ -304,7 +314,8 @@ struct Home: View {
                 AnyView(AgentHub(api: studioAPI, isVisible: selectedHomeTab == Space.tasks.rawValue,
                                  studioUnlocked: $nsfwSessionUnlocked,
                                  onPrivateSessionEnded: showPrivateSessionNotice, onBack: goBack,
-                                 experimentalWork: experimentalVillageWork, onExperimentalAction: openExperimentalVillageWork))
+                                 experimentalWork: experimentalVillageWork, onExperimentalAction: openExperimentalVillageWork)
+                    .environment(\.villagePlannerAPI, studioAPI))
             }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Agenter", systemImage: "person.2.fill") }.tag(Space.tasks.rawValue)
@@ -313,6 +324,11 @@ struct Home: View {
             }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Code Bot", systemImage: "chevron.left.forwardslash.chevron.right") }.tag(Space.library.rawValue)
+            DeferredHomeTab(isSelected: selectedHomeTab == Space.music.rawValue) {
+                AnyView(MusicView(onBack: goBack))
+            }
+                .toolbarVisibility(.hidden, for: .tabBar)
+                .tabItem { Label("Musik", systemImage: "music.note") }.tag(Space.music.rawValue)
             Color.clear
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Underholdning", systemImage: "play.tv") }.tag(Space.entertainment.rawValue)

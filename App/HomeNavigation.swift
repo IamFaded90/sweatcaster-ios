@@ -18,10 +18,7 @@ extension Home {
                 .frame(maxWidth: .infinity)
                 .accessibilityLabel("Aktiv fane · \(currentTabAccessibilityName)")
                 .accessibilityAddTraits(.isHeader)
-            ViewThatFits(in: .horizontal) {
-                tabButtons
-                ScrollView(.horizontal) { tabButtons }.scrollIndicators(.hidden)
-            }
+            tabButtons
             .padding(6)
             .fadedGlassSurface(radius: FadedRadius.media, tint: v0LookPreset?.cardColor(in: palette),
                                border: v0LookPreset?.borderColor(in: palette))
@@ -30,92 +27,41 @@ extension Home {
         .padding(.horizontal, 12).padding(.bottom, 4)
         .sheet(isPresented: $showMoreDestinations, onDismiss: openMoreDestination) {
             FadedMoreScreen(modules: visibleModuleTarget == nil ? [] : moduleTabs,
-                            lookPreset: lookPresetBinding) { destination in
+                            api: studioAPI, lookPreset: lookPresetBinding,
+                            startInStudio: showCreativeStudioShortcut) { destination in
                 pendingMoreDestination = destination
                 showMoreDestinations = false
             }
         }
     }
 
-    /// Hjem sits in the middle of the dock.
     private var dockSpaces: [Space] {
-        [.notes, .gallery, .brain, .tasks, .entertainment]
+        [.notes, .gallery, .brain, .tasks, .entertainment, .music, .library]
     }
 
     private var tabButtons: some View {
-        HStack(spacing: 2) {
-            ForEach(dockSpaces) { item in
-                dockTab(item)
-            }
-            moreDestinations
+        let fixed = dockSpaces.map { FadedWheelItem(id: $0.rawValue, title: spaceTitle($0), icon: spaceIcon($0)) }
+        let modules = (visibleModuleTarget == nil ? [] : moduleTabs).map {
+            FadedWheelItem(id: "module:" + $0.id, title: $0.title,
+                           icon: $0.kind == "cards" ? "rectangle.on.rectangle" : "info.circle")
         }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Faner · \(currentTabAccessibilityName)")
-    }
-
-    private func dockTab(_ item: Space) -> some View {
-        let selected = selectedModuleTab == nil && space == item
-        let isHome = item == .brain
-        return Button {
-            if reduceMotion { selectTab(item) }
-            else { withAnimation(.spring(response: calmMotion ? 0.70 : 0.35, dampingFraction: 0.8)) { selectTab(item) } }
-        } label: {
-            VStack(spacing: 3) {
-                Image(systemName: spaceIcon(item))
-                    .font(isHome ? .title3.weight(.semibold) : .body)
-                Text(spaceTitle(item)).font(.caption2.bold()).fixedSize(horizontal: true, vertical: false)
-                Capsule()
-                    .fill(selected ? FadedBrand.mint : Color.clear)
-                    .frame(width: selected ? (isHome ? 22 : 16) : 0, height: 3)
-                    .accessibilityHidden(true)
-            }
-            .padding(.horizontal, 4)
-            .foregroundStyle(selected ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
-            .frame(minWidth: isHome ? 56 : 44, maxWidth: .infinity, minHeight: 48)
-            .background(selected ? FadedBrand.mint.opacity(palette.isDark ? 0.18 : 0.28) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: FadedRadius.medium))
-            .overlay {
-                if selected {
-                    RoundedRectangle(cornerRadius: FadedRadius.medium)
-                        .strokeBorder(FadedBrand.mint.opacity(0.45), lineWidth: 1)
-                }
-            }
-            .contentShape(Rectangle())
+        return FadedNavigationWheel(items: fixed + modules + [.init(id: "more", title: "Mere", icon: "ellipsis")],
+                                    selectedID: showMoreDestinations ? "more" : selectedModuleTab ?? space.rawValue,
+                                    reduceMotion: reduceMotion || calmMotion) { id in
+            if id == "more" { showMoreDestinations = true }
+            else if let destination = Space(rawValue: id) { selectTab(destination) }
+            else { selectModule(id) }
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Åbn " + spaceTitle(item))
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .accessibilityValue(selected ? "Valgt" : "")
     }
 
     private var currentTabAccessibilityName: String {
-        if selectedModuleTab != nil { return "Mere" }
+        if let selectedModuleTab,
+           let module = moduleTabs.first(where: { "module:" + $0.id == selectedModuleTab }) { return module.title }
         return spaceTitle(space)
     }
 
-    private var moreDestinations: some View {
-        let selected = selectedModuleTab != nil || showMoreDestinations
-        return Button { showMoreDestinations = true } label: {
-            VStack(spacing: 3) {
-                Image(systemName: "ellipsis").font(.body)
-                Text("Mere").font(.caption2.bold())
-                Capsule()
-                    .fill(selected ? FadedBrand.mint : Color.clear)
-                    .frame(width: selected ? 16 : 0, height: 3)
-                    .accessibilityHidden(true)
-            }
-            .frame(minWidth: 44, minHeight: 48)
-            .foregroundStyle(selected ? (palette.isDark ? FadedBrand.mint : palette.text) : palette.secondary)
-            .background(selected ? FadedBrand.mint.opacity(palette.isDark ? 0.18 : 0.28) : Color.clear,
-                        in: RoundedRectangle(cornerRadius: FadedRadius.medium))
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Mere")
-        .accessibilityAddTraits(selected ? .isSelected : [])
-        .accessibilityValue(selected ? "Valgt" : "")
-    }
-
     private func openMoreDestination() {
+        showCreativeStudioShortcut = false
         guard let destination = pendingMoreDestination else { return }
         pendingMoreDestination = nil
         switch destination {
@@ -155,6 +101,7 @@ extension Home {
         case .gallery: "Video"
         case .tasks: "Agenter"
         case .library: "Code Bot"
+        case .music: "Musik"
         case .entertainment: "Underholdning"
         }
     }
@@ -166,6 +113,7 @@ extension Home {
         case .gallery: "play.rectangle.fill"
         case .tasks: "person.2.fill"
         case .library: "chevron.left.forwardslash.chevron.right"
+        case .music: "music.note"
         case .entertainment: "play.tv"
         }
     }
@@ -217,6 +165,7 @@ private struct FadedMoreScreen: View {
     private enum Page: Hashable { case lookbook, powerHub, atlas, help, creativeStudio, memory, safety, vault }
 
     let modules: [ModuleTab]
+    let api: LiveAPI?
     @Binding var lookPreset: V0LookPreset?
     let open: (FadedMoreDestination) -> Void
     @State private var path = NavigationPath()
@@ -227,10 +176,12 @@ private struct FadedMoreScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
 
-    init(modules: [ModuleTab], lookPreset: Binding<V0LookPreset?>,
+    init(modules: [ModuleTab], api: LiveAPI?, lookPreset: Binding<V0LookPreset?>, startInStudio: Bool,
          open: @escaping (FadedMoreDestination) -> Void) {
         self.modules = modules
+        self.api = api
         _lookPreset = lookPreset
+        if startInStudio { _path = State(initialValue: NavigationPath([Page.creativeStudio])) }
         self.open = open
     }
 
@@ -327,7 +278,7 @@ private struct FadedMoreScreen: View {
                 case .atlas: V0FeatureAtlasView()
                 case .help: V0HelpView()
                 case .creativeStudio:
-                    V0CreativeStudioView(openVideo: { open(.video) }, openImages: { open(.imageBrief($0)) })
+                    V0CreativeStudioView(openVideo: { open(.video) }, openImages: { open(.imageBrief($0)) }, api: api)
                 case .memory: FadedMemoryOverview(bots: FadedMoreScreenData.bots)
                 case .vault: PersonalVaultView()
                 case .safety:

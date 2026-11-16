@@ -40,6 +40,10 @@ enum AgentWhisper {
     }
 
     static func transcribe(_ url: URL, language: String) throws -> String {
+        try transcribeSegments(url, language: language).map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func transcribeSegments(_ url: URL, language: String) throws -> [LocalWhisperEngine.Segment] {
         let file = try AVAudioFile(forReading: url)
         let frameCount = AVAudioFrameCount(min(Int64(sampleRate * 45), file.length))
         guard frameCount > 0, file.processingFormat.sampleRate == Double(sampleRate),
@@ -49,11 +53,11 @@ enum AgentWhisper {
         try file.read(into: pcm, frameCount: frameCount)
         guard let samples = pcm.floatChannelData?[0] else { throw APIError.malformed }
         let code = language.hasPrefix("en") ? "en" : language.hasPrefix("da") ? "da" : "auto"
-        guard let result = LocalWhisperEngine.transcribe(modelPath: model.path, samples: samples,
-                                                        count: Int32(pcm.frameLength), language: code) else {
+        guard let result = LocalWhisperEngine.transcribeSegments(modelPath: model.path, samples: samples,
+                                                                count: Int32(pcm.frameLength), language: code) else {
             throw APIError.malformed
         }
-        return result.trimmingCharacters(in: .whitespacesAndNewlines)
+        return result
     }
 }
 
@@ -65,6 +69,7 @@ enum AgentWhisper {
     private(set) var active = false
     private(set) var processing = false
     private(set) var installing = false
+    private(set) var segments: [LocalWhisperEngine.Segment] = []
 
     func install() async throws {
         guard !installing else { return }
@@ -77,6 +82,7 @@ enum AgentWhisper {
         guard !active, !processing, AgentWhisper.ready else { throw APIError.storage }
         let id = UUID()
         revision = id
+        segments = []
         guard await AVAudioApplication.requestRecordPermission(), revision == id else { throw APIError.input }
         let file = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".wav")
         let audio = AVAudioSession.sharedInstance()
@@ -112,14 +118,18 @@ enum AgentWhisper {
             processing = false
         }
         let result = try await LocalCompute.run(minimumMiB: 300) {
-            try await Task.detached(priority: .userInitiated) { try AgentWhisper.transcribe(file, language: language) }.value
+            try await Task.detached(priority: .userInitiated) {
+                try AgentWhisper.transcribeSegments(file, language: language)
+            }.value
         }
         guard revision == id else { throw CancellationError() }
-        return result
+        segments = result
+        return result.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func cancel() {
         revision = UUID()
+        segments = []
         releaseMic()
         if let recordingURL { try? FileManager.default.removeItem(at: recordingURL) }
         recordingURL = nil

@@ -532,7 +532,7 @@ extension OfflineStudio {
         }
         dictation.stop()
         let utterance = LocalSpeechVoice.utterance(LocalSpeechVoice.replyText(turn.reply), voice: voice, rate: bot?.voiceRate ?? 1)
-        speech.play(utterance, as: .reply(turn.id))
+        speech.play(utterance, as: .reply(turn.id), agentID: bot?.id)
         status = "Læser op på \(label)."
     }
 

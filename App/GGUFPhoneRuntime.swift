@@ -111,6 +111,7 @@ enum GGUFPhoneRuntime {
         _ model: GGUFPhoneModel, prompt: String, instructions: String, history: [PhoneModels.ChatExchange],
         maximumTokens: Int32, update: @escaping @MainActor (String) -> Void
     ) async throws -> Report {
+        guard PhoneMemoryBudget.assess(model).fit != .unavailable else { throw LocalComputeError.lowMemory }
         LocalCompute.beginModelLoad()
         let messages = (instructions.isEmpty ? [] : [Message("system", instructions)]) +
             history.flatMap { [Message("user", $0.prompt), Message("assistant", $0.reply)] } + [Message("user", prompt)]

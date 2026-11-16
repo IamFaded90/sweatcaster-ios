@@ -33,7 +33,9 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
 
     private static let castContext: GCKCastContext = {
         let criteria = GCKDiscoveryCriteria(applicationID: kGCKDefaultMediaReceiverApplicationID)
-        GCKCastContext.setSharedInstanceWith(GCKCastOptions(discoveryCriteria: criteria))
+        let options = GCKCastOptions(discoveryCriteria: criteria)
+        options.stopReceiverApplicationWhenEndingSession = false
+        GCKCastContext.setSharedInstanceWith(options)
         let context = GCKCastContext.sharedInstance()
         context.useDefaultExpandedMediaControls = true
         return context

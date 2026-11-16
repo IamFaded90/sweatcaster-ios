@@ -166,22 +166,70 @@ class RepositoryLibrary:
         return {"revision": revision, "chunks": len(rows)}
 
     def search(self, slug: str, query: str) -> list[dict]:
-        _, revision = self._head(slug)
+        repo, revision = self._head(slug)
         if not query.strip() or len(query) > 1000:
             raise RepositoryError("Søgningen skal være mellem 1 og 1.000 tegn.")
-        packed = self._vectors([query])[0]
-        shape = f"<{len(packed) // 4}f"
-        vector = struct.unpack(shape, packed)
-        matches = []
         with closing(self._connect()) as conn:
-            for path, line, body, candidate in conn.execute(
+            rows = conn.execute(
                 "SELECT path, line, body, vector FROM code_chunks WHERE repo = ? AND revision = ?",
                 (slug.lower(), revision),
-            ):
-                if len(candidate) == len(packed):
-                    score = sum(a * b for a, b in zip(vector, struct.unpack(shape, candidate)))
-                    matches.append((score, path, line, body))
+            ).fetchall()
+        if not rows or self.embed is None:
+            return self._search_snapshot(repo, revision, query)
+        try:
+            packed = self._vectors([query])[0]
+        except (RepositoryError, OSError, RuntimeError, ValueError):
+            return self._search_snapshot(repo, revision, query)
+        shape = f"<{len(packed) // 4}f"
+        vector = struct.unpack(shape, packed)
+        terms = self._terms(query)
+        matches = []
+        for path, line, body, candidate in rows:
+            if len(candidate) == len(packed):
+                score = sum(a * b for a, b in zip(vector, struct.unpack(shape, candidate)))
+                exact = sum(term in (path + "\n" + body).casefold() for term in terms)
+                matches.append((score + 0.13 * exact, path, line, body))
         return [{"path": path, "line": line, "text": body} for _, path, line, body in sorted(matches, reverse=True)[:5]]
+
+    @staticmethod
+    def _terms(query: str) -> list[str]:
+        stop = {"der", "som", "med", "til", "fra", "hvor", "hvad", "hvordan", "the", "and", "for", "what", "where", "how"}
+        tokens = re.findall(r"[^\W_][\w]{1,63}", query.casefold())
+        return list(dict.fromkeys(word for word in tokens if word not in stop))[:6]
+
+    def _search_snapshot(self, repo: Path, revision: str, query: str) -> list[dict]:
+        """Get useful results after cloning, even if the local embedding model has not been installed."""
+        terms = self._terms(query)
+        if not terms:
+            return []
+        allowed = dict(self._files(repo, revision))
+        by_path = {path: (sum(term in path.casefold() for term in terms), 1, "") for path in allowed}
+        flags = [flag for term in terms for flag in ("-e", term)]
+        patterns = [f":(icase,glob)**/*{suffix}" for suffix in sorted(_SOURCE)]
+        try:
+            matches = self._git(repo, "grep", "-n", "-i", "-I", "-z", "-F", "--no-textconv", "--max-count=3",
+                                *flags, revision, "--", *patterns, timeout=12)
+        except RepositoryError:
+            matches = b""
+        prefix = revision.encode("ascii") + b":"
+        for row in matches.splitlines():
+            path_data, delimiter, excerpt = row.partition(b"\x00")
+            line_data, separator, body = excerpt.partition(b"\x00")
+            if not delimiter or not separator or not path_data.startswith(prefix) or not line_data.isdigit():
+                continue
+            path = path_data[len(prefix):].decode("utf-8", "replace")
+            if path not in allowed:
+                continue
+            line = int(line_data)
+            text = body.decode("utf-8", "replace").strip()[:2400]
+            path_score = sum(term in path.casefold() for term in terms)
+            hits = sum(term in text.casefold() for term in terms)
+            score = path_score + 2 * hits
+            if score > by_path[path][0]:
+                by_path[path] = (score, line, text)
+        ranked = sorted(by_path.items(), key=lambda row: (-row[1][0], row[0]))
+        return [{"path": path, "line": line, "text": text or path}
+                for path, (score, line, text) in ranked[:5] if score > 0]
 
 
 def mcp_server(library: RepositoryLibrary, **options):

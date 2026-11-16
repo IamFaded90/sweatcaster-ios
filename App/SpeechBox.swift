@@ -23,6 +23,7 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     @Published private(set) var isSpeaking = false
     let wordProgress = WordProgress()
     private var currentUtterance: AVSpeechUtterance?
+    private var motionOwner: UUID?
     var voiceName: String? { currentUtterance?.voice?.name }
 
     override init() {
@@ -31,8 +32,9 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         synthesizer.delegate = self
     }
 
-    @MainActor func play(_ utterance: AVSpeechUtterance, as playback: Playback) {
+    @MainActor func play(_ utterance: AVSpeechUtterance, as playback: Playback, agentID: UUID? = nil) {
         stop()
+        motionOwner = VillageSpeechMotion.shared.begin(agentID: agentID) { [weak self] in self?.stop() }
         currentUtterance = utterance
         self.playback = playback
         synthesizer.speak(utterance)
@@ -60,6 +62,7 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
         Task { @MainActor [weak self] in
             guard let self, let currentUtterance, ObjectIdentifier(currentUtterance) == identifier else { return }
             isSpeaking = speaking
+            if let motionOwner { VillageSpeechMotion.shared.setSpeaking(speaking, owner: motionOwner) }
         }
     }
 
@@ -67,9 +70,14 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
                            utterance: AVSpeechUtterance) {
         let identifier = ObjectIdentifier(utterance)
         Task { @MainActor [weak self] in
-            guard let self, let currentUtterance, ObjectIdentifier(currentUtterance) == identifier,
-                  case .reply(_)? = playback else { return }
-            wordProgress.position = .init(text: currentUtterance.speechString, range: characterRange)
+            guard let self, let currentUtterance, ObjectIdentifier(currentUtterance) == identifier else { return }
+            if let motionOwner {
+                let rate = Double(currentUtterance.rate / AVSpeechUtteranceDefaultSpeechRate)
+                VillageSpeechMotion.shared.word(length: characterRange.length, rate: rate, owner: motionOwner)
+            }
+            if case .reply(_)? = playback {
+                wordProgress.position = .init(text: currentUtterance.speechString, range: characterRange)
+            }
         }
     }
 
@@ -90,6 +98,8 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     }
 
     @MainActor private func clearPlayback() {
+        if let motionOwner { VillageSpeechMotion.shared.end(owner: motionOwner) }
+        motionOwner = nil
         currentUtterance = nil
         if wordProgress.position != nil { wordProgress.position = nil }
         if isSpeaking { isSpeaking = false }

@@ -104,6 +104,33 @@ struct FadedSearchIndex: Equatable, Sendable {
         (try? cancellableMatches(input)) ?? []
     }
 
+    /// Rank only the entries the caller supplied. Private documents and scenes never enter this index.
+    func relatedMatches(_ input: String, existing: Set<String>) throws -> [FadedSearchRecord] {
+        let query = Self.boundedQuery(input).trimmingCharacters(in: .whitespacesAndNewlines)
+        let candidates = records.filter { !existing.contains($0.id) }
+        let texts = candidates.map { [$0.title, $0.detail, $0.keywords].joined(separator: " ") }
+        let lexical = try LocalTextRanking.lexicalOrder(query: query, texts: texts)
+        let shortlist = LocalTextRanking.fusedOrder(
+            [Array(lexical.prefix(28)), Array(candidates.indices.prefix(64))], limit: 64
+        )
+        var semantic: [(index: Int, score: Float)] = []
+        if let model = LocalTextRanking.installedEmbedding() {
+            defer { model.unload() }
+            if let queryVector = LocalTextRanking.vector(for: query, using: model) {
+                for index in shortlist {
+                    try Task.checkCancellation()
+                    guard let candidate = LocalTextRanking.vector(for: texts[index], using: model),
+                          let score = LocalTextRanking.similarity(queryVector, candidate), score >= 0.76 else { continue }
+                    semantic.append((index, score))
+                }
+            }
+        }
+        let byMeaning = semantic.sorted { $0.score == $1.score ? $0.index < $1.index : $0.score > $1.score }
+            .map(\.index)
+        return LocalTextRanking.fusedOrder([Array(lexical.prefix(16)), Array(byMeaning.prefix(16))], limit: 12)
+            .map { candidates[$0] }
+    }
+
     func cancellableMatches(_ input: String) throws -> [FadedSearchRecord] {
         try Task.checkCancellation()
         let query = Self.fold(Self.boundedQuery(input).trimmingCharacters(in: .whitespacesAndNewlines))
@@ -216,6 +243,9 @@ struct FadedSearchSheet: View {
     @State private var query: String
     @State private var results: [FadedSearchRecord] = []
     @State private var completedRequest: Request?
+    @State private var broadenedRequest: Request?
+    @State private var related: [FadedSearchRecord] = []
+    @State private var relatedTask: Task<Void, Never>?
 
     private struct Request: Equatable, Sendable {
         let query: String
@@ -244,7 +274,13 @@ struct FadedSearchSheet: View {
             .navigationTitle("Søg i FadedAI")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Luk") { dismiss() } }
-            .task(id: request) { await search(request) }
+            .task(id: request) {
+                relatedTask?.cancel()
+                related = []
+                broadenedRequest = nil
+                await search(request)
+            }
+            .onDisappear { relatedTask?.cancel() }
         }
     }
 
@@ -286,11 +322,46 @@ struct FadedSearchSheet: View {
                     FadedSectionLabel("Resultater · \(results.count)")
                     ForEach(results, content: resultRow)
                 }
+                if !request.query.isEmpty && completedRequest == request {
+                    relatedResults
+                }
             }
             .padding(.horizontal, FadedSpacing.edge).padding(.bottom, FadedSpacing.edge)
             .frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
         .scrollDismissesKeyboard(.interactively)
+    }
+
+    @ViewBuilder private var relatedResults: some View {
+        if broadenedRequest == request {
+            if related.isEmpty {
+                FadedDetailText("Ingen relaterede resultater.")
+            } else {
+                FadedSectionLabel("Relateret til din søgning")
+                ForEach(related, content: resultRow)
+            }
+        } else if relatedTask != nil {
+            ProgressView("Leder efter relaterede resultater…")
+        } else {
+            FadedSecondaryButton("Find relaterede resultater", icon: "sparkle.magnifyingglass") { broadenSearch() }
+        }
+    }
+
+    private func broadenSearch() {
+        let selected = request
+        let seen = Set(results.map(\.id))
+        focused = false
+        relatedTask = Task {
+            defer { relatedTask = nil }
+            let worker = Task.detached(priority: .utility) {
+                try selected.index.relatedMatches(selected.query, existing: seen)
+            }
+            guard let found = try? await withTaskCancellationHandler(operation: { try await worker.value },
+                                                                     onCancel: { worker.cancel() }),
+                  !Task.isCancelled, self.request == selected else { return }
+            related = found
+            broadenedRequest = selected
+        }
     }
 
     private func resultRow(_ record: FadedSearchRecord) -> some View {

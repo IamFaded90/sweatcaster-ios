@@ -316,7 +316,7 @@ struct RemoteScreen: View {
                     RemoteArtworkCard(model: model)
                     RemoteTransport(model: model)
                     RemoteVolume(model: model)
-                    Text("Websitevideoer bruger iPhonens stream. Hold appen åben under afspilning.")
+                    Text(model.screenOffMessage)
                         .font(Style.meta).foregroundStyle(Style.muted)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     if model.hasSubtitleTracks {

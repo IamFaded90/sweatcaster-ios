@@ -98,6 +98,21 @@ struct VillageMemorial: Codable, Identifiable, Equatable {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 creatorCard
+                NavigationLink {
+                    VillageHexOffice(bots: bots, openProfile: onOpenProfile,
+                                     openComputer: onOpenComputer, openCemetery: onOpenCemetery)
+                } label: {
+                    Label("Åbn kontorkort", systemImage: "map")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .fadedGlassSurface(radius: FadedRadius.medium)
+                }
+                NavigationLink {
+                    ScannedOfficeRoomsView(bots: bots)
+                } label: {
+                    Label("Scan og indret mit værelse", systemImage: "viewfinder")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .fadedGlassSurface(radius: FadedRadius.medium)
+                }
                 Text("Personlige computere")
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
@@ -395,6 +410,11 @@ private struct VillageCreationScene: View {
                     .font(.title3.weight(.semibold))
                 Text("Vælg en bot. Opgaven sendes fra bottens egen computer, hvor du også kan følge resultatet og filerne.")
                     .font(.subheadline).foregroundStyle(palette.secondary)
+                if !bots.isEmpty {
+                    NavigationLink { VillageChiefPlanner(bots: bots) } label: {
+                        Label("Planlæg med Chief", systemImage: "crown")
+                    }.buttonStyle(FadedButtonStyle(kind: .secondary))
+                }
                 if bots.isEmpty {
                     FadedEmptyState(icon: "person.2", title: "Ingen bots endnu",
                                     detail: "Opret først en bot i Kontoret.")

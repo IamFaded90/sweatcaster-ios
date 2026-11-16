@@ -1,4 +1,5 @@
 from pathlib import Path
+import sqlite3
 import subprocess
 
 import pytest
@@ -16,6 +17,31 @@ class Snapshot(RepositoryLibrary):
 
     def _git(self, repo, *args):
         return (args[-1] + " = 1\n").encode()
+
+
+def test_existing_queue_can_prioritize_new_work_and_reject_without_applying(tmp_path):
+    database = tmp_path / "jobs.sqlite"
+    with sqlite3.connect(database) as connection:
+        connection.execute("""CREATE TABLE code_batch (
+            id TEXT PRIMARY KEY, repo TEXT NOT NULL, goal TEXT NOT NULL, files TEXT NOT NULL,
+            status TEXT NOT NULL, result TEXT, created REAL NOT NULL, updated REAL NOT NULL)""")
+
+    def generate(goal, files):
+        return {"feasible": True, "files": {path: source.replace("1", "2") for path, source in files.items()},
+                "tests": ["Check the chosen source file."]}
+
+    batch = CodeBatch(database, Snapshot(tmp_path, tmp_path / "index.sqlite", None), generate)
+    normal = batch.enqueue("user/repo", "first", ["a.py"])
+    high = batch.enqueue("user/repo", "second", ["a.py"], priority=1)
+    assert batch.work_once()
+    assert batch.get(normal)["status"] == "queued"
+    assert batch.get(high)["status"] == "review"
+    assert batch.reject(high)["status"] == "rejected"
+    assert batch.reject(high)["result"]["requires_approval"] is False
+    with pytest.raises(RepositoryError):
+        batch.apply(high)
+    assert batch.work_once()
+    assert batch.get(normal)["status"] == "review"
 
 
 def test_queue_defers_busy_model_and_requires_review_for_multiple_files(tmp_path):

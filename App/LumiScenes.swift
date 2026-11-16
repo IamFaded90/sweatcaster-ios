@@ -73,12 +73,17 @@ struct LumiSavedScene: Codable, Identifiable {
     let messages: [LumiSceneMessage]
     let draft: String
     let updatedAt: Date
+    var expiresAt: Date? = nil
 
     static func snapshot(card: LumiSceneCard, initiative: LumiInitiative, language: String,
-                         messages: [LumiSceneMessage], draft: String) -> Self {
-        Self(card: card.cleaned, initiative: initiative, language: language,
-             messages: Array(messages.suffix(16)), draft: String(draft.unicodeScalars.prefix(4_000)), updatedAt: .now)
+                         messages: [LumiSceneMessage], draft: String, temporarily: Bool = false) -> Self {
+        let now = Date.now
+        return Self(card: card.cleaned, initiative: initiative, language: language,
+                    messages: Array(messages.suffix(16)), draft: String(draft.unicodeScalars.prefix(4_000)), updatedAt: now,
+                    expiresAt: temporarily ? now.addingTimeInterval(300) : nil)
     }
+
+    func isExpired(at date: Date) -> Bool { expiresAt.map { $0 <= date } ?? false }
 
     func matches(_ other: Self) -> Bool {
         card == other.card && initiative == other.initiative &&
@@ -95,7 +100,7 @@ enum LumiSceneLibrary {
     private static var file: URL { root.appending(path: "library.json") }
     private static var store: LocalFileStore { LocalFileStore(root: root, maximumBytes: 12_000_000) }
 
-    static func load() throws -> [LumiSavedScene] {
+    static func load(now: Date = .now) throws -> [LumiSavedScene] {
         do {
             let scenes = try store.read([LumiSavedScene].self, from: file)
             guard scenes.count <= maximumScenes,
@@ -103,7 +108,9 @@ enum LumiSceneLibrary {
                   scenes.allSatisfy({ !$0.card.title.isEmpty && $0.messages.count <= 16 }) else {
                 throw LocalFileStore.Failure.invalidFile
             }
-            return scenes.sorted { $0.updatedAt > $1.updatedAt }
+            let current = scenes.filter { !$0.isExpired(at: now) }
+            if current.count != scenes.count { try save(current) }
+            return current.sorted { $0.updatedAt > $1.updatedAt }
         } catch let error where LocalFileStore.isMissing(error) {
             return []
         }
@@ -111,6 +118,10 @@ enum LumiSceneLibrary {
 
     static func save(_ scenes: [LumiSavedScene]) throws {
         guard scenes.count <= maximumScenes else { throw LocalFileStore.Failure.tooLarge }
+        if scenes.isEmpty {
+            try store.delete(file)
+            return
+        }
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         var directory = root
         var values = URLResourceValues()
@@ -203,6 +214,10 @@ struct LumiSceneLibraryView: View {
                                 Text(scene.card.title).font(.headline)
                                 Text(scene.card.mood.title + " · " + scene.updatedAt.formatted(date: .abbreviated, time: .shortened))
                                     .font(.footnote).foregroundStyle(.secondary)
+                                if let expiry = scene.expiresAt {
+                                    Text("Slettes \(expiry.formatted(date: .omitted, time: .shortened))")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
                             }
                             .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
                         }

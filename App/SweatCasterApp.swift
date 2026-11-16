@@ -83,6 +83,32 @@ struct SweatCasterShortcuts: AppShortcutsProvider {
                     shortTitle: "Tjek PC", systemImageName: "network")
         AppShortcut(intent: OpenFadedAIHarperChat(), phrases: ["Tal med Harper i \(.applicationName)"],
                     shortTitle: "Tal med Harper", systemImageName: "bubble.left")
+        AppShortcut(intent: OpenFadedAIVillage(), phrases: ["Åbn Landsbyen i \(.applicationName)"],
+                    shortTitle: "Åbn Landsbyen", systemImageName: "house.fill")
+        AppShortcut(intent: OpenFadedAIVideoBrief(), phrases: ["Lav videokladde i \(.applicationName)"],
+                    shortTitle: "Lav videokladde", systemImageName: "film")
+    }
+}
+
+struct OpenFadedAIVillage: AppIntent {
+    static let title: LocalizedStringResource = "Åbn Landsbyen"
+    static let openAppWhenRun = true
+    static let destination = "village"
+
+    @MainActor func perform() async throws -> some IntentResult {
+        UserDefaults.standard.set(Self.destination, forKey: AppStorageKeys.spacesShortcut)
+        return .result()
+    }
+}
+
+struct OpenFadedAIVideoBrief: AppIntent {
+    static let title: LocalizedStringResource = "Lav videokladde"
+    static let openAppWhenRun = true
+    static let destination = "video-brief"
+
+    @MainActor func perform() async throws -> some IntentResult {
+        UserDefaults.standard.set(Self.destination, forKey: AppStorageKeys.spacesShortcut)
+        return .result()
     }
 }
 
@@ -113,6 +139,7 @@ struct PromptExample: Identifiable {
                 .onChange(of: scenePhase, initial: true) { _, phase in
                     StudioImageDownloads.shared.setForeground(phase == .active)
                     if phase == .active {
+                        _ = try? LumiSceneLibrary.load()
                         GGUFModelDownloads.shared.activate()
                         Task { await PhoneModelDownloads.shared.resumeInterruptedVisionDownload() }
                     }

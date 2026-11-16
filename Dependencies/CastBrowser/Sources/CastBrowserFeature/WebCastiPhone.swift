@@ -63,20 +63,22 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
             }
         }
     }
-    private var pendingAutoCast: VideoCandidate?
-    private var pendingAutoCastDate: Date?
-    private var pendingAutoCastPosition: Double = 0
+    var pendingAutoCast: VideoCandidate?
+    var pendingAutoCastDate: Date?
+    var pendingAutoCastPosition: Double = 0
     private var resumePositions: [String: Double] = [:]
     private var lastPersistedProgressKey: String?
     private var lastPersistedProgressPosition: Double = 0
-    private var receiverErrorLogged = false
+    var receiverErrorLogged = false
     @Published var castFeedback: String?
     @Published var canRetryCast = false
     private var observingCast = false
-    private(set) var retryTarget: (video: VideoCandidate, position: Double)?
-    private var retryCount = 0
-    private var attemptID = UUID()
-    private var loadStarted: Date?
+    var retryTarget: (video: VideoCandidate, position: Double)?
+    var preferPhoneStream = false
+    var retryCount = 0
+    var attemptID = UUID()
+    var loadStarted: Date?
+    var loadDelegate: CastRequestStatus?
 
     func observeCastSession() {
         guard !observingCast else { return }
@@ -98,11 +100,19 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
     func retryCast() {
         guard let target = retryTarget else { return }
         retryCount = 0
+        preferPhoneStream = false
         startCast(target.video, initialPosition: target.position)
     }
 
-    private func recoverCast(_ id: UUID) {
+    func recoverCast(_ id: UUID) {
         guard id == attemptID, let target = retryTarget else { return }
+        // One direct attempt, then preserve the proven cookie-aware phone route.
+        if !preferPhoneStream {
+            preferPhoneStream = true
+            addDiagnostic("TV’et kunne ikke hente kilden direkte. Prøver via iPhone…")
+            startCast(target.video, initialPosition: target.position)
+            return
+        }
         loadStarted = nil
         attemptID = UUID()
         let retryID = attemptID
@@ -233,6 +243,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
 
     func castRecent(_ item: RecentCast) {
         retryCount = 0
+        preferPhoneStream = false
         let position = resumePositions[resumeKey(for: item.video.title)] ?? 0
         startCast(item.video, initialPosition: position)
     }
@@ -253,6 +264,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
             return
         }
         retryCount = 0
+        preferPhoneStream = false
         let key = resumeKey(for: video.title)
         if let saved = resumePositions[key], saved >= 15 {
             resumePromptVideo = video
@@ -274,145 +286,6 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
     func cancelResumePrompt() {
         resumePromptVideo = nil
         resumePromptPosition = 0
-    }
-
-    private func startCast(_ video: VideoCandidate, initialPosition: Double) {
-        guard let mediaURL = URL(string: video.url), ["http", "https"].contains(mediaURL.scheme?.lowercased() ?? "") else { return }
-        let id = UUID()
-        attemptID = id
-        retryTarget = (video, initialPosition)
-        canRetryCast = false
-        loadStarted = nil
-        castFeedback = "Forbinder til TV…"
-        receiverErrorLogged = false
-        addDiagnostic("Nyt castforsøg: \(video.title)")
-        guard let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession else {
-            pendingAutoCast = video
-            pendingAutoCastPosition = initialPosition
-            pendingAutoCastDate = Date()
-            status = "Vælg din Chromecast — videoen starter automatisk bagefter."
-            selectedTab = .remote
-            let context = GCKCastContext.sharedInstance()
-            context.discoveryManager.startDiscovery()
-            context.presentCastDialog()
-            return
-        }
-        castFeedback = "Indlæser…"
-        status = "Forbereder videostream fra iPhone…"
-        PhoneStreamProxy.shared.onActivity = { [weak self] message in
-            DispatchQueue.main.async { self?.addDiagnostic(message) }
-        }
-        browser.captureBrowserSession { [weak self] cookies, userAgent, capturedHeaders in
-            guard let self else { return }
-            PhoneStreamProxy.shared.prepare(cookies: cookies, userAgent: userAgent, referer: video.pageURL, capturedHeadersByURL: capturedHeaders) { result in
-                DispatchQueue.main.async {
-                    guard self.attemptID == id else { return }
-                    switch result {
-                    case .success:
-                        guard let localURL = PhoneStreamProxy.shared.proxiedURL(for: mediaURL) else {
-                            self.status = "Kunne ikke oprette telefonens lokale stream-adresse."
-                            return
-                        }
-                        let isHLS = video.isHLSMaster == true || video.mime.localizedCaseInsensitiveContains("mpegurl") || mediaURL.pathExtension.lowercased() == "m3u8"
-                        guard !isHLS else {
-                            self.status = "Kontrollerer lyd- og videoformatet i HLS-listen…"
-                            PhoneStreamProxy.shared.inspectHLS(mediaURL) { formats in
-                                DispatchQueue.main.async {
-                                    guard self.attemptID == id else { return }
-                                    if let formats {
-                                        let audio = formats.audioSegmentFormat.map { self.hlsAudioFormatName($0) } ?? "ukendt"
-                                        let videoFormat = formats.videoSegmentFormat.map { self.hlsVideoFormatName($0) } ?? "ukendt"
-                                        self.addDiagnostic("HLS-format fundet: lyd \(audio), video \(videoFormat).")
-                                        self.load(video, from: localURL, on: session, hlsFormats: formats, initialPosition: initialPosition)
-                                    } else {
-                                        self.addDiagnostic("Kunne ikke læse HLS-underlisterne på forhånd; sender uden formatgæt.")
-                                        self.load(video, from: localURL, on: session, hlsFormats: nil, initialPosition: initialPosition)
-                                    }
-                                }
-                            }
-                            return
-                        }
-                        self.load(video, from: localURL, on: session, hlsFormats: nil, initialPosition: initialPosition)
-                    case .failure(let error):
-                        self.addDiagnostic("Stream-proxy kunne ikke starte: \(error.localizedDescription)")
-                        self.recoverCast(id)
-                    }
-                }
-            }
-        }
-        selectedTab = .remote
-    }
-
-    private func load(_ video: VideoCandidate, from mediaURL: URL, on session: GCKCastSession, hlsFormats: HLSFormats?, initialPosition: Double = 0) {
-        if session.currentDeviceVolume < 0.01 {
-            _ = session.setDeviceVolume(0.5)
-            receiverVolume = 0.5
-            status = "Chromecast var lydløs — skruer lydstyrken op til 50 %."
-        }
-        let builder = GCKMediaInformationBuilder(contentURL: mediaURL)
-        let isHLS = video.isHLSMaster == true || video.mime.localizedCaseInsensitiveContains("mpegurl") || mediaURL.pathExtension.lowercased() == "m3u8"
-        builder.contentType = isHLS ? "application/x-mpegurl" : video.mime
-        builder.streamType = .buffered
-        if isHLS {
-            let rawValue = hlsFormats?.audioSegmentFormat ?? 5 // Test TS_AAC when playlist inspection cannot identify audio.
-            if let format = GCKHLSSegmentFormat(rawValue: rawValue) {
-                builder.hlsSegmentFormat = format
-                if hlsFormats?.audioSegmentFormat == nil {
-                    addDiagnostic("HLS-lydformat var ukendt; sender TS_AAC som test-fallback.")
-                }
-            }
-        }
-        if let rawValue = hlsFormats?.videoSegmentFormat,
-           let format = GCKHLSVideoSegmentFormat(rawValue: rawValue) {
-            builder.hlsVideoSegmentFormat = format
-        }
-        let metadata = GCKMediaMetadata(metadataType: .movie)
-        metadata.setString(video.title, forKey: kGCKMetadataKeyTitle)
-        if let poster = video.poster, let posterURL = URL(string: poster) {
-            metadata.addImage(GCKImage(url: posterURL, width: 640, height: 360))
-        }
-        builder.metadata = metadata
-        let tracks = video.subtitles.enumerated().compactMap { index, item -> GCKMediaTrack? in
-            guard let url = PhoneStreamProxy.shared.proxiedURL(for: URL(string: item.url) ?? mediaURL) else { return nil }
-            return GCKMediaTrack(identifier: Int(index + 1), contentIdentifier: url.absoluteString,
-                                 contentType: item.mime, type: .text, textSubtype: .subtitles,
-                                 name: item.name, languageCode: item.language, customData: nil)
-        }
-        if !tracks.isEmpty { builder.mediaTracks = tracks }
-        guard let client = session.remoteMediaClient else {
-            addDiagnostic("LOAD kunne ikke startes: Cast-klienten mangler.")
-            status = "Kunne ikke sende videoen. Kontrollér Cast-forbindelsen."
-            recoverCast(attemptID)
-            return
-        }
-        let mediaInformation = builder.build()
-        let audioFormat = hlsFormats?.audioSegmentFormat.map { hlsAudioFormatName($0) } ?? (isHLS ? "ukendt (TS_AAC fallback)" : "ukendt")
-        let videoFormat = hlsFormats?.videoSegmentFormat.map { hlsVideoFormatName($0) } ?? "ukendt"
-        addDiagnostic("Starter LOAD: type \(mediaInformation.contentType), lyd \(audioFormat), video \(videoFormat).")
-        addDiagnostic(initialPosition > 0 ? "Genoptager fra \(initialPosition.clockString)." : "Starter fra begyndelsen.")
-        let id = attemptID
-        loadStarted = Date()
-        let request = client.loadMedia(mediaInformation, autoplay: true, playPosition: initialPosition)
-        CastRequestStatus.shared.onComplete = { [weak self] in
-            DispatchQueue.main.async { self?.addDiagnostic("Chromecast accepterede LOAD-kommandoen.") }
-        }
-        CastRequestStatus.shared.onFailure = { [weak self] error in
-            DispatchQueue.main.async {
-                guard let self, self.attemptID == id else { return }
-                self.addDiagnostic("Cast-kommando fejlede: \(error.localizedDescription)")
-                self.recoverCast(id)
-            }
-        }
-        request.delegate = CastRequestStatus.shared
-        addDiagnostic("LOAD-request oprettet; afventer svar fra Chromecast.")
-        nowPlayingTitle = video.title
-        currentPoster = video.poster
-        if hlsFormats?.audioSegmentFormat != nil || hlsFormats?.videoSegmentFormat != nil {
-            status = "HLS-formater kontrolleret — sender til \(session.device.friendlyName ?? "Chromecast")…"
-        } else {
-            status = "Streamer fra iPhone til \(session.device.friendlyName ?? "Chromecast")…"
-        }
-        selectedTab = .remote
     }
 
     func castNextQueued() {
@@ -443,14 +316,16 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
             receiverMuted = session.currentDeviceMuted
             if let media = session.remoteMediaClient?.mediaStatus {
                 hasSubtitleTracks = media.mediaInformation?.mediaTracks?.contains(where: { $0.type == .text }) ?? false
+                let receivedAttempt = (media.mediaInformation?.customData as? [String: String])?["fadedaiAttempt"]
+                let matchesAttempt = retryTarget == nil || receivedAttempt == attemptID.uuidString
                 isPlaying = media.playerState == .playing
-                if isPlaying, let target = retryTarget,
+                if matchesAttempt, isPlaying, let target = retryTarget,
                    media.mediaInformation?.metadata?.string(forKey: kGCKMetadataKeyTitle) == target.video.title {
                     rememberSuccessfulCast()
                 }
                 playbackPosition = max(0, media.streamPosition)
                 playbackDuration = max(0, media.mediaInformation?.streamDuration ?? 0)
-                if media.playerState == .playing || media.playerState == .paused {
+                if matchesAttempt && (media.playerState == .playing || media.playerState == .paused) {
                     if loadStarted != nil || castFeedback == "Bufferer…" || castFeedback == "Forbinder til TV…" { castFeedback = nil }
                     loadStarted = nil
                     if let target = retryTarget,
@@ -461,7 +336,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
                 } else if media.playerState == .buffering {
                     castFeedback = "Bufferer…"
                 }
-                if media.playerState == .idle && media.idleReason == .error {
+                if matchesAttempt && media.playerState == .idle && media.idleReason == .error {
                     if !receiverErrorLogged && castFeedback != "Prøver igen…" && (loadStarted.map { Date().timeIntervalSince($0) > 2 } ?? true) {
                         receiverErrorLogged = true
                         let contentType = media.mediaInformation?.contentType ?? "ukendt"
@@ -520,14 +395,14 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
         lastPersistedProgressPosition = playbackPosition
     }
 
-    private func addDiagnostic(_ message: String) {
+    func addDiagnostic(_ message: String) {
         status = message
         let entry = "\(Date.now.formatted(date: .omitted, time: .shortened))  \(message)"
         diagnostics.insert(entry, at: 0)
         if diagnostics.count > 80 { diagnostics.removeLast(diagnostics.count - 80) }
     }
 
-    private func hlsAudioFormatName(_ rawValue: Int) -> String {
+    func hlsAudioFormatName(_ rawValue: Int) -> String {
         switch rawValue {
         case 1: return "AAC"
         case 2: return "AC3"
@@ -540,7 +415,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
         }
     }
 
-    private func hlsVideoFormatName(_ rawValue: Int) -> String {
+    func hlsVideoFormatName(_ rawValue: Int) -> String {
         switch rawValue {
         case 1: return "MPEG2_TS"
         case 2: return "FMP4"

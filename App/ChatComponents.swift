@@ -98,13 +98,14 @@ struct ChatTranscriptView: View {
     private var tapInstalled = false
     private var sessionActive = false
     private var runID = UUID()
+    private var deadline: Task<Void, Never>?
     private(set) var active = false
     private(set) var problem: String?
     private(set) var hasTranscript = false
 
     func clearReview() { hasTranscript = false }
 
-    func start(language: String = "da-DK", update: @escaping (String) -> Void) async {
+    func start(language: String = "da-DK", contextualStrings: [String] = [], update: @escaping (String) -> Void) async {
         guard !active else { return }
         let id = UUID()
         runID = id
@@ -115,6 +116,7 @@ struct ChatTranscriptView: View {
             SFSpeechRecognizer.requestAuthorization { continuation.resume(returning: $0 == .authorized) }
         }
         guard runID == id else { return }
+        guard !Task.isCancelled else { stop(); return }
         guard speechAllowed, let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language)),
               recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
             fail("Diktering på det valgte sprog er ikke tilgængelig på telefonen. Tjek talegenkendelse i Indstillinger.")
@@ -122,6 +124,7 @@ struct ChatTranscriptView: View {
         }
         let micAllowed = await AVAudioApplication.requestRecordPermission()
         guard runID == id else { return }
+        guard !Task.isCancelled else { stop(); return }
         guard micAllowed else {
             fail("Giv FadedAI adgang til mikrofonen i Indstillinger.")
             return
@@ -134,6 +137,7 @@ struct ChatTranscriptView: View {
             let request = SFSpeechAudioBufferRecognitionRequest()
             request.requiresOnDeviceRecognition = true
             request.shouldReportPartialResults = true
+            request.contextualStrings = Array(contextualStrings.prefix(30)).map { String($0.prefix(80)) }
             self.request = request
             self.recognizer = recognizer
             let node = engine.inputNode
@@ -159,10 +163,17 @@ struct ChatTranscriptView: View {
                 }
             }
             try engine.start()
+            deadline = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(55))
+                guard !Task.isCancelled, let self, self.runID == id else { return }
+                self.stop()
+            }
         } catch { AppDiagnostics.record(error); fail("Mikrofonen kunne ikke startes.") }
     }
 
     func stop() {
+        deadline?.cancel()
+        deadline = nil
         runID = UUID()
         active = false
         engine.stop()

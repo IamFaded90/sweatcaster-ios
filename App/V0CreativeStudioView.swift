@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct V0CreativeStudioView: View {
     let openVideo: () -> Void
     let openImages: (String) -> Void
+    var api: LiveAPI? = nil
 
     private enum Page: String, CaseIterable, Identifiable {
         case video = "Video Studio", images = "Billedværksted"
@@ -75,6 +76,15 @@ struct V0CreativeStudioView: View {
                 ideaCard
                 materialCard
                 expressionCard
+                if page == .video {
+                    NavigationLink {
+                        PCVideoGenerationView(api: api, initialPrompt: idea)
+                    } label: {
+                        Label("Generér video på PC", systemImage: "wand.and.stars")
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }
+                    .buttonStyle(FadedButtonStyle(kind: .secondary))
+                }
                 if let notice { FadedToast(notice, tone: .info) }
             }
             .padding(FadedSpacing.edge)

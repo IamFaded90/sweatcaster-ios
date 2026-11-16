@@ -19,6 +19,8 @@ def test_indexes_committed_sources_and_rejects_private_paths(tmp_path):
     git("add", ".")
     git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture")
     library = RepositoryLibrary(workspace, tmp_path / "index.sqlite", lambda texts: [[1, 2] for _ in texts])
+    assert library.search("Example/Demo", "hvor er dashboard?")[0]["line"] == 1
+    assert library.search("Example/Demo", "private data") == []
     assert library.index("Example/Demo")["chunks"] == 1
     assert library.search("example/demo", "dashboard")[0]["path"] == "stats.py"
     assert library.read("example/demo", "stats.py").startswith("def dashboard")

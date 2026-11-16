@@ -217,7 +217,7 @@ enum PhoneModels {
                 "seneste nyt", "min pc", "på pc", "file explorer", "agent-hub"].contains { text.contains($0) }
     }
 
-    private static func minimumMemory(for modelID: String) -> UInt64 {
+    static func minimumMemory(for modelID: String) -> UInt64 {
         if let model = GGUFPhoneModel.installed(id: modelID) { return model.memoryEstimateMiB }
         return switch modelID {
         case "apple": 256
@@ -225,60 +225,6 @@ enum PhoneModels {
         case ModelDownloader.ModelInfo.qwen35_08b.id: 1_536
         case ModelDownloader.ModelInfo.qwen3vl_2b.id: 2_560
         default: 2_048
-        }
-    }
-
-    @MainActor static func reply(modelID: String, prompt: String, instructions: String = "",
-                                 history: [ChatExchange] = [], update: @escaping (String) -> Void) async throws {
-        try await LocalCompute.run(minimumMiB: minimumMemory(for: modelID)) {
-            try await streamReply(modelID: modelID, prompt: prompt, instructions: instructions, history: history, update: update)
-        }
-    }
-
-    @MainActor private static func streamReply(modelID: String, prompt: String, instructions: String,
-                                              history: [ChatExchange],
-                                              update: @escaping (String) -> Void) async throws {
-        var answer = ""
-        if let model = GGUFPhoneModel.installed(id: modelID) {
-            _ = try await GGUFPhoneRuntime.generate(model, prompt: prompt, instructions: instructions,
-                                                    history: history, maximumTokens: 384, update: update)
-            return
-        } else if modelID == "apple" {
-            guard #available(iOS 26.0, *), appleAvailable else { throw PhoneModelError.unavailable }
-            let defaults = "Svar kort på brugerens sprog. Du har kun adgang til teksten i chatten."
-            let session = LanguageModelSession(instructions: instructions.isEmpty ? defaults : instructions)
-            LocalCompute.didLoadModel()
-            for try await snapshot in session.streamResponse(to: prompt) {
-                try Task.checkCancellation()
-                answer = snapshot.content
-                update(answer)
-            }
-        } else {
-            guard let folder = installedDirectory(modelID) else { throw PhoneModelError.unavailable }
-            if let variant = QwenPhoneRuntime.Variant(modelID: modelID) {
-                _ = try await QwenPhoneRuntime.generate(variant, folder: folder, prompt: prompt, instructions: instructions,
-                                                       history: history, maxTokens: 384, update: update)
-                return
-            }
-            LocalCompute.beginModelLoad()
-            let model = try await CoreMLLLM.load(from: folder, computeUnits: .cpuAndNeuralEngine)
-            try Task.checkCancellation()
-            LocalCompute.didLoadModel()
-            var messages: [CoreMLLLM.Message] = []
-            if !instructions.isEmpty { messages.append(.init(role: .system, content: instructions)) }
-            for exchange in history {
-                messages.append(.init(role: .user, content: exchange.prompt))
-                messages.append(.init(role: .assistant, content: exchange.reply))
-            }
-            messages.append(.init(role: .user, content: prompt))
-            for await token in try await model.stream(messages, maxTokens: 384) {
-                try Task.checkCancellation()
-                answer += token
-                update(answer)
-            }
-        }
-        guard !answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw PhoneModelError.emptyResponse
         }
     }
 
@@ -322,48 +268,6 @@ enum PhoneModels {
             try Task.checkCancellation()
             guard !result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PhoneModelError.emptyResponse }
             return result
-        }
-    }
-
-    @MainActor static func benchmark(modelID: String) async throws -> String {
-        let prompt = "Skriv to korte sætninger om, hvordan regn dannes."
-        return try await LocalCompute.run(minimumMiB: minimumMemory(for: modelID)) {
-            if let model = GGUFPhoneModel.installed(id: modelID) {
-                let sample = "Hvad mener jeg med: I wud lik to boock a tabel for too on Fryday? Svar kort på dansk."
-                let result = try await GGUFPhoneRuntime.generate(model, prompt: sample,
-                    instructions: "Svar med højst to sætninger og uden at vise din fremgangsmåde.",
-                    history: [], maximumTokens: 128, update: { _ in })
-                let format = FloatingPointFormatStyle<Double>.number.precision(.fractionLength(1))
-                let ram = result.footprint.map { " · RAM målt under testen: " + ModelDiskStorage.gigabytes(Int64($0)) } ?? ""
-                return "\(model.name)\nFørste tekst: \(result.firstToken.formatted(format)) sek. · \(result.tokensPerSecond.formatted(format)) tokens/sek.\(ram)\n\nPrøvesvar: \(result.reply)"
-            }
-            if modelID == "apple" {
-                guard #available(iOS 26.0, *), appleAvailable else { throw PhoneModelError.unavailable }
-                let session = LanguageModelSession()
-                LocalCompute.didLoadModel()
-                let start = Date()
-                _ = try await session.respond(to: prompt)
-                try Task.checkCancellation()
-                let seconds = Date().timeIntervalSince(start).formatted(.number.precision(.fractionLength(1)))
-                return "Apple Foundation Models: \(seconds) sek. pr. svar."
-            }
-            guard let folder = installedDirectory(modelID) else { throw PhoneModelError.unavailable }
-            if let variant = QwenPhoneRuntime.Variant(modelID: modelID) {
-                let result = try await QwenPhoneRuntime.generate(variant, folder: folder, prompt: prompt, instructions: "",
-                                                                maxTokens: 64, update: { _ in })
-                let name = catalog.first(where: { $0.id == modelID })?.name ?? "Qwen"
-                return "\(name): \(result.rate.formatted(.number.precision(.fractionLength(1)))) tokens/sek. inkl. promptbehandling."
-            }
-            LocalCompute.beginModelLoad()
-            let model = try await CoreMLLLM.load(from: folder, computeUnits: .cpuAndNeuralEngine)
-            try Task.checkCancellation()
-            LocalCompute.didLoadModel()
-            let reply = try await model.generate(prompt, maxTokens: 64)
-            try Task.checkCancellation()
-            let rate = model.tokensPerSecond
-            guard !reply.isEmpty, rate.isFinite, rate > 0 else { throw PhoneModelError.emptyResponse }
-            let name = catalog.first(where: { $0.id == modelID })?.name ?? "Importeret model"
-            return "\(name): \(rate.formatted(.number.precision(.fractionLength(1)))) tokens/sek."
         }
     }
 
@@ -603,6 +507,7 @@ enum PhoneModels {
 
 @MainActor final class FadedAIModelDownloadDelegate: NSObject, UIApplicationDelegate {
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        PCChatBackgroundDelivery.register()
         UNUserNotificationCenter.current().delegate = JobNotifications.shared
         UIDevice.current.isBatteryMonitoringEnabled = true
         PhoneModelDownloads.shared.activate()

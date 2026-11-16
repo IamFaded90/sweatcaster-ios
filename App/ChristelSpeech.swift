@@ -112,6 +112,8 @@ enum ChristelSpeech {
     private var pending: Task<Void, Never>?
     private var run = UUID()
     private var sessionActive = false
+    private var motionOwner: UUID?
+    private var metering: Task<Void, Never>?
 
     func play(text: String, pc: LiveAPI?) {
         stop()
@@ -145,14 +147,24 @@ enum ChristelSpeech {
                 try Task.checkCancellation()
                 guard current == run else { return }
                 let audioPlayer = try AVAudioPlayer(data: audio)
+                motionOwner = VillageSpeechMotion.shared.begin(agentID: VillageBot.lumiID) { [weak self] in self?.stop() }
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playback, mode: .spokenAudio)
                 try session.setActive(true)
                 sessionActive = true
                 audioPlayer.delegate = self
+                audioPlayer.isMeteringEnabled = true
                 player = audioPlayer
                 guard audioPlayer.play() else { throw APIError.malformed }
                 playing = true
+                metering = Task { [weak self] in
+                    while !Task.isCancelled {
+                        guard let self, self.playing, self.player === audioPlayer, let owner = self.motionOwner else { return }
+                        audioPlayer.updateMeters()
+                        VillageSpeechMotion.shared.audio(decibels: Double(audioPlayer.averagePower(forChannel: 0)), owner: owner)
+                        do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
+                    }
+                }
             } catch {
                 guard !Task.isCancelled, current == run else { return }
                 stop()
@@ -166,6 +178,10 @@ enum ChristelSpeech {
     }
 
     func stop() {
+        metering?.cancel()
+        metering = nil
+        if let motionOwner { VillageSpeechMotion.shared.end(owner: motionOwner) }
+        motionOwner = nil
         run = UUID()
         pending?.cancel()
         pending = nil

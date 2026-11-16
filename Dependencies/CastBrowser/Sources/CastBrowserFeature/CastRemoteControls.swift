@@ -3,6 +3,20 @@ import GoogleCast
 import UIKit
 
 extension CastAppModel {
+    var screenOffMessage: String {
+        guard hasActiveMedia else { return "Start en film for at se, om skærmen kan slukkes." }
+        guard castFeedback == nil, !canRetryCast,
+              let media = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remoteMediaClient?.mediaStatus,
+              media.playerState == .playing || media.playerState == .paused else {
+            return "Vent, til TV’et er begyndt at afspille, før du slukker skærmen."
+        }
+        let route = (media.mediaInformation?.customData as? [String: String])?["fadedaiRoute"]
+        if route == "direct" {
+            return "Direkte på TV · Du kan skifte app eller låse iPhone. Næste film i FadedAI-køen skal startes i appen."
+        }
+        return "Via iPhone · Denne kilde bruger telefonens forbindelse. Du kan skifte fane i FadedAI, men hold appen åben og skærmen tændt."
+    }
+
     func togglePlayback() {
         guard let client = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remoteMediaClient else { return }
         if isPlaying {
