@@ -95,7 +95,8 @@ struct LiveAPI: SweatAPI, ChatAPI {
         if auth { request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization") }
         return request
     }
-    private func mapped(_ error: URLError, posting: Bool) -> APIError {
+    // Shared by the transport extensions, including agent computer requests.
+    func mapped(_ error: URLError, posting: Bool) -> APIError {
         if posting { return .transport(error.errorCode) }
         // URLSession does not reliably distinguish LAN denial from an unreachable PC.
         if error.code == .appTransportSecurityRequiresSecureConnection { return .transport(error.errorCode) }

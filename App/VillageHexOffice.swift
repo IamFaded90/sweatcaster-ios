@@ -94,7 +94,7 @@ struct VillageMapExport: Codable, Transferable {
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
-                ShareLink(item: VillageMapExport(bots)) {
+                ShareLink(item: VillageMapExport(bots), preview: SharePreview("FadedAI-landsby")) {
                     Label("Del landsbykort", systemImage: "square.and.arrow.up").frame(minHeight: 44)
                 }
             }
