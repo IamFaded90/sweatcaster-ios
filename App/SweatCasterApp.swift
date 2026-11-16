@@ -51,6 +51,24 @@ struct OpenFadedAIConnection: AppIntent {
     }
 }
 
+struct OpenFadedAIHarperChat: AppIntent {
+    static let title: LocalizedStringResource = "Tal med Harper"
+    static let openAppWhenRun = true
+    static let destination = "harper-chat"
+
+    @MainActor func perform() async throws -> some IntentResult {
+        UserDefaults.standard.set(Self.destination, forKey: AppStorageKeys.spacesShortcut)
+        return .result()
+    }
+
+    static func matchingProfiles(in bots: [VillageBot]) -> [VillageBot] {
+        bots.filter { bot in
+            bot.id != VillageBot.lumiID &&
+                bot.name.trimmingCharacters(in: .whitespacesAndNewlines).caseInsensitiveCompare("Harper") == .orderedSame
+        }
+    }
+}
+
 struct SweatCasterShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: OpenSweatCasterChat(), phrases: ["Åbn chat i \(.applicationName)"],
@@ -63,6 +81,8 @@ struct SweatCasterShortcuts: AppShortcutsProvider {
                     shortTitle: "Lav billede", systemImageName: "photo")
         AppShortcut(intent: OpenFadedAIConnection(), phrases: ["Tjek PC i \(.applicationName)"],
                     shortTitle: "Tjek PC", systemImageName: "network")
+        AppShortcut(intent: OpenFadedAIHarperChat(), phrases: ["Tal med Harper i \(.applicationName)"],
+                    shortTitle: "Tal med Harper", systemImageName: "bubble.left")
     }
 }
 
@@ -92,7 +112,10 @@ struct PromptExample: Identifiable {
                  .accessibility1, .accessibility2][min(5, max(0, Int(textScale)))])
                 .onChange(of: scenePhase, initial: true) { _, phase in
                     StudioImageDownloads.shared.setForeground(phase == .active)
-                    if phase == .active { Task { await PhoneModelDownloads.shared.resumeInterruptedVisionDownload() } }
+                    if phase == .active {
+                        GGUFModelDownloads.shared.activate()
+                        Task { await PhoneModelDownloads.shared.resumeInterruptedVisionDownload() }
+                    }
                     let village = SimulationEngine.shared
                     village.handle(phase)
                     villageNotice = village.readError

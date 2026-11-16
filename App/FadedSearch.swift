@@ -1,3 +1,4 @@
+// Filnavn: App/FadedSearch.swift
 import SwiftUI
 
 enum FadedSearchCategory: String, Hashable, Sendable {
@@ -119,9 +120,38 @@ struct FadedSearchIndex: Equatable, Sendable {
             let score = title == query ? 0 : title.hasPrefix(query) ? 1 : title.contains(query) ? 2 : 3
             matches.append((order, score, record))
         }
+        if matches.isEmpty { return try fuzzyMatches(words) }
         return matches.sorted { left, right in
             left.score == right.score ? left.order < right.order : left.score < right.score
         }.prefix(Self.limit).map { $0.record }
+    }
+
+    private func fuzzyMatches(_ words: [Substring]) throws -> [FadedSearchRecord] {
+        guard words.count <= 8 else { return [] }
+        let terms = words.map(FuzzyWord.init)
+        guard terms.contains(where: { !$0.alphabet.isEmpty }) else { return [] }
+        var results: [(score: Int, order: Int, record: FadedSearchRecord)] = []
+        for (order, record) in records.enumerated() {
+            try Task.checkCancellation()
+            let title = Self.fold(record.title)
+            let fullText = Self.fold([record.title, record.detail, record.keywords,
+                                     record.category.rawValue, record.source?.rawValue ?? ""].joined(separator: " "))
+            guard let score = Self.fuzzyScore(terms, in: fullText) else { continue }
+            let titleScore = Self.fuzzyScore(terms, in: title)
+            results.append((score * 2 + (titleScore == score ? 0 : 1), order, record))
+        }
+        return results.sorted { left, right in
+            left.score == right.score ? left.order < right.order : left.score < right.score
+        }.prefix(Self.limit).map { $0.record }
+    }
+
+    private static func fuzzyScore(_ terms: [FuzzyWord], in text: String) -> Int? {
+        var score = 0
+        for term in terms where !text.contains(term.text) {
+            guard let differences = term.differences(in: text) else { return nil }
+            score += differences
+        }
+        return score
     }
 
     static func boundedQuery(_ input: String) -> String {
@@ -130,6 +160,50 @@ struct FadedSearchIndex: Equatable, Sendable {
 
     private static func fold(_ value: String) -> String {
         value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "da_DK"))
+    }
+}
+
+// fuse-swift bruger Bitap. Her søger vi forlæns og begrænser antal tastefejl.
+private struct FuzzyWord {
+    let text: String
+    let alphabet: [UInt16: UInt32]
+    private let lastBit: UInt32
+    private let tolerance: Int
+
+    init(_ word: Substring) {
+        text = String(word)
+        let units = Array(word.utf16)
+        let allowed = (4...24).contains(units.count) ? (units.count >= 8 ? 2 : 1) : 0
+        tolerance = allowed
+        lastBit = allowed > 0 ? UInt32(1) << (units.count - 1) : 0
+        var letters: [UInt16: UInt32] = [:]
+        if allowed > 0 {
+            for (position, unit) in units.enumerated() {
+                letters[unit, default: 0] |= UInt32(1) << position
+            }
+        }
+        alphabet = letters
+    }
+
+    func differences(in candidate: String) -> Int? {
+        guard tolerance > 0 else { return nil }
+        var previous = (0...tolerance).map { (UInt32(1) << $0) - 1 }
+        var current = previous
+        var best: Int?
+        for character in candidate.utf16 {
+            let matching = alphabet[character] ?? 0
+            current[0] = matching & ((previous[0] << 1) | 1)
+            if current[0] & lastBit != 0 { return 0 }
+            for edits in 1...tolerance {
+                let fewer = edits - 1
+                let same = matching & ((previous[edits] << 1) | 1)
+                let substitutionOrDeletion = ((previous[fewer] | current[fewer]) << 1) | 1
+                current[edits] = same | substitutionOrDeletion | previous[fewer]
+                if current[edits] & lastBit != 0 { best = min(best ?? edits, edits) }
+            }
+            swap(&previous, &current)
+        }
+        return best
     }
 }
 

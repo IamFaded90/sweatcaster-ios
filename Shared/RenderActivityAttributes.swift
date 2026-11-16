@@ -9,8 +9,10 @@ struct RenderActivityAttributes: ActivityAttributes {
         let phase: String
         var progressIsKnown: Bool? = nil
         var isRunning: Bool? = nil
+        var lastUpdatedAt: Date? = nil
     }
 
     let jobKey: String
     var kind: Kind? = nil
+    var pairingKey: String? = nil
 }

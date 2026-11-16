@@ -419,8 +419,7 @@ extension Home {
 
     func exportDiagnostics() {
         let selected = UserDefaults.standard.string(forKey: PhoneModels.selectionKey) ?? "apple"
-        let name = PhoneModels.catalog.first(where: { $0.id == selected })?.name
-            ?? (selected == "imported" ? "Importeret model" : "Apple Foundation Models")
+        let name = PhoneModels.textModelName(selected)
         do {
             diagnosticsExport = DiagnosticsExport(url: try AppDiagnostics.export(phoneModel: name,
                                                                                  pcConnected: model.connected && !model.isDemo))

@@ -52,7 +52,9 @@ extension ChatView {
         return message
     }
 
-    func send() {
+    func send() { send(via: nil) }
+
+    func send(via requested: ResolvedRoute?) {
         guard stagedPhoto == nil else {
             chatNotice = "Analysér eller fjern billedet, før du sender."
             return
@@ -60,7 +62,7 @@ extension ChatView {
         dictation.stop()
         let originalDraft = draft
         let message = originalDraft.trimmingCharacters(in: .whitespacesAndNewlines)
-        let route = resolvedRoute
+        let route = requested ?? resolvedRoute
         let outgoing = transportMessage(for: route.source)
         if route.source != .pc, route.automatic != nil, PhoneModels.shouldUseLiteModel,
            ModelRouter.intent(for: message) == .cardCollection {
@@ -287,11 +289,7 @@ extension ChatView {
     }
 
     func phoneModelLabel(for id: String) -> String {
-        switch id {
-        case "apple": "Apple Foundation Models"
-        case "imported": "Importeret model"
-        default: PhoneModels.catalog.first { $0.id == id }?.name ?? id
-        }
+        PhoneModels.textModelName(id)
     }
 
     func replyAttribution(for turn: ChatTurn) -> String {

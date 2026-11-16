@@ -118,7 +118,8 @@ import SwiftUI
             .sheet(item: $computerBot, content: botComputer)
             .sheet(item: $inspectedLifeBot, content: lifeBotInspector)
             .sheet(item: $villageChatBot) { bot in
-                AgentPhoneChat(bot: bot)
+                if bot.id == VillageBot.lumiID { LumiStudio(api: api) }
+                else { AgentPhoneChat(bot: bot, api: api) }
             }
             .task(id: "\(attempt):\(hubPhase == .active):\(api?.queueTargetID ?? "offline")") {
                 resetRemoteIfNeeded()
@@ -236,7 +237,7 @@ import SwiftUI
                             FadedDetailText(specialty)
                         }
                         FadedPrimaryButton("Opgaver og computer", icon: "desktopcomputer") { openBotComputer(bot) }
-                        FadedSecondaryButton("Chat med \(bot.name) på iPhone", icon: "iphone") { villageChatBot = bot }
+                        FadedSecondaryButton("Chat med \(bot.name)", icon: "bubble.left") { villageChatBot = bot }
                         FadedSecondaryButton("Profil", icon: "person.crop.circle") { localBot = bot }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -268,7 +269,12 @@ import SwiftUI
 
     private var hubContent: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.action) {
-            villageMap
+            VStack(spacing: 8) {
+                villageMap
+                VillageZoomSlider(zoom: $villageZoom)
+                    .padding(.horizontal, 12)
+                    .fadedGlassSurface()
+            }
             if !cinematic {
                 if !showOffice && ExperimentalVillageGate.available && experimentalVillageEnabled {
                     ExperimentalVillageView(bots: localVillageBots, work: experimentalWork, paused: villagePause,
@@ -289,10 +295,10 @@ import SwiftUI
     private var villageMap: some View {
         let hour = Calendar.current.component(.hour, from: life.virtualClock)
         let night = villageLightMode == "night" || (villageLightMode == "auto" && (hour < 7 || hour >= 22))
-        return VillageMapView(bots: life.bots, night: night,
+        return VillageMapView(zoom: $villageZoom, bots: life.bots, night: night,
                               cinematic: cinematic, reduceMotion: reduceMotion || calmMotion,
                               offline: api == nil || offline, banner: life.banner, paused: life.paused,
-                              onSelect: openLifeComputer,
+                              onSelect: openLifeProfile,
                               onSelectBuilding: { zone in
                                   selectedBuilding = zone
                                   showBuilding = true
@@ -507,7 +513,7 @@ import SwiftUI
         FadedSecondaryButton("Profil", icon: "person.crop.circle") { localBot = bot }
             .accessibilityLabel("Åbn profil for \(bot.name)")
         FadedSecondaryButton("Chat", icon: "bubble.left") { villageChatBot = bot }
-            .accessibilityLabel("Chat med \(bot.name) på iPhone")
+            .accessibilityLabel("Chat med \(bot.name)")
     }
 
     @ViewBuilder private var hubAgents: some View {

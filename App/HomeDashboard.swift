@@ -462,4 +462,120 @@ extension Home {
             LoadingSkeleton(label: model.mediaLoading ? "Henter video…" : "Henter klip og job…")
         }
     }
+
+    func openShortcut() {
+        guard !shortcut.isEmpty else { return }
+        let destination = shortcut
+        shortcut = ""
+        switch destination {
+        case "private-chat":
+            nsfwSessionUnlocked = false
+            openStudio(.chat)
+        case "chat": showChat = true
+        case "images": openStudio(.images)
+        case "connection": showLogin = true
+        case "video": openVideoClips()
+        case "video-jobs": openVideoJobs()
+        case "code": selectSpace(.library)
+        case OpenFadedAIHarperChat.destination: openHarperChat()
+        default: break
+        }
+    }
+
+    @ViewBuilder func presentSearchBot(_ selection: SearchBot) -> some View {
+        switch selection.entry {
+        case .profile:
+            NavigationStack {
+                VillageBotProfile(botID: selection.id, api: studioAPI, studioUnlocked: $nsfwSessionUnlocked,
+                                  onPrivateSessionEnded: showPrivateSessionNotice)
+                    .toolbar { Button("Luk") { searchBot = nil } }
+            }
+        case .chat(let bot):
+            AgentPhoneChat(bot: bot, api: studioAPI, startsOnPhone: true)
+        case .harperSetup:
+            HarperShortcutSetup(api: studioAPI)
+        }
+    }
+
+    private func openHarperChat() {
+        guard !privateStudioPresented else { return }
+        guard case .success(let bots) = MigratedAppData.shared.loadBots() else {
+            studioToast = StudioToast(text: "Agentlisten kunne ikke læses. Åbn Agenter for at prøve igen.")
+            return
+        }
+        let matches = OpenFadedAIHarperChat.matchingProfiles(in: bots)
+        guard matches.count <= 1 else {
+            studioToast = StudioToast(text: "Flere agenter hedder Harper. Giv dem forskellige navne under Agenter.")
+            return
+        }
+        if model.needsPairing && !enteredWithoutPC {
+            selectSpace(.tasks)
+            enteredWithoutPC = true
+        }
+        if let bot = matches.first {
+            if case .chat(let current)? = searchBot?.entry, current.id == bot.id { return }
+            searchBot = SearchBot(id: UUID(), entry: .chat(bot))
+        } else {
+            searchBot = SearchBot(id: UUID(), entry: .harperSetup)
+        }
+    }
+}
+
+@MainActor private struct HarperShortcutSetup: View {
+    let api: LiveAPI?
+    @Environment(\.dismiss) private var dismiss
+    @State private var created: VillageBot?
+    @State private var notice: String?
+
+    var body: some View {
+        if let created {
+            AgentPhoneChat(bot: created, api: api, startsOnPhone: true)
+        } else {
+            NavigationStack {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: FadedSpacing.m) {
+                        FadedEmptyState(icon: "person.crop.circle.badge.plus",
+                                        title: "Tilføj Harper",
+                                        detail: "Harper er en dansk researchagent til spørgsmål, idéer og overblik.",
+                                        actionTitle: "Opret Harper og åbn chatten", action: createHarper)
+                        if let notice { FadedDetailText(notice) }
+                    }
+                    .padding(FadedSpacing.edge)
+                }
+                .background { FadedBackground() }
+                .navigationTitle("Tal med Harper")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar { Button("Luk") { dismiss() } }
+            }
+        }
+    }
+
+    private func createHarper() {
+        guard case .success(var bots) = MigratedAppData.shared.loadBots() else {
+            notice = "Agentlisten kunne ikke læses."
+            return
+        }
+        let matches = OpenFadedAIHarperChat.matchingProfiles(in: bots)
+        guard matches.isEmpty else {
+            if matches.count == 1 { created = matches.first }
+            else { notice = "Flere agenter hedder Harper. Åbn Agenter for at vælge den rigtige." }
+            return
+        }
+        guard bots.count < 10 else {
+            notice = "Du har plads til 10 agenter. Frigør en plads under Agenter for at tilføje Harper."
+            return
+        }
+        let bot = VillageBot(name: "Harper", color: "Grøn",
+                             prompt: "Svar på naturligt dansk. Hjælp med research og overblik, og skeln mellem fakta og antagelser.",
+                             personality: "Nysgerrig", specialty: "Research")
+        bots.append(bot)
+        do {
+            try MigratedAppData.shared.saveBots(bots)
+            VillageHistory.shared.created(bot)
+            created = bot
+        } catch {
+            AppDiagnostics.record(error)
+            notice = "Harper kunne ikke gemmes. Prøv igen."
+        }
+    }
 }

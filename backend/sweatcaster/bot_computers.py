@@ -498,15 +498,8 @@ class BotComputers:
 
 def ollama_reports(settings, *, phone_actions=False, mail_appointments=False, web_query=False, add_on=False):
     def generate(prompt, source, *, profile=None, research=False):
-        from threading import Event, Timer
-
-        import requests
-        from sweatcaster.commentary import ollama_endpoint
-        from sweatcaster.coord import ModelCoord, ollama_call
         from sweatcaster.ollama_gate import chat_payload
-        from sweatcaster.ollama_runtime import align_resident, mark_loaded
 
-        coord = ModelCoord(settings.output_root / "state.sqlite3")
         if add_on:
             from sweatcaster.addons import INSTRUCTIONS
 
@@ -564,37 +557,49 @@ def ollama_reports(settings, *, phone_actions=False, mail_appointments=False, we
         payload["options"]["num_predict"] = 350 if phone_actions or mail_appointments or web_query else 900
         if phone_actions or mail_appointments or web_query or add_on:
             payload["format"] = "json"
-        tag = str(payload["model"])
-        lease = coord.try_acquire(tag, "code-batch")
-        if lease is None:
-            raise ModelBusy()
-        try:
-            cancel = Event()
-            deadline = Timer(60, cancel.set)
-            deadline.start()
-            try:
-                if not coord.wait_active(lease, cancel):
-                    raise ModelBusy()
-            finally:
-                deadline.cancel()
-            with requests.Session() as session:
-                session.trust_env = False
-                align_resident(settings, coord, tag, session)
-                with ollama_call():
-                    response = session.post(ollama_endpoint(settings.ollama_origin, "/api/chat"),
-                                            json=payload, timeout=(3, 120), allow_redirects=False)
-                response.raise_for_status()
-                if response.status_code != 200:
-                    raise BotComputerError(502, "PC-modellen returnerede et uventet svar.")
-                mark_loaded(coord, tag)
-                data = response.json()
-                if data.get("done_reason") == "length":
-                    raise BotComputerError(502, "Svaret blev for langt. Bed om en kortere rapport.")
-                return data["message"]["content"]
-        finally:
-            coord.release(lease)
+        return run_local_text(settings, payload, purpose="code-batch")
 
     return generate
+
+
+def run_local_text(settings, payload, *, purpose):
+    from threading import Event, Timer
+
+    import requests
+    from sweatcaster.commentary import ollama_endpoint
+    from sweatcaster.coord import ModelCoord, ollama_call
+    from sweatcaster.ollama_runtime import align_resident, mark_loaded
+
+    coord = ModelCoord(settings.output_root / "state.sqlite3")
+    tag = str(payload["model"])
+    lease = coord.try_acquire(tag, purpose)
+    if lease is None:
+        raise ModelBusy()
+    try:
+        cancel = Event()
+        deadline = Timer(60, cancel.set)
+        deadline.start()
+        try:
+            if not coord.wait_active(lease, cancel):
+                raise ModelBusy()
+        finally:
+            deadline.cancel()
+        with requests.Session() as session:
+            session.trust_env = False
+            align_resident(settings, coord, tag, session)
+            with ollama_call():
+                response = session.post(ollama_endpoint(settings.ollama_origin, "/api/chat"),
+                                        json=payload, timeout=(3, 90 if purpose == "agent-chat" else 120), allow_redirects=False)
+            response.raise_for_status()
+            if response.status_code != 200:
+                raise BotComputerError(502, "PC-modellen returnerede et uventet svar.")
+            mark_loaded(coord, tag)
+            data = response.json()
+            if purpose != "agent-chat" and data.get("done_reason") == "length":
+                raise BotComputerError(502, "Svaret blev for langt. Bed om en kortere rapport.")
+            return data["message"]["content"]
+    finally:
+        coord.release(lease)
 
 
 class BotComputerWorker:

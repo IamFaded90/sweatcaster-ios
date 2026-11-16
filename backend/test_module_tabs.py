@@ -59,6 +59,67 @@ def test_removed_media_integration_is_unavailable(tmp_path):
         assert client.get("/api/modules/v1/emby/library").status_code == 404
 
 
+def module_endpoint(settings, path):
+    app = create_app(settings)
+    return next(route.endpoint for route in app.routes if getattr(route, "path", None) == path)
+
+
+def module_request(settings, *, authorized=True):
+    headers = [(b"authorization", ("Bearer " + settings.token).encode())] if authorized else []
+    return Request({"type": "http", "headers": headers})
+
+
+def test_agent_chat_passes_profile_to_the_selected_model(tmp_path, monkeypatch):
+    from sweatcaster import bot_computers, v2_api
+
+    settings = make_settings(tmp_path)
+    endpoint = module_endpoint(settings, "/api/modules/v1/agent-chat")
+    payload = {"modelID": "llama31-8b", "prompt": "Skriv det på dansk.", "instructions": "Du er Eva."}
+    monkeypatch.setattr(v2_api, "catalog", lambda _: {
+        "models": [{"id": "llama31-8b", "available": True}],
+    })
+
+    def local_reply(original_settings, request, *, purpose):
+        assert original_settings is settings
+        assert purpose == "agent-chat"
+        assert request["model"] == "llama3.1:8b"
+        assert "tools" not in request
+        assert request["messages"] == [
+            {"role": "system", "content": "Du er Eva."},
+            {"role": "user", "content": "Skriv det på dansk."},
+        ]
+        return "Hej fra Eva."
+
+    monkeypatch.setattr(bot_computers, "run_local_text", local_reply)
+    with pytest.raises(ApiError) as rejected:
+        endpoint(module_request(settings, authorized=False), Response(), payload)
+    assert rejected.value.status_code == 401
+    response = Response()
+    assert endpoint(module_request(settings), response, payload) == {"text": "Hej fra Eva."}
+    assert response.headers["Cache-Control"] == "no-store"
+    with pytest.raises(ApiError) as invalid:
+        endpoint(module_request(settings), Response(), {**payload, "modelID": "moondream-18"})
+    assert invalid.value.status_code == 422
+
+
+def test_agent_chat_research_cites_exact_page_chosen(tmp_path, monkeypatch):
+    from sweatcaster import web_research
+
+    settings = make_settings(tmp_path)
+    endpoint = module_endpoint(settings, "/api/modules/v1/chat-research")
+    url = "https://example.org/vejledning"
+    monkeypatch.setattr(web_research, "page_excerpt", lambda link: "Offentlig vejledning." if link == url else "")
+    with pytest.raises(ApiError) as rejected:
+        endpoint(module_request(settings, authorized=False), Response(), {"query": url})
+    assert rejected.value.status_code == 401
+    assert endpoint(module_request(settings), Response(), {"query": url}) == {"context": "Offentlig vejledning.", "sources": [
+        {"title": "Siden du valgte", "url": url, "readPage": True},
+    ]}
+    with pytest.raises(ApiError) as blocked:
+        endpoint(module_request(settings), Response(), {"query": "http://localhost/"})
+    assert blocked.value.status_code == 404
+
+
 def test_pc_status_reports_partial_setup_and_protects_read_only_probes(tmp_path, monkeypatch):
     settings = make_settings(tmp_path)
     triggered = []

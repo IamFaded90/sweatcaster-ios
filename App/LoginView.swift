@@ -1,3 +1,4 @@
+// Filnavn: App/LoginView.swift
 // Manual PC pairing and time-limited QR scanning.
 import AVFoundation
 import SwiftUI
@@ -63,6 +64,8 @@ struct LoginView: View {
     @State private var attemptedConnection = false
     @State private var connecting = false
     @State private var scanning = false
+    @State private var torchOn = false
+    @State private var torchReady = false
     @State private var pinging = false
 
     init(model: Model, close: (() -> Void)? = nil,
@@ -103,9 +106,26 @@ struct LoginView: View {
             .toolbar(close == nil ? .hidden : .visible, for: .navigationBar)
             .sheet(isPresented: $scanning) {
                 NavigationStack {
-                    PairingQRScanner { result in finishScan(result) }
+                    PairingQRScanner(torchOn: $torchOn, torchReady: $torchReady, finish: finishScan)
+                        .overlay {
+                            // QRCameraKits sigtemærke over FadedAIs kamera.
+                            Image(systemName: "qrcode.viewfinder")
+                                .font(.system(size: 196, weight: .light))
+                                .foregroundStyle(Color(red: 0.8, green: 1, blue: 0.35))
+                                .shadow(color: .black.opacity(0.8), radius: 5)
+                                .allowsHitTesting(false).accessibilityHidden(true)
+                        }
                         .navigationTitle("Scan forbindelseskode")
-                        .toolbar { Button("Luk") { scanning = false } }
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) { Button("Luk") { scanning = false } }
+                            ToolbarItem(placement: .primaryAction) {
+                                Button(torchOn ? "Sluk lommelygten" : "Tænd lommelygten",
+                                       systemImage: torchOn ? "flashlight.on.fill" : "flashlight.off.fill") {
+                                    torchOn.toggle()
+                                }.disabled(!torchReady)
+                            }
+                        }
+                        .onDisappear { torchOn = false; torchReady = false }
                 }
             }
             .toolbar {
@@ -360,6 +380,7 @@ struct LoginView: View {
         do {
             scannedPairing = try PairingQRSession.accept(result.get())
             manualExpanded = false
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
         } catch {
             AppDiagnostics.record(error)
             if case .pairingExpired? = error as? APIError {
@@ -447,6 +468,8 @@ struct LoginView: View {
 }
 
 private struct PairingQRScanner: UIViewRepresentable {
+    @Binding var torchOn: Bool
+    @Binding var torchReady: Bool
     let finish: (Result<String, Error>) -> Void
 
     final class Preview: UIView {
@@ -458,6 +481,8 @@ private struct PairingQRScanner: UIViewRepresentable {
         let session = AVCaptureSession()
         let queue = DispatchQueue(label: "dk.fadedai.pairing-camera")
         let finish: (Result<String, Error>) -> Void
+        var torchStatus: (Bool, Bool, Bool) -> Void = { _, _, _ in }
+        private var camera: AVCaptureDevice?
         private var delivered = false
         private var started = false
 
@@ -469,6 +494,14 @@ private struct PairingQRScanner: UIViewRepresentable {
                     guard !self.started else { return }
                     self.started = true
                     guard let camera = AVCaptureDevice.default(for: .video) else { throw APIError.input }
+                    self.camera = camera
+                    if camera.isFocusModeSupported(.continuousAutoFocus) {
+                        do {
+                            try camera.lockForConfiguration()
+                            camera.focusMode = .continuousAutoFocus
+                            camera.unlockForConfiguration()
+                        } catch { AppDiagnostics.record(error) }
+                    }
                     let input = try AVCaptureDeviceInput(device: camera)
                     let output = AVCaptureMetadataOutput()
 
@@ -487,6 +520,8 @@ private struct PairingQRScanner: UIViewRepresentable {
                     output.metadataObjectTypes = [.qr]
                     guard !self.session.isRunning else { return }
                     self.session.startRunning()
+                    let available = camera.hasTorch && camera.isTorchAvailable
+                    DispatchQueue.main.async { if !self.delivered { self.torchStatus(available, false, false) } }
                 } catch {
                     if self.session.isRunning { self.session.stopRunning() }
                     AppDiagnostics.record(error)
@@ -500,7 +535,26 @@ private struct PairingQRScanner: UIViewRepresentable {
             stop()
         }
 
-        private func stop() { queue.async { if self.session.isRunning { self.session.stopRunning() } } }
+        func setTorch(_ on: Bool) {
+            queue.async {
+                guard self.session.isRunning, let camera = self.camera,
+                      camera.hasTorch, camera.torchMode != (on ? .on : .off) else { return }
+                do {
+                    try camera.lockForConfiguration()
+                    defer { camera.unlockForConfiguration() }
+                    if on, camera.isTorchAvailable { try camera.setTorchModeOn(level: 0.5) }
+                    else if camera.isTorchModeSupported(.off) { camera.torchMode = .off }
+                } catch { AppDiagnostics.record(error) }
+                let actual = camera.torchMode == .on
+                let available = camera.isTorchAvailable
+                DispatchQueue.main.async { if !self.delivered { self.torchStatus(available, actual, on) } }
+            }
+        }
+
+        private func stop() {
+            setTorch(false)
+            queue.async { if self.session.isRunning { self.session.stopRunning() } }
+        }
 
         private func deliver(_ result: Result<String, Error>) {
             guard !delivered else { return }
@@ -527,6 +581,13 @@ private struct PairingQRScanner: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: Preview, context: Context) {}
+    func updateUIView(_ uiView: Preview, context: Context) {
+        context.coordinator.torchStatus = { ready, on, requested in
+            guard torchOn == requested else { return }
+            if torchReady != ready { torchReady = ready }
+            if torchOn != on { torchOn = on }
+        }
+        context.coordinator.setTorch(torchOn)
+    }
     static func dismantleUIView(_ uiView: Preview, coordinator: Coordinator) { coordinator.cancel() }
 }

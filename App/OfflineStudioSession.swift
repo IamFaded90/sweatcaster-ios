@@ -79,6 +79,7 @@ extension OfflineStudio {
         defer { LocalCompute.resume() }
         PhoneModelDownloads.shared.cancel()
         StudioImageDownloads.shared.cancel()
+        GGUFModelDownloads.shared.cancel()
         closeChatSession()
         loraPreviewSelection = nil
         removeTemporaryStudioImages()
@@ -88,11 +89,12 @@ extension OfflineStudio {
 
         let previews = URL.applicationSupportDirectory.appending(path: "StudioLoRAPreviews", directoryHint: .isDirectory)
         for directory in [historyFolder, previews, PhoneModels.importedFolder, PhoneModels.downloadedRoot,
-                          DolphinPhoneRuntime.storageRoot] {
+                          DolphinPhoneRuntime.storageRoot, GGUFPhoneModel.root] {
             do { try FileManager.default.removeItem(at: directory) }
             catch let error where LocalFileStore.isMissing(error) { continue }
             catch { AppDiagnostics.record(error); finished = false }
         }
+        GGUFModelDownloads.shared.notifyCatalogChange()
         promptHistoryData = Data()
         imageFavoritesData = Data()
         loraLabelsData = Data()

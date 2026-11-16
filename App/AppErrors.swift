@@ -43,6 +43,12 @@ struct AppErrorPresentation {
     }
 
     private static func describe(_ error: Error) -> Self {
+        if let problem = error as? GGUFPhoneRuntime.Failure {
+            switch problem {
+            case .unsupportedModel: return .init(title: "Denne GGUF-model kan ikke åbnes på iPhone. Prøv en understøttet tekstmodel.")
+            case .inference: return .init(title: "iPhone kunne ikke gennemføre svaret med denne model. Prøv en mindre model.")
+            }
+        }
         if let api = error as? APIError {
             let fix: FixAction = switch api {
             case .address, .addressLeadingZeros, .token, .http(401, _): .connect

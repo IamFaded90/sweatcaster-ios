@@ -107,9 +107,10 @@ extension Home {
             if value == .active { LocalCompute.resume() }
         }
         .task(id: renderActivityKey) {
-            await RenderLiveActivity.shared.sync(jobs: model.jobs, server: model.address,
-                                                 enabled: liveActivityEnabled && !model.isDemo && model.connected,
-                                                 codeJobs: model.observedCodeJobs)
+            await RenderLiveActivity.shared.sync(jobs: model.jobs, codeJobs: model.observedCodeJobs,
+                                                 videoWindow: model.jobsObservationWindow,
+                                                 codeWindow: model.codeJobsObservationWindow, pairing: renderActivityPairing,
+                                                 connected: model.connected, enabled: liveActivityEnabled)
         }
     }
 
@@ -297,13 +298,7 @@ extension Home {
                     showSearch = false
                 }
             }
-            .sheet(item: $searchBot) { selection in
-                NavigationStack {
-                    VillageBotProfile(botID: selection.id, api: studioAPI, studioUnlocked: $nsfwSessionUnlocked,
-                                      onPrivateSessionEnded: showPrivateSessionNotice)
-                        .toolbar { Button("Luk") { searchBot = nil } }
-                }
-            }
+            .sheet(item: $searchBot, content: presentSearchBot)
             .sheet(isPresented: $showNotes) { FadedNotesSheet(onClose: { showNotes = false }) }
     }
 
@@ -416,28 +411,17 @@ extension Home {
     }
 
     private var renderActivityKey: String {
-        let video = model.jobs.filter { $0.status.active }.map { "\($0.id):\($0.status.rawValue):\($0.progress)" }
+        let video = model.jobs.filter { $0.status.active }.map { "\($0.id):\($0.status.rawValue):\($0.progress):\($0.updated_at.timeIntervalSinceReferenceDate)" }
         let code = model.observedCodeJobs.filter { $0.status == "queued" || $0.status == "running" }.map { "\($0.id):\($0.status)" }
-        let connection = "\(liveActivityEnabled):\(phase == .active):\(model.address):\(model.connected):\(model.isDemo)"
+        let connection = "\(liveActivityEnabled):\(phase == .active):\(renderActivityPairing ?? ""):\(model.connected)"
         return "\(connection):\(model.jobsObservationWindow):\(model.codeJobsObservationWindow):" + (video + code).joined(separator: ",")
     }
 
-    private func openShortcut() {
-        guard !shortcut.isEmpty else { return }
-        let destination = shortcut
-        shortcut = ""
-        switch destination {
-        case "private-chat":
-            nsfwSessionUnlocked = false
-            openStudio(.chat)
-        case "chat": showChat = true
-        case "images": openStudio(.images)
-        case "connection": showLogin = true
-        case "video": openVideoClips()
-        case "video-jobs": openVideoJobs()
-        case "code": selectSpace(.library)
-        default: break
-        }
+    private var renderActivityPairing: String? {
+        guard !model.isDemo, !model.needsPairing, !model.address.isEmpty,
+              let live = model.api as? LiveAPI else { return nil }
+        let reset = model.defaults.string(forKey: AppStorageKeys.appResetGeneration) ?? ""
+        return "\(live.queueTargetID):\(reset)"
     }
 
     var switchDisabled: Bool {

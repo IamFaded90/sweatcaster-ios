@@ -5,7 +5,7 @@ import MediaGenerationKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-private enum ModelDiskStorage {
+enum ModelDiskStorage {
     struct Item: Identifiable, Sendable {
         let url: URL
         let name: String
@@ -169,6 +169,7 @@ struct PhoneModelsView: View {
             .onChange(of: StudioImageDownloads.shared.activeModel) { _, model in
                 if model == nil { storageRevision += 1 }
             }
+            .onChange(of: GGUFModelDownloads.shared.revision) { storageRevision += 1 }
             .safeAreaInset(edge: .bottom) {
                 if let downloadSuccess {
                     FadedToast(downloadSuccess, tone: .success).padding(.horizontal, FadedSpacing.edge)
@@ -201,6 +202,8 @@ struct PhoneModelsView: View {
         switch page {
         case .models:
             catalogSection
+            extraModelsLink
+            NavigationLink("Del iPhone-modellen på Wi-Fi") { PhoneModelServerScreen() }
             appleCard
             favoriteSection
             importSection
@@ -208,7 +211,8 @@ struct PhoneModelsView: View {
             StudioImageDownloadsView(canStart: !mutationBusy)
         case .storage:
             storageSection
-            if storage?.text.isEmpty == true {
+            extraModelsLink
+            if storage?.text.isEmpty == true && GGUFPhoneModel.installed.isEmpty {
                 FadedEmptyState(icon: "arrow.down.circle", title: "Ingen gemte tekstmodeller",
                                 detail: "Hent en model nu, så du kan chatte uden internet.",
                                 actionTitle: "Se telefonmodeller") { page = .models }
@@ -218,6 +222,17 @@ struct PhoneModelsView: View {
             benchmarkSection
         }
     }
+
+    private var extraModelsLink: some View {
+        NavigationLink {
+            GGUFModelsView()
+        } label: {
+            Label("Ekstra iPhone-modeller", systemImage: "arrow.down.circle")
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(FadedButtonStyle(kind: .secondary))
+        .disabled(mutationBusy)
+    }
     private var pagePicker: some View {
         Picker("Sektion", selection: $page) {
             ForEach(Page.allCases.filter { allowsImageDownloads || $0 != .images }, id: \.self) { Text($0.rawValue).tag($0) }
@@ -226,9 +241,10 @@ struct PhoneModelsView: View {
 
     @ViewBuilder private var favoriteSection: some View {
         let installed = orderedCatalog.filter { favorites.contains($0.id) && PhoneModels.installedDirectory($0.id) != nil }
+        let gguf = GGUFPhoneModel.installed.filter { favorites.contains($0.id) }
         let showApple = favorites.contains("apple")
         let showImported = favorites.contains("imported") && PhoneModels.installedDirectory("imported") != nil
-        if showApple || showImported || !installed.isEmpty {
+        if showApple || showImported || !installed.isEmpty || !gguf.isEmpty {
             FadedCard {
                 VStack(alignment: .leading, spacing: 6) {
                     FadedSectionLabel("Favoritter")
@@ -237,6 +253,7 @@ struct PhoneModelsView: View {
                         favoriteRow(entry.name, id: entry.id)
                     }
                     if showImported { favoriteRow("Importeret model", id: "imported") }
+                    ForEach(gguf) { model in favoriteRow(model.name, id: model.id) }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
         }
@@ -552,6 +569,7 @@ struct PhoneModelsView: View {
             textFolders[entry.id] = folder
         }
         if FileManager.default.fileExists(atPath: PhoneModels.importedFolder.path) { textFolders["imported"] = PhoneModels.importedFolder }
+        for model in GGUFPhoneModel.installed { textFolders[model.id] = model.url.deletingLastPathComponent() }
         let folders = textFolders
         let roots = ModelDiskStorage.allowedImageRoots(MediaGenerationEnvironment.default.externalUrls)
         let snapshot = await Task.detached(priority: .utility) { ModelDiskStorage.scan(textFolders: folders, imageRoots: roots) }.value

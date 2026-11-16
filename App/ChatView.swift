@@ -111,6 +111,7 @@ struct ChatView: View {
     @AppStorage(AppStorageKeys.chatAutoModelRouter) var autoRouterEnabled = false
     @State var phoneBatteryLevel = UIDevice.current.batteryLevel
     @State var dictation = ChatDictation()
+    @State private var wakeID = UUID()
     @StateObject var speechBox = SpeechBox()
     @AppStorage(AppStorageKeys.chatVoiceMode) var voiceMode = false
     @AppStorage(AppStorageKeys.chatVoiceBot) var voiceBotID = ""
@@ -425,6 +426,7 @@ struct ChatView: View {
                 scrollChat(proxy)
             }
             .onDisappear {
+                ChatScreenWake.hold(wakeID, whileReplying: false)
                 onComposerFocusChange?(false)
                 stop()
                 dictation.stop()
@@ -441,6 +443,7 @@ struct ChatView: View {
                 Task { @MainActor in availableVoiceRevision += 1 }
             }
             .onChange(of: chatScenePhase) { _, phase in
+                ChatScreenWake.hold(wakeID, whileReplying: phase == .active && task != nil)
                 if phase == .background { speechBox.stop() }
             }
             .onReceive(NotificationCenter.default.publisher(for: PCChatOutbox.didChange)) { _ in reloadOutbox() }
@@ -450,6 +453,7 @@ struct ChatView: View {
             .onChange(of: initialSearch) { consumeEntryRequests() }
             .onChange(of: preferPhone) { consumeEntryRequests() }
             .onChange(of: task != nil) { _, active in
+                ChatScreenWake.hold(wakeID, whileReplying: active && chatScenePhase == .active)
                 if !active { reloadOutbox(); consumeEntryRequests() }
             }
             .task(id: (api as? LiveAPI)?.queueTargetID) { await loadModels() }

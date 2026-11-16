@@ -3,6 +3,35 @@ import XCTest
 @testable import SweatCaster
 
 extension ContractTests {
+    func testAgentLocalToolsAndStructuredCards() throws {
+        XCTAssertEqual(try XCTUnwrap(AgentLocalTool.calculate("2 * (3 + 4) + 12,5%")), 14.125, accuracy: 0.00001)
+        XCTAssertNil(AgentLocalTool.calculate("10 / (2 - 2)"))
+        XCTAssertNil(AgentLocalTool.calculate("2*(3+4"))
+        XCTAssertNil(AgentLocalTool.answer(#"{"tool":"shell","input":"echo test"}"#))
+
+        let payload = #"{"title":"Indkøb","items":["Mælk","Brød"]}"#
+        let card = try XCTUnwrap(AgentReplyCard.decode("```json\n" + payload + "\n```"))
+        XCTAssertEqual(card.plainText, "Indkøb\n• Mælk\n• Brød")
+        XCTAssertNil(AgentReplyCard.decode(#"{"title":"Tom","items":[]}"#))
+    }
+
+    func testGGUFImportRecognizesSingleFileFormatAndRejectsInvalidHeader() throws {
+        XCTAssertTrue(GGUFPhoneModel.validFileName("Qwen-Test.Q4_K_M.GGUF"))
+        XCTAssertFalse(GGUFPhoneModel.validFileName("../Qwen.gguf"))
+        XCTAssertFalse(GGUFPhoneModel.validFileName("Qwen-00001-of-00002.gguf"))
+        XCTAssertFalse(GGUFPhoneModel.validFileName("mmproj-test.gguf"))
+
+        let url = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".gguf")
+        defer { try? FileManager.default.removeItem(at: url) }
+        // Header only. No real model is loaded by this format check.
+        let header: [UInt8] = [71, 71, 85, 70, 3, 0, 0, 0, 1, 0, 0, 0,
+                               0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        try Data(header).write(to: url)
+        XCTAssertNoThrow(try GGUFPhoneModel.validateHeader(url))
+        try Data(header.prefix(14)).write(to: url)
+        XCTAssertThrowsError(try GGUFPhoneModel.validateHeader(url))
+    }
+
     func testGitHubWebAddOnStagesOnlyFilesInsideItsOwnFolder() throws {
         let temporary = FileManager.default.temporaryDirectory
         let folder = temporary.appending(path: UUID().uuidString, directoryHint: .isDirectory)
@@ -192,19 +221,6 @@ final class ContractTests: XCTestCase {
             _ = try await api.moduleInformation("../health")
             XCTFail("Expected a rejected module ID")
         } catch V2Failure.invalidInput {}
-    }
-
-    func testFilmLibraryLinkAcceptsWebAddressesWithoutEmbeddedLogin() {
-        let lanAddress = "http://library.example:8096/"
-        let secureAddress = "https://library.example/web/index.html"
-        XCTAssertEqual(FilmLibraryLinkView.validatedURL(for: " \(lanAddress)\n")?.absoluteString, lanAddress)
-        XCTAssertEqual(FilmLibraryLinkView.validatedURL(for: secureAddress)?.absoluteString, secureAddress)
-
-        for invalid in ["", "library.example", "file:///library", "https://",
-                        "http://user:password@library.example/", "https://library.example/?token=secret",
-                        "https://library.example/#token"] {
-            XCTAssertNil(FilmLibraryLinkView.validatedURL(for: invalid), invalid)
-        }
     }
 
     func testClipKeepsV1ShapeAndAcceptsFutureFolderMetadata() throws {

@@ -85,9 +85,10 @@ extension ChatView {
     var phoneRoutingCandidates: [ModelRouter.Candidate] {
         let favorites = Set(phoneFavorites.split(separator: "|").map(String.init))
         let preferred = PhoneModels.effectiveModelID(phoneModel)
-        let entries = PhoneModels.catalog.map { ($0.id, $0.name) } + [("apple", "Apple Foundation Models"), ("imported", "Importeret model")]
+        let entries = PhoneModels.textOptions
         let vision = Set(PhoneModels.readyVisionModelIDs)
-        return entries.compactMap { id, name in
+        return entries.compactMap { entry in
+            let (id, name) = (entry.id, entry.name)
             guard PhoneModels.isReady(id) else { return nil }
             return ModelRouter.candidate(id: id, name: name, location: .phone, ready: true,
                                          capabilities: PhoneModels.routingCapabilities(for: id),

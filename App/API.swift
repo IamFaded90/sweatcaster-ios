@@ -326,6 +326,18 @@ struct LiveAPI: SweatAPI, ChatAPI {
         return try await moduleJSON("web-search", upload: data, timeout: 16)
     }
 
+    func chatResearch(query: String) async throws -> AgentWebSources {
+        let data = try JSONEncoder().encode(["query": query])
+        return try await moduleJSON("chat-research", upload: data, timeout: 45)
+    }
+
+    func agentChat(model: String, prompt: String, instructions: String) async throws -> String {
+        struct Reply: Decodable { let text: String }
+        let data = try JSONEncoder().encode(["modelID": model, "prompt": prompt, "instructions": instructions])
+        let result: Reply = try await moduleJSON("agent-chat", upload: data, timeout: 160)
+        return result.text
+    }
+
     func villageBotActivity(ids: [UUID]) async throws -> VillageBotActivity {
         let data = try JSONEncoder().encode(["botIDs": ids.map { $0.uuidString.lowercased() }])
         return try await moduleJSON("bot-activity", upload: data, timeout: 10)

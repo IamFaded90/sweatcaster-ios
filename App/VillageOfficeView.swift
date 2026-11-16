@@ -501,6 +501,26 @@ private struct VillageCreationScene: View {
     }
 }
 
+struct VillageZoomSlider: View {
+    @Binding var zoom: Double
+
+    var body: some View {
+        let percentage = zoom.formatted(.percent.precision(.fractionLength(0)))
+        HStack(spacing: 12) {
+            Text("Zoom").accessibilityHidden(true)
+            Slider(value: $zoom, in: VillageCamera.zoomRange)
+                .accessibilityLabel("Kortzoom")
+                .accessibilityValue(percentage)
+            Text(percentage)
+                .monospacedDigit()
+                .frame(minWidth: 54, alignment: .trailing)
+                .accessibilityHidden(true)
+        }
+        .font(.subheadline)
+        .frame(minHeight: 44)
+    }
+}
+
 @MainActor struct VillageSettingsView: View {
     @Binding var lightMode: String
     @Binding var showNames: Bool
@@ -530,8 +550,7 @@ private struct VillageCreationScene: View {
                         Toggle("Vis botternes navne på kortet", isOn: $showNames)
                         Toggle("Reducer bevægelse", isOn: $reduceMotion)
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Kortzoom · \(Int(zoom * 100)) %")
-                            Slider(value: $zoom, in: 1...2.2)
+                            VillageZoomSlider(zoom: $zoom)
                             Button("Nulstil zoom og placering") { zoom = 1 }
                                 .frame(minHeight: 44)
                         }

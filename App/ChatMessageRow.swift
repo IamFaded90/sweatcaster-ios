@@ -1,3 +1,4 @@
+// Filnavn: App/ChatMessageRow.swift
 // Renders each prompt and reply together with message-level actions and source attribution.
 
 import Foundation
@@ -30,7 +31,11 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
                     Text(turn.prompt)
                         .foregroundStyle(FadedColors.deep)
                         .padding(.horizontal, 14).padding(.vertical, 10)
-                        .background(palette.lime, in: RoundedRectangle(cornerRadius: 18))
+                        .background(
+                            LinearGradient(colors: [Color(red: 0.80, green: 1, blue: 0.42), FadedBrand.mint],
+                                           startPoint: .topLeading, endPoint: .bottomTrailing),
+                            in: RoundedRectangle(cornerRadius: 18)
+                        )
                         .accessibilityAction(named: Text("Kopiér prompt")) { copyPrompt() }
                 }
                 .frame(maxWidth: userBubbleWidth, alignment: .trailing)
@@ -53,7 +58,7 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
                 .padding(.horizontal, 16).padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .foregroundStyle(palette.text)
-                .background(palette.card, in: replyShape)
+                .background { ChatGlassSurface(radius: 18, colors: replyGradient) }
                 .overlay {
                     if isSpeaking {
                         replyShape.strokeBorder(accent.opacity(palette.isDark ? 0.55 : 0.7), lineWidth: 1.5)
@@ -78,6 +83,16 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    // Swift Chats chatBubbleStyle anvender brugerdefineret fyld på beskedboblen.
+    private var replyGradient: [Color] {
+        switch turn.source {
+        case "PC": [FadedBrand.pc, FadedBrand.blue]
+        case "Telefon", "iPhone": [FadedBrand.mint, Color(red: 0.64, green: 0.42, blue: 1)]
+        case "Claude", "ClaudeAI": [FadedColors.purple, .pink]
+        default: [accent, palette.raised]
+        }
+    }
+
     private func messageHeading(_ title: String, icon: String, accent: Color) -> some View {
         HStack(spacing: FadedSpacing.s) {
             Image(systemName: icon)
@@ -91,6 +106,30 @@ struct ChatMessageRow<ReplyActions: View, NoticeActions: View>: View {
             }
         }
         .foregroundStyle(accent)
+    }
+}
+
+struct ChatGlassSurface: View {
+    @Environment(\.fadedPalette) private var palette
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    let radius: CGFloat
+    let colors: [Color]
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: radius)
+        let gradient = LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+        ZStack {
+            if #available(iOS 26.0, *), !reduceTransparency {
+                Color.clear.glassEffect(.regular.tint(colors.first?.opacity(0.18)), in: shape)
+                shape.fill(palette.card.opacity(0.76))
+            } else {
+                shape.fill(palette.card)
+            }
+            shape.fill(gradient).opacity(palette.isDark ? 0.13 : 0.08)
+            shape.strokeBorder(gradient).opacity(palette.isDark ? 0.36 : 0.22)
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -297,8 +336,23 @@ extension ChatView {
             Button("Prøv igen på telefonen", systemImage: "arrow.clockwise") { retryOnPhone(turn) }
                 .disabled(task != nil)
         }
-        Button("Brug som kladde", systemImage: "square.and.pencil") { restoreDraft(turn) }
-            .disabled(task != nil || isQueued(turn))
+        Button("Redigér besked", systemImage: "square.and.pencil") { restoreDraft(turn) }
+            .disabled(task != nil || isQueued(turn) || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        if !demo, turn.imageRequest != true {
+            Menu("Prøv med en anden model", systemImage: "arrow.clockwise") {
+                ForEach(phoneRoutingCandidates, id: \.id) { option in
+                    Button("iPhone · \(option.name)") {
+                        retryWithModel(turn, route: .init(source: .phone, modelID: option.id, automatic: nil))
+                    }
+                }
+                ForEach(models.filter(PCModelSelection.usable), id: \.id) { option in
+                    Button("PC · \(option.label)") {
+                        retryWithModel(turn, route: .init(source: .pc, modelID: option.id, automatic: nil))
+                    }
+                }
+            }
+            .disabled(task != nil || isQueued(turn) || !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
         Button("Kopiér besked", systemImage: "doc.on.doc") { copyText(turn.prompt) }
         if !turn.reply.isEmpty {
             if api is LiveAPI {
@@ -324,6 +378,14 @@ extension ChatView {
         restoreDraft(turn)
         chooseSource(.phone)
         send()
+    }
+
+    private func retryWithModel(_ turn: ChatTurn, route: ResolvedRoute) {
+        guard task == nil, !isQueued(turn), draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              canSend(to: route) else { return }
+        restoreDraft(turn)
+        composerFocused = false
+        send(via: route)
     }
 
     private func restoreDraft(_ turn: ChatTurn) {

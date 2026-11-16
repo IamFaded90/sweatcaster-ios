@@ -37,9 +37,9 @@ extension Home {
         }
     }
 
-    /// Hjem sits in the middle of the dock: Chat · Video · Hjem · Agenter · Code Bot · Mere
+    /// Hjem sits in the middle of the dock.
     private var dockSpaces: [Space] {
-        [.notes, .gallery, .brain, .tasks, .library]
+        [.notes, .gallery, .brain, .tasks, .entertainment]
     }
 
     private var tabButtons: some View {
@@ -121,6 +121,7 @@ extension Home {
         switch destination {
         case .chat: selectSpace(.notes)
         case .code: selectSpace(.library)
+        case .entertainment: selectSpace(.entertainment)
         case .village: selectSpace(.tasks)
         case .video: openVideoClips()
         case .images: openStudio(.images)
@@ -154,6 +155,7 @@ extension Home {
         case .gallery: "Video"
         case .tasks: "Agenter"
         case .library: "Code Bot"
+        case .entertainment: "Underholdning"
         }
     }
 
@@ -164,6 +166,7 @@ extension Home {
         case .gallery: "play.rectangle.fill"
         case .tasks: "person.2.fill"
         case .library: "chevron.left.forwardslash.chevron.right"
+        case .entertainment: "play.tv"
         }
     }
 }
@@ -197,7 +200,7 @@ struct DeferredHomeTab: View {
 
 
 enum FadedMoreDestination {
-    case chat, code, village, codeAddOns
+    case chat, code, entertainment, village, codeAddOns
     case holdchat, activity
     case imageBrief(String)
     case video, images, privateStudio, notes, projects, backup, savedVideos, team, models, settings, connections, pcStatus, search
@@ -211,7 +214,7 @@ enum FadedMoreDestination {
 }
 
 private struct FadedMoreScreen: View {
-    private enum Page: Hashable { case lookbook, films, powerHub, atlas, help, creativeStudio, memory, safety, vault }
+    private enum Page: Hashable { case lookbook, powerHub, atlas, help, creativeStudio, memory, safety, vault }
 
     let modules: [ModuleTab]
     @Binding var lookPreset: V0LookPreset?
@@ -258,7 +261,7 @@ private struct FadedMoreScreen: View {
                     row("Noter", "Skriv og genfind noter", "note.text", .notes)
                     row("Projekter", "Find og redigér dine kladder", "folder", .projects)
                     row("Gemte videoer", "Afspil dine færdige videoer", "film.stack", .savedVideos)
-                    link("Film & serier", "Åbn dit bibliotek i browseren", "play.rectangle", .films)
+                    row("Underholdning", "Browser, videoer og Chromecast", "play.tv", .entertainment)
                 }
                 Section("Gør det til dit") {
                     link("Fælles Vault", "Gem logins til dig selv og dine agenter", "lock.doc", .vault)
@@ -283,6 +286,7 @@ private struct FadedMoreScreen: View {
                     row("Søg med det samme", "Find et område eller en funktion", "magnifyingglass", .search)
                 }
                 Section("Udvidelser") {
+                    row("Code Bot", "Åbn dit kodeværksted", "chevron.left.forwardslash.chevron.right", .code)
                     row("Tilføjelser", "Dine installerede sider og værktøjer fra Code Bot", "square.stack.3d.up", .codeAddOns)
                     ForEach(modules) { tab in
                         row(tab.title, "Åbn på din tilsluttede PC", "square.grid.2x2", .module(tab.id))
@@ -315,7 +319,6 @@ private struct FadedMoreScreen: View {
             .navigationDestination(for: Page.self) { page in
                 switch page {
                 case .lookbook: V0LookbookView(selection: $lookPreset)
-                case .films: FilmLibraryLinkView()
                 case .powerHub:
                     V0PowerHubView(actions: powerActions, openLookbook: { path.append(Page.lookbook) },
                        tryAuroraGlass: { lookPreset = .auroraGlass },

@@ -266,6 +266,67 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
         response.headers["Cache-Control"] = "no-store"
         return {"results": results}
 
+    @app.put("/api/modules/v1/chat-research", include_in_schema=False)
+    def chat_research(request: Request, response: Response, body: dict = Body(...)):
+        from sweatcaster.web_research import collect_sources, page_excerpt
+
+        authorize(request, settings)
+        query = body.get("query")
+        if not isinstance(query, str) or not 3 <= len(query.strip()) <= 500 or not query.strip().isprintable():
+            raise ApiError(422, "INVALID_INPUT", "Skriv en kort søgning eller en offentlig webadresse.")
+        query = query.strip()
+        try:
+            if query.startswith(("https://", "http://")) and not any(char.isspace() for char in query):
+                excerpt = page_excerpt(query)
+                if not excerpt:
+                    raise SearXNGError(404, "Den offentlige side kunne ikke læses.")
+                context = excerpt
+                sources = [{"title": "Siden du valgte", "url": query, "readPage": True}]
+            else:
+                context, sources = collect_sources(query[:180])
+        except SearXNGError as exc:
+            raise ApiError(exc.status, "RESEARCH_UNAVAILABLE", exc.message) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return {"context": context, "sources": sources}
+
+    @app.put("/api/modules/v1/agent-chat", include_in_schema=False)
+    def agent_chat(request: Request, response: Response, body: dict = Body(...)):
+        import requests
+        from dataclasses import replace
+
+        from sweatcaster.bot_computers import BotComputerError, ModelBusy, run_local_text
+        from sweatcaster.config import ALLOWED_OLLAMA_MODELS
+        from sweatcaster.model_ids import TEXT_MODEL_TAGS, tag_for
+        from sweatcaster.ollama_gate import chat_payload
+        from sweatcaster.v2_api import catalog
+
+        authorize(request, settings)
+        model_id, prompt, instructions = (body.get(key) for key in ("modelID", "prompt", "instructions"))
+        if not all(isinstance(value, str) and 1 <= len(value.strip()) <= bound
+                   for value, bound in ((model_id, 80), (prompt, 2_000), (instructions, 3_000))):
+            raise ApiError(422, "INVALID_INPUT", "Beskeden eller agentens instruktioner er ugyldige.")
+        tag = tag_for(model_id)
+        if tag not in TEXT_MODEL_TAGS or tag not in ALLOWED_OLLAMA_MODELS:
+            raise ApiError(422, "INVALID_INPUT", "Vælg en PC-model til tekstchat.")
+        if not any(entry["id"] == model_id and entry["available"] for entry in catalog(settings)["models"]):
+            raise ApiError(503, "NOT_READY", "Den valgte model er ikke installeret på PC’en.")
+        payload = chat_payload(replace(settings, ollama_model=tag), [
+            {"role": "system", "content": instructions},
+            {"role": "user", "content": prompt},
+        ], stream=False, temperature=0.5)
+        try:
+            text = run_local_text(settings, payload, purpose="agent-chat")
+            if not isinstance(text, str) or not text.strip():
+                raise BotComputerError(502, "PC-modellen sendte et tomt svar.")
+        except ModelBusy as exc:
+            raise ApiError(503, "NOT_READY", "PC’en svarer på en anden opgave. Prøv igen om lidt.") from exc
+        except BotComputerError as exc:
+            raise ApiError(exc.status, "AGENT_CHAT_FAILED", exc.message) from exc
+        except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
+            raise ApiError(502, "AGENT_CHAT_FAILED", "Agentens PC-model svarede ikke. Tjek Ollama.") from exc
+        response.headers["Cache-Control"] = "no-store"
+        return {"text": text[:12_000]}
+
     @app.put("/api/modules/v1/bot-activity", include_in_schema=False)
     def bot_activity(request: Request, response: Response, body: dict = Body(...)):
         authorize(request, settings)

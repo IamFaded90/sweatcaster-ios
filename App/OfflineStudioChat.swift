@@ -459,8 +459,7 @@ extension OfflineStudio {
 
     private func studioTextModelName(_ id: String) -> String {
         if id == DolphinPhoneRuntime.modelID { return DolphinPhoneRuntime.modelName }
-        if id == "imported" { return "Importeret model" }
-        return PhoneModels.catalog.first { $0.id == id }?.name ?? id
+        return PhoneModels.textModelName(id)
     }
 
     static func companionInstructions(for profile: VillageBot?, preset choice: String = "bot") -> String {
@@ -568,6 +567,6 @@ extension OfflineStudio {
     private var hasPrompt: Bool { !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var textReady: Bool {
         if privateSession { return privateModelDownload == nil && DolphinPhoneRuntime.isInstalled }
-        return effectiveTextModel != "apple" && PhoneModels.installedDirectory(effectiveTextModel) != nil
+        return effectiveTextModel != "apple" && PhoneModels.isReady(effectiveTextModel)
     }
 }

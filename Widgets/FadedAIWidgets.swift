@@ -8,8 +8,7 @@ private struct RenderingWidget: Widget {
             VStack(alignment: .leading, spacing: 8) {
                 Label(context.attributes.kind == .code ? "FadedAI · Code Bot" : "FadedAI · Video", systemImage: icon(context))
                     .font(.headline)
-                Text(context.isStale ? "Åbn FadedAI for ny status" : context.state.phase)
-                progress(context)
+                status(context)
             }
             .padding().widgetURL(link(context))
         } dynamicIsland: { context in
@@ -20,8 +19,7 @@ private struct RenderingWidget: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     VStack(alignment: .leading) {
-                        Text(context.isStale ? "Åbn FadedAI for ny status" : context.state.phase).font(.caption)
-                        progress(context)
+                        status(context)
                     }
                 }
             } compactLeading: {
@@ -41,6 +39,19 @@ private struct RenderingWidget: Widget {
 
     private func link(_ context: ActivityViewContext<RenderActivityAttributes>) -> URL? {
         URL(string: context.attributes.kind == .code ? "fadedai://code" : "fadedai://video")
+    }
+
+    @ViewBuilder private func status(_ context: ActivityViewContext<RenderActivityAttributes>) -> some View {
+        Text(context.state.phase).font(.subheadline)
+        progress(context)
+        if let updated = context.state.lastUpdatedAt {
+            Text("Senest opdateret \(updated, format: .dateTime.day().month().hour().minute())")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        if context.isStale {
+            Text("Afventer ny status fra PC’en").font(.caption2).foregroundStyle(.secondary)
+        }
     }
 
     @ViewBuilder private func progress(_ context: ActivityViewContext<RenderActivityAttributes>) -> some View {

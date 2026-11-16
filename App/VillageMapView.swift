@@ -3,7 +3,7 @@ import UIKit
 
 @MainActor struct VillageMapView: View {
     @AppStorage(AppStorageKeys.villageMapNames) private var showNames = true
-    @AppStorage(AppStorageKeys.villageMapZoom) private var zoom = 1.0
+    @Binding var zoom: Double
     let bots: [VillageLifeBot]
     let night: Bool
     let cinematic: Bool
@@ -23,7 +23,7 @@ import UIKit
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
-            let scale = min(2.2, max(1, CGFloat(zoom) * magnification))
+            let scale = CGFloat(VillageCamera.clampZoom(zoom * Double(magnification)))
             let pan = clampedPan(adding: translation, zoom: scale, size: size)
             ZStack {
                 mapContent(size: size)
@@ -39,8 +39,8 @@ import UIKit
                         current = value.magnification
                     }
                     .onEnded { value in
-                        let finalScale = min(2.2, max(1, CGFloat(zoom) * value.magnification))
-                        zoom = finalScale > 1.001 ? Double(finalScale) : 1
+                        let finalScale = VillageCamera.clampZoom(zoom * Double(value.magnification))
+                        zoom = finalScale > 1.001 ? finalScale : 1
                         offset = VillageCamera.clampOffset(offset, zoom: CGFloat(zoom), frame: size)
                     }
             )

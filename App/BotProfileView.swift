@@ -35,7 +35,7 @@ import SwiftUI
 
     private var modelID: String { PhoneModels.effectiveModelID(phoneModel) }
     private var canTest: Bool {
-        modelID == "apple" ? PhoneModels.appleAvailable : PhoneModels.installedDirectory(modelID) != nil
+        PhoneModels.isReady(modelID)
     }
 
     var body: some View {
@@ -44,12 +44,8 @@ import SwiftUI
             VStack(spacing: 16) {
                 if let bot = localBots.first(where: { $0.id == botID }) {
                     hero(bot)
-                    FadedSecondaryButton("Chat på iPhone", icon: "iphone") {
-                        speechBox.stop()
-                        showPhoneChat = true
-                    }
+                    profileShortcuts(bot, roster: localBots)
                     roomCard(bot)
-                    computerLink(bot, roster: localBots)
                     NavigationLink {
                         BotMailView(api: api, bot: bot)
                     } label: {
@@ -100,7 +96,7 @@ import SwiftUI
         }
         .sheet(isPresented: $showModels) { PhoneModelsView() }
         .sheet(isPresented: $showPhoneChat) {
-            if let bot = localBots.first(where: { $0.id == botID }) { AgentPhoneChat(bot: bot) }
+            if let bot = localBots.first(where: { $0.id == botID }) { AgentPhoneChat(bot: bot, api: api) }
         }
         .sheet(isPresented: $showPrivateChat) {
             if botID == VillageBot.lumiID {
@@ -122,18 +118,23 @@ import SwiftUI
         }
     }
 
-    private func computerLink(_ bot: VillageBot, roster: [VillageBot]) -> some View {
-        NavigationLink {
-            BotComputerView(bot: bot, roster: roster, api: api, onFileShared: onFileShared)
-        } label: {
-            FadedCard(accent: palette.cyan) {
-                Label("Åbn computer", systemImage: "desktopcomputer")
-                    .font(FadedTypography.action)
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+    private func profileShortcuts(_ bot: VillageBot, roster: [VillageBot]) -> some View {
+        HStack(spacing: 10) {
+            FadedPrimaryButton("Chat", icon: "bubble.left") {
+                speechBox.stop()
+                if bot.id == VillageBot.lumiID { showPrivateChat = true }
+                else { showPhoneChat = true }
             }
+            .accessibilityLabel("Chat med \(bot.name)")
+            NavigationLink {
+                BotComputerView(bot: bot, roster: roster, api: api, onFileShared: onFileShared)
+            } label: {
+                Label("Computer", systemImage: "desktopcomputer")
+                    .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(FadedButtonStyle(kind: .secondary))
+            .accessibilityLabel("Computer for \(bot.name)")
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Computer for \(bot.name)")
     }
 
     private func hero(_ bot: VillageBot) -> some View {
@@ -255,9 +256,11 @@ import SwiftUI
 
     private func profileActions(_ bot: VillageBot, canDuplicate: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            FadedSecondaryButton(bot.id == VillageBot.lumiID ? "Åbn Lumis private studie" : "Åbn i Studio", icon: "lock.shield") {
-                speechBox.stop()
-                showPrivateChat = true
+            if bot.id != VillageBot.lumiID {
+                FadedSecondaryButton("Åbn i Studio", icon: "lock.shield") {
+                    speechBox.stop()
+                    showPrivateChat = true
+                }
             }
             FadedSecondaryButton("Redigér", icon: "pencil") {
                 speechBox.stop()
@@ -371,6 +374,7 @@ import SwiftUI
     @AppStorage(AppStorageKeys.lumiPendingVideoJob) private var pendingVideoJobID = ""
     @State private var mode = 0
     @State private var draft = ""
+    @FocusState private var composerFocused: Bool
     @State private var imageDraft = ""
     @State private var videoDraft = ""
     @State private var language = "da-DK"
@@ -410,57 +414,17 @@ import SwiftUI
                     Text("Video").tag(2)
                 }.pickerStyle(.segmented)
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if mode == 0 {
-                            sceneControls
-                            LazyVStack(alignment: .leading, spacing: 12) {
-                                ForEach(messages) { item in messageCard(item) }
-                            }
-                        } else if mode == 1 {
-                            if let picture, let image = UIImage(data: picture) {
-                                Image(uiImage: image).resizable().scaledToFit()
-                                    .clipShape(.rect(cornerRadius: 16))
-                                    .accessibilityLabel("Billede lavet af Lumi")
-                            }
-                            if let pictureFile {
-                                ShareLink(item: pictureFile) {
-                                    Label("Gem eller del billede", systemImage: "square.and.arrow.up")
-                                        .frame(minHeight: 44)
-                                }
-                            }
-                        } else if let videoPlayer {
-                            VideoPlayer(player: videoPlayer).frame(height: 300)
-                            if let videoFile {
-                                ShareLink(item: videoFile) {
-                                    Label("Gem eller del video", systemImage: "square.and.arrow.up")
-                                        .frame(minHeight: 44)
-                                }
-                            }
-                        } else {
-                            Text("Lav et kort klip med PC’en. Det kan tage flere minutter.")
-                                .font(.subheadline).foregroundStyle(palette.secondary)
-                        }
-                        if let notice {
-                            Text(notice).font(.footnote).foregroundStyle(palette.coralText)
-                        }
+                ScrollViewReader { scroll in
+                    ScrollView {
+                        studioContent
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .scrollDismissesKeyboard(.interactively)
+                    .onChange(of: messages.count) {
+                        guard mode == 0 else { return }
+                        scroll.scrollTo("latest-lumi-message", anchor: .bottom)
+                    }
+                    .safeAreaInset(edge: .bottom, spacing: 0) { promptComposer }
                 }
-
-                if mode == 0 { voiceControls }
-                if mode == 1 { referencePicker }
-                TextField(mode == 0 ? "Skriv til Lumi" : mode == 1 ? "Beskriv dit billede" : "Beskriv din video", text: promptDraft(for: mode),
-                          axis: .vertical)
-                    .lineLimit(2...5)
-                    .padding(12)
-                    .background(palette.raised, in: .rect(cornerRadius: 14))
-                FadedPrimaryButton(busy ? "Arbejder på PC’en…" : mode == 0 ? "Send" : mode == 1 ? "Lav billede" : "Lav video",
-                                   icon: mode == 0 ? "arrow.up" : mode == 1 ? "photo" : "film") { send() }
-                    .disabled(busy || (mode == 1 && loadingReference) || dictation.active ||
-                              !isValidPrompt(promptDraft(for: mode).wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)) ||
-                              api == nil)
-                if api == nil { Text("Forbind din PC for at bruge Lumi.").font(.footnote) }
             }
             .padding(16)
             .background { FadedBackground() }
@@ -474,8 +438,11 @@ import SwiftUI
                 }
                 if mode == 0 {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("Hverdagsværktøjer", systemImage: "wrench.and.screwdriver") { showEverydayTools = true }
-                            .disabled(busy || dictation.active)
+                        Button("Hverdagsværktøjer", systemImage: "wrench.and.screwdriver") {
+                            composerFocused = false
+                            showEverydayTools = true
+                        }
+                        .disabled(busy || dictation.active)
                     }
                 }
             }
@@ -512,10 +479,88 @@ import SwiftUI
                 refreshChristel()
                 await resumeVideoIfNeeded()
             }
-            .onChange(of: mode) { stopAudio() }
+            .onChange(of: mode) {
+                composerFocused = false
+                stopAudio()
+            }
             .onChange(of: phase) { if phase != .active { stopAudio() } }
             .onDisappear { stopAudio() }
         }
+    }
+
+    private var studioContent: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if mode == 0 {
+                sceneControls
+                voiceControls
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(messages) { item in messageCard(item) }
+                }
+                Color.clear.frame(height: 1).id("latest-lumi-message")
+            } else if mode == 1 {
+                referencePicker
+                if let picture, let image = UIImage(data: picture) {
+                    Image(uiImage: image).resizable().scaledToFit()
+                        .clipShape(.rect(cornerRadius: 16))
+                        .accessibilityLabel("Billede lavet af Lumi")
+                }
+                if let pictureFile {
+                    ShareLink(item: pictureFile) {
+                        Label("Gem eller del billede", systemImage: "square.and.arrow.up")
+                            .frame(minHeight: 44)
+                    }
+                }
+            } else if let videoPlayer {
+                VideoPlayer(player: videoPlayer).frame(height: 300)
+                if let videoFile {
+                    ShareLink(item: videoFile) {
+                        Label("Gem eller del video", systemImage: "square.and.arrow.up")
+                            .frame(minHeight: 44)
+                    }
+                }
+            } else {
+                FadedDetailText("Lav et kort klip med PC’en. Det kan tage flere minutter.")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var promptComposer: some View {
+        let currentDraft = promptDraft(for: mode)
+        let placeholder = mode == 0 ? "Skriv til Lumi" : mode == 1 ? "Beskriv dit billede" : "Beskriv din video"
+        let action = mode == 0 ? "Send" : mode == 1 ? "Lav billede" : "Lav video"
+        let icon = mode == 0 ? "arrow.up" : mode == 1 ? "photo" : "film"
+        return VStack(alignment: .leading, spacing: 6) {
+            if let notice {
+                Text(notice).font(.footnote).foregroundStyle(palette.coralText)
+                    .accessibilityAddTraits(.updatesFrequently)
+            } else if api == nil {
+                FadedDetailText("Forbind din PC for at bruge Lumi.")
+            }
+            if busy { ProgressView(mode == 0 ? "Lumi svarer på PC’en…" : "Arbejder på PC’en…") }
+            HStack(alignment: .bottom, spacing: 8) {
+                TextField(placeholder, text: currentDraft, axis: .vertical)
+                    .lineLimit(1...4)
+                    .padding(12)
+                    .frame(minHeight: 44)
+                    .fadedGlassSurface()
+                    .focused($composerFocused)
+                if composerFocused {
+                    Button("Skjul tastatur", systemImage: "keyboard.chevron.compact.down") { composerFocused = false }
+                        .labelStyle(.iconOnly)
+                        .frame(width: 44, height: 44)
+                        .fadedGlassSurface()
+                }
+                Button(action, systemImage: icon) { send() }
+                    .labelStyle(.iconOnly)
+                    .frame(width: 44, height: 44)
+                    .buttonStyle(FadedButtonStyle(kind: .primary))
+                    .disabled(busy || (mode == 1 && loadingReference) || dictation.active || api == nil ||
+                              !isValidPrompt(currentDraft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)))
+            }
+        }
+        .padding(.top, 8)
+        .background(palette.background)
     }
 
     private func messageCard(_ message: LumiSceneMessage) -> some View {
@@ -827,6 +872,7 @@ import SwiftUI
         let input = opening ? (language == "da-DK" ? "Tag føringen" : "Take the lead")
             : selectedDraft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isValidPrompt(input) else { return }
+        composerFocused = false
         let reference = selectedMode == 1 ? imageReference : nil
         let replyLanguage = language
         let selectedScene = sceneCard

@@ -7,6 +7,16 @@ import XCTest
     private let novaID = "7C9E6679-7425-40DE-944B-E07FC1F90AE7"
     private let lunaID = "A1B2C3D4-E5F6-4789-A012-3456789ABCDE"
 
+    func testHarperShortcutMatchesSavedNameAndExcludesPrivateLumi() {
+        let harper = VillageBot(name: "  HARPER\n")
+        let otherHarper = VillageBot(name: "Harper")
+        var lumi = VillageBot.lumi()
+        lumi.name = "Harper"
+        XCTAssertEqual(OpenFadedAIHarperChat.matchingProfiles(in: [lumi, harper, VillageBot(name: "Harperina")]), [harper])
+        XCTAssertEqual(OpenFadedAIHarperChat.matchingProfiles(in: [harper, otherHarper]).count, 2)
+        XCTAssertTrue(OpenFadedAIHarperChat.matchingProfiles(in: [lumi]).isEmpty)
+    }
+
     func testOldBotProfilesDraftsAndBackupsDecodeWithDefaultTraits() throws {
         let draft = Data(#"{"id":"7C9E6679-7425-40DE-944B-E07FC1F90AE7","name":"Nova","color":"Blå","prompt":"Vær varm","voice":"da-DK","sprite":null,"personality":"Omsorgsfuld"}"#.utf8)
         let imported = try JSONDecoder().decode(VillageBot.self, from: draft)

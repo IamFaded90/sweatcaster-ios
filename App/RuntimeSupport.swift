@@ -1,3 +1,4 @@
+import CastBrowserFeature
 import Darwin
 import Foundation
 import os
@@ -510,10 +511,13 @@ struct ResourceMonitor: View {
         defer { LocalCompute.resume() }
         PhoneModelDownloads.shared.cancel()
         StudioImageDownloads.shared.cancel()
+        GGUFModelDownloads.shared.cancel()
         try deleteOwnedData(documents: .documentsDirectory, support: .applicationSupportDirectory,
                             temporary: FileManager.default.temporaryDirectory)
         try Pairing.removeAll()
         CloudModelKey.remove()
+        GGUFHubKey.remove()
+        CastBrowserScreen.clearWebsiteData()
         let center = UNUserNotificationCenter.current()
         center.removeAllPendingNotificationRequests()
         center.removeAllDeliveredNotifications()
@@ -527,7 +531,8 @@ struct ResourceMonitor: View {
         let roots = [
             (documents, ["Models"]),
             (support, ["FadedAI", "ImportedPhoneModels", LumiSceneLibrary.directoryName, "PCChatOutbox", "SavedVideos", "StudioImages",
-                       "StudioLoRAPreviews", "VideoStudio", DolphinPhoneRuntime.storageRoot.lastPathComponent]),
+                       "StudioLoRAPreviews", "VideoStudio", DolphinPhoneRuntime.storageRoot.lastPathComponent,
+                       GGUFPhoneModel.root.lastPathComponent, AgentWhisper.folder.lastPathComponent]),
             (temporary, ["FadedAI-diagnostics", BackupService.exportDirectory])
         ]
         for (root, names) in roots where manager.fileExists(atPath: root.path) {

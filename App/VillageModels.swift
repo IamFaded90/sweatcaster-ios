@@ -228,6 +228,12 @@ enum VillageCopy {
 }
 
 enum VillageCamera {
+    static let zoomRange = 1.0...2.2
+
+    static func clampZoom(_ value: Double) -> Double {
+        min(zoomRange.upperBound, max(zoomRange.lowerBound, value))
+    }
+
     /// Clamp pan so the scaled map never leaves the frame.
     /// At zoom ≤ 1 the offset is always zero (centered).
     static func clampOffset(_ proposed: CGSize, zoom: CGFloat, frame: CGSize) -> CGSize {

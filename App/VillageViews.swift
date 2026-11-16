@@ -170,12 +170,35 @@ struct VillageBot: Codable, Identifiable, Equatable {
     }
 }
 
+private struct VillageBotTemplate: Codable {
+    let profile: VillageBot
+    let phoneModelID: String?
+    let phoneModelName: String?
+    let pcModelID: String?
+
+    @MainActor init(bot: VillageBot) {
+        var copy = bot
+        copy.id = UUID()
+        copy.dailyMemory = []
+        copy.bestFriendID = nil
+        copy.sprite = nil
+        let defaults = UserDefaults.standard
+        if let voice = defaults.string(forKey: PhoneModels.agentVoiceKey(bot.id)), !voice.isEmpty {
+            copy.voice = voice
+        }
+        profile = copy
+        phoneModelID = defaults.string(forKey: PhoneModels.agentModelKey(bot.id))
+        phoneModelName = phoneModelID.map(PhoneModels.textModelName)
+        pcModelID = defaults.string(forKey: PhoneModels.agentPCModelKey(bot.id))
+    }
+}
+
 private struct VillageBotFile: FileDocument {
     static var readableContentTypes: [UTType] { [.json] }
     static let maximumBytes = 256_000
-    let bot: VillageBot
+    let template: VillageBotTemplate
 
-    init(bot: VillageBot) { self.bot = bot }
+    @MainActor init(bot: VillageBot) { template = VillageBotTemplate(bot: bot) }
 
     init(configuration: ReadConfiguration) throws {
         let attributes = configuration.file.fileAttributes as NSDictionary
@@ -185,11 +208,11 @@ private struct VillageBotFile: FileDocument {
         guard let data = configuration.file.regularFileContents, data.count <= Self.maximumBytes else {
             throw CocoaError(.fileReadCorruptFile)
         }
-        bot = try JSONDecoder().decode(VillageBot.self, from: data)
+        template = try JSONDecoder().decode(VillageBotTemplate.self, from: data)
     }
 
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        FileWrapper(regularFileWithContents: try JSONEncoder().encode(bot))
+        FileWrapper(regularFileWithContents: try JSONEncoder().encode(template))
     }
 }
 
@@ -262,7 +285,7 @@ private struct VillageSpritePhoto: Transferable {
     private var bots: [VillageBot] { VillageBot.list(from: savedBots) }
     private var testing: Bool { testTask != nil }
     private var testModel: String { PhoneModels.effectiveModelID(phoneModel) }
-    private var canTest: Bool { testModel == "apple" ? PhoneModels.appleAvailable : PhoneModels.installedDirectory(testModel) != nil }
+    private var canTest: Bool { PhoneModels.isReady(testModel) }
 
     init(api: LiveAPI? = nil, bot: VillageBot? = nil, onBack: (() -> Void)? = nil) {
         self.api = api
@@ -289,7 +312,7 @@ private struct VillageSpritePhoto: Transferable {
                     DisclosureGroup("Gemte bots · \(bots.count) af 10") {
                         ForEach(bots) { bot in Button(bot.name) { selectDraft(bot) } }
                         Button("Ny bot") { selectDraft(VillageBot()) }.disabled(bots.count >= 10)
-                        Button("Importér JSON") { importing = true }.disabled(bots.count >= 10 || testing)
+                        Button("Importér agentskabelon") { importing = true }.disabled(bots.count >= 10 || testing)
                     }.listRowBackground(palette.card)
                 }
                 Group {
@@ -419,7 +442,9 @@ private struct VillageSpritePhoto: Transferable {
                 .disabled(improving || draft.prompt.isEmpty || !PhoneModels.appleAvailable)
             Button("Gem bot") { _ = save(draft) }.disabled(draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             if bots.contains(where: { $0.id == draft.id }) {
-                Button("Eksportér bot") { exportFile = VillageBotFile(bot: draft); exporting = true }
+                if draft.id != VillageBot.lumiID {
+                    Button("Del som agentskabelon") { exportFile = VillageBotFile(bot: draft); exporting = true }
+                }
                 FadedSecondaryButton("Slet bot", icon: "trash", role: .destructive) { confirmDelete = true }
             }
         }
@@ -590,8 +615,9 @@ private struct VillageSpritePhoto: Transferable {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             let data = try LocalFileStore.readBytes(from: url, maximumBytes: VillageBotFile.maximumBytes)
-            var bot = try JSONDecoder().decode(VillageBot.self, from: data)
-            guard !bot.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            let template = try? JSONDecoder().decode(VillageBotTemplate.self, from: data)
+            var bot = try template?.profile ?? JSONDecoder().decode(VillageBot.self, from: data)
+            guard bot.id != VillageBot.lumiID, !bot.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw CocoaError(.fileReadCorruptFile)
             }
             if let original = bot.sprite {
@@ -599,7 +625,19 @@ private struct VillageSpritePhoto: Transferable {
                 bot.sprite = sprite
             }
             bot.id = UUID()
-            if save(bot) { draft = bot }
+            if save(bot) {
+                if let template {
+                    let options = PhoneModels.textOptions
+                    let imported = options.first { $0.id == template.phoneModelID || $0.name == template.phoneModelName }
+                    if let imported {
+                        UserDefaults.standard.set(imported.id, forKey: PhoneModels.agentModelKey(bot.id))
+                    }
+                    if let id = template.pcModelID, (1...96).contains(id.utf8.count) {
+                        UserDefaults.standard.set(id, forKey: PhoneModels.agentPCModelKey(bot.id))
+                    }
+                }
+                draft = bot
+            }
         } catch { AppDiagnostics.record(error); notice = "Filen kunne ikke læses som en FadedAI-bot." }
     }
 

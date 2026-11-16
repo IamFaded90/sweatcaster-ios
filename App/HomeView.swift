@@ -66,7 +66,11 @@ struct Home: View {
             progress = job.progress
         }
     }
-    struct SearchBot: Identifiable { let id: UUID }
+    struct SearchBot: Identifiable {
+        enum Entry { case profile, chat(VillageBot), harperSetup }
+        let id: UUID
+        var entry = Entry.profile
+    }
     struct DashboardApproval: Identifiable {
         let id: String
         let api: LiveAPI
@@ -74,6 +78,7 @@ struct Home: View {
     enum SettingsFollowup { case login, models, privateChat, bots, code, export }
     enum Space: String, CaseIterable, Identifiable {
         case brain = "Brain", notes = "Notes", gallery = "Gallery", tasks = "Tasks", library = "Library"
+        case entertainment = "Entertainment"
         var id: Self { self }
     }
     private enum TabDestination: Equatable {
@@ -239,8 +244,13 @@ struct Home: View {
 
     var homeContent: some View {
         VStack(spacing: 0) {
-            homeTabs
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            EntertainmentView(isSelected: selectedHomeTab == Space.entertainment.rawValue,
+                              background: AnyView(homeBackground),
+                              showsPlaybackControls: !privateStudioPresented,
+                              onOpen: { selectTab(.entertainment) }) {
+                homeTabs
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             if currentDestination != .fixed(.notes) {
                 spacesBar
             }
@@ -256,16 +266,16 @@ struct Home: View {
             if rememberLastSpace { lastSpace = value.rawValue }
             if autoRefreshTabs && !model.isDemo && !privateStudioPresented { Task { await model.refresh() } }
         }
-        .onChange(of: keepScreenAwake) { UIApplication.shared.isIdleTimerDisabled = keepScreenAwake }
+        .onChange(of: keepScreenAwake) { ChatScreenWake.setUserPreference(keepScreenAwake) }
         .onAppear {
             if !restoredNavigation {
                 restoredNavigation = true
                 if tabHistory.isEmpty, rememberLastSpace, let saved = Space(rawValue: lastSpace) { space = saved }
             }
             refreshDashboard()
-            UIApplication.shared.isIdleTimerDisabled = keepScreenAwake
+            ChatScreenWake.setUserPreference(keepScreenAwake)
         }
-        .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+        .onDisappear { ChatScreenWake.setUserPreference(false) }
     }
 
     private var selectedHomeTab: String {
@@ -303,6 +313,9 @@ struct Home: View {
             }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Code Bot", systemImage: "chevron.left.forwardslash.chevron.right") }.tag(Space.library.rawValue)
+            Color.clear
+                .toolbarVisibility(.hidden, for: .tabBar)
+                .tabItem { Label("Underholdning", systemImage: "play.tv") }.tag(Space.entertainment.rawValue)
             if visibleModuleTarget != nil, let api = model.api as? LiveAPI {
                 ForEach(moduleTabs) { tab in
                     DeferredHomeTab(isSelected: selectedHomeTab == "module:" + tab.id) {

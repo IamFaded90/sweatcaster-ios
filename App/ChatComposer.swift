@@ -1,3 +1,4 @@
+// Filnavn: App/ChatComposer.swift
 // Owns the fixed chat input, attachments, model menu and local speech controls.
 
 import AVFAudio
@@ -11,11 +12,9 @@ struct ChatComposer<Content: View>: View {
     init(@ViewBuilder content: () -> Content) { self.content = content() }
 
     var body: some View {
-        let shape = RoundedRectangle(cornerRadius: FadedRadius.card)
         VStack(alignment: .leading, spacing: FadedSpacing.xs) { content }
             .padding(.horizontal, FadedSpacing.s).padding(.vertical, FadedSpacing.xs)
-            .background(palette.card, in: shape)
-            .overlay { shape.strokeBorder(palette.border).allowsHitTesting(false) }
+            .background { ChatGlassSurface(radius: FadedRadius.card, colors: [palette.lime, palette.cyan]) }
     }
 }
 

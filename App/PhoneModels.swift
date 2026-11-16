@@ -23,6 +23,30 @@ enum PhoneModels {
         let reply: String
     }
 
+    struct TextOption: Identifiable {
+        let id: String
+        let name: String
+    }
+
+    static var textOptions: [TextOption] {
+        [.init(id: "apple", name: "Apple Foundation Models")] +
+            catalog.map { TextOption(id: $0.id, name: $0.name) } +
+            [.init(id: "imported", name: "Importeret model")] +
+            GGUFPhoneModel.installed.map { TextOption(id: $0.id, name: $0.name) }
+    }
+
+    static func textModelName(_ id: String) -> String {
+        switch id {
+        case "apple": "Apple Foundation Models"
+        case "imported": "Importeret model"
+        default: GGUFPhoneModel.installed(id: id)?.name ?? catalog.first(where: { $0.id == id })?.name ?? id
+        }
+    }
+
+    static func agentModelKey(_ id: UUID) -> String { "agent-phone.model." + id.uuidString.lowercased() }
+    static func agentPCModelKey(_ id: UUID) -> String { "agent-pc.model." + id.uuidString.lowercased() }
+    static func agentVoiceKey(_ id: UUID) -> String { "agent-chat.voice." + id.uuidString.lowercased() }
+
     struct Entry: Identifiable {
         enum PackageFormat: String {
             case coreML = "Core ML"
@@ -89,11 +113,14 @@ enum PhoneModels {
 
     static func supportsLocalInference(_ id: String) -> Bool {
         if id == "apple" || id == "imported" { return true }
+        if id.hasPrefix(GGUFPhoneModel.prefix) { return GGUFPhoneModel.installed(id: id) != nil }
         return catalog.contains { $0.id == id && $0.model != nil && $0.unavailableReason == nil }
     }
 
     static func isReady(_ id: String) -> Bool {
-        id == "apple" ? appleAvailable : installedDirectory(id) != nil
+        if id == "apple" { return appleAvailable }
+        if id.hasPrefix(GGUFPhoneModel.prefix) { return GGUFPhoneModel.installed(id: id) != nil }
+        return installedDirectory(id) != nil
     }
 
     static func installedDirectory(_ id: String) -> URL? {
@@ -191,7 +218,8 @@ enum PhoneModels {
     }
 
     private static func minimumMemory(for modelID: String) -> UInt64 {
-        switch modelID {
+        if let model = GGUFPhoneModel.installed(id: modelID) { return model.memoryEstimateMiB }
+        return switch modelID {
         case "apple": 256
         case ModelDownloader.ModelInfo.lfm2_5_350m.id: 512
         case ModelDownloader.ModelInfo.qwen35_08b.id: 1_536
@@ -211,7 +239,11 @@ enum PhoneModels {
                                               history: [ChatExchange],
                                               update: @escaping (String) -> Void) async throws {
         var answer = ""
-        if modelID == "apple" {
+        if let model = GGUFPhoneModel.installed(id: modelID) {
+            _ = try await GGUFPhoneRuntime.generate(model, prompt: prompt, instructions: instructions,
+                                                    history: history, maximumTokens: 384, update: update)
+            return
+        } else if modelID == "apple" {
             guard #available(iOS 26.0, *), appleAvailable else { throw PhoneModelError.unavailable }
             let defaults = "Svar kort på brugerens sprog. Du har kun adgang til teksten i chatten."
             let session = LanguageModelSession(instructions: instructions.isEmpty ? defaults : instructions)
@@ -296,6 +328,15 @@ enum PhoneModels {
     @MainActor static func benchmark(modelID: String) async throws -> String {
         let prompt = "Skriv to korte sætninger om, hvordan regn dannes."
         return try await LocalCompute.run(minimumMiB: minimumMemory(for: modelID)) {
+            if let model = GGUFPhoneModel.installed(id: modelID) {
+                let sample = "Hvad mener jeg med: I wud lik to boock a tabel for too on Fryday? Svar kort på dansk."
+                let result = try await GGUFPhoneRuntime.generate(model, prompt: sample,
+                    instructions: "Svar med højst to sætninger og uden at vise din fremgangsmåde.",
+                    history: [], maximumTokens: 128, update: { _ in })
+                let format = FloatingPointFormatStyle<Double>.number.precision(.fractionLength(1))
+                let ram = result.footprint.map { " · RAM målt under testen: " + ModelDiskStorage.gigabytes(Int64($0)) } ?? ""
+                return "\(model.name)\nFørste tekst: \(result.firstToken.formatted(format)) sek. · \(result.tokensPerSecond.formatted(format)) tokens/sek.\(ram)\n\nPrøvesvar: \(result.reply)"
+            }
             if modelID == "apple" {
                 guard #available(iOS 26.0, *), appleAvailable else { throw PhoneModelError.unavailable }
                 let session = LanguageModelSession()
@@ -566,6 +607,7 @@ enum PhoneModels {
         UIDevice.current.isBatteryMonitoringEnabled = true
         PhoneModelDownloads.shared.activate()
         StudioImageDownloads.shared.activate()
+        GGUFModelDownloads.shared.activate()
         return true
     }
 
@@ -576,6 +618,8 @@ enum PhoneModels {
             PhoneModelDownloads.shared.handleBackgroundEvents(completion: completionHandler)
         case StudioImageDownloads.backgroundIdentifier:
             StudioImageDownloads.shared.handleBackgroundEvents(completion: completionHandler)
+        case GGUFModelDownloads.backgroundIdentifier:
+            GGUFModelDownloads.shared.handleBackgroundEvents(completion: completionHandler)
         default:
             completionHandler()
         }
