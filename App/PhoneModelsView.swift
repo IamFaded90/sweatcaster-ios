@@ -5,95 +5,6 @@ import MediaGenerationKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum ModelDiskStorage {
-    struct Item: Identifiable, Sendable {
-        let url: URL
-        let name: String
-        let kind: String
-        let bytes: Int64
-        var id: URL { url }
-    }
-
-    struct Snapshot: Sendable {
-        var text: [String: Int64] = [:]
-        var files: [Item] = []
-        var total = Int64(0)
-        var used: Int64?
-        var capacity: Int64?
-    }
-
-    static let textRoot = PhoneModels.downloadedRoot
-
-    static func allowedImageRoots(_ configured: [URL]) -> [URL] {
-        let allowed = [URL.documentsDirectory, URL.applicationSupportDirectory].map { $0.resolvingSymlinksInPath().path + "/" }
-        var seen = Set<URL>()
-        return (configured + [textRoot]).map { $0.resolvingSymlinksInPath().standardizedFileURL }
-            .filter { root in allowed.contains(where: { root.path.hasPrefix($0) }) && seen.insert(root).inserted }
-    }
-
-    static func scan(textFolders: [String: URL], imageRoots: [URL]) -> Snapshot {
-        var snapshot = Snapshot()
-        var seen = Set<NSObject>()
-        for (id, folder) in textFolders.sorted(by: { $0.key < $1.key }) {
-            snapshot.text[id] = folderSize(folder, seen: &seen)
-        }
-        for folder in imageRoots {
-            let contents = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: Array(keys),
-                                                                        options: [.skipsHiddenFiles])) ?? []
-            for url in contents where ["ckpt", "safetensors"].contains(url.pathExtension.lowercased()) {
-                guard let size = fileSize(url, seen: &seen) else { continue }
-                let kind = url.lastPathComponent.lowercased().contains("lora") ? "LoRA" : "Billedmodelfil"
-                snapshot.files.append(Item(url: url, name: url.lastPathComponent, kind: kind, bytes: size))
-            }
-        }
-        snapshot.files.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
-        snapshot.total = snapshot.text.values.reduce(0, +) + snapshot.files.reduce(0) { $0 + $1.bytes }
-        if let volume = try? URL.documentsDirectory.resourceValues(forKeys: [.volumeTotalCapacityKey, .volumeAvailableCapacityKey]),
-           let total = volume.volumeTotalCapacity, let free = volume.volumeAvailableCapacity {
-            snapshot.capacity = Int64(total)
-            snapshot.used = Int64(max(0, total - free))
-        }
-        return snapshot
-    }
-
-    static func delete(_ file: Item, within roots: [URL]) throws {
-        let target = file.url.standardizedFileURL
-        guard roots.contains(target.deletingLastPathComponent()), target == target.resolvingSymlinksInPath(),
-              ["ckpt", "safetensors"].contains(target.pathExtension.lowercased()),
-              try target.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
-            throw PhoneModelError.invalidBundle
-        }
-        try FileManager.default.removeItem(at: target)
-    }
-
-    static func gigabytes(_ bytes: Int64) -> String {
-        (Double(bytes) / 1_000_000_000).formatted(.number.precision(.fractionLength(3))) + " GB"
-    }
-
-    private static let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .totalFileAllocatedSizeKey,
-                                                     .fileAllocatedSizeKey, .fileSizeKey, .fileResourceIdentifierKey]
-
-    private static func folderSize(_ folder: URL, seen: inout Set<NSObject>) -> Int64 {
-        guard (try? folder.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { return 0 }
-        guard let contents = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: Array(keys), options: []) else { return 0 }
-        var total = Int64(0)
-        for case let file as URL in contents {
-            if (try? file.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true {
-                contents.skipDescendants()
-                continue
-            }
-            total += fileSize(file, seen: &seen) ?? 0
-        }
-        return total
-    }
-
-    private static func fileSize(_ file: URL, seen: inout Set<NSObject>) -> Int64? {
-        guard let values = try? file.resourceValues(forKeys: keys), values.isRegularFile == true, values.isSymbolicLink != true else { return nil }
-        if let id = values.fileResourceIdentifier as? NSObject, !seen.insert(id).inserted { return nil }
-        return Int64(values.totalFileAllocatedSize ?? values.fileAllocatedSize ?? values.fileSize ?? 0)
-    }
-}
-
 struct PhoneModelsView: View {
     let allowsImageDownloads: Bool
     init(allowsImageDownloads: Bool = true) { self.allowsImageDownloads = allowsImageDownloads }
@@ -142,23 +53,30 @@ struct PhoneModelsView: View {
         PhoneModels.catalog.filter { favorites.contains($0.id) } + PhoneModels.catalog.filter { !favorites.contains($0.id) }
     }
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
-                    if typeSize.isAccessibilitySize { pagePicker.pickerStyle(.menu) }
-                    else { pagePicker.pickerStyle(.segmented) }
-                    modelPage
-                    if let notice { FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently) }
-                }
-                .padding(16).frame(maxWidth: 640).frame(maxWidth: .infinity)
+        NavigationStack { modelDialogs }
+    }
+
+    private var modelList: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
+                if typeSize.isAccessibilitySize { pagePicker.pickerStyle(.menu) }
+                else { pagePicker.pickerStyle(.segmented) }
+                modelPage
+                if let notice { FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently) }
             }
-            .background { FadedBackground() }
-            .foregroundStyle(palette.text)
-            .tint(palette.isDark ? palette.lime : palette.text)
-            .navigationTitle("Lokale modeller")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Luk") { dismiss() }.disabled(working) }
-            .interactiveDismissDisabled(working)
+            .padding(16).frame(maxWidth: 640).frame(maxWidth: .infinity)
+        }
+        .background { FadedBackground() }
+        .foregroundStyle(palette.text)
+        .tint(palette.isDark ? palette.lime : palette.text)
+        .navigationTitle("Lokale modeller")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar { Button("Luk") { dismiss() }.disabled(working) }
+        .interactiveDismissDisabled(working)
+    }
+
+    private var modelLifecycle: some View {
+        modelList
             .task(id: storageRevision) { await refreshStorage() }
             .onChange(of: downloader.isDownloading) { _, isDownloading in
                 if !isDownloading { storageRevision += 1 }
@@ -169,7 +87,9 @@ struct PhoneModelsView: View {
             .onChange(of: StudioImageDownloads.shared.activeModel) { _, model in
                 if model == nil { storageRevision += 1 }
             }
-            .onChange(of: GGUFModelDownloads.shared.revision) { storageRevision += 1 }
+            .onChange(of: GGUFModelDownloads.shared.revision) { _, _ in
+                storageRevision += 1
+            }
             .safeAreaInset(edge: .bottom) {
                 if let downloadSuccess {
                     FadedToast(downloadSuccess, tone: .success).padding(.horizontal, FadedSpacing.edge)
@@ -181,6 +101,10 @@ struct PhoneModelsView: View {
                 catch { return }
                 downloadSuccess = nil
             }
+    }
+
+    private var modelDialogs: some View {
+        modelLifecycle
             .confirmationDialog("Hent stor model?", isPresented: Binding(
                 get: { downloadConfirmation != nil }, set: { if !$0 { downloadConfirmation = nil } }
             ), presenting: downloadConfirmation) { entry in
@@ -196,8 +120,8 @@ struct PhoneModelsView: View {
             ), presenting: deleteTarget) { target in
                 Button("Slet \(target.name)", role: .destructive) { remove(target) }
             } message: { _ in Text("Du kan hente eller importere filen igen.") }
-        }
     }
+
     @ViewBuilder private var modelPage: some View {
         switch page {
         case .models:
