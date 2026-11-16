@@ -71,6 +71,7 @@ import UIKit
             if !coordinator.finishing { view.captureSession.stop(pauseARSession: true) }
         }
 
+        @objc(FadedOfficeRoomCaptureCoordinator)
         final class Coordinator: NSObject, RoomCaptureViewDelegate {
             let saved: (Result<CapturedRoom, any Error>) -> Void
             var finishing = false
@@ -78,6 +79,15 @@ import UIKit
             private var delivered = false
 
             init(saved: @escaping (Result<CapturedRoom, any Error>) -> Void) { self.saved = saved }
+
+            // RoomCaptureViewDelegate inherits NSCoding. This delegate belongs to one
+            // live SwiftUI capture and its callback cannot be restored from an archive.
+            // Completed rooms are persisted separately by ScannedOfficeStore.
+            required init?(coder: NSCoder) { return nil }
+
+            func encode(with coder: NSCoder) {
+                // No capture session, callback or room contents are archived here.
+            }
 
             func captureView(shouldPresent roomDataForProcessing: CapturedRoomData, error: (any Error)?) -> Bool {
                 guard !cancelled else { return false }
