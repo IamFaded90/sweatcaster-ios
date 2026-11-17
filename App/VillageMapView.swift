@@ -3,6 +3,7 @@ import UIKit
 
 @MainActor struct VillageMapView: View {
     @AppStorage(AppStorageKeys.villageMapNames) private var showNames = true
+    @AppStorage("village.map.navigationLocked.v2") private var navigationLocked = true
     @Binding var zoom: Double
     let bots: [VillageLifeBot]
     let night: Bool
@@ -36,21 +37,25 @@ import UIKit
             .gesture(
                 MagnifyGesture()
                     .updating($magnification) { value, current, _ in
-                        current = value.magnification
+                        if !navigationLocked { current = value.magnification }
                     }
                     .onEnded { value in
+                        guard !navigationLocked else { return }
                         let finalScale = VillageCamera.clampZoom(zoom * Double(value.magnification))
                         zoom = finalScale > 1.001 ? finalScale : 1
                         offset = VillageCamera.clampOffset(offset, zoom: CGFloat(zoom), frame: size)
-                    }
+                    },
+                including: navigationLocked ? .subviews : .all
             )
             .simultaneousGesture(
                 DragGesture()
                     .updating($translation) { value, current, _ in
-                        current = value.translation
+                        if !navigationLocked { current = value.translation }
                     }
-                    .onEnded { value in offset = clampedPan(adding: value.translation, zoom: scale, size: size) },
-                including: scale > 1.001 ? .all : .subviews
+                    .onEnded { value in
+                        if !navigationLocked { offset = clampedPan(adding: value.translation, zoom: scale, size: size) }
+                    },
+                including: !navigationLocked && scale > 1.001 ? .all : .subviews
             )
             .onChange(of: size) { _, newSize in
                 offset = VillageCamera.clampOffset(offset, zoom: CGFloat(zoom), frame: newSize)
@@ -59,7 +64,26 @@ import UIKit
                 offset = value <= 1.001 ? .zero : VillageCamera.clampOffset(offset, zoom: CGFloat(value), frame: size)
             }
             .clipShape(RoundedRectangle(cornerRadius: 20))
-            .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(.white.opacity(0.08)))
+            .overlay {
+                RoundedRectangle(cornerRadius: 20)
+                    .strokeBorder(LinearGradient(colors: [FadedBrand.mint.opacity(0.4), .white.opacity(0.08), FadedBrand.blue.opacity(0.28)],
+                                                 startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .allowsHitTesting(false)
+            }
+            .overlay(alignment: .topLeading) { villageHUD.padding(10).allowsHitTesting(false) }
+            .overlay(alignment: .bottomLeading) {
+                HStack(spacing: 8) {
+                    Button { navigationLocked.toggle() } label: {
+                        Image(systemName: navigationLocked ? "lock.fill" : "hand.draw")
+                            .frame(width: 44, height: 44).fadedGlassSurface()
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(navigationLocked ? "Kortet er låst" : "Flyt kortet")
+                    .accessibilityHint("Zoomskyderen virker også, når kortet er låst")
+                    placesMenu
+                }
+                .padding(10)
+            }
             .overlay(alignment: .bottomTrailing) {
                 if zoom > 1.001 {
                     Button {
@@ -79,8 +103,46 @@ import UIKit
             }
         }
         .frame(height: cinematic ? 520 : 420)
+        .shadow(color: .black.opacity(0.38), radius: 16, y: 7)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Landsbykort")
+    }
+
+    private var villageHUD: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 10) {
+                Label(paused ? "På pause" : night ? "Aften" : "Dag", systemImage: paused ? "pause.fill" : night ? "moon.stars.fill" : "sun.max.fill")
+                if !bots.isEmpty { Label("\(bots.count) beboere", systemImage: "person.2.fill") }
+            }
+            Label(paused ? "På pause" : night ? "Aften" : "Dag", systemImage: paused ? "pause.fill" : night ? "moon.stars.fill" : "sun.max.fill")
+        }
+        .font(.caption.weight(.semibold)).foregroundStyle(.white)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .fadedGlassSurface(tint: FadedBrand.panel)
+    }
+
+    private var placesMenu: some View {
+        Menu {
+            Section("Steder") {
+                ForEach(VillageZoneID.allCases, id: \.self) { zone in
+                    Button(zone.title) { onSelectBuilding(zone) }
+                }
+                Button("Kirkegården", action: onSelectCemetery)
+                Button("Skaberens kontor", action: onSelectCreator)
+            }
+            if !bots.isEmpty {
+                Section("Beboere") {
+                    ForEach(bots.sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }) { bot in
+                        Button(bot.displayName + " · " + bot.zoneID.title) { onSelect(bot) }
+                    }
+                }
+            }
+        } label: {
+            Label("Find", systemImage: "map")
+                .font(.caption.weight(.semibold)).padding(.horizontal, 12).frame(minHeight: 44)
+                .fadedGlassSurface()
+        }
+        .accessibilityLabel("Find et sted eller en beboer")
     }
 
     private func clampedPan(adding translation: CGSize, zoom: CGFloat, size: CGSize) -> CGSize {
@@ -94,15 +156,11 @@ import UIKit
     private func mapContent(size: CGSize) -> some View {
         let placements = botPlacements(size: size)
         return ZStack {
-            if let map = VillageAssets.image(named: night ? "map-night" : "map-day", subdirectory: "new") {
+            if let map = VillageProductionArt.image(night ? "map-night" : "map-day") {
                 Image(uiImage: map)
-                    .resizable()
-                    .interpolation(.none)
-                    .scaledToFill()
+                    .resizable().scaledToFit()
                     .frame(width: size.width, height: size.height)
-                    .clipped()
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+                    .allowsHitTesting(false).accessibilityHidden(true)
             }
             ForEach(VillageZoneID.allCases, id: \.self) { zone in
                 Button { onSelectBuilding(zone) } label: {
@@ -114,20 +172,22 @@ import UIKit
                 .accessibilityLabel("Åbn \(zone.title)")
             }
             Button(action: onSelectCemetery) {
-                VillageChurchLandmark(count: VillageHistory.shared.memorials.count)
+                Color.clear.frame(width: 80, height: 76).contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .position(x: size.width * 0.80, y: size.height * 0.77)
+            .position(VillageMapLayout.point(VillageMapLayout.cemetery, in: size))
             .accessibilityLabel("Åbn Kirkegården")
             Button(action: onSelectCreator) {
                 VillageCreatorMonument()
             }
             .buttonStyle(.plain)
-            .position(x: size.width * 0.55, y: size.height * 0.50)
+            .position(VillageMapLayout.point(VillageMapLayout.creator, in: size))
             .accessibilityLabel("Åbn Skaberens kontor")
             ForEach(placements) { placement in
                 botNode(placement.bot, at: placement.foot)
             }
+            VillageMapForeground(night: night)
+            VillageWindowLights(night: night)
         }
         .frame(width: size.width, height: size.height)
     }
@@ -138,13 +198,13 @@ import UIKit
                 Text(VillageCopy.pcUnavailable)
                     .font(.caption2.weight(.semibold))
                     .padding(8)
-                    .background(.ultraThinMaterial, in: Capsule())
+                    .fadedGlassSurface(tint: FadedBrand.panel)
             }
             if let banner, !banner.isEmpty {
                 Text(banner)
                     .font(.caption2.weight(.semibold))
                     .padding(8)
-                    .background(.black.opacity(0.55), in: Capsule())
+                    .fadedGlassSurface(tint: FadedBrand.panel)
                     .foregroundStyle(.white)
             }
         }
@@ -242,9 +302,7 @@ import UIKit
     }
 
     private func buildingCenter(_ zone: VillageZoneID, size: CGSize) -> CGPoint {
-        let anchor = VillageLifeSimulator.mapPoint(zone: zone, size: size)
-        // The bottom anchor of each 192px building sprite is at y=176.
-        return CGPoint(x: anchor.x, y: anchor.y - 150 * (176 - 96) / 192)
+        VillageMapLayout.point(VillageMapLayout.building(zone), in: size)
     }
 
     private func propLayer(size: CGSize) -> some View {
@@ -273,14 +331,14 @@ import UIKit
         // Each bot keeps the same offset in every zone and along each route.
         let slots = [
             CGPoint(x: -20, y: 0), CGPoint(x: 20, y: 0),
-            CGPoint(x: -60, y: 0), CGPoint(x: 60, y: 0),
-            CGPoint(x: 0, y: -44), CGPoint(x: 0, y: 44),
-            CGPoint(x: -44, y: -44), CGPoint(x: 44, y: 44),
-            CGPoint(x: -44, y: 44), CGPoint(x: 44, y: -44)
+            CGPoint(x: -28, y: 10), CGPoint(x: 28, y: 10),
+            CGPoint(x: 0, y: -10), CGPoint(x: 0, y: 10),
+            CGPoint(x: -14, y: -10), CGPoint(x: 14, y: 10),
+            CGPoint(x: -14, y: 10), CGPoint(x: 14, y: -10)
         ]
         let spread = min(1, size.width / 330)
         return bots.sorted { $0.id < $1.id }.enumerated().map { index, bot in
-            let point = VillageLifeSimulator.interpolatedPoint(bot: bot, size: size)
+            let point = VillageMapLayout.foot(for: bot, in: size)
             let slot = slots[index % slots.count]
             return BotPlacement(bot: bot, foot: CGPoint(x: point.x + slot.x * spread, y: point.y + slot.y))
         }.sorted {
@@ -343,8 +401,8 @@ import UIKit
         }
         .buttonStyle(.plain)
         .foregroundStyle(.white)
-        // The 64px frames share foot y=60, i.e. 21pt below the center at this size.
-        .position(x: foot.x, y: foot.y - (young ? 15 : 21))
+        // Normalized artwork feet sit at y=114 of 128; keep their contact point on the path.
+        .position(x: foot.x, y: foot.y - (young ? 13 : 19))
         .accessibilityLabel(accessibilityText(for: bot))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: bot.zoneID)
         .animation(reduceMotion ? nil : .linear(duration: 0.25), value: bot.pathProgress)

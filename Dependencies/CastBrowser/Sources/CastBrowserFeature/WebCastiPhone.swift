@@ -5,6 +5,12 @@ import Combine
 import UIKit
 import AVFoundation
 
+public typealias CastPCRelay = @MainActor (URL, URL?) async throws -> URL
+
+enum CastMediaRoute: String {
+    case direct, pc, phone
+}
+
 @MainActor
 final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSessionManagerListener {
     @Published var recentCasts: [RecentCast] = []
@@ -74,7 +80,8 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
     @Published var canRetryCast = false
     private var observingCast = false
     var retryTarget: (video: VideoCandidate, position: Double)?
-    var preferPhoneStream = false
+    var mediaRoute = CastMediaRoute.direct
+    var pcRelay: CastPCRelay?
     var retryCount = 0
     var attemptID = UUID()
     var loadStarted: Date?
@@ -100,15 +107,20 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
     func retryCast() {
         guard let target = retryTarget else { return }
         retryCount = 0
-        preferPhoneStream = false
+        mediaRoute = .direct
         startCast(target.video, initialPosition: target.position)
     }
 
     func recoverCast(_ id: UUID) {
         guard id == attemptID, let target = retryTarget else { return }
-        // One direct attempt, then preserve the proven cookie-aware phone route.
-        if !preferPhoneStream {
-            preferPhoneStream = true
+        if mediaRoute == .direct, pcRelay != nil {
+            mediaRoute = .pc
+            addDiagnostic("TV’et kunne ikke hente kilden direkte. Prøver via PC…")
+            startCast(target.video, initialPosition: target.position)
+            return
+        }
+        if mediaRoute != .phone {
+            mediaRoute = .phone
             addDiagnostic("TV’et kunne ikke hente kilden direkte. Prøver via iPhone…")
             startCast(target.video, initialPosition: target.position)
             return
@@ -243,7 +255,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
 
     func castRecent(_ item: RecentCast) {
         retryCount = 0
-        preferPhoneStream = false
+        mediaRoute = .direct
         let position = resumePositions[resumeKey(for: item.video.title)] ?? 0
         startCast(item.video, initialPosition: position)
     }
@@ -264,7 +276,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
             return
         }
         retryCount = 0
-        preferPhoneStream = false
+        mediaRoute = .direct
         let key = resumeKey(for: video.title)
         if let saved = resumePositions[key], saved >= 15 {
             resumePromptVideo = video

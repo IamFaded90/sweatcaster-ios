@@ -329,128 +329,16 @@ private struct AppleComposer: UIViewControllerRepresentable {
     }
 }
 
-struct BotPhoneActionReview: View {
-    let action: BotPhoneAction
-    let jobID: UUID
-    let botName: String
-    let onApplied: () -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var title: String
-    @State private var date: Date
-    @State private var endDate: Date
-    @State private var location: String
-    @State private var usesDate: Bool
-    @State private var busy = false
-    @State private var issue: String?
-
-    init(action: BotPhoneAction, jobID: UUID, botName: String, onApplied: @escaping () -> Void) {
-        self.action = action
-        self.jobID = jobID
-        self.botName = botName
-        self.onApplied = onApplied
-        let proposed = action.localDate.flatMap { BotPhoneAction.localFormatter().date(from: $0) }
-        _title = State(initialValue: action.title)
-        _usesDate = State(initialValue: action.kind != .reminder || action.localDate != nil || action.needsDate == true)
-        _date = State(initialValue: proposed ?? .now)
-        let proposedEnd = action.endDate.flatMap { BotPhoneAction.localFormatter().date(from: $0) }
-        _endDate = State(initialValue: proposedEnd ?? (proposed ?? .now).addingTimeInterval(1800))
-        _location = State(initialValue: action.location ?? "")
-        if action.localDate != nil && proposed == nil {
-            _issue = State(initialValue: "Bottens tidspunkt kunne ikke læses. Vælg det rigtige tidspunkt.")
-        } else if action.needsDate == true {
-            _issue = State(initialValue: "Mailen mangler et sikkert tidspunkt. Hvornår er aftalen?")
-        }
-    }
-
-    static var supportsAlarms: Bool {
-        #if canImport(AlarmKit)
-        if #available(iOS 26.0, *) { return true }
-        #endif
-        return false
-    }
-
-    private var dated: Bool { action.kind != .reminder || usesDate }
-    private var cleanTitle: String { title.trimmingCharacters(in: .whitespacesAndNewlines) }
-    private var validEnd: Bool { action.kind != .calendar || endDate > date }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Forslag fra \(botName)") {
-                    TextField("Titel", text: $title)
-                    if action.kind == .reminder { Toggle("Med tidspunkt", isOn: $usesDate) }
-                    if dated {
-                        DatePicker(action.kind == .calendar ? "Start" : "Tidspunkt", selection: $date)
-                        if date <= .now { Text("Vælg et tidspunkt frem i tiden.").foregroundStyle(.secondary) }
-                    }
-                    if action.kind == .calendar {
-                        DatePicker("Slut", selection: $endDate)
-                        TextField("Sted (valgfrit)", text: $location)
-                        if !validEnd { Text("Sluttid skal være efter start.").foregroundStyle(.secondary) }
-                    }
-                }
-                Button("Godkend og opret", systemImage: "checkmark") { Task { await apply() } }
-                    .disabled(busy || cleanTitle.isEmpty || cleanTitle.count > 120 || !validEnd || (dated && date <= .now))
-                if busy { ProgressView() }
-                if let issue { Text(issue).foregroundStyle(.secondary) }
-            }
-            .navigationTitle(action.kind.title)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Luk") { dismiss() }.disabled(busy)
-                }
-            }
-            .interactiveDismissDisabled(busy)
-        }
-    }
-
-    @MainActor private func apply() async {
-        let requestedTitle = cleanTitle
-        let requestedDate = dated ? date : nil
-        guard !busy, !requestedTitle.isEmpty, requestedTitle.count <= 120, validEnd else { return }
-        if let requestedDate, requestedDate <= .now {
-            issue = "Vælg et tidspunkt frem i tiden."
-            return
-        }
-        busy = true
-        issue = nil
-        defer { busy = false }
-        do {
-            switch action.kind {
-            case .calendar:
-                guard let requestedDate else { throw PhoneActions.Failure.expired }
-                try await PhoneActions.saveEvent(title: requestedTitle, start: requestedDate, end: endDate,
-                                                location: String(location.prefix(240)), jobID: jobID, store: EKEventStore())
-            case .reminder:
-                try await PhoneActions.saveReminder(title: requestedTitle, due: requestedDate, jobID: jobID,
-                                                    store: EKEventStore())
-            case .alarm:
-                #if canImport(AlarmKit)
-                if #available(iOS 26.0, *), let requestedDate {
-                    try await PhoneActions.scheduleAlarm(title: requestedTitle, date: requestedDate, id: jobID)
-                } else {
-                    throw PhoneActions.Failure.unsupportedAlarm
-                }
-                #else
-                throw PhoneActions.Failure.unsupportedAlarm
-                #endif
-            }
-            onApplied()
-            dismiss()
-        } catch {
-            issue = (error as? PhoneActions.Failure)?.message ?? "Kunne ikke oprette \(action.kind.title.lowercased()). Prøv igen."
-        }
-    }
-}
-
-@MainActor private enum PhoneActions {
+@MainActor enum PhoneActions {
     enum Failure: Error {
-        case calendarPermission, calendarMissing, reminderPermission, reminderList, unsupportedAlarm, alarmPermission, expired
+        case calendarPermission, calendarReadPermission, calendarConflict, calendarMissing
+        case reminderPermission, reminderList, unsupportedAlarm, alarmPermission, expired
 
         var message: String {
             switch self {
             case .calendarPermission: "Giv FadedAI adgang til at oprette aftaler i iPhone-indstillinger."
+            case .calendarReadPermission: "Giv FadedAI fuld kalenderadgang i iPhone-indstillinger for at finde ledige tider."
+            case .calendarConflict: "Der ligger en aftale i tidsrummet. Vælg en anden tid."
             case .calendarMissing: "Vælg en standardkalender på din iPhone."
             case .reminderPermission: "Giv FadedAI adgang til Påmindelser i iPhone-indstillinger."
             case .reminderList: "Opret eller vælg en standardliste i Påmindelser på din iPhone."
@@ -462,18 +350,23 @@ struct BotPhoneActionReview: View {
     }
 
     static func saveEvent(title: String, start: Date, end: Date, location: String,
-                          jobID: UUID, store: EKEventStore) async throws {
-        let fullAccess = EKEventStore.authorizationStatus(for: .event) == .fullAccess
-        if !fullAccess {
+                          jobID: UUID, store: EKEventStore, requiresAvailableTime: Bool = false) async throws {
+        if requiresAvailableTime {
+            guard try await store.requestFullAccessToEvents() else { throw Failure.calendarReadPermission }
+        } else if EKEventStore.authorizationStatus(for: .event) != .fullAccess {
             guard try await store.requestWriteOnlyAccessToEvents() else { throw Failure.calendarPermission }
         }
         guard start > .now, end > start else { throw Failure.expired }
         guard let calendar = store.defaultCalendarForNewEvents else { throw Failure.calendarMissing }
         let marker = URL(string: "fadedai://bot-action/\(jobID.uuidString.lowercased())")
-        if fullAccess, let marker {
+        if EKEventStore.authorizationStatus(for: .event) == .fullAccess, let marker {
             let predicate = store.predicateForEvents(withStart: start.addingTimeInterval(-86400),
                                                      end: end.addingTimeInterval(86400), calendars: nil)
             if store.events(matching: predicate).contains(where: { $0.url == marker }) { return }
+        }
+        if requiresAvailableTime,
+           !AgentCalendarAvailability.blockingEvents(in: DateInterval(start: start, end: end), store: store).isEmpty {
+            throw Failure.calendarConflict
         }
         let event = EKEvent(eventStore: store)
         event.title = title
@@ -485,9 +378,13 @@ struct BotPhoneActionReview: View {
         try store.save(event, span: .thisEvent)
     }
 
-    static func saveReminder(title: String, due: Date?, jobID: UUID? = nil, store: EKEventStore) async throws {
+    static func saveReminder(title: String, due: Date?, jobID: UUID? = nil, store: EKEventStore,
+                             notes: String? = nil, preferredLists: [String] = []) async throws {
         guard try await store.requestFullAccessToReminders() else { throw Failure.reminderPermission }
-        guard let calendar = store.defaultCalendarForNewReminders() else { throw Failure.reminderList }
+        let preferred = preferredLists.isEmpty ? nil : store.calendars(for: .reminder).first { list in
+            list.allowsContentModifications && preferredLists.contains { list.title.localizedCaseInsensitiveCompare($0) == .orderedSame }
+        }
+        guard let calendar = preferred ?? store.defaultCalendarForNewReminders() else { throw Failure.reminderList }
         let reminder = EKReminder(eventStore: store)
         if let jobID, let marker = URL(string: "fadedai://bot-action/\(jobID.uuidString.lowercased())") {
             let alreadySaved = await withCheckedContinuation { continuation in
@@ -510,6 +407,7 @@ struct BotPhoneActionReview: View {
         }
         reminder.calendar = calendar
         reminder.title = title
+        reminder.notes = notes.map { String($0.prefix(2_000)) }
         try store.save(reminder, commit: true)
     }
 

@@ -5,15 +5,22 @@ from __future__ import annotations
 import math
 import os
 import re
+import shutil
 import sqlite3
+import stat
 import struct
 import subprocess
 import tempfile
 from contextlib import closing
 from pathlib import Path, PurePosixPath
+from threading import RLock
 
 
 class RepositoryError(ValueError):
+    pass
+
+
+class RepositoryInUse(RepositoryError):
     pass
 
 
@@ -22,6 +29,8 @@ _SOURCE = {".swift", ".py", ".js", ".ts", ".tsx", ".rs", ".go", ".java", ".md", 
 
 
 class RepositoryLibrary:
+    snapshot_changes = RLock()
+
     def __init__(self, workspace: Path, database: Path, embed):
         self.workspace = workspace.resolve()
         self.database = database
@@ -62,6 +71,10 @@ class RepositoryLibrary:
         return result.stdout
 
     def clone(self, slug: str) -> str:
+        with self.snapshot_changes:
+            return self._clone(slug)
+
+    def _clone(self, slug: str) -> str:
         target = self._repo(slug)
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
@@ -72,6 +85,47 @@ class RepositoryLibrary:
                       f"https://github.com/{slug}.git", "snapshot", timeout=180)
             (parent / "snapshot").rename(target)
         return slug.lower()
+
+    def remove_snapshot(self, slug: str) -> bool:
+        if not self.snapshot_changes.acquire(blocking=False):
+            raise RepositoryInUse("Vent til PC’en er færdig med Git-arbejdet.")
+        try:
+            repo = self._repo(slug)
+            if not repo.exists():
+                return False
+            self._head(slug)
+            if self._git(repo, "rev-parse", "--is-bare-repository").strip() != b"true":
+                raise RepositoryError("Kun FadedAI’s lokale Git-kopi kan slettes her.")
+            origin = self._git(repo, "config", "--local", "--get", "remote.origin.url").decode().strip()
+            if origin.lower() != f"https://github.com/{slug.lower()}.git":
+                raise RepositoryError("Git-kopiens oprindelse matcher ikke det valgte GitHub-projekt.")
+            head = self._git(repo, "symbolic-ref", "HEAD").strip()
+            refs = self._git(repo, "for-each-ref", "--format=%(refname)").splitlines()
+            worktrees = self._git(repo, "worktree", "list", "--porcelain").splitlines()
+            if refs != [head] or sum(line.startswith(b"worktree ") for line in worktrees) != 1:
+                raise RepositoryInUse("Den lokale kopi har ekstra grene eller arbejdsmapper. Behold kopien.")
+            with closing(self._connect()) as db, db:
+                db.execute("DELETE FROM code_chunks WHERE repo = ?", (slug.lower(),))
+                def delete_read_only_file(unlink, path, error_info):
+                    error = error_info[1]
+                    if os.name != "nt" or unlink is not os.unlink or not isinstance(error, PermissionError):
+                        raise error
+                    file = Path(path)
+                    flags = file.lstat()
+                    if (not stat.S_ISREG(flags.st_mode) or flags.st_mode & stat.S_IWRITE
+                            or flags.st_nlink != 1 or not file.resolve().is_relative_to(repo)):
+                        raise error
+                    file.chmod(flags.st_mode | stat.S_IWRITE)
+                    try:
+                        unlink(file)
+                    except OSError:
+                        file.chmod(flags.st_mode)
+                        raise
+
+                shutil.rmtree(repo, onerror=delete_read_only_file)
+            return True
+        finally:
+            self.snapshot_changes.release()
 
     def _head(self, slug: str) -> tuple[Path, str]:
         repo = self._repo(slug)
@@ -84,6 +138,10 @@ class RepositoryLibrary:
         return repo, revision
 
     def refresh(self, slug: str) -> str:
+        with self.snapshot_changes:
+            return self._refresh(slug)
+
+    def _refresh(self, slug: str) -> str:
         repo, base = self._head(slug)
         if self._git(repo, "rev-parse", "--is-bare-repository").strip() != b"true":
             raise RepositoryError("GitHub-opdatering kræver et isoleret Git-snapshot.")
@@ -142,6 +200,10 @@ class RepositoryLibrary:
         return result
 
     def index(self, slug: str) -> dict:
+        with self.snapshot_changes:
+            return self._index(slug)
+
+    def _index(self, slug: str) -> dict:
         repo, revision = self._head(slug)
         chunks = []
         for path, oid in self._files(repo, revision):

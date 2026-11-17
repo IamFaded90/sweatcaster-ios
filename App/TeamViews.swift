@@ -118,7 +118,7 @@ struct TeamRoster: View {
             } else { expandedSidebar.padding(FadedSpacing.edge) }
         }
         .background { FadedBackground() }
-        .background(.ultraThinMaterial)
+        .fadedGlassSurface(radius: FadedRadius.card)
         .overlay(alignment: .trailing) { Rectangle().fill(palette.border).frame(width: 1).accessibilityHidden(true) }
         .task(id: "\(api?.queueTargetID ?? ""):\(phase):\(refresh)") {
             guard phase == .active, api != nil else { return }
@@ -161,7 +161,7 @@ struct TeamRoster: View {
                     }
                 }
             case .workflow(let mode):
-                navigationSheet { TeamWorkflowView(mode: mode, bots: bots) }
+                navigationSheet { TeamWorkflowView(mode: mode, bots: bots, api: api) }
             case .notebook(let bot):
                 navigationSheet { TeamBotNotebook(botID: bot.id) }
             case .routines:

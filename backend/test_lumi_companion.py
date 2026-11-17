@@ -2,6 +2,7 @@
 
 import base64
 from io import BytesIO
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -9,6 +10,42 @@ from PIL import Image
 from sweatcaster.api import create_app
 from sweatcaster import lumi_companion
 from tests.conftest import make_settings
+
+
+def test_removing_lumi_video_only_deletes_its_owned_webm(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path)
+    job_id = str(uuid4())
+    jobs = {job_id: {"status": "working"}}
+    monkeypatch.setattr(lumi_companion, "_video_jobs", jobs)
+    root = tmp_path / "output"
+    folder = root / lumi_companion.VIDEO_OUTPUT_FOLDER
+    folder.mkdir(parents=True)
+    monkeypatch.setenv("FADEDAI_COMFY_OUTPUT_DIR", str(root))
+    output = folder / f"{job_id}_00001_.webm"
+    other_video = folder / f"{uuid4()}_00001_.webm"
+    reference = folder / f"{job_id}_00001_.png"
+    legacy = root / "FadedAI_Lumi_00001_.webm"
+    for file in (other_video, reference, legacy):
+        file.write_bytes(b"keep")
+
+    def render(_prompt, *, output_id):
+        assert output_id == job_id
+        output.write_bytes(b"video")
+        return b"mp4"
+
+    monkeypatch.setattr(lumi_companion, "video", render)
+    client = TestClient(create_app(settings))
+    stable = f"/api/modules/v1/lumi/{lumi_companion.LUMI_ID}/video/{job_id}"
+    paired = {"Authorization": "Bearer " + settings.token}
+    assert client.put(stable + "/remove").status_code == 401
+    assert client.put(stable.replace(lumi_companion.LUMI_ID, str(uuid4())) + "/remove", headers=paired).status_code == 404
+    assert client.put(stable + "/remove", headers=paired).status_code == 409
+    lumi_companion._render_video(job_id, "Et hav.")
+    assert client.get(stable, headers=paired).json()["removable"] is True
+    assert client.put(stable + "/remove", headers=paired).json() == {"ok": True}
+    assert client.put(stable + "/remove", headers=paired).json() == {"ok": True}
+    assert client.get(stable + "/file", headers=paired).status_code == 404
+    assert not output.exists() and all(file.read_bytes() == b"keep" for file in (other_video, reference, legacy))
 
 
 def test_only_paired_lumi_can_use_private_model(tmp_path, monkeypatch):
@@ -111,8 +148,11 @@ def test_scene_chat_resumes_dialogue_with_selected_roles_and_initiative(tmp_path
 
 def test_reference_reaches_comfy_temp_storage_and_is_encoded_into_latent():
     output = BytesIO()
-    Image.new("RGB", (128, 96), "teal").save(output, "PNG")
+    sample = Image.new("RGB", (128, 96), "teal")
+    sample.save(output, "PNG")
     png = output.getvalue()
+    jpeg = BytesIO()
+    sample.save(jpeg, "JPEG")
 
     class Reply:
         content = png
@@ -156,4 +196,4 @@ def test_reference_reaches_comfy_temp_storage_and_is_encoded_into_latent():
             assert url.endswith("/view") and options["params"]["type"] == "temp"
             return Reply({})
 
-    assert lumi_companion.image("Et fyrtårn", reference=base64.b64encode(png).decode(), client=Comfy()) == png
+    assert lumi_companion.image("Et fyrtårn", reference=base64.b64encode(jpeg.getvalue()).decode(), client=Comfy()) == png

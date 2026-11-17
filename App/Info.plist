@@ -29,10 +29,10 @@
     <string>Appen bruger dit lokale netværk til din PC, Chromecast og valgfri deling af en model fra iPhone.</string>
     <key>NSBonjourServices</key>
     <array><string>_googlecast._tcp</string><string>_CC1AD845._googlecast._tcp</string></array>
-    <key>NSFaceIDUsageDescription</key><string>Face ID beskytter dit lokale studie, godkender kodeforslag og gendannelse af dine data.</string>
-    <key>NSCameraUsageDescription</key><string>Kameraet scanner din PC-forbindelseskode og de værelser, du vælger at gemme.</string>
+    <key>NSFaceIDUsageDescription</key><string>Face ID beskytter dit lokale studie og godkender mailafsendelse, kodeforslag og gendannelse af dine data.</string>
+    <key>NSCameraUsageDescription</key><string>Kameraet bruges til videooptagelse, PC-parring og rumscanning, når du vælger det.</string>
     <key>NSPhotoLibraryAddUsageDescription</key><string>FadedAI gemmer billeder i Fotos, når du trykker Gem eller slår automatisk lagring til.</string>
-    <key>NSMicrophoneUsageDescription</key><string>Mikrofonen bruges, når du dikterer en chatbesked.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Mikrofonen bruges til chatdiktering og lyd på dine videooptagelser.</string>
     <key>NSSpeechRecognitionUsageDescription</key><string>FadedAI bruger lokal talegenkendelse til at skrive din chatkladde.</string>
     <key>NSCalendarsFullAccessUsageDescription</key><string>FadedAI viser kommende aftaler, når du vælger at åbne din kalender.</string>
     <key>NSCalendarsWriteOnlyAccessUsageDescription</key><string>FadedAI tilføjer kalenderaftaler, som du godkender.</string>

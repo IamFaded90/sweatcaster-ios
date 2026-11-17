@@ -3,6 +3,7 @@ import AVKit
 import AVFAudio
 import PhotosUI
 import SwiftUI
+import UIKit
 
 /// Lumi has a separate screen and a fixed PC route; ordinary bot chats never select her models.
 @MainActor struct LumiStudio: View {
@@ -34,6 +35,8 @@ import SwiftUI
     @Environment(\.scenePhase) var phase
     @State var messages: [LumiSceneMessage] = []
     @State var sceneCard: LumiSceneCard?
+    @State var openedSceneExpiry: Date?
+    @State var sceneRevision = UUID()
     @State var initiative: LumiInitiative = .together
     @State var scenes: [LumiSavedScene] = []
     @State var saveSceneTemporarily = false
@@ -49,6 +52,10 @@ import SwiftUI
     @State var loadingReference = false
     @State var videoPlayer: AVPlayer?
     @State var videoFile: URL?
+    @State var videoResultID: UUID?
+    @State var confirmVideoRemoval = false
+    @State var scratchID = UUID()
+    @State var studioRevision = UUID()
     @State var busy = false
     @State var notice: String?
 
@@ -131,15 +138,10 @@ import SwiftUI
                 loadScenes()
                 await resumeVideoIfNeeded()
             }
-            .task(id: scenes.compactMap(\.expiresAt).min()) {
-                guard let expiry = scenes.compactMap(\.expiresAt).min() else { return }
-                do { try await Task.sleep(for: .seconds(max(0, expiry.timeIntervalSinceNow))) }
-                catch { return }
-                loadScenes()
-            }
+            .task(id: nextSceneExpiry) { await waitForSceneExpiry() }
             .sheet(isPresented: $showVoicePicker) {
                 AgentVoicePicker(botID: VillageBot.lumiID, name: "Lumi", inheritedVoice: inheritedVoice, rate: 1,
-                                 selection: $voiceOverride, language: $voiceLanguage)
+                                 api: api, selection: $voiceOverride, language: $voiceLanguage)
             }
             .onChange(of: mode) {
                 composerFocused = false
@@ -149,7 +151,8 @@ import SwiftUI
                 if phase == .active { loadScenes() }
                 else { stopAudio() }
             }
-            .onDisappear { stopAudio() }
+            .onDisappear { discardStudioSession() }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in loadScenes() }
             .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { _ in stopAudio() }
         }
     }
@@ -176,17 +179,35 @@ import SwiftUI
                         Label("Gem eller del billede", systemImage: "square.and.arrow.up")
                             .frame(minHeight: 44)
                     }
+                    Button("Slet billede på iPhone", systemImage: "trash", role: .destructive) { deletePreview(isVideo: false) }
+                        .frame(minHeight: 44)
+                        .disabled(busy)
                 }
-            } else if let videoPlayer {
-                VideoPlayer(player: videoPlayer).frame(height: 300)
-                if let videoFile {
+            } else {
+                if let videoPlayer, let videoFile {
+                    VideoPlayer(player: videoPlayer).frame(height: 300)
                     ShareLink(item: videoFile) {
                         Label("Gem eller del video", systemImage: "square.and.arrow.up")
                             .frame(minHeight: 44)
                     }
+                    Button("Slet kopi på iPhone", systemImage: "trash", role: .destructive) { deletePreview(isVideo: true) }
+                        .frame(minHeight: 44)
+                        .disabled(busy)
+                } else if videoResultID == nil {
+                    FadedDetailText("Lav et kort klip med PC’en. Det kan tage flere minutter.")
                 }
-            } else {
-                FadedDetailText("Lav et kort klip med PC’en. Det kan tage flere minutter.")
+                if videoResultID != nil {
+                    Button("Slet video fra PC og iPhone", systemImage: "trash", role: .destructive) {
+                        confirmVideoRemoval = true
+                    }
+                    .frame(minHeight: 44)
+                    .disabled(busy || api == nil)
+                    .confirmationDialog("Slet videoen?", isPresented: $confirmVideoRemoval) {
+                        Button("Slet video", role: .destructive, action: deleteVideoResult)
+                    } message: {
+                        Text("Det genererede resultat slettes. Kopier, du selv har eksporteret, bliver liggende.")
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -252,14 +273,23 @@ import SwiftUI
 
     func replyAudio(_ text: String, language: String) -> some View {
         let locale = LocalSpeechVoice.detectedReplyLanguage(text) ?? language
-        let voice = AgentVoiceSelection.resolve(identifier: voiceOverride.isEmpty ? inheritedVoice : voiceOverride,
-                                                 language: locale)
+        let identifier = voiceOverride.isEmpty ? inheritedVoice : voiceOverride
+        let pcVoice = AgentPCVoice(rawValue: identifier)
+        let voice = AgentVoiceSelection.resolve(identifier: identifier, language: locale)
+        let name = pcVoice?.name ?? voice?.name
         return VStack(alignment: .leading, spacing: 2) {
-            Button(voice.map { "Læs med " + $0.name } ?? "Vælg en stemme", systemImage: "speaker.wave.2") {
+            Button(name.map { "Læs med " + $0 } ?? "Vælg en stemme", systemImage: "speaker.wave.2") {
                 dictation.stop()
+                let text = LocalSpeechVoice.replyText(text)
+                if let pcVoice {
+                    speech.stop()
+                    guard let api else { notice = "Forbind PC’en, eller vælg en iPhone-stemme."; return }
+                    christel.playAgentVoice(text: text, voice: pcVoice, agentID: VillageBot.lumiID, pc: api)
+                    return
+                }
                 christel.stop()
                 guard let voice else { notice = AgentVoiceSelection.unavailable; showVoicePicker = true; return }
-                speech.play(LocalSpeechVoice.utterance(LocalSpeechVoice.replyText(text), voice: voice, rate: 1),
+                speech.play(LocalSpeechVoice.utterance(text, voice: voice, rate: 1),
                             as: .preview, agentID: VillageBot.lumiID)
             }
             .frame(minHeight: 44)

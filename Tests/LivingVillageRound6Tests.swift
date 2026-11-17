@@ -366,6 +366,8 @@ import XCTest
         XCTAssertEqual(reopened.states[eva.id]?.social, 53)
 
         engine.setPaused(true)
+        let restoredPause = SimulationEngine(repository: repo, defaults: defaults, store: saved, runsLoop: false)
+        XCTAssertTrue(restoredPause.isPaused)
         time = time.addingTimeInterval(1800)
         engine.tick()
         XCTAssertEqual(engine.states[adam.id]?.energy, 100)

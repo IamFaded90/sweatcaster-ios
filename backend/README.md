@@ -68,6 +68,8 @@ Copy `sweatcaster/code_batch.py` into the same installed Python package as `repo
 
 The queue persists under the PC output directory. The worker starts with the PC HTTP server after installing the module hooks. It serializes jobs and acquires the existing Ollama model lease shared with chat and rendering. A job produces a unified diff for up to five selected tracked files and a test plan. In the compatible iOS app, open **Code Bot → Forslag til flere filer** to submit and review jobs. Approval creates a local `fadedai/review-*` branch in the bare repository snapshot. The source branch remains unchanged. `worker --once` is also available for standalone diagnostics.
 
+Set `FADEDAI_CODE_BATCH_ENGINE=crewai` and point `FADEDAI_CREW_PYTHON` to a separate Python environment with `backend/requirements-crewai.txt` installed to enable draft and review. The dispatcher requests both model calls from the running FadedAI process, which retains the existing Ollama lease and proposal approvals. If the dispatcher cannot start, the existing single-pass proposal path remains available. An interrupted review is reported as a failed proposal or requeued when the model is busy.
+
 ## Forbindelse med QR
 
 Brug **FadedAI – Scan QR** på skrivebordet, hvis genvejen er installeret. Som alternativ kan du åbne Windows Terminal i projektmappen og køre QR-værktøjet med Python-pakken `qrcode`.
@@ -80,3 +82,18 @@ python backend/show_pairing_qr.py 192.168.1.50
 Brug PC’ens egen LAN- eller Tailscale-adresse. Indsæt det eksisterende token i den skjulte prompt, eller tilføj `--token-file 'D:\FadedAIData\PAIRING_TOKEN.txt'` med stien til tokenfilen. Vælg **Scan QR fra PC’en** på iPhonen, og tryk derefter **Test og Forbind**.
 
 Åbn en ny QR-kode, hvis de fem minutter er gået. Vis koden på din egen skærm, og luk terminalvisningen med Enter efter scanning. Forstør vinduet, hvis koden ikke kan være der.
+- **Google Drive direkte.** Aktivér Google Drive API i Google Cloud-projektet til din Desktop OAuth-klient. Start `python setup_youtube_windows.pyw --drive` under samme Windows-bruger som FadedAI, vælg klientfilen, og godkend læsning af filnavne hos Google. Åbn **Forbindelser → Tjenester på PC’en → Google Drive direkte** på iPhone. Dokumentlinks åbnes hos Google. FadedAI læser mappenavne og filnavne gennem den parrede PC og gemmer login krypteret på PC’en.
+### Kreativt Studio · 3D på PC
+
+**Generér 3D på PC** bruger den eksisterende parring. Shap-E kan tage tekst eller ét billede. Blender pakker modellen som USDZ, så iPhone kan vise og dele den. Der kan køre ét 3D-job ad gangen. Hvis forbindelsen afbrydes, kan samme afsendelse gentages med samme id.
+
+Start PC-backenden med disse lokale stier, når de tilsvarende programmer er installeret.
+
+| Indstilling | Lokal sti |
+| --- | --- |
+| `FADEDAI_BLENDER` | Blender med USDZ-eksport |
+| `FADEDAI_SHAPE_PYTHON` | Python-miljø med Shap-E og dets afhængigheder |
+| `FADEDAI_SHAPE_CACHE` | Valgfri særskilt mappe til Shap-E-vægtene |
+| `FADEDAI_SHAPE_IMPORTS` | Valgfrie mapper med separate Python-biblioteker til Shap-E. Brug semikolon mellem absolutte stier på Windows. |
+
+PC’en behandler teksten og referencebilledet lokalt. Førstegangsopsætningen kan hente modelvægte. Det færdige USDZ ligger på PC’en og kan hentes igen i appen. [Shap-E](https://github.com/openai/shap-e) · [Blender USDZ](https://docs.blender.org/manual/en/dev/files/import_export/usd.html)

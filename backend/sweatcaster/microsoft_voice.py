@@ -5,7 +5,9 @@ import json
 import os
 from pathlib import Path
 import re
-from tempfile import NamedTemporaryFile
+import shutil
+import subprocess
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from xml.sax.saxutils import escape
 
 import requests
@@ -121,3 +123,94 @@ def register_christel(app, settings, authorize):
         authorize(request, settings)
         response.headers["Cache-Control"] = "no-store"
         return synthesize(body.get("text"))
+
+    @app.put("/api/modules/v1/kokoro", include_in_schema=False)
+    def local_play(request: Request, response: Response, body: dict = Body(...)):
+        authorize(request, settings)
+        response.headers["Cache-Control"] = "no-store"
+        return synthesize_local(body.get("text"), body.get("voice"))
+
+    @app.get("/api/modules/v1/agent-local-voices", include_in_schema=False)
+    def local_voices(request: Request, response: Response):
+        from sweatcaster.kokoro_voice import kokoro_ready
+
+        authorize(request, settings)
+        response.headers["Cache-Control"] = "no-store"
+        voices = ["piper-da"] if danish_piper(settings) else []
+        if kokoro_ready()[0]:
+            voices += ["kokoro-heart", "kokoro-michael"]
+        return {"voices": voices}
+
+    @app.put("/api/modules/v1/agent-local-voices", include_in_schema=False)
+    def local_agent_speech(request: Request, response: Response, body: dict = Body(...)):
+        authorize(request, settings)
+        response.headers["Cache-Control"] = "no-store"
+        if body.get("voice") == "piper-da":
+            return synthesize_danish(body.get("text"), settings)
+        kokoro_voice = {"kokoro-heart": "af_heart", "kokoro-michael": "am_michael"}.get(
+            body.get("voice") if isinstance(body.get("voice"), str) else ""
+        )
+        if kokoro_voice is None:
+            raise ApiError(422, "INVALID_INPUT", "Vælg en dansk eller engelsk PC-stemme.")
+        return synthesize_local(body.get("text"), kokoro_voice)
+
+
+def danish_piper(settings):
+    model_name = "da_DK-talesyntese-medium.onnx"
+    asset_root = os.environ.get("FADEDAI_ASSET_ROOT")
+    roots = ([Path(asset_root)] if asset_root else []) + [Path("F:/FadedAI"), Path("H:/FadedAI")]
+    config_model = getattr(settings, "piper_model", None)
+    candidates = [root / "FadedBot-voice" / "models" / model_name for root in roots]
+    if config_model is not None and config_model.name == model_name:
+        candidates.insert(0, config_model)
+    model = next((path for path in candidates if path.is_file() and path.with_suffix(".onnx.json").is_file()), None)
+    configured_bin = getattr(settings, "piper_bin", "piper")
+    windows_bin = Path(os.environ.get("LOCALAPPDATA", "")) / "SweatCaster/bin/piper/piper.exe"
+    binary = shutil.which(configured_bin) or (str(windows_bin) if windows_bin.is_file() else None)
+    return (binary, model) if binary and model is not None else None
+
+
+def synthesize_danish(text, settings):
+    from sweatcaster.tts import piper_command
+
+    if not isinstance(text, str) or not 1 <= len(text.strip()) <= 500:
+        raise ApiError(422, "INVALID_INPUT", "Vælg op til 500 tegn dansk tekst.")
+    installation = danish_piper(settings)
+    if installation is None:
+        raise ApiError(503, "NOT_READY", "Den danske stemmepakke mangler på den parrede PC.")
+    binary, model = installation
+    try:
+        with TemporaryDirectory(prefix="fadedai-piper-") as directory:
+            audio = Path(directory) / "reply.wav"
+            result = subprocess.run(piper_command(binary, model, audio), input=text.strip().encode("utf-8"),
+                                    capture_output=True, check=False, timeout=45,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if result.returncode:
+                raise ValueError("Piper did not produce audio.")
+            with audio.open("rb") as handle:
+                data = handle.read(4_000_001)
+            if not 44 < len(data) <= 4_000_000 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+                raise ValueError("Invalid WAV.")
+            return {"audio": b64encode(data).decode("ascii")}
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise ApiError(503, "NOT_READY", "Den danske PC-stemme kunne ikke læse teksten op.") from exc
+
+
+def synthesize_local(text, voice):
+    from sweatcaster.kokoro_voice import CHAT_VOICES, KokoroSynthesisError, kokoro_ready, synthesize_kokoro
+
+    if not isinstance(text, str) or not 1 <= len(text.strip()) <= 500 or voice not in CHAT_VOICES:
+        raise ApiError(422, "INVALID_INPUT", "Vælg en Kokoro-stemme og op til 500 tegn engelsk tekst.")
+    if not kokoro_ready()[0]:
+        raise ApiError(503, "NOT_READY", "Kokoro eller stemmepakken mangler på den parrede PC.")
+    try:
+        with TemporaryDirectory(prefix="fadedai-voice-") as directory:
+            audio = Path(directory) / "reply.wav"
+            synthesize_kokoro(text.strip(), audio, voice=voice)
+            with audio.open("rb") as handle:
+                data = handle.read(4_000_001)
+            if not 44 < len(data) <= 4_000_000 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+                raise KokoroSynthesisError("Invalid WAV.")
+            return {"audio": b64encode(data).decode("ascii")}
+    except (OSError, KokoroSynthesisError) as exc:
+        raise ApiError(503, "NOT_READY", "Kokoro kunne ikke læse teksten op på PC’en.") from exc

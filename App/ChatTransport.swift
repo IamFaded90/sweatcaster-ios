@@ -128,6 +128,9 @@ extension ChatView {
                                                 modelID: route.modelID ?? phoneModel, turnID: turnID)
                     case .pc: try await answerOnPC(input, modelID: route.modelID, turnID: turnID)
                     case .grok: try await answerOnGrok(cloudMessages, turnID: turnID)
+                    case .openrouter: try await answerOnOpenRouter(outgoing, modelID: route.modelID ?? "openrouter/free", turnID: turnID)
+                    case .nvidia: try await answerOnComposio(outgoing, modelID: route.modelID ?? "", turnID: turnID, nvidia: true)
+                    case .composio: try await answerOnComposio(outgoing, modelID: route.modelID ?? "deepseek-chat", turnID: turnID)
                     }
                 }
                 if let index = turnIndex(turnID), turns[index].notice == nil {
@@ -281,10 +284,49 @@ extension ChatView {
     }
 
     func sourceIcon(_ source: String?) -> String {
-        switch source ?? "" {
+        if source?.contains("Composio") == true || source?.contains("NVIDIA") == true || source == "OpenRouter" { return "cloud" }
+        return switch source ?? "" {
         case "Telefon": "iphone"
         case GrokAPI.sourceLabel: "cloud"
         default: "desktopcomputer"
+        }
+    }
+
+    private func answerOnComposio(_ message: String, modelID: String, turnID: UUID, nvidia: Bool = false) async throws {
+        guard let index = turnIndex(turnID) else { return }
+        let name = modelID.hasPrefix("deepseek") ? "DeepSeek" : "Grok"
+        let source = nvidia ? NvidiaCloud.title(modelID) : name + " · Composio"
+        turns[index].source = source
+        turns[index].replyModelID = modelID
+        status = source + " · Venter på svar…"
+        var messages = [["role": "system", "content": "Svar på dansk. " + responsePreferences().joined(separator: ", ")]]
+        for turn in turns.filter({ $0.source == source && $0.notice == nil && !$0.reply.isEmpty }).suffix(4) {
+            messages.append(["role": "user", "content": String(turn.prompt.prefix(2000))])
+            messages.append(["role": "assistant", "content": String(turn.reply.prefix(3000))])
+        }
+        messages.append(["role": "user", "content": message])
+        let answer = try await nvidia
+            ? NvidiaCloud.reply(model: modelID, messages: messages)
+            : ComposioCloud.reply(model: modelID, messages: messages)
+        try Task.checkCancellation()
+        if let current = turnIndex(turnID) { turns[current].reply = safeText(answer, complete: true) }
+    }
+
+    private func answerOnOpenRouter(_ message: String, modelID: String, turnID: UUID) async throws {
+        guard let index = turnIndex(turnID) else { return }
+        turns[index].source = "OpenRouter"
+        status = OpenRouterCloud.title(modelID) + " · Venter på svar…"
+        var messages = [["role": "system", "content": "Svar på dansk. " + responsePreferences().joined(separator: ", ")]]
+        for turn in turns.filter({ $0.source == "OpenRouter" && $0.notice == nil && !$0.reply.isEmpty }).suffix(4) {
+            messages.append(["role": "user", "content": String(turn.prompt.prefix(2000))])
+            messages.append(["role": "assistant", "content": String(turn.reply.prefix(3000))])
+        }
+        messages.append(["role": "user", "content": message])
+        let result = try await OpenRouterCloud.reply(model: modelID, messages: messages)
+        try Task.checkCancellation()
+        if let current = turnIndex(turnID) {
+            turns[current].reply = safeText(result.text, complete: true)
+            turns[current].replyModelID = result.modelID
         }
     }
 

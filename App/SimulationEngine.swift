@@ -25,11 +25,14 @@ struct VillageSimulationSnapshot: Codable, Equatable {
     var states: [String: BotSimulationState]
     var jobHistory: [String: [UUID]]?
     var socialHistory: [String]?
+    var paused: Bool?
 
-    init(states: [UUID: BotSimulationState], jobHistory: [String: [UUID]]? = nil, socialHistory: [String]? = nil) {
+    init(states: [UUID: BotSimulationState], jobHistory: [String: [UUID]]? = nil,
+         socialHistory: [String]? = nil, paused: Bool? = nil) {
         self.states = Dictionary(uniqueKeysWithValues: states.map { ($0.key.uuidString, $0.value) })
         self.jobHistory = jobHistory
         self.socialHistory = socialHistory
+        self.paused = paused
     }
 
     func keyed() -> [UUID: BotSimulationState] {
@@ -110,6 +113,7 @@ enum VillageSeeder {
                 states = snapshot.keyed()
                 jobHistory = snapshot.jobHistory ?? [:]
                 socialHistory = Array((snapshot.socialHistory ?? []).suffix(500))
+                isPaused = snapshot.paused ?? false
             }
             catch { AppDiagnostics.record(error) }
         }
@@ -165,6 +169,7 @@ enum VillageSeeder {
         lastTick = clock()
         isPaused = paused
         if !paused { updateScheduledActivity(at: lastTick, elapsed: 0) }
+        persist()
     }
 
     func beginConversation(_ eventID: UUID, bots: [UUID]) {
@@ -267,7 +272,7 @@ enum VillageSeeder {
     private func persist() {
         do {
             store.save(try JSONEncoder().encode(
-                VillageSimulationSnapshot(states: states, jobHistory: jobHistory, socialHistory: socialHistory)
+                VillageSimulationSnapshot(states: states, jobHistory: jobHistory, socialHistory: socialHistory, paused: isPaused)
             ))
         }
         catch { AppDiagnostics.record(error) }

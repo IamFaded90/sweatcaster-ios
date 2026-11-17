@@ -65,16 +65,28 @@ enum LocalComputeError: Error { case busy, lowMemory }
     static let prefix = "FadedAI-Private-"
     private static var purgedAtLaunch = false
 
+    static func isLegacyLumiPreview(_ entry: URL) -> Bool {
+        let stem = entry.deletingPathExtension().lastPathComponent
+        return ["png", "mp4"].contains(entry.pathExtension) && stem.hasPrefix("lumi-") &&
+            UUID(uuidString: String(stem.dropFirst(5))) != nil
+    }
+
     static func purgeOnceAtLaunch() {
         guard !purgedAtLaunch else { return }
         purgedAtLaunch = true
         let manager = FileManager.default
         let root = manager.temporaryDirectory
-        guard let entries = try? manager.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return }
+        guard let entries = try? manager.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]
+        ) else { return }
         for entry in entries {
             let name = entry.lastPathComponent
+            guard let info = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isRegularFileKey, .isSymbolicLinkKey]) else { continue }
+            if isLegacyLumiPreview(entry), info.isRegularFile == true || info.isSymbolicLink == true {
+                try? manager.removeItem(at: entry)
+                continue
+            }
             guard name.hasPrefix(prefix), UUID(uuidString: String(name.dropFirst(prefix.count))) != nil,
-                  let info = try? entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
                   info.isDirectory == true, info.isSymbolicLink != true else { continue }
             try? manager.removeItem(at: entry)
         }
@@ -516,6 +528,10 @@ struct ResourceMonitor: View {
                             temporary: FileManager.default.temporaryDirectory)
         try Pairing.removeAll()
         CloudModelKey.remove()
+        ComposioCloudAccount.shared.remove()
+        NvidiaCloudAccount.shared.remove()
+        OpenRouterCloudAccount.shared.remove()
+        VeoCloudLibrary.shared.clearMemory()
         GGUFHubKey.remove()
         CastBrowserScreen.clearWebsiteData()
         let center = UNUserNotificationCenter.current()
@@ -523,6 +539,7 @@ struct ResourceMonitor: View {
         center.removeAllDeliveredNotifications()
         if let bundle = Bundle.main.bundleIdentifier { UserDefaults.standard.removePersistentDomain(forName: bundle) }
         MigratedAppData.shared.resetCachedValues()
+        VillageAvatarCache.clear()
         UserDefaults.standard.set(UUID().uuidString, forKey: AppStorageKeys.appResetGeneration)
     }
 
@@ -545,7 +562,9 @@ struct ResourceMonitor: View {
                 }
                 let isPrivateScratch = root == temporary && name.hasPrefix(StudioScratch.prefix) &&
                     UUID(uuidString: String(name.dropFirst(StudioScratch.prefix.count))) != nil
-                guard names.contains(name) || isPreview || isPrivateScratch else { continue }
+                let isLumiPreview = root == temporary && StudioScratch.isLegacyLumiPreview(child) &&
+                    (try? child.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) != true
+                guard names.contains(name) || isPreview || isPrivateScratch || isLumiPreview else { continue }
                 // Removing a link unlinks the directory entry; resolving it here would target another location.
                 try manager.removeItem(at: child)
             }

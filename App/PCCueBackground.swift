@@ -61,14 +61,20 @@ import UIKit
                 submit()
                 return
             }
-            guard !Task.isCancelled,
-                  let address = UserDefaults.standard.string(forKey: Pairing.addressKey),
+            guard let address = UserDefaults.standard.string(forKey: Pairing.addressKey),
                   let server = try? Server(address), let key = try? Pairing.load(address),
-                  let api = try? LiveAPI(server: server, token: key) else { return }
-            await PCChatOutbox().deliverReady(using: api)
-            guard !Task.isCancelled else { return }
+                  let api = try? LiveAPI(server: server, token: key) else {
+                if !UIApplication.shared.isProtectedDataAvailable { submit() }
+                return
+            }
+            if !Task.isCancelled { await PCChatOutbox().deliverReady(using: api) }
+            // Expiration can leave work waiting. Schedule a new run without marking this run successful.
+            guard UIApplication.shared.isProtectedDataAvailable else {
+                submit()
+                return
+            }
             let pending = PCChatOutbox().pendingCount(for: address, targetID: api.queueTargetID)
-            if pending > 0 { schedule(using: api) }
+            if pending > 0 { submit() }
             completed = pending == 0
         }
         running = work

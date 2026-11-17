@@ -214,6 +214,19 @@ def register_video_review(app, settings, authorize):
             file = Path(review.scratch.name) / "preview.mp4"
             return FileResponse(file, media_type="video/mp4", headers={"Cache-Control": "no-store"})
 
+    @router.delete("/{review_id}/preview")
+    def delete_preview(review_id: str):
+        with lock:
+            review = find(review_id)
+            if review.busy:
+                raise ApiError(409, "NOT_READY", "Vent på, at videojobbet bliver færdigt.")
+            try:
+                clean(review)
+            except OSError as exc:
+                raise ApiError(409, "NOT_READY", "Videoprøven er i brug. Prøv igen.") from exc
+            review.reviewed_lines = ()
+            return review.receipt()
+
     app.include_router(router)
 
     def waiting_for_review():

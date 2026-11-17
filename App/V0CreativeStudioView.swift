@@ -1,7 +1,10 @@
 // Klargør og eksporterer briefs til de eksisterende video- og billedværksteder.
 
+import AVFoundation
+import AVKit
 import Foundation
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 struct V0CreativeStudioView: View {
@@ -76,7 +79,21 @@ struct V0CreativeStudioView: View {
                 ideaCard
                 materialCard
                 expressionCard
+                NavigationLink {
+                    PCMeshGenerationView(api: api)
+                } label: {
+                    Label("Generér 3D på PC", systemImage: "cube")
+                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                }
+                .buttonStyle(FadedButtonStyle(kind: .secondary))
                 if page == .video {
+                    NavigationLink {
+                        FadedCaptureView()
+                    } label: {
+                        Label("FadedAI Kamera", systemImage: "video")
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    }
+                    .buttonStyle(FadedButtonStyle(kind: .secondary))
                     NavigationLink {
                         PCVideoGenerationView(api: api, initialPrompt: idea)
                     } label: {
@@ -221,6 +238,133 @@ struct V0CreativeStudioView: View {
         case .failure(let error):
             AppDiagnostics.record(error)
             notice = "Filnavnene kunne ikke tilføjes. Prøv at vælge dem igen."
+        }
+    }
+}
+
+@MainActor struct FadedCaptureView: View {
+    var modal = false
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var phase
+    @State private var capturing = false
+    @State private var requesting = false
+    @State private var clip: URL?
+    @State private var player: AVPlayer?
+    @State private var errorText: String?
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: FadedSpacing.m) {
+                if let player {
+                    VideoPlayer(player: player).frame(height: 260)
+                        .clipShape(.rect(cornerRadius: FadedRadius.medium))
+                }
+                if let clip {
+                    ShareLink(item: clip) { Label("Gem eller del optagelse", systemImage: "square.and.arrow.up") }
+                        .frame(minHeight: 44)
+                    Button("Kassér optagelse", role: .destructive, action: clear).frame(minHeight: 44)
+                } else {
+                    FadedDetailText("Optag op til ét minut. Gem klippet via delingsmenuen, før du lukker kameraet.")
+                    FadedPrimaryButton("Åbn kamera", icon: "video", action: begin)
+                        .disabled(requesting || !UIImagePickerController.isSourceTypeAvailable(.camera))
+                }
+                if let errorText { FadedDetailText(errorText) }
+                if !UIImagePickerController.isSourceTypeAvailable(.camera) {
+                    FadedDetailText("Denne enhed har intet tilgængeligt kamera.")
+                }
+            }
+            .padding(FadedSpacing.edge)
+            .frame(maxWidth: 580)
+            .frame(maxWidth: .infinity)
+        }
+        .background { FadedBackground() }
+        .navigationTitle("FadedAI Kamera")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            if modal { ToolbarItem(placement: .cancellationAction) { Button("Luk") { dismiss() } } }
+        }
+        .fullScreenCover(isPresented: $capturing) {
+            FadedVideoCapture { result in
+                capturing = false
+                switch result {
+                case .some(.success(let url)): clip = url; player = AVPlayer(url: url)
+                case .some(.failure): errorText = "Optagelsen kunne ikke klargøres. Prøv igen med et kortere klip."
+                case nil: break
+                }
+            }
+            .ignoresSafeArea()
+        }
+        .onChange(of: phase) { _, phase in if phase != .active { player?.pause() } }
+        .onDisappear { clear() }
+    }
+
+    private func begin() {
+        guard !requesting, UIImagePickerController.isSourceTypeAvailable(.camera) else { return }
+        requesting = true
+        Task {
+            defer { requesting = false }
+            guard await AVCaptureDevice.requestAccess(for: .video) else {
+                errorText = "Giv FadedAI kameraadgang i Indstillinger, og prøv igen."
+                return
+            }
+            guard await AVCaptureDevice.requestAccess(for: .audio) else {
+                errorText = "Giv FadedAI mikrofonadgang i Indstillinger for at optage med lyd."
+                return
+            }
+            errorText = nil
+            capturing = true
+        }
+    }
+
+    private func clear() {
+        player?.pause()
+        player = nil
+        if let clip { try? FileManager.default.removeItem(at: clip) }
+        clip = nil
+    }
+}
+
+@MainActor private struct FadedVideoCapture: UIViewControllerRepresentable {
+    let completed: (Result<URL, Error>?) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(completed: completed) }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let camera = UIImagePickerController()
+        camera.delegate = context.coordinator
+        camera.sourceType = .camera
+        camera.mediaTypes = [UTType.movie.identifier]
+        camera.cameraCaptureMode = .video
+        camera.videoMaximumDuration = 60
+        camera.videoQuality = .typeHigh
+        return camera
+    }
+
+    func updateUIViewController(_ camera: UIImagePickerController, context: Context) {}
+
+    @MainActor final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let completed: (Result<URL, Error>?) -> Void
+
+        init(completed: @escaping (Result<URL, Error>?) -> Void) { self.completed = completed }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) { completed(nil) }
+
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            guard let source = info[.mediaURL] as? URL else {
+                completed(.failure(LocalFileStore.Failure.invalidFile))
+                return
+            }
+            let file = URL.temporaryDirectory.appending(path: "FadedAI-\(UUID().uuidString).mov")
+            do {
+                _ = try LocalFileStore.checkedFileSize(source, maximumBytes: 450_000_000)
+                try FileManager.default.copyItem(at: source, to: file)
+                try LocalFileStore.protectFile(file)
+                completed(.success(file))
+            } catch {
+                try? FileManager.default.removeItem(at: file)
+                completed(.failure(error))
+            }
         }
     }
 }

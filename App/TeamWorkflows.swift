@@ -30,7 +30,7 @@ enum TeamWorkflowMode: String, Identifiable, Hashable {
 
     var detail: String {
         switch self {
-        case .group: "Vælg 2–6 bots. De svarer én ad gangen."
+        case .group: "Én agent giver hovedsvaret. De andre tilføjer nye pointer fra deres rolle."
         case .handoff: "Vælg en afsender og en modtager. Modtageren får afsenderens forslag."
         case .debate: "Fire roller vurderer samme spørgsmål og samler deres konklusion."
         case .chief: "Chief fordeler et mål i delopgaver og samler forslag fra tre roller."
@@ -64,6 +64,7 @@ private struct TeamWorkflowTurn: Identifiable {
         let id = UUID()
         let name: String
         var text = ""
+        var source: String? = nil
     }
 
     let id = UUID()
@@ -76,18 +77,6 @@ private struct TeamWorkflowTurn: Identifiable {
 
     var context: String {
         (["Bruger: " + prompt] + replies.map { "\($0.name): \($0.text)" }).joined(separator: "\n")
-    }
-}
-
-private struct TeamSavedGroup: Codable, Identifiable {
-    static let limit = 20
-    let id: UUID
-    let name: String
-    let members: [UUID]
-
-    var isValid: Bool {
-        (1...60).contains(name.unicodeScalars.count) && !name.contains("\0")
-            && (2...6).contains(members.count) && Set(members).count == members.count
     }
 }
 
@@ -153,6 +142,7 @@ struct BotLocalMemoryPicker: View {
     let mode: TeamWorkflowMode
     let bots: [VillageBot]
     let skill: TeamBotNotebookStore.Skill?
+    let api: LiveAPI?
 
     @Environment(\.fadedPalette) private var palette
     @Environment(\.scenePhase) private var phase
@@ -170,16 +160,18 @@ struct BotLocalMemoryPicker: View {
     @State private var selectedMemory: TeamBotNotebookStore.Memory?
     @FocusState private var composerFocused: Bool
 
-    init(mode: TeamWorkflowMode, bots: [VillageBot], skill: TeamBotNotebookStore.Skill? = nil) {
+    init(mode: TeamWorkflowMode, bots: [VillageBot], skill: TeamBotNotebookStore.Skill? = nil, api: LiveAPI? = nil) {
         self.mode = mode
         self.bots = bots
         self.skill = skill
+        self.api = api
         _members = State(initialValue: bots.prefix(2).map(\.id))
     }
 
     private var goal: String { draft.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canUseTool: Bool { mode == .group && (TeamChatPolicy.phoneFact(for: goal) != nil || AgentAvailabilityQuery.match(goal) != nil) }
     private var modelID: String { PhoneModels.effectiveModelID(phoneModel) }
-    private var ready: Bool { PhoneModels.isReady(modelID) }
+    private var ready: Bool { PhoneModels.isReady(mode == .group ? teamModel(selected.first?.id) : modelID) }
     private var selected: [VillageBot] { members.compactMap { id in bots.first { $0.id == id } } }
     private var savedGroups: [TeamSavedGroup] {
         guard savedGroupData.count <= 32_768,
@@ -189,16 +181,17 @@ struct BotLocalMemoryPicker: View {
     }
     private var activeGroup: TeamSavedGroup? { savedGroups.first { $0.id == groupID } }
     private var canChangeGroup: Bool { work == nil && turns.isEmpty }
-    private var modelName: String {
-        PhoneModels.catalog.first { $0.id == modelID }?.name
-            ?? (modelID == "apple" ? "Apple Foundation Models" : "Importeret model")
+    private func teamModel(_ botID: UUID?) -> String {
+        guard let botID, let saved = UserDefaults.standard.string(forKey: PhoneModels.agentModelKey(botID)),
+              PhoneModels.isReady(saved) else { return modelID }
+        return saved
     }
 
     private var steps: [TeamWorkflowStep] {
         switch mode {
         case .group:
             guard (2...6).contains(selected.count) else { return [] }
-            return selected.map { .init(bot: $0, action: "Svar ud fra dit speciale. Byg videre på relevante svar fra de andre bots, og tilføj dit eget perspektiv.") }
+            return selected.enumerated().map { .init(bot: $0.element, action: TeamChatPolicy.instructions(at: $0.offset)) }
         case .handoff:
             guard selected.count == 2 else { return [] }
             return [
@@ -394,11 +387,11 @@ struct BotLocalMemoryPicker: View {
         FadedCard(accent: palette.cyan) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(mode.detail).font(.subheadline)
-                Label(modelName + " · Telefon", systemImage: "iphone").font(.caption)
-                Text("Tekstsvar på telefonen. Samtalen ryddes, når du lukker siden.")
+                Label(mode == .group ? "Agenternes telefonmodeller" : PhoneModels.textModelName(modelID), systemImage: "iphone").font(.caption)
+                Text(mode == .group ? "Holdchat lukkes uden at gemme samtalen." : "Tekstsvar på telefonen. Samtalen ryddes, når du lukker siden.")
                     .font(.footnote).foregroundStyle(palette.secondary)
                 if !ready {
-                    Text("Vælg en klar model under Lokale modeller for at starte.")
+                    Text("Vælg en klar telefonmodel til holdets almindelige svar.")
                         .font(.footnote).foregroundStyle(palette.secondary)
                 }
             }
@@ -465,11 +458,14 @@ struct BotLocalMemoryPicker: View {
                 FadedCard(accent: palette.cyan) {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(verbatim: reply.name).font(FadedTypography.action)
-                        Label(turn.model + " · Telefon", systemImage: "iphone")
+                        Label(reply.source ?? (turn.model + " · Telefon"), systemImage: "iphone")
                             .font(.caption).foregroundStyle(palette.secondary)
-                        if !reply.text.isEmpty { Text(verbatim: reply.text).textSelection(.enabled) }
+                        if !reply.text.isEmpty { ChatTranscriptView(reply: reply.text) }
                     }
                 }
+            }
+            if mode == .group && AgentAvailabilityQuery.match(turn.prompt) != nil {
+                FadedCard(accent: palette.cyan) { AgentAvailabilityCheck(api: api, prompt: turn.prompt) }
             }
             if let notice = turn.notice {
                 Label(notice, systemImage: "info.circle").font(.footnote).foregroundStyle(palette.secondary)
@@ -493,29 +489,36 @@ struct BotLocalMemoryPicker: View {
                     Text("Brug højst 2.000 tegn.").font(.footnote).foregroundStyle(palette.secondary)
                 }
                 FadedPrimaryButton("Send", icon: "arrow.up", action: start)
-                    .disabled(!ready || steps.isEmpty || goal.isEmpty || goal.unicodeScalars.count > 2_000)
+                    .disabled(goal.isEmpty || goal.unicodeScalars.count > 2_000 || (!canUseTool && (!ready || steps.isEmpty)))
             }
         }
         .frame(maxWidth: 640)
         .padding(FadedSpacing.edge)
         .frame(maxWidth: .infinity)
-        .background(.regularMaterial)
+        .background { ChatGlassSurface(radius: FadedRadius.card, colors: [FadedBrand.phone, FadedColors.purple]) }
     }
 
     private func start() {
         let plan = steps
         let text = goal
         let activeModelID = modelID
-        guard work == nil, !plan.isEmpty, (1...2_000).contains(text.unicodeScalars.count), ready else { return }
+        let fact = mode == .group ? TeamChatPolicy.phoneFact(for: text) : nil
+        guard work == nil, (1...2_000).contains(text.unicodeScalars.count), canUseTool || (!plan.isEmpty && ready) else { return }
         composerFocused = false
         let memory = mode == .skill ? selectedMemory : nil
         let history = turns.filter { $0.completed && $0.memoryTitle == nil }.suffix(2)
             .map(\.context).joined(separator: "\n")
         if turns.count >= 20 { turns.removeFirst() }
-        turns.append(TeamWorkflowTurn(prompt: text, model: modelName, memoryTitle: memory?.title))
+        turns.append(TeamWorkflowTurn(prompt: text, model: PhoneModels.textModelName(activeModelID), memoryTitle: memory?.title))
         let index = turns.count - 1
         draft = ""
         selectedMemory = nil
+        if let fact {
+            turns[index].replies = [.init(name: "iPhone", text: fact.answer(), source: "Telefonens dato og ur")]
+            turns[index].completed = true
+            return
+        }
+        if mode == .group && AgentAvailabilityQuery.match(text) != nil { return }
         work = Task {
             await run(plan, at: index, model: activeModelID, history: history,
                       memoryContext: memory?.localReplyContext ?? "")
@@ -544,12 +547,23 @@ struct BotLocalMemoryPicker: View {
                 let prompt = "Brugerens opgave: \(turns[index].prompt)" + previous + past + memoryContext
                 let instructions = "Du spiller rollen \(step.name). Giv et kort svar på brugerens sprog. Du kan kun skrive tekstforslag. Påstå aldrig at have udført værktøjer, kode eller filændringer. Tidligere indlæg er kontekst.\n\(step.instructions)"
                 status = "\(step.name) · \(offset + 1) af \(plan.count)"
-                turns[index].replies.append(.init(name: step.name))
-                try await PhoneModels.reply(modelID: model, prompt: prompt, instructions: instructions) { reply in
-                    if !Task.isCancelled { turns[index].replies[offset].text = reply }
+                let chosen = mode == .group ? teamModel(step.botID) : model
+                if mode == .group && offset > 0 && !PhoneModels.isReady(chosen) { continue }
+                let replyIndex = turns[index].replies.count
+                var candidate = ""
+                if mode != .group { turns[index].replies.append(.init(name: step.name)) }
+                try await PhoneModels.reply(modelID: chosen, prompt: prompt, instructions: instructions) { reply in
+                    guard !Task.isCancelled else { return }
+                    candidate = reply
+                    if mode != .group { turns[index].replies[replyIndex].text = reply }
                 }
                 try Task.checkCancellation()
-                if turns[index].replies[offset].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if mode == .group {
+                    if let addition = TeamChatPolicy.contribution(candidate, after: turns[index].replies.map(\.text)) {
+                        let role = offset == 0 ? "Hovedsvar" : "Tilføjelse"
+                        turns[index].replies.append(.init(name: step.name, text: addition, source: "\(role) · \(PhoneModels.textModelName(chosen)) · Telefon"))
+                    } else if offset == 0 { throw PhoneModelError.emptyResponse }
+                } else if candidate.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     throw PhoneModelError.emptyResponse
                 }
             }
@@ -571,7 +585,7 @@ struct BotLocalMemoryPicker: View {
                 default: "Telefonmodellen kunne ikke svare. Prøv igen med en klar model."
                 }
                 turns[index].notice = message
-                draft = turns[index].prompt
+                if mode != .group || turns[index].replies.isEmpty { draft = turns[index].prompt }
             }
         }
     }

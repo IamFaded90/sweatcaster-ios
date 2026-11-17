@@ -11,10 +11,6 @@ extension OfflineStudio {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 imageThermalWarning
-                if privateSession, imageReady, !canRenderPrivateImages {
-                    FadedEmptyState(icon: "airplane", title: "Modellen er hentet — slå netværket fra",
-                                    detail: privateImageOfflineInstructions + " Når telefonen er offline, bliver Lav billede aktiv. Bliv i appen, mens billedet bliver lavet.")
-                }
                 if generatingImages { imageShimmer }
                 if idleAsleep {
                     FadedSecondaryButton("Vis resultat igen", icon: "photo") { resetIdleTimer() }
@@ -44,18 +40,15 @@ extension OfflineStudio {
         let blocker = imageBlocker(for: request)
         return VStack(alignment: .leading, spacing: 8) {
             if privateSession {
-                Label("Privat billede på telefonen", systemImage: "lock.shield")
-                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
-                if blocker == nil, let model = StudioImageModel(rawValue: request.model) {
-                    FadedDetailText("\(model.title) er klar. Billedet bliver i denne session.")
-                }
+                privateImageModelMenu(current: request.model)
+                if request.route == .pc { FadedDetailText("Din beskrivelse og dit valgte foto sendes til din parrede PC.") }
             } else {
                 Picker("Lav billedet på", selection: $studioImageRoute) {
                     ForEach(StudioImageRoute.allCases) { route in Text(route.title).tag(route) }
                 }.pickerStyle(.segmented)
                 FadedDetailText(imageRouteDetail(for: request))
             }
-            if imagePromptFocused {
+            if imagePromptFocused && (!privateSession || baseImage == nil) {
                 ScrollView(.horizontal) {
                     HStack(spacing: 8) {
                         ForEach(["masterpiece", "cinematic", "blødt lys", "detaljeret"], id: \.self) { suggestion in
@@ -70,16 +63,17 @@ extension OfflineStudio {
                 }.scrollIndicators(.hidden)
             }
             HStack(alignment: .bottom, spacing: 8) {
-                TextField("Beskriv dit billede…", text: $imagePrompt, axis: .vertical)
+                TextField(privateSession && baseImage != nil ? "Hvad vil du ændre?" : "Beskriv dit billede…", text: $imagePrompt, axis: .vertical)
                     .lineLimit(1...5).frame(minHeight: 44).focused($imagePromptFocused)
                     .dropDestination(for: StudioPhotoInput.self) { items, _ in
-                        guard request.route != .pc else { return false }
+                        guard request.isPrivate || request.route != .pc else { return false }
                         return acceptStudioImageDrop(items.map(\.data))
                     }
                 studioEditorButton(forImage: true)
             }
             if privateSession {
                 imageReferencePicker
+                if baseImage != nil { privateReferenceOptions }
             }
             imageGenerationButton(request, blocked: blocker != nil)
             if let blocker { FadedDetailText(blocker).accessibilityAddTraits(.updatesFrequently) }
@@ -94,10 +88,11 @@ extension OfflineStudio {
 
     private func imageBlocker(for request: StudioImageRequest) -> String? {
         let modelReady = isImageModelReady(request.model)
-        if request.isPrivate {
+        if request.isPrivate && request.route == .pc {
+            if privateImagePC == nil { return "Forbind PC’en, eller vælg en iPhone-model." }
+            if request.prompt.count > 1_000 { return "Forkort billedbeskrivelsen til højst 1.000 tegn." }
+        } else if request.isPrivate {
             if !modelReady { return "Billedmodellen mangler. Hent den under Hjem → ⋯ → Lokale modeller → Billeder, og åbn Privat Studio igen." }
-            if privateNetworkOffline == nil { return "Tjekker, om telefonen er offline…" }
-            if !canRenderPrivateImages { return privateImageOfflineInstructions }
         } else if request.route == .pc {
             if api == nil { return "Forbind til PC’en, eller vælg Telefon." }
             if request.prompt.count > 1_000 { return "PC’en tager højst 1.000 tegn. Forkort teksten, eller vælg Telefon." }
@@ -129,9 +124,10 @@ extension OfflineStudio {
         isImageModelReady(imageModel)
     }
 
-    private func isImageModelReady(_ id: String) -> Bool {
-        StudioImageDownloads.shared.activeModel?.id != id &&
-            StudioImageModel(rawValue: id)?.isInstalled == true
+    func isImageModelReady(_ id: String) -> Bool {
+        guard let model = StudioImageModel(rawValue: id) else { return false }
+        let downloads = StudioImageDownloads.shared
+        return downloads.activeModel != model && downloads.isInstalled(model)
     }
 
     private var installedLoRA: String? {
@@ -150,8 +146,6 @@ extension OfflineStudio {
         (try? JSONDecoder().decode([String].self, from: imageFavoritesData)) ?? []
     }
 
-    private var loraPreviews: URL { URL.applicationSupportDirectory.appending(path: "StudioLoRAPreviews", directoryHint: .isDirectory) }
-
     private var importedLoRAs: [String] {
         let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey]
         return Array(Set(MediaGenerationEnvironment.default.externalUrls.flatMap { root in
@@ -166,15 +160,25 @@ extension OfflineStudio {
         })).sorted()
     }
 
-    var loraLabels: [String: String] {
-        (try? JSONDecoder().decode([String: String].self, from: loraLabelsData)) ?? [:]
+    @ViewBuilder var privateImageSettings: some View {
+        if privateSession && sessionPreferences.imageRoute == .pc {
+            VStack(alignment: .leading, spacing: 6) {
+                Label("RealVisXL på din PC", systemImage: "desktopcomputer")
+                FadedDetailText("Brug modelmenuen ved skrivefeltet, hvis du vil skifte tilbage til iPhone.")
+            }
+        } else {
+            phoneImageSettings
+        }
     }
 
-    var privateImageSettings: some View {
+    private var phoneImageSettings: some View {
         VStack(alignment: .leading, spacing: 12) {
             Picker("Billedmodel", selection: privateSession ? $sessionPreferences.imageModel : $savedImageModel) {
                 ForEach(StudioImageModel.allCases) { model in Text(model.title).tag(model.id) }
             }.disabled(task != nil)
+            if let model = StudioImageModel(rawValue: imageModel) {
+                StudioImageModelDeleteButton(model: model, canChange: task == nil)
+            }
             if privateSession {
                 Text(imageReady ? "Billedmodellen er klar på telefonen." : "Hent billedmodellen under Hjem → ⋯ → Lokale modeller → Billeder.")
                     .font(.caption).foregroundStyle(palette.secondary)
@@ -190,7 +194,7 @@ extension OfflineStudio {
                 regularImageModelActions
             }
             Button("Benchmark billedmodel") { benchmarkImageModel() }.frame(minHeight: 44)
-                .disabled(!imageReady || task != nil || (privateSession && !canRenderPrivateImages))
+                .disabled(!imageReady || task != nil)
             if let imageBenchmark { Text(imageBenchmark).font(.caption) }
         }
     }
@@ -246,6 +250,10 @@ extension OfflineStudio {
                         else { selection.wrappedValue = "" }
                     }
                 })).frame(minHeight: 44)
+                if !privateSession {
+                    Button("Slet LoRA", systemImage: "trash", role: .destructive) { pendingLoRADeletion = name }
+                        .buttonStyle(.borderless).frame(minHeight: 44)
+                }
             }.id("\(name)-\(loraPreviewRefresh)")
         }
     }
@@ -318,12 +326,12 @@ extension OfflineStudio {
                 Label(baseImage == nil ? "Tilføj referencebillede" : "Skift referencebillede", systemImage: "photo.badge.plus")
                     .frame(minHeight: 44)
             }
-            .disabled((privateSession && !canRenderPrivateImages) || (task != nil && !generatingImages))
+            .disabled(task != nil && !generatingImages)
             if loadingBaseImage { ProgressView().accessibilityLabel("Henter referencebillede") }
             if baseImage != nil || loadingBaseImage {
                 Button("Fjern referencebillede", systemImage: "xmark") {
                     basePhoto = nil
-                    baseImage = nil
+                    setReferenceImage(nil)
                 }.labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
             }
         }
@@ -333,7 +341,7 @@ extension OfflineStudio {
     private func imageGenerationButton(_ request: StudioImageRequest, blocked: Bool) -> some View {
         let action = request.route == .pc ? "Lav billede på PC" : "Lav billede"
         let label = pendingImages.isEmpty ? action : "\(action) · I kø (\(pendingImages.count))"
-        let waitingForBase = request.route != .pc && loadingBaseImage
+        let waitingForBase = (request.isPrivate || request.route != .pc) && loadingBaseImage
         return FadedPrimaryButton(label, icon: "photo.badge.plus") { generateImage(request) }
             .disabled(blocked || !canEnqueueImage || waitingForBase || pendingImages.count >= 5
                 || request.prompt.isEmpty || request.prompt.count > 2_000 || request.negative.count > 1_000)
@@ -371,7 +379,7 @@ extension OfflineStudio {
         guard sessionUnlocked, task == nil || generatingImages,
               let first = items.first, let decoded = StudioPhotoInput.downsample(first) else { return false }
         basePhoto = nil
-        baseImage = decoded
+        setReferenceImage(decoded)
         status = "Bruger dit billede som base…"
         return true
     }
@@ -435,6 +443,8 @@ extension OfflineStudio {
             Button("Kopiér billede", systemImage: "doc.on.doc") { copyStudioImage(file) }.frame(minHeight: 44)
         }
         imageTurnActions(file)
+        Button("Slet billede", systemImage: "trash", role: .destructive) { pendingImageDeletion = file }
+            .frame(minHeight: 44).disabled(task != nil)
     }
 
     func imageTurnActions(_ file: URL) -> some View {
@@ -443,30 +453,21 @@ extension OfflineStudio {
 
     private func loadBasePhoto() async {
         guard let item = basePhoto else { loadingBaseImage = false; return }
-        guard !privateSession || canRenderPrivateImages else {
-            basePhoto = nil
-            status = privateImageOfflineInstructions
-            return
-        }
         loadingBaseImage = true
         defer { if basePhoto == item { loadingBaseImage = false } }
         do {
             let photo = try await item.loadTransferable(type: StudioPhotoInput.self)
             try Task.checkCancellation()
             guard basePhoto == item else { return }
-            guard !privateSession || canRenderPrivateImages else { throw StudioImageInterruption.network }
             guard let photo else { throw CocoaError(.fileReadCorruptFile) }
-            baseImage = photo.data
+            setReferenceImage(photo.data)
             status = "Basebillede valgt. Det bliver på telefonen."
         } catch is CancellationError {
             return
-        } catch StudioImageInterruption.network {
-            AppDiagnostics.record(StudioImageInterruption.network)
-            status = privateImageOfflineInstructions
         } catch {
             AppDiagnostics.record(error)
             if basePhoto == item {
-                baseImage = nil
+                setReferenceImage(nil)
                 status = "Billedet kunne ikke læses fra Fotos."
             }
         }
@@ -496,17 +497,18 @@ extension OfflineStudio {
     }
 
     private var studioImageRequest: StudioImageRequest {
-        let route: StudioImageRoute = privateSession ? .phone : studioImageRoute
+        let route = privateSession ? sessionPreferences.imageRoute : studioImageRoute
         let usesPhoneOptions = route != .pc
         let model = usesPhoneOptions && !imageReady
             ? StudioImageModel.allCases.first(where: { isImageModelReady($0.id) })?.id ?? imageModel
             : imageModel
-        let negative = usesPhoneOptions ? negativeImagePrompt.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        let negative = usesPhoneOptions || privateSession ? negativeImagePrompt.trimmingCharacters(in: .whitespacesAndNewlines) : ""
         let lora = usesPhoneOptions && (privateSession || useLoRA) ? installedLoRA ?? "" : ""
         return StudioImageRequest(
             model: model, route: route, prompt: imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
             negative: negative, lora: lora, count: usesPhoneOptions && makeFourImages ? 4 : 1,
-            seed: usesPhoneOptions ? studioSeed : nil, sourceImage: usesPhoneOptions ? baseImage : nil,
+            seed: usesPhoneOptions || privateSession ? studioSeed : nil, sourceImage: usesPhoneOptions || privateSession ? baseImage : nil,
+            referenceMode: privateSession && baseImage != nil ? sessionPreferences.referenceMode : nil, referenceMask: privateSession ? referenceMask : nil,
             isPrivate: privateSession, autoSave: autoSaveStudioPhotos && !privateSession,
             botID: selectedPrivateBot?.id, allowPCFallback: !privateSession && allowPCFallback
         )
@@ -515,7 +517,7 @@ extension OfflineStudio {
     private func generateImage(_ request: StudioImageRequest) {
         guard studioEnabled, canShowStudio, canEnqueueImage, pendingImages.count < 5,
               !request.prompt.isEmpty, request.prompt.count <= 2_000, request.negative.count <= 1_000,
-              request.route == .pc || !loadingBaseImage else { return }
+              (request.route == .pc && !request.isPrivate) || !loadingBaseImage else { return }
         if let blocker = imageBlocker(for: request) {
             status = blocker
             return
@@ -536,10 +538,6 @@ extension OfflineStudio {
                 catch StudioImageInterruption.battery {
                     AppDiagnostics.record(StudioImageInterruption.battery)
                     status = "Batteriet er lavt. Sæt telefonen til opladning for at fortsætte."
-                    return
-                } catch StudioImageInterruption.network {
-                    AppDiagnostics.record(StudioImageInterruption.network)
-                    status = privateImageOfflineInstructions
                     return
                 } catch is CancellationError { throw CancellationError() }
                 catch LocalComputeError.lowMemory {

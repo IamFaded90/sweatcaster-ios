@@ -21,6 +21,7 @@ struct PrivateChatTurn: Codable, Identifiable {
     var replyCard: AgentReplyCard? = nil
     var webSources: [AgentWebSources.Source]? = nil
     var documentSources: [AgentDocumentSource]? = nil
+    var agentAction: AgentChatAction? = nil
 }
 
 struct StudioPhotoInput: Transferable {
@@ -64,7 +65,7 @@ struct StudioPhotoInput: Transferable {
     }
 }
 
-enum StudioImageInterruption: Error { case heat, battery, network }
+enum StudioImageInterruption: Error { case heat, battery }
 
 enum StudioImageModel: String, CaseIterable, Identifiable, Sendable {
     case stableDiffusion = "sd_v1.5_f16.ckpt"
@@ -119,12 +120,13 @@ struct StudioImageDownloadsView: View {
                                         : "Tungere model. Kræver mindst 8 GB ledig plads før download.")
                         if downloads.activeModel == model {
                             StudioImageDownloadProgress()
-                        } else if model.isInstalled {
+                        } else if downloads.isInstalled(model) {
                             Label("Gemt på telefonen", systemImage: "checkmark.circle")
                         } else {
                             FadedSecondaryButton("Hent billedmodel", icon: "arrow.down.circle") { downloads.start(model) }
                                 .accessibilityLabel("Hent \(model.title)").disabled(!canStart)
                         }
+                        StudioImageModelDeleteButton(model: model, canChange: canStart)
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
@@ -133,11 +135,32 @@ struct StudioImageDownloadsView: View {
     }
 }
 
+struct StudioImageModelDeleteButton: View {
+    let model: StudioImageModel
+    let canChange: Bool
+    @State private var confirming = false
+
+    var body: some View {
+        let downloads = StudioImageDownloads.shared
+        if downloads.hasLocalFiles(model), downloads.activeModel != model {
+            FadedSecondaryButton("Slet billedmodel", icon: "trash", role: .destructive) { confirming = true }
+                .accessibilityLabel("Slet \(model.title)")
+                .disabled(!canChange || downloads.activeModel != nil)
+                .confirmationDialog("Slet \(model.title)?", isPresented: $confirming) {
+                    Button("Slet billedmodellen", role: .destructive) { downloads.removeLocalFiles(model) }
+                } message: {
+                    Text("Lokale modelfiler fjernes fra telefonen.")
+                }
+        }
+    }
+}
+
 struct StudioImageDownloadProgress: View {
     var body: some View {
         let downloads = StudioImageDownloads.shared
         if downloads.isInterrupted {
-            FadedSecondaryButton("Fortsæt download", icon: "arrow.down.circle") { downloads.resume() }
+            FadedSecondaryButton(downloads.isWaitingForModelCheck ? "Fortsæt modelkontrol" : "Fortsæt download",
+                                 icon: "arrow.down.circle") { downloads.resume() }
         } else if let progress = downloads.progress, progress < 1 {
             ProgressView(value: progress) { Text(progress.formatted(.percent)) }
         } else {
@@ -177,6 +200,100 @@ enum StudioImageRoute: String, CaseIterable, Identifiable {
     }
 }
 
+enum StudioReferenceMode: String, CaseIterable, Identifiable {
+    case preserve = "Behold motiv"
+    case edit = "Redigér"
+    case creative = "Fri fortolkning"
+
+    var id: Self { self }
+    var strength: Float {
+        switch self {
+        case .preserve: 0.24
+        case .edit: 0.40
+        case .creative: 0.58
+        }
+    }
+
+    var maskedStrength: Float { min(0.78, strength + 0.28) }
+
+    static func dimensions(width: Int, height: Int, edge: Int) -> (width: Int, height: Int) {
+        guard width > 0, height > 0 else { return (edge, edge) }
+        let aspect = Double(min(width, height)) / Double(max(width, height))
+        let shortEdge = max(edge / 2, Int((aspect * Double(edge) / 64).rounded()) * 64)
+        return width < height ? (shortEdge, edge) : (edge, shortEdge)
+    }
+}
+
+struct StudioReferenceMask {
+    var strokes: [[CGPoint]] = []
+    static let brushWidth: CGFloat = 0.09
+    var isEmpty: Bool { strokes.isEmpty }
+
+    static func cropFrame(source: CGSize, width: Int, height: Int) -> CGRect {
+        let w = Int(source.width), h = Int(source.height)
+        guard w > 0, h > 0 else { return .zero }
+        let wide = w * height > h * width
+        let scaledWidth = wide ? w * height / h : width
+        let scaledHeight = wide ? height : h * width / w
+        let x = (width - scaledWidth) / 2
+        let y = height - scaledHeight - (height - scaledHeight) / 2
+        return CGRect(x: x, y: y, width: scaledWidth, height: scaledHeight)
+    }
+
+    /// Draw Things uses low-bit class 2 to repaint pixels, and class 0 to preserve them.
+    func encoded(source: CGSize, width: Int, height: Int, repaintValue: UInt8 = 2) throws -> Data {
+        guard !isEmpty, source.width > 0, source.height > 0, width > 0, height > 0 else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        let frame = Self.cropFrame(source: source, width: width, height: height)
+        let lineWidth = Self.brushWidth * min(frame.width, frame.height)
+        var gray = [UInt8](repeating: 0, count: width * height)
+        try gray.withUnsafeMutableBytes { pixels in
+            guard let context = CGContext(data: pixels.baseAddress, width: width, height: height,
+                                          bitsPerComponent: 8, bytesPerRow: width,
+                                          space: CGColorSpaceCreateDeviceGray(),
+                                          bitmapInfo: CGImageAlphaInfo.none.rawValue) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            context.translateBy(x: 0, y: CGFloat(height))
+            context.scaleBy(x: 1, y: -1)
+            context.setShouldAntialias(false)
+            context.setStrokeColor(gray: 1, alpha: 1)
+            context.setFillColor(gray: 1, alpha: 1)
+            context.setLineWidth(lineWidth)
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            for stroke in strokes {
+                let points = stroke.map { CGPoint(x: frame.minX + frame.width * $0.x, y: frame.minY + frame.height * $0.y) }
+                guard let first = points.first else { continue }
+                context.fillEllipse(in: CGRect(x: first.x - lineWidth / 2, y: first.y - lineWidth / 2,
+                                               width: lineWidth, height: lineWidth))
+                if points.count > 1 {
+                    context.beginPath()
+                    context.addLines(between: points)
+                    context.strokePath()
+                }
+            }
+        }
+        guard gray.contains(where: { $0 > 127 }) else { throw CocoaError(.fileReadCorruptFile) }
+        let codes = Data(gray.map { $0 > 127 ? repaintValue : 0 })
+        guard let provider = CGDataProvider(data: codes as CFData),
+              let image = CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 8,
+                                  bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(),
+                                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                                  provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        let png = NSMutableData()
+        guard let output = CGImageDestinationCreateWithData(png as CFMutableData, UTType.png.identifier as CFString, 1, nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        CGImageDestinationAddImage(output, image, nil)
+        guard CGImageDestinationFinalize(output) else { throw CocoaError(.fileWriteUnknown) }
+        return png as Data
+    }
+}
+
 struct StudioImageRequest {
     let model: String
     let route: StudioImageRoute
@@ -186,6 +303,8 @@ struct StudioImageRequest {
     let count: Int
     let seed: UInt32?
     let sourceImage: Data?
+    let referenceMode: StudioReferenceMode?
+    let referenceMask: StudioReferenceMask?
     let isPrivate: Bool
     let autoSave: Bool
     let botID: UUID?
@@ -198,7 +317,9 @@ struct StudioImageRequest {
 }
 
 struct StudioSessionPreferences {
+    var imageRoute = StudioImageRoute.phone
     var imageModel = "sd_v1.5_f16.ckpt"
+    var referenceMode = StudioReferenceMode.preserve
     var lora = ""
     var voiceLanguage = "da-DK"
     var danishVoice = ""

@@ -126,6 +126,38 @@ enum ChristelSpeech {
             notice = "Vælg oplæsning på iPhone til dette lange svar."
             return
         }
+        start(agentID: VillageBot.lumiID, failure: "Christel kunne ikke læse op. Tjek forbindelsen til Microsoft Speech.") {
+            if let configuration {
+                return try await ChristelSpeech.audio(for: text, configuration: configuration)
+            }
+            guard let pc else { throw APIError.input }
+            return try await pc.christelAudio(text)
+        }
+    }
+
+    func playKokoro(text: String, voice: String, agentID: UUID, pc: LiveAPI) {
+        stop()
+        guard (1...500).contains(text.count) else {
+            notice = "Vælg et svar på højst 500 tegn til Kokoro."
+            return
+        }
+        start(agentID: agentID, failure: "Kokoro kunne ikke læse op på den parrede PC.") {
+            try await pc.kokoroAudio(text, voice: voice)
+        }
+    }
+
+    func playAgentVoice(text: String, voice: AgentPCVoice, agentID: UUID, pc: LiveAPI) {
+        stop()
+        guard (1...500).contains(text.count) else {
+            notice = "PC-stemmen kan læse op til 500 tegn ad gangen. Vælg en iPhone-stemme til længere svar."
+            return
+        }
+        start(agentID: agentID, failure: "\(voice.name) kunne ikke læse op på den parrede PC.") {
+            try await pc.agentPCVoiceAudio(text, voice: voice)
+        }
+    }
+
+    private func start(agentID: UUID, failure: String, audio: @escaping @MainActor () async throws -> Data) {
         let current = run
         loading = true
         pending = Task {
@@ -136,18 +168,11 @@ enum ChristelSpeech {
                 }
             }
             do {
-                let audio: Data
-                if let configuration {
-                    audio = try await ChristelSpeech.audio(for: text, configuration: configuration)
-                } else if let pc {
-                    audio = try await pc.christelAudio(text)
-                } else {
-                    throw APIError.input
-                }
+                let bytes = try await audio()
                 try Task.checkCancellation()
                 guard current == run else { return }
-                let audioPlayer = try AVAudioPlayer(data: audio)
-                motionOwner = VillageSpeechMotion.shared.begin(agentID: VillageBot.lumiID) { [weak self] in self?.stop() }
+                let audioPlayer = try AVAudioPlayer(data: bytes)
+                motionOwner = VillageSpeechMotion.shared.begin(agentID: agentID) { [weak self] in self?.stop() }
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playback, mode: .spokenAudio)
                 try session.setActive(true)
@@ -171,7 +196,7 @@ enum ChristelSpeech {
                 if case APIError.http(_, let problem) = error, let message = problem?.message {
                     notice = message
                 } else {
-                    notice = "Christel kunne ikke læse op. Tjek forbindelsen til Microsoft Speech."
+                    notice = failure
                 }
             }
         }

@@ -2,6 +2,7 @@ extends Node2D
 
 const Terrain = preload("res://terrain.gd")
 const VoxelMap = preload("res://voxel_map.gd")
+const OfficeWalkthrough = preload("res://office_walkthrough.gd")
 const RADIUS := 18.0
 const MAP_CENTER := Vector2(480, 320)
 const BOT_COLORS := [
@@ -25,6 +26,11 @@ var voxel := false
 var status: Label
 var details: Label
 var voxel_map: SubViewportContainer
+var office_view: SubViewportContainer
+var village_actions: HBoxContainer
+var close_office_button: Button
+var village_status := ""
+var village_details := ""
 
 func _ready() -> void:
 	tiles = Terrain.fields(2026)
@@ -38,6 +44,9 @@ func _ready() -> void:
 	var flag := args.find("--snapshot")
 	if flag >= 0 and flag + 1 < args.size():
 		load_snapshot(args[flag + 1])
+	flag = args.find("--office")
+	if flag >= 0 and flag + 1 < args.size():
+		load_office(args[flag + 1])
 	queue_redraw()
 
 func make_controls() -> void:
@@ -48,9 +57,11 @@ func make_controls() -> void:
 	layer.add_child(controls)
 	var actions := HBoxContainer.new()
 	controls.add_child(actions)
+	village_actions = HBoxContainer.new()
+	actions.add_child(village_actions)
 	var load_button := Button.new()
 	load_button.text = "Åbn landsbykort fra FadedAI"
-	actions.add_child(load_button)
+	village_actions.add_child(load_button)
 	var picker := FileDialog.new()
 	picker.title = "Vælg landsbykort"
 	picker.access = FileDialog.ACCESS_FILESYSTEM
@@ -59,9 +70,20 @@ func make_controls() -> void:
 	layer.add_child(picker)
 	load_button.pressed.connect(func() -> void: picker.popup_centered_ratio(0.65))
 	picker.file_selected.connect(load_snapshot)
+	var office_button := Button.new()
+	office_button.text = "Åbn kontorlayout"
+	village_actions.add_child(office_button)
+	var office_picker := FileDialog.new()
+	office_picker.title = "Vælg FadedAI-kontor"
+	office_picker.access = FileDialog.ACCESS_FILESYSTEM
+	office_picker.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	office_picker.filters = PackedStringArray(["*.json ; Kontorlayout"])
+	layer.add_child(office_picker)
+	office_button.pressed.connect(func() -> void: office_picker.popup_centered_ratio(0.65))
+	office_picker.file_selected.connect(load_office)
 	var toggle := CheckButton.new()
 	toggle.text = "3D-voxel"
-	actions.add_child(toggle)
+	village_actions.add_child(toggle)
 	toggle.toggled.connect(show_voxel)
 	var slider := HSlider.new()
 	slider.custom_minimum_size = Vector2(132, 44)
@@ -70,8 +92,13 @@ func make_controls() -> void:
 	slider.step = 0.05
 	slider.value = 1
 	slider.tooltip_text = "Zoom"
-	actions.add_child(slider)
+	village_actions.add_child(slider)
 	slider.value_changed.connect(set_zoom)
+	close_office_button = Button.new()
+	close_office_button.text = "Tilbage til landsbyen"
+	close_office_button.hide()
+	actions.add_child(close_office_button)
+	close_office_button.pressed.connect(close_office)
 	status = Label.new()
 	controls.add_child(status)
 	details = Label.new()
@@ -124,6 +151,53 @@ func load_snapshot(path: String) -> void:
 		voxel_map.rebuild_bots(PLACES, bots)
 	queue_redraw()
 
+func load_office(path: String) -> void:
+	var source := FileAccess.open(path, FileAccess.READ)
+	if source == null or source.get_length() > 150000:
+		status.text = "Kontorlayoutet kunne ikke åbnes"
+		return
+	if not open_office(OfficeWalkthrough.parse_layout(JSON.parse_string(source.get_as_text()))):
+		status.text = "Filen indeholder ikke en plantegning, der kan åbnes"
+
+func open_office(layout: Dictionary) -> bool:
+	if layout.is_empty() or office_view != null:
+		return false
+	var panel := OfficeWalkthrough.new()
+	panel.position = Vector2(100, 90)
+	panel.size = Vector2(760, 475)
+	add_child(panel)
+	panel.build(layout)
+	office_view = panel
+	village_status = status.text
+	village_details = details.text
+	village_actions.hide()
+	close_office_button.show()
+	if voxel_map != null:
+		voxel_map.hide()
+	status.text = "Kontor · målt plantegning"
+	details.text = "W A S D går · ← → drejer · Esc åbner landsbyen"
+	queue_redraw()
+	return true
+
+func close_office() -> void:
+	if office_view == null:
+		return
+	office_view.hide()
+	office_view.queue_free()
+	office_view = null
+	village_actions.show()
+	close_office_button.hide()
+	status.text = village_status
+	details.text = village_details
+	if voxel_map != null:
+		voxel_map.visible = voxel
+	queue_redraw()
+
+func _unhandled_key_input(event: InputEvent) -> void:
+	if office_view != null and event.is_action_pressed("ui_cancel"):
+		close_office()
+		get_viewport().set_input_as_handled()
+
 func place_point(id: String) -> Vector2:
 	return Terrain.center(PLACES[id].cell, RADIUS)
 
@@ -139,7 +213,7 @@ func bot_point(index: int) -> Vector2:
 	return origin
 
 func _draw() -> void:
-	if voxel:
+	if voxel or office_view != null:
 		return
 	draw_set_transform(MAP_CENTER, 0, Vector2.ONE * zoom)
 	for cell in tiles:
@@ -164,7 +238,7 @@ func _draw() -> void:
 		draw_string(font, point + Vector2(-28, 21), bots[index].name.left(14), HORIZONTAL_ALIGNMENT_CENTER, 56, 12, Color("#242a22"))
 
 func _unhandled_input(event: InputEvent) -> void:
-	if voxel or not event is InputEventMouseButton or not event.pressed or event.button_index != MOUSE_BUTTON_LEFT:
+	if voxel or office_view != null or not event is InputEventMouseButton or not event.pressed or event.button_index != MOUSE_BUTTON_LEFT:
 		return
 	var target := (get_local_mouse_position() - MAP_CENTER) / zoom
 	for index in range(bots.size() - 1, -1, -1):

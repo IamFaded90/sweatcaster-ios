@@ -1,0 +1,50 @@
+[
+  {
+    "trigger": {
+      "url-filter": "^https?://doubleclick\\.net[:/]",
+      "load-type": ["third-party"],
+      "resource-type": ["image", "script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[a-z0-9.-]+\\.doubleclick\\.net[:/]",
+      "load-type": ["third-party"],
+      "resource-type": ["image", "script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://googlesyndication\\.com[:/]",
+      "load-type": ["third-party"],
+      "resource-type": ["image", "script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[a-z0-9.-]+\\.googlesyndication\\.com[:/]",
+      "load-type": ["third-party"],
+      "resource-type": ["image", "script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://amazon-adsystem\\.com[:/]",
+      "load-type": ["third-party"],
+      "resource-type": ["image", "script"]
+    },
+    "action": { "type": "block" }
+  },
+  {
+    "trigger": {
+      "url-filter": "^https?://[a-z0-9.-]+\\.amazon-adsystem\\.com[:/]",
+      "load-type": ["third-party"],
+      "resource-type": ["image", "script"]
+    },
+    "action": { "type": "block" }
+  }
+]

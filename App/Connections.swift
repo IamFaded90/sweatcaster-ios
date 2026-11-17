@@ -271,6 +271,11 @@ struct ConnectionsView: View {
         .init(name: "Figma", icon: "square.stack", detail: "Kræver Figma OAuth og adgang til de valgte filer.")
     ]
 
+    private var otherProviders: [Provider] {
+        guard openPairing != nil || pcAPI != nil else { return providers }
+        return providers.filter { !["Gmail", "Google Drive", "Notion", "GitHub"].contains($0.name) }
+    }
+
     var body: some View {
         @Bindable var photoConnector = photos
         @Bindable var fileConnector = files
@@ -300,13 +305,25 @@ struct ConnectionsView: View {
                 }
                 if openPairing != nil || pcAPI != nil {
                     NavigationLink {
+                        ComposioLibraryView(api: pcAPI, onUse: nil)
+                    } label: {
+                        FadedCard {
+                            VStack(alignment: .leading, spacing: FadedSpacing.s) {
+                                Label("Composio", systemImage: "link").font(FadedTypography.action)
+                                FadedDetailText("Se aktive forbindelser og dem, FadedAI kan bruge.")
+                            }
+                            .frame(minHeight: 44)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    NavigationLink {
                         PCServicesView(api: pcAPI)
                     } label: {
                         FadedCard {
                             VStack(alignment: .leading, spacing: FadedSpacing.s) {
                                 Label("Tjenester på PC’en", systemImage: "desktopcomputer")
                                     .font(FadedTypography.action)
-                                FadedDetailText("Composio, YouTube, websøgning og PC-måler.")
+                                FadedDetailText("YouTube, websøgning og PC-måler.")
                             }
                             .frame(minHeight: 44)
                         }
@@ -338,7 +355,7 @@ struct ConnectionsView: View {
                 pickerCard(photos, detail: "Vælg op til tre billeder i Apples billedvælger. Her vises små lokale forhåndsvisninger.")
                 pickerCard(files, detail: "Vælg én fil op til 5 MB fra iCloud Drive eller en anden placering i Filer. Se billeder og uddrag fra tekstfiler her.")
                 DisclosureGroup("Tjenester uden direkte forbindelse") {
-                    VStack(spacing: 10) { ForEach(providers) { providerCard($0) } }
+                    VStack(spacing: 10) { ForEach(otherProviders) { providerCard($0) } }
                         .padding(.top, 10)
                 }
             }
@@ -422,6 +439,105 @@ struct ConnectionsView: View {
                 Text(ConnectorStatus.unavailable.title).font(.caption.weight(.semibold))
                 Text(provider.detail).font(.subheadline).foregroundStyle(palette.secondary)
             }
+        }
+    }
+}
+struct PCDriveFiles: Decodable, Sendable {
+    struct Entry: Decodable, Hashable, Identifiable, Sendable {
+        let id: String
+        let name: String
+        let folder: Bool
+
+        var viewer: URL? {
+            guard id.range(of: #"^[A-Za-z0-9_-]{1,200}$"#, options: .regularExpression) != nil else { return nil }
+            return URL(string: "https://drive.google.com/open?id=" + id)
+        }
+    }
+
+    let configured: Bool
+    let files: [Entry]
+    let nextPage: String?
+}
+
+@MainActor struct PCDriveView: View {
+    let api: LiveAPI?
+    @State private var folders: [PCDriveFiles.Entry] = []
+    @State private var files: [PCDriveFiles.Entry] = []
+    @State private var nextPage: String?
+    @State private var configured = true
+    @State private var loading = false
+    @State private var notice: String?
+    @State private var update = UUID()
+    @State private var page: String?
+
+    var body: some View {
+        List {
+            if api == nil {
+                Text("Par din iPhone med FadedAI på PC’en.")
+            } else if !configured {
+                Text("Forbind Google Drive på PC’en, og tryk Opdatér her bagefter.")
+            } else {
+                if !folders.isEmpty {
+                    Button("Til forrige mappe", systemImage: "chevron.left") {
+                        folders.removeLast()
+                        reload()
+                    }
+                }
+                Section(folders.last?.name ?? "Mit drev") {
+                    ForEach(files) { file in
+                        if file.folder {
+                            Button {
+                                folders.append(file)
+                                reload()
+                            } label: { Label(file.name, systemImage: "folder") }
+                            .disabled(loading)
+                        } else if let viewer = file.viewer {
+                            Link(destination: viewer) { Label(file.name, systemImage: "doc") }
+                        }
+                    }
+                    if let nextPage {
+                        Button("Hent flere filer") { page = nextPage; update = UUID() }
+                            .disabled(loading)
+                    }
+                    if files.isEmpty && !loading && notice == nil { Text("Ingen filer i denne mappe.") }
+                }
+            }
+            if let notice { Text(notice).foregroundStyle(.secondary) }
+            if loading { ProgressView("Henter filer…") }
+        }
+        .navigationTitle("Google Drive")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            Button("Opdatér", systemImage: "arrow.clockwise", action: reload)
+                .disabled(api == nil || loading)
+        }
+        .task(id: update) { await load() }
+    }
+
+    private func reload() {
+        files = []
+        nextPage = nil
+        page = nil
+        update = UUID()
+    }
+
+    private func load() async {
+        guard let api else { return }
+        let ticket = update
+        let cursor = page
+        loading = true
+        notice = nil
+        defer { if update == ticket { loading = false } }
+        do {
+            let result = try await api.googleDriveFiles(parent: folders.last?.id, page: cursor)
+            guard !Task.isCancelled, update == ticket else { return }
+            configured = result.configured
+            nextPage = result.nextPage
+            var seen = Set(files.map(\.id))
+            files.append(contentsOf: result.files.filter { seen.insert($0.id).inserted })
+        } catch {
+            guard !Task.isCancelled, update == ticket else { return }
+            notice = "Google Drive kunne ikke hentes. Tjek PC-forbindelsen og dit Google-login."
         }
     }
 }

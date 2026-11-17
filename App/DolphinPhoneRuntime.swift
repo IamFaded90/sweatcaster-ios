@@ -57,6 +57,18 @@ enum DolphinPhoneRuntime {
         }
     }
 
+    static var hasLocalFiles: Bool {
+        guard let flags = try? folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }
+        return flags.isDirectory == true && flags.isSymbolicLink != true
+    }
+
+    @MainActor static func removeLocalFiles() throws {
+        guard !isInstalling, !LocalCompute.isRunning else { throw LocalComputeError.busy }
+        guard hasLocalFiles else { return }
+        let marker = try LocalFileStore.safeWriteURL(folder.appending(path: ".model-removal"), within: storageRoot)
+        try FileManager.default.removeItem(at: marker.deletingLastPathComponent())
+    }
+
     @MainActor static func install(progress: @escaping (Double) -> Void) async throws {
         if isInstalled { progress(1); return }
         guard !isInstalling else { throw PhoneModelError.downloadBusy }

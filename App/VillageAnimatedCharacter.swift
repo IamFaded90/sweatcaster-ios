@@ -49,26 +49,64 @@ struct VillageSpriteFace: View {
     let bot: VillageBot
     var listening = false
     @ObservedObject private var motion = VillageSpeechMotion.shared
+    @State private var destination: Destination?
+
+    private enum Destination: Identifiable {
+        case portrait(String), vrm
+        var id: String {
+            switch self {
+            case .portrait(let name): "portrait-" + name
+            case .vrm: "vrm"
+            }
+        }
+    }
 
     private var figure: VillageLifeBot {
         VillageLifeBot(id: bot.id.uuidString, displayName: bot.name, archetype: .logic,
-                       spriteID: "adam", zoneID: .research, activity: .idle, pose: .idle,
+                       spriteID: bot.villageFigure, zoneID: .research, activity: .idle, pose: .idle,
                        needs: .balanced, pathProgress: 0, updatedAt: .now)
     }
 
     var body: some View {
         HStack(spacing: 12) {
-            VillageBotSprite(bot: figure, size: 88, animateWalk: true)
-                .frame(width: 56, height: 58).clipped()
+            if let name = VillagePortraitIdentity.name(for: bot) {
+                Button { destination = .portrait(name) } label: {
+                    VillagePortraitView(name: name, botID: bot.id)
+                        .frame(width: 56, height: 58)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Se portræt af \(bot.name)")
+            } else {
+                VillageBotSprite(bot: figure, size: 58, animateWalk: true)
+                    .frame(width: 56, height: 58)
+            }
             VStack(alignment: .leading, spacing: 3) {
                 Text(bot.name).font(.subheadline.bold())
                 Text(listening ? "Jeg lytter…" : motion.isSpeaking(figure.id) ? "Taler til dig" : "Klar til en snak")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
+            Button {
+                destination = .vrm
+            } label: {
+                Label("3D", systemImage: "cube")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(minWidth: 50, minHeight: 44)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Vis 3D-figur for \(bot.name)")
         }
         .padding(.horizontal, 12)
         .background { ChatGlassSurface(radius: 18, colors: [FadedBrand.mint, FadedColors.purple]) }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .contain)
+        .sheet(item: $destination) {
+            switch $0 {
+            case .portrait(let name):
+                VillagePortraitScreen(bot: bot, name: name)
+            case .vrm:
+                VillageVRMScreen(bot: bot)
+            }
+        }
     }
 }

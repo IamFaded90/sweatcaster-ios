@@ -33,6 +33,7 @@ struct BatchReviewView: View {
     @State private var loadingJobs = false
     @State private var loadedJobs = false
     @State private var projectToClone: String?
+    @State private var projectToRemove: String?
     @State private var showRepositorySearch = false
 
     private var projectName: String { repo.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -58,6 +59,9 @@ struct BatchReviewView: View {
                 FadedDetailText("Skriv navnet som på GitHub. Hent projektet, hvis det mangler på PC’en.")
                 Button("Hent projekt til PC’en") { projectToClone = projectName }
                     .disabled(busy || projectName.isEmpty)
+                Button("Slet lokal projektkopi", systemImage: "trash", role: .destructive) {
+                    projectToRemove = projectName
+                }.disabled(busy || projectName.isEmpty)
             }
             Section("2. Beskriv ændringen og vælg filer") {
                 TextField("Hvad vil du have ændret?", text: $goal, axis: .vertical)
@@ -110,6 +114,13 @@ struct BatchReviewView: View {
         } message: { project in
             Text("PC’en henter \(project) til Agent Workspace.")
         }
+        .confirmationDialog("Slet lokal Git-kopi?", isPresented: Binding(
+            get: { projectToRemove != nil }, set: { if !$0 { projectToRemove = nil } }
+        ), titleVisibility: .visible, presenting: projectToRemove) { project in
+            Button("Slet den lokale kopi", role: .destructive) { Task { await removeCopy(project) } }
+        } message: { project in
+            Text("PC’en frigør plads ved at slette FadedAI’s lokale kopi af \(project).")
+        }
         .task { await reload() }
         .refreshable { await reload() }
     }
@@ -148,6 +159,29 @@ struct BatchReviewView: View {
             try await api.cloneCodeRepository(project)
             failure = nil
         } catch { AppDiagnostics.record(error); failure = pcBusyMessage(error) ?? "Repoet kunne ikke klones. Tjek navnet og PC’ens adgang til GitHub." }
+    }
+
+    private func removeCopy(_ project: String) async {
+        guard !busy else { return }
+        busy = true
+        defer { busy = false }
+        do {
+            let removed = try await api.removeLocalCodeRepository(project)
+            if projectName.caseInsensitiveCompare(project) == .orderedSame { paths = "" }
+            failure = removed ? "Den lokale projektkopi er slettet." : "Der ligger ingen lokal kopi af projektet."
+        } catch {
+            AppDiagnostics.record(error)
+            failure = pcBusyMessage(error) ?? "Kopien kunne ikke slettes. Tjek PC’en og projektets kodejob, grene og rutiner."
+        }
+    }
+}
+
+private extension LiveAPI {
+    func removeLocalCodeRepository(_ repo: String) async throws -> Bool {
+        struct Receipt: Decodable { let removed: Bool }
+        let request = try JSONEncoder().encode(["repo": repo, "confirm_repo": repo])
+        let receipt: Receipt = try await moduleJSON("code-repositories/removal", upload: request, timeout: 60)
+        return receipt.removed
     }
 }
 

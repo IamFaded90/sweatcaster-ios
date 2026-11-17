@@ -1,5 +1,7 @@
 # Landsbyfigurer og tale · 16. november 2026
 
+**Efterfølgende grafikændring:** [Ny pakke og figurvælger](village-art/FINAL-INTEGRATION.md) tilføjer egne Harper/Lumi-portrætudtryk med samme taleejerskab. De nye små landsbyfigurer bruger bevægelse og taleboble; de gamle faste ansigtsankre tegnes ikke oven på den nye grafik. Live2D/VRM er fortsat ikke indbygget.
+
 Brugeren valgte punkt 1 og 5 fra listen over landsbyforbedringer. Denne lokale ændring bygger videre på de eksisterende figurer og talevalg. Ingen push, modeldownload, IPA eller ændring af den kørende PC-tjeneste er foretaget.
 
 ## Med i koden

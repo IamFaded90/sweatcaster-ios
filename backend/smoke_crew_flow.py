@@ -1,6 +1,7 @@
 """Exercise the real CrewAI dispatcher using simulated model replies; never apply a proposal."""
 import importlib.util
 from pathlib import Path
+import sys
 
 spec = importlib.util.spec_from_file_location("crew_proposals", Path(__file__).parent / "sweatcaster/crew_proposals.py")
 module = importlib.util.module_from_spec(spec)
@@ -8,13 +9,20 @@ spec.loader.exec_module(module)
 
 
 def main():
+    isolated = len(sys.argv) > 1
+
+    def dispatch(generate):
+        if isolated:
+            return module.isolated_crew_generator(generate, sys.argv[1])
+        return module.crew_generator(generate)
+
     calls = []
 
     def generate(goal, files, context):
         calls.append(context)
         return {"feasible": True, "files": {"a.py": "answer = 2\n"}, "tests": ["Check answer equals 2."]}
 
-    run = module.crew_generator(generate)
+    run = dispatch(generate)
     result = run("Improve", {"a.py": "answer = 1\n"})
     assert result["files"]["a.py"] == "answer = 2\n" and len(calls) == 2
 
@@ -25,7 +33,7 @@ def main():
         raise Busy()
 
     try:
-        module.crew_generator(unavailable)("Improve", {"a.py": "answer = 1\n"})
+        dispatch(unavailable)("Improve", {"a.py": "answer = 1\n"})
     except Busy:
         pass
     else:
@@ -35,8 +43,8 @@ def main():
         return {"feasible": True, "files": {"outside.py": "x=1"}, "tests": ["Check"]}
 
     try:
-        module.crew_generator(invalid)("Improve", {"a.py": "answer = 1\n"})
-    except ValueError:
+        dispatch(invalid)("Improve", {"a.py": "answer = 1\n"})
+    except (ValueError, RuntimeError):
         pass
     else:
         raise AssertionError("The real dispatcher must propagate invalid proposal failures")

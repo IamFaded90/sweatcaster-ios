@@ -13,7 +13,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
-from sweatcaster.repository_library import RepositoryError, RepositoryLibrary
+from sweatcaster.repository_library import RepositoryError, RepositoryInUse, RepositoryLibrary
 
 
 class CodeBatch:
@@ -44,13 +44,13 @@ class CodeBatch:
             raise RepositoryError("Angiv en opgave og 1–5 forskellige kildefiler.")
         if type(priority) is not int or priority not in {0, 1}:
             raise RepositoryError("Vælg normal eller høj prioritet.")
-        self.repository._head(repo)
         if not all(self.repository._allowed(path) for path in files):
             raise RepositoryError("Vælg almindelige kildefiler i projektet.")
         now = time.time()
         job = uuid4().hex
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
+            self.repository._head(repo)
             count = db.execute("SELECT count(*) FROM code_batch WHERE status IN ('queued', 'running')").fetchone()[0]
             if count >= 20:
                 raise RepositoryError("Kodekøen er fuld.")
@@ -70,6 +70,23 @@ class CodeBatch:
         with closing(self._connect()) as db:
             return [dict(row) for row in db.execute(
                 "SELECT id, repo, goal, status FROM code_batch ORDER BY created DESC LIMIT 50")]
+
+    def remove_repository(self, repo: str) -> bool:
+        library = self.workflows.library if self.workflows else self.repository
+        with closing(self._connect()) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            active = db.execute("SELECT 1 FROM code_batch WHERE repo = ? AND status IN ('queued','running','review','applied')",
+                                (repo.lower(),)).fetchone()
+            if active:
+                raise RepositoryInUse("Der ligger kodearbejde til projektet. Den lokale kopi er bevaret.")
+            if not library.snapshot_changes.acquire(blocking=False):
+                raise RepositoryInUse("Vent til PC’en er færdig med Git-arbejdet.")
+            try:
+                if self.workflows and any(row["repo"].lower() == repo.lower() for row in self.workflows.routines()):
+                    raise RepositoryInUse("Fjern projektets planlagte rutiner, før du sletter kopien.")
+                return library.remove_snapshot(repo)
+            finally:
+                library.snapshot_changes.release()
 
     def apply(self, job: str) -> dict:
         with closing(self._connect()) as db, db:
@@ -272,14 +289,15 @@ class ModelBusy(Exception):
 
 def configured_batch(settings, workspace: Path) -> CodeBatch:
     import os
+    import sys
     from sweatcaster.agent_workflows import configured_workflows
 
     root = settings.output_root / "agent-workflows"
     library = RepositoryLibrary(workspace, root / "unused.sqlite", None)
     generate = ollama_generator(settings)
     if os.environ.get("FADEDAI_CODE_BATCH_ENGINE", "local") == "crewai":
-        from sweatcaster.crew_proposals import crew_generator
-        generate = crew_generator(generate)
+        from sweatcaster.crew_proposals import isolated_crew_generator
+        generate = isolated_crew_generator(generate, os.environ.get("FADEDAI_CREW_PYTHON", sys.executable))
     return CodeBatch(root / "code-batch.sqlite3", library, generate, configured_workflows(settings, workspace))
 
 

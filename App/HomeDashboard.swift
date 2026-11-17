@@ -48,6 +48,7 @@ struct DashboardVideoCard: View {
 }
 
 private struct FadedDashboardHero: View {
+    let openAssistant: () -> Void
     let openVillage: () -> Void
     @Environment(\.fadedPalette) private var palette
 
@@ -65,10 +66,8 @@ private struct FadedDashboardHero: View {
                 .font(.subheadline)
                 .foregroundStyle(palette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            FadedPrimaryButton("Træd ind i din verden", icon: "arrow.up.right", action: openVillage)
-            Text("Du giver retningen. Vi giver idéerne plads.")
-                .font(.footnote)
-                .foregroundStyle(palette.secondary)
+            FadedPrimaryButton("Assistent og opgaver", icon: "sparkle.magnifyingglass", action: openAssistant)
+            FadedSecondaryButton("Åbn landsbyen", icon: "arrow.up.right", action: openVillage)
         }
         .multilineTextAlignment(.center)
         .padding(FadedSpacing.l)
@@ -80,7 +79,7 @@ private struct FadedDashboardHero: View {
 
 extension Home {
     @ViewBuilder var header: some View {
-        FadedDashboardHero(openVillage: openDashboardVillage)
+        FadedDashboardHero(openAssistant: { showAgentAssistant = true }, openVillage: openDashboardVillage)
         dashboardMainActions
         quickActions
         if !model.isDemo {
@@ -478,6 +477,9 @@ extension Home {
         case "video-jobs": openVideoJobs()
         case "code": selectSpace(.library)
         case OpenFadedAIHarperChat.destination: openHarperChat()
+        case OpenFadedAICamera.destination:
+            guard !privateStudioPresented else { return }
+            showFadedCamera = true
         case OpenFadedAIVillage.destination:
             guard !privateStudioPresented else { return }
             UserDefaults.standard.set(false, forKey: AppStorageKeys.villageBasicMode)

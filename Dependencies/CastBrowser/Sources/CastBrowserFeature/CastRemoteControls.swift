@@ -3,6 +3,14 @@ import GoogleCast
 import UIKit
 
 extension CastAppModel {
+    var needsPhoneAwake: Bool {
+        guard hasSession else { return false }
+        let media = GCKCastContext.sharedInstance().sessionManager.currentCastSession?.remoteMediaClient?.mediaStatus
+        let route = (media?.mediaInformation?.customData as? [String: String])?["fadedaiRoute"]
+        return (route == "phone" && (media?.playerState == .playing || media?.playerState == .buffering))
+            || (mediaRoute == .phone && castFeedback != nil)
+    }
+
     var screenOffMessage: String {
         guard hasActiveMedia else { return "Start en film for at se, om skærmen kan slukkes." }
         guard castFeedback == nil, !canRetryCast,
@@ -12,7 +20,10 @@ extension CastAppModel {
         }
         let route = (media.mediaInformation?.customData as? [String: String])?["fadedaiRoute"]
         if route == "direct" {
-            return "Direkte på TV · Du kan skifte app eller låse iPhone. Næste film i FadedAI-køen skal startes i appen."
+            return "Afspiller direkte på TV · Du kan skifte app eller låse iPhone."
+        }
+        if route == "pc" {
+            return "Afspiller via PC · Du kan skifte app eller låse iPhone. Lad PC’en være tændt."
         }
         return "Via iPhone · Denne kilde bruger telefonens forbindelse. Du kan skifte fane i FadedAI, men hold appen åben og skærmen tændt."
     }

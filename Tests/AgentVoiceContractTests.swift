@@ -3,6 +3,59 @@ import XCTest
 @testable import SweatCaster
 
 final class AgentVoiceContractTests: XCTestCase {
+    func testDanishDictationPrefersDedicatedModelAndKeepsInstalledFallbacks() {
+        XCTAssertEqual(AgentWhisper.availableModels(for: "da-DK", installed: { _ in true }), [.danish, .small, .base])
+        XCTAssertEqual(AgentWhisper.availableModels(for: "da-DK", installed: { $0 == .base }), [.base])
+        XCTAssertEqual(AgentWhisper.availableModels(for: "en-US", installed: { _ in true }), [.base, .small])
+        XCTAssertTrue(AgentWhisper.availableModels(for: "en-US", installed: { $0 == .danish }).isEmpty)
+    }
+
+    func testSilentRecordingIsNotSentToTheWhisperDecoder() {
+        let empty = [Float]()
+        let quiet: [Float] = [0, -0.000001, 0.00003, .nan, .infinity]
+        let quietVoice: [Float] = [0, -0.005, 0]
+        XCTAssertFalse(empty.withUnsafeBufferPointer { AgentWhisper.hasMicrophoneSignal($0) })
+        XCTAssertFalse(quiet.withUnsafeBufferPointer { AgentWhisper.hasMicrophoneSignal($0) })
+        XCTAssertTrue(quietVoice.withUnsafeBufferPointer { AgentWhisper.hasMicrophoneSignal($0) })
+    }
+
+    func testWhisperReplacementPreservesAnOpenModel() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let model = folder.appending(path: "model.bin")
+        let download = folder.appending(path: "verified.bin")
+        let old = Data("older".utf8)
+        let replacement = Data("newer".utf8)
+        try old.write(to: model)
+        try replacement.write(to: download)
+        let inUse = try FileHandle(forReadingFrom: model)
+        defer { try? inUse.close() }
+
+        try AgentWhisper.publishVerifiedDownload(download, to: model, within: folder, expectedBytes: replacement.count)
+
+        XCTAssertEqual(try Data(contentsOf: model), replacement)
+        XCTAssertEqual(try inUse.readToEnd(), old)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: download.path))
+    }
+
+    func testRejectedWhisperReplacementLeavesTheModelAvailable() throws {
+        let folder = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let model = folder.appending(path: "model.bin")
+        let download = folder.appending(path: "truncated.bin")
+        let old = Data("older".utf8)
+        try old.write(to: model)
+        try Data("bad".utf8).write(to: download)
+
+        XCTAssertThrowsError(try AgentWhisper.publishVerifiedDownload(download, to: model, within: folder,
+                                                                    expectedBytes: old.count))
+
+        XCTAssertEqual(try Data(contentsOf: model), old)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: folder.path), ["model.bin"])
+    }
+
     func testExplicitVoiceIsNotReplacedWhenReplyLanguageChanges() throws {
         guard let voice = AVSpeechSynthesisVoice.speechVoices().first(where: {
             !$0.voiceTraits.contains(.isPersonalVoice)

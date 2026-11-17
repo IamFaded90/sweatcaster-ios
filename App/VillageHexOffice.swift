@@ -2,6 +2,130 @@ import CoreTransferable
 import SwiftUI
 import UniformTypeIdentifiers
 
+/// A bounded Conway board. One bit represents each tile on the 8 × 8 map.
+struct VillageLifeBoard: Equatable, RawRepresentable {
+    static let side = 8
+    static let empty = Self(bits: 0)
+    static let glider = Self(bits: [1, 10, 16, 17, 18].reduce(0) { $0 | mask($1) })
+
+    private(set) var bits: UInt64
+    private(set) var generation: Int
+
+    init(bits: UInt64, generation: Int = 0) {
+        self.bits = bits
+        self.generation = generation
+    }
+
+    init?(rawValue: String) {
+        let parts = rawValue.split(separator: ":")
+        guard parts.count == 2, let bits = UInt64(parts[0], radix: 16),
+              let generation = Int(parts[1]), generation >= 0 else { return nil }
+        self.init(bits: bits, generation: generation)
+    }
+
+    var rawValue: String { String(bits, radix: 16) + ":" + String(generation) }
+    var population: Int { bits.nonzeroBitCount }
+
+    func contains(_ index: Int) -> Bool {
+        (0..<64).contains(index) && (bits & Self.mask(index)) != 0
+    }
+
+    mutating func toggle(_ index: Int) {
+        guard (0..<64).contains(index) else { return }
+        bits ^= Self.mask(index)
+    }
+
+    mutating func advance() {
+        var next: UInt64 = 0
+        for index in 0..<64 {
+            let x = index % Self.side
+            let y = index / Self.side
+            var neighbors = 0
+            for row in max(0, y - 1)...min(Self.side - 1, y + 1) {
+                for column in max(0, x - 1)...min(Self.side - 1, x + 1) {
+                    let neighbor = row * Self.side + column
+                    if neighbor != index && contains(neighbor) { neighbors += 1 }
+                }
+            }
+            if neighbors == 3 || (neighbors == 2 && contains(index)) { next |= Self.mask(index) }
+        }
+        bits = next
+        if generation < Int.max { generation += 1 }
+    }
+
+    private static func mask(_ index: Int) -> UInt64 { UInt64(1) << index }
+}
+
+@MainActor struct VillageLifeGarden: View {
+    @AppStorage("village.lifeGarden.board") private var board = VillageLifeBoard.glider
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.fadedPalette) private var palette
+    @State private var running = false
+
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.flexible(minimum: 1), spacing: 2), count: VillageLifeBoard.side)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: FadedSpacing.m) {
+                FadedDetailText("Tryk på felterne for at plante liv. Se, hvordan mønstret vokser eller forsvinder efter hvert trin.")
+                Text("Trin \(board.generation) · \(board.population) levende felter")
+                    .font(.subheadline.monospacedDigit())
+                LazyVGrid(columns: columns, spacing: 2) {
+                    ForEach(0..<64, id: \.self) { index in
+                        Button {
+                            board.toggle(index)
+                        } label: {
+                            RoundedRectangle(cornerRadius: 4)
+                                .fill(board.contains(index) ? palette.lime : palette.raised)
+                                .aspectRatio(1, contentMode: .fit)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Række \(index / 8 + 1), felt \(index % 8 + 1)")
+                        .accessibilityValue(board.contains(index) ? "Levende" : "Tomt")
+                    }
+                }
+                .padding(6)
+                .fadedGlassSurface(radius: FadedRadius.medium)
+                FadedPrimaryButton(running ? "Pause" : "Start", icon: running ? "pause.fill" : "play.fill") {
+                    running.toggle()
+                }
+                .disabled(board.population == 0 && !running)
+                Button("Næste trin", systemImage: "forward.end") { board.advance() }
+                    .frame(minHeight: 44)
+                    .disabled(running || board.population == 0)
+                Menu("Nyt mønster", systemImage: "square.grid.3x3") {
+                    Button("Sæt et vandrende mønster") { reset(.glider) }
+                    Button("Ryd felterne", role: .destructive) { reset(.empty) }
+                }
+                .frame(minHeight: 44)
+            }
+            .padding(FadedSpacing.edge)
+            .frame(maxWidth: 440)
+            .frame(maxWidth: .infinity)
+        }
+        .background { FadedBackground(variant: .village) }
+        .navigationTitle("Livshaven")
+        .navigationBarTitleDisplayMode(.inline)
+        .task(id: running && scenePhase == .active) {
+            while running && scenePhase == .active && !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(650)) }
+                catch { return }
+                guard !Task.isCancelled, running, scenePhase == .active else { return }
+                board.advance()
+                if board.population == 0 { running = false }
+            }
+        }
+        .onDisappear { running = false }
+    }
+
+    private func reset(_ pattern: VillageLifeBoard) {
+        running = false
+        board = pattern
+    }
+}
+
 struct VillageMapExport: Codable, Transferable {
     struct Bot: Codable {
         let id, name, zone, activity: String

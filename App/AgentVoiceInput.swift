@@ -1,89 +1,236 @@
 import AudioToolbox
 import AVFAudio
 import CryptoKit
+import Darwin
 import FadedAIWhisperRuntime
 import Foundation
 import Observation
 
 enum AgentWhisper {
+    enum Model: String, CaseIterable, Sendable {
+        case base, small, danish
+
+        var title: String {
+            switch self {
+            case .base: "lille offline-model"
+            case .small: "flersproget offline-model"
+            case .danish: "dansk offline-model"
+            }
+        }
+
+        var downloadURL: URL {
+            if self == .danish {
+                return URL(string: "https://huggingface.co/AladdinChen/trans-local-speech-models/resolve/035921168a44cf4702e81eed7f3c9094c538323b/models/da/da-whisper-q8.bin")!
+            }
+            return URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-\(rawValue)-q5_1.bin")!
+        }
+        var bytes: Int {
+            switch self {
+            case .base: 59_707_625
+            case .small: 190_085_487
+            case .danish: 264_464_624
+            }
+        }
+        var checksum: String {
+            switch self {
+            case .base: "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898"
+            case .small: "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb"
+            case .danish: "55e73c83b66e38a34484c715325f602f3f5aba6d4db1958541d7244c032546ab"
+            }
+        }
+        var minimumMemoryMiB: UInt64 {
+            switch self {
+            case .base: 300
+            case .small: 700
+            case .danish: 800
+            }
+        }
+        var file: URL { AgentWhisper.folder.appending(path: self == .danish ? "danish-q8.bin" : "\(rawValue)-multilingual.bin") }
+        var installed: Bool { (try? LocalFileStore.checkedFileSize(file, maximumBytes: bytes)) == bytes }
+    }
+
+    enum Failure: Error { case inference }
+
     static let folder = URL.applicationSupportDirectory.appending(path: "WhisperDictation", directoryHint: .isDirectory)
-    private static let model = folder.appending(path: "base-multilingual.bin")
-    private static let url = URL(string: "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base-q5_1.bin")!
-    private static let bytes = 59_707_625
-    private static let digest = "422f1ae452ade6f30a004d7e5c6a43195e4433bc370bf23fac9cc591f01a8898"
     private static let sampleRate = 16_000
 
-    static var ready: Bool { (try? LocalFileStore.checkedFileSize(model, maximumBytes: bytes)) == bytes }
+    static func languageCode(_ locale: String) -> String {
+        let value = locale.lowercased()
+        return value.hasPrefix("en") ? "en" : value.hasPrefix("da") ? "da" : "auto"
+    }
 
-    static func install() async throws {
-        guard !ready else { return }
+    static func availableModels(for locale: String, installed: (Model) -> Bool = { $0.installed }) -> [Model] {
+        let order: [Model] = languageCode(locale) == "da" ? [.danish, .small, .base] : [.base, .small]
+        return order.filter(installed)
+    }
+
+    static func install(_ variant: Model = .base) async throws {
+        guard !variant.installed else { return }
+        let bytes = variant.bytes
+        let model = variant.file
         guard PhoneModels.hasDownloadSpace(bytes: Int64(bytes) + 100_000_000) else { throw APIError.storage }
-        let (location, response) = try await URLSession.shared.download(from: url)
+        let (location, response) = try await URLSession.shared.download(from: variant.downloadURL)
         defer { try? FileManager.default.removeItem(at: location) }
         guard let http = response as? HTTPURLResponse, http.statusCode == 200, GGUFHub.permittedHost(http.url),
               try LocalFileStore.checkedFileSize(location, maximumBytes: bytes) == bytes else { throw APIError.malformed }
-        try await Task.detached(priority: .utility) {
+        try Task.checkCancellation()
+        let verification = Task.detached(priority: .utility) {
             let input = try FileHandle(forReadingFrom: location)
             defer { try? input.close() }
             var hash = SHA256()
-            while let data = try input.read(upToCount: 1_048_576), !data.isEmpty { hash.update(data: data) }
-            guard hash.finalize().map({ String(format: "%02x", Int($0)) }).joined() == digest else { throw APIError.malformed }
-            let fm = FileManager.default
-            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
-            if fm.fileExists(atPath: model.path) { try fm.removeItem(at: model) }
-            try fm.moveItem(at: location, to: model)
-            var target = model
-            var values = URLResourceValues()
-            values.isExcludedFromBackup = true
-            try target.setResourceValues(values)
-        }.value
+            while let data = try input.read(upToCount: 1_048_576), !data.isEmpty {
+                try Task.checkCancellation()
+                hash.update(data: data)
+            }
+            guard hash.finalize().map({ String(format: "%02x", Int($0)) }).joined() == variant.checksum else { throw APIError.malformed }
+            try Task.checkCancellation()
+            try publishVerifiedDownload(location, to: model, within: folder, expectedBytes: bytes)
+        }
+        try await withTaskCancellationHandler {
+            try await verification.value
+        } onCancel: { verification.cancel() }
+    }
+
+    static func publishVerifiedDownload(_ download: URL, to model: URL, within folder: URL,
+                                        expectedBytes: Int) throws {
+        let manager = FileManager.default
+        let target = try LocalFileStore.safeWriteURL(model, within: folder)
+        try manager.createDirectory(at: folder, withIntermediateDirectories: true)
+        var staged = try LocalFileStore.safeWriteURL(
+            folder.appending(path: ".whisper-\(UUID().uuidString).download"), within: folder
+        )
+        defer { try? manager.removeItem(at: staged) }
+        try manager.moveItem(at: download, to: staged)
+        guard try LocalFileStore.checkedFileSize(staged, maximumBytes: expectedBytes) == expectedBytes else {
+            throw APIError.malformed
+        }
+        var values = URLResourceValues()
+        values.isExcludedFromBackup = true
+        try staged.setResourceValues(values)
+        // The staged file shares the destination volume. Atomic rename keeps an installed model readable.
+        let result = staged.withUnsafeFileSystemRepresentation { source in
+            target.withUnsafeFileSystemRepresentation { destination -> Int32? in
+                guard let source, let destination else { return nil }
+                return Darwin.rename(source, destination)
+            }
+        }
+        guard let result else { throw APIError.storage }
+        guard result == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
     }
 
     static func transcribe(_ url: URL, language: String) throws -> String {
-        try transcribeSegments(url, language: language).map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let model = availableModels(for: language).first else { throw APIError.storage }
+        return try transcribeSegments(url, language: language, model: model)
+            .map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func transcribeSegments(_ url: URL, language: String) throws -> [LocalWhisperEngine.Segment] {
+    static func transcribeSegments(_ url: URL, language: String, model: Model = .base) throws -> [LocalWhisperEngine.Segment] {
         let file = try AVAudioFile(forReading: url)
         let frameCount = AVAudioFrameCount(min(Int64(sampleRate * 45), file.length))
-        guard frameCount > 0, file.processingFormat.sampleRate == Double(sampleRate),
+        guard frameCount > 0 else { return [] }
+        guard file.processingFormat.sampleRate == Double(sampleRate),
               let pcm = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: frameCount) else {
             throw APIError.malformed
         }
         try file.read(into: pcm, frameCount: frameCount)
         guard let samples = pcm.floatChannelData?[0] else { throw APIError.malformed }
-        let code = language.hasPrefix("en") ? "en" : language.hasPrefix("da") ? "da" : "auto"
-        guard let result = LocalWhisperEngine.transcribeSegments(modelPath: model.path, samples: samples,
-                                                                count: Int32(pcm.frameLength), language: code) else {
-            throw APIError.malformed
+        guard hasMicrophoneSignal(UnsafeBufferPointer(start: samples, count: Int(pcm.frameLength))) else { return [] }
+        // The Danish checkpoint was tuned with short text-only transcripts. Whisper still returns clip ranges.
+        guard let result = LocalWhisperEngine.transcribeSegments(
+            modelPath: model.file.path, samples: samples, count: Int32(pcm.frameLength),
+            language: languageCode(language), timestamped: model != .danish
+        ) else {
+            throw Failure.inference
         }
         return result
+    }
+
+    static func hasMicrophoneSignal(_ samples: UnsafeBufferPointer<Float>) -> Bool {
+        // Ignore empty recordings and traces below -60 dBFS, so the decoder cannot invent a reply from digital silence.
+        samples.contains { $0.isFinite && abs($0) >= 0.001 }
+    }
+}
+
+struct AgentVoiceSilence {
+    let pause: TimeInterval
+    private var speechSamples = 0
+    private var lastSpeech: TimeInterval?
+
+    init(pause: TimeInterval) {
+        self.pause = pause.isFinite ? min(4, max(1.4, pause)) : 2.5
+    }
+
+    mutating func ended(at time: TimeInterval, level: Float) -> Bool {
+        if level >= -42 {
+            speechSamples = min(3, speechSamples + 1)
+            lastSpeech = time
+            return false
+        }
+        if speechSamples < 3 { speechSamples = 0 }
+        return speechSamples == 3 && lastSpeech.map { time - $0 >= pause } == true
     }
 }
 
 @MainActor @Observable final class AgentWhisperCapture {
+    private static var modelTransferActive = false
+    @ObservationIgnored private var installation: Task<Void, Error>?
+    private var modelRevision = 0
     private var recorder: AVAudioRecorder?
     private var recordingURL: URL?
     private var revision = UUID()
     private var maxDuration: Task<Void, Never>?
+    private var silenceMonitor: Task<Void, Never>?
+    private(set) var starting = false
     private(set) var active = false
     private(set) var processing = false
     private(set) var installing = false
     private(set) var segments: [LocalWhisperEngine.Segment] = []
-
-    func install() async throws {
-        guard !installing else { return }
-        installing = true
-        defer { installing = false }
-        try await AgentWhisper.install()
+    var deletionChoice: AgentWhisper.Model?
+    var installedModels: [AgentWhisper.Model] {
+        _ = modelRevision
+        return AgentWhisper.Model.allCases.filter(\.installed)
     }
 
-    func start(whenFull: @escaping @MainActor () -> Void) async throws {
-        guard !active, !processing, AgentWhisper.ready else { throw APIError.storage }
+    func install(_ model: AgentWhisper.Model = .base) async throws {
+        guard !Self.modelTransferActive else { throw PhoneModelError.downloadBusy }
+        Self.modelTransferActive = true
+        installing = true
+        let transfer = Task { try await AgentWhisper.install(model) }
+        installation = transfer
+        defer {
+            Self.modelTransferActive = false
+            installation = nil
+            installing = false
+            modelRevision += 1
+        }
+        try await withTaskCancellationHandler {
+            try await transfer.value
+        } onCancel: { transfer.cancel() }
+    }
+
+    func cancelInstallation() { installation?.cancel() }
+
+    func removeModel(_ model: AgentWhisper.Model) throws {
+        guard !Self.modelTransferActive, !starting, !active, !processing, !LocalCompute.isRunning else {
+            throw LocalComputeError.busy
+        }
+        try LocalFileStore(root: AgentWhisper.folder).delete(model.file)
+        modelRevision += 1
+    }
+
+    func start(language: String, silenceAfter: TimeInterval? = nil,
+               whenFull: @escaping @MainActor () -> Void) async throws {
+        guard !starting, !active, !processing, !AgentWhisper.availableModels(for: language).isEmpty else {
+            throw APIError.storage
+        }
+        starting = true
+        defer { starting = false }
         let id = UUID()
         revision = id
         segments = []
-        guard await AVAudioApplication.requestRecordPermission(), revision == id else { throw APIError.input }
+        let permitted = await AVAudioApplication.requestRecordPermission()
+        guard revision == id, !Task.isCancelled else { throw CancellationError() }
+        guard permitted else { throw APIError.input }
         let file = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".wav")
         let audio = AVAudioSession.sharedInstance()
         try audio.setCategory(.record, mode: .measurement)
@@ -96,6 +243,7 @@ enum AgentWhisper {
             ])
             guard recorder?.record(forDuration: 45) == true else { throw APIError.storage }
             active = true
+            if silenceAfter != nil { recorder?.isMeteringEnabled = true }
         } catch {
             cancel()
             try? audio.setActive(false, options: .notifyOthersOnDeactivation)
@@ -104,6 +252,20 @@ enum AgentWhisper {
         maxDuration = Task {
             try? await Task.sleep(for: .seconds(45))
             if !Task.isCancelled, active { whenFull() }
+        }
+        if let silenceAfter {
+            silenceMonitor = Task {
+                var detector = AgentVoiceSilence(pause: silenceAfter)
+                while !Task.isCancelled, active, revision == id {
+                    do { try await Task.sleep(for: .milliseconds(120)) } catch { return }
+                    guard !Task.isCancelled, active, revision == id, let recorder else { return }
+                    recorder.updateMeters()
+                    if detector.ended(at: ProcessInfo.processInfo.systemUptime, level: recorder.averagePower(forChannel: 0)) {
+                        whenFull()
+                        return
+                    }
+                }
+            }
         }
     }
 
@@ -117,14 +279,31 @@ enum AgentWhisper {
             try? FileManager.default.removeItem(at: file)
             processing = false
         }
-        let result = try await LocalCompute.run(minimumMiB: 300) {
+        let models = AgentWhisper.availableModels(for: language)
+        guard !models.isEmpty else { throw APIError.storage }
+        for (index, model) in models.enumerated() {
+            guard revision == id else { throw CancellationError() }
+            let hasFallback = index + 1 < models.count
+            do {
+                let result = try await recognize(file, language: language, model: model)
+                guard revision == id else { throw CancellationError() }
+                segments = result
+                return result.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+            } catch LocalComputeError.lowMemory where hasFallback {
+                continue
+            } catch AgentWhisper.Failure.inference where hasFallback {
+                continue
+            }
+        }
+        throw LocalComputeError.lowMemory
+    }
+
+    private func recognize(_ file: URL, language: String, model: AgentWhisper.Model) async throws -> [LocalWhisperEngine.Segment] {
+        try await LocalCompute.run(minimumMiB: model.minimumMemoryMiB) {
             try await Task.detached(priority: .userInitiated) {
-                try AgentWhisper.transcribeSegments(file, language: language)
+                try AgentWhisper.transcribeSegments(file, language: language, model: model)
             }.value
         }
-        guard revision == id else { throw CancellationError() }
-        segments = result
-        return result.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func cancel() {
@@ -136,6 +315,8 @@ enum AgentWhisper {
     }
 
     private func releaseMic() {
+        silenceMonitor?.cancel()
+        silenceMonitor = nil
         maxDuration?.cancel()
         maxDuration = nil
         if let recorder {

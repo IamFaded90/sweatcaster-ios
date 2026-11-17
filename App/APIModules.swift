@@ -31,6 +31,21 @@ extension LiveAPI {
         return data
     }
 
+    func privateStudioImage(prompt: String, negative: String, reference: Data?, mask: Data?,
+                            strength: Float?, seed: UInt32) async throws -> Data {
+        struct Edit: Encodable {
+            let prompt: String, negative: String
+            let reference: Data?, mask: Data?, strength: Float?
+            let seed: UInt32
+        }
+        let body = try JSONEncoder().encode(Edit(prompt: prompt, negative: negative, reference: reference,
+                                                  mask: mask, strength: strength, seed: seed))
+        let (data, response) = try await lumiData("private-image", body: body, timeout: 330)
+        try checked(response, expected: 200, data: data)
+        guard data.count <= 15_000_000, data.starts(with: [0x89, 0x50, 0x4e, 0x47]) else { throw APIError.malformed }
+        return data
+    }
+
     func lumiStartVideo(prompt: String) async throws -> LumiVideoJob {
         let body = try JSONSerialization.data(withJSONObject: ["prompt": prompt])
         return try await lumiRequest("video", body: body, timeout: 30)
@@ -65,7 +80,7 @@ extension LiveAPI {
 
     private func lumiData(_ action: String, body: Data,
                           timeout: TimeInterval) async throws -> (Data, URLResponse) {
-        guard ["chat", "scene-chat", "image", "video"].contains(action) else { throw APIError.input }
+        guard ["chat", "scene-chat", "image", "private-image", "video"].contains(action) else { throw APIError.input }
         let url = try lumiURL(action)
         var endpoint = request(url, method: "POST")
         endpoint.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -109,6 +124,27 @@ extension LiveAPI {
 
     func moduleManifest() async throws -> ModuleManifest { try await moduleJSON("manifest") }
 
+    func castRelayURL(source: URL, page: URL?) async throws -> URL {
+        struct Input: Encodable { let url: String; let origin: String? }
+        struct Relay: Decodable { let path: String }
+        guard server.profile == .home else { throw APIError.offline }
+        let origin = page.flatMap { address -> String? in
+            guard var parts = URLComponents(url: address, resolvingAgainstBaseURL: false),
+                  ["http", "https"].contains(parts.scheme ?? ""), parts.host != nil,
+                  parts.user == nil, parts.password == nil else { return nil }
+            parts.path = ""
+            parts.query = nil
+            parts.fragment = nil
+            return parts.string
+        }
+        let data = try JSONEncoder().encode(Input(url: source.absoluteString, origin: origin))
+        let result: Relay = try await moduleJSON("cast-relay", upload: data, timeout: 8, maximumBytes: 1024)
+        let path = #"^/api/modules/v1/cast-relay/play/[A-Za-z0-9_-]{32}/[A-Za-z0-9_-]{24}$"#
+        guard result.path.range(of: path, options: .regularExpression) != nil,
+              let receiver = URL(string: server.origin.absoluteString + result.path) else { throw APIError.malformed }
+        return receiver
+    }
+
     func grokTemplate(_ link: String) async throws -> GrokTemplateReceipt {
         try await moduleJSON("grok-template", upload: JSONEncoder().encode(["url": link]), timeout: 50)
     }
@@ -148,6 +184,16 @@ extension LiveAPI {
               let url = URL(string: server.origin.absoluteString + "/api/modules/v1/video-review/\(id)/preview")
         else { throw APIError.input }
         return try await downloadVideo(at: url)
+    }
+
+    func deleteVideoReviewPreview(_ id: String) async throws -> PCVideoReview {
+        guard validWireID(id),
+              let url = URL(string: server.origin.absoluteString + "/api/modules/v1/video-review/\(id)/preview")
+        else { throw APIError.input }
+        let (data, response) = try await loggedData(for: request(url, method: "DELETE"))
+        try checked(response, expected: 200, data: data)
+        guard data.count <= 100_000 else { throw APIError.malformed }
+        return try loggedDecode(PCVideoReview.self, from: data, decoder: JSONDecoder())
     }
 
     func botMailbox(_ botID: UUID, createFor name: String? = nil) async throws -> BotMailboxState {
@@ -228,8 +274,13 @@ extension LiveAPI {
         guard result.ok else { throw APIError.malformed }
     }
 
-    func composioProviders() async throws -> ComposioProviders {
-        try await moduleJSON("composio", timeout: 85)
+    func composioProviders(refresh: Bool = false) async throws -> ComposioProviders {
+        do {
+            return try await moduleJSON("composio/integrations", timeout: 85,
+                                        query: refresh ? [URLQueryItem(name: "refresh", value: "true")] : [])
+        } catch APIError.http(404, _) {
+            return try await moduleJSON("composio", timeout: 85)
+        }
     }
 
     func composioLink(_ provider: String) async throws -> ComposioLink {
@@ -248,6 +299,20 @@ extension LiveAPI {
 
     func youtubeChannels() async throws -> YouTubeChannels {
         try await moduleJSON("youtube/channels", timeout: 24)
+    }
+
+    func kokoroAudio(_ text: String, voice: String) async throws -> Data {
+        struct Speech: Decodable { let audio: Data }
+        let result: Speech = try await moduleJSON("kokoro", upload: JSONEncoder().encode(["text": text, "voice": voice]),
+                                                  timeout: 60, maximumBytes: 12_000_000)
+        guard !result.audio.isEmpty else { throw APIError.malformed }
+        return result.audio
+    }
+
+    func googleDriveFiles(parent: String?, page: String?) async throws -> PCDriveFiles {
+        let query = [parent.map { URLQueryItem(name: "parent", value: $0) },
+                     page.map { URLQueryItem(name: "page", value: $0) }].compactMap { $0 }
+        return try await moduleJSON("google-drive/files", timeout: 25, query: query)
     }
 
     func pcWebSearch(query: String) async throws -> PCWebSearch {

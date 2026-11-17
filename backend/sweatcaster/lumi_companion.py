@@ -6,6 +6,10 @@ import base64
 import binascii
 from io import BytesIO
 import json
+import os
+from pathlib import Path
+import re
+import stat
 import time
 import shutil
 import subprocess
@@ -27,6 +31,7 @@ VIDEO_VAE = "wan_2.1_vae.safetensors"
 OLLAMA = "http://127.0.0.1:11434"
 COMFY = "http://127.0.0.1:8188"
 MAX_REFERENCE = 1_000_000
+VIDEO_OUTPUT_FOLDER = "FadedAI_Lumi"
 _video_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lumi-video")
 _video_lock = Lock()
 _video_jobs: dict[str, dict] = {}
@@ -148,7 +153,7 @@ def normalize_reference(value):
         if len(raw) > MAX_REFERENCE:
             raise ValueError
         with Image.open(BytesIO(raw), formats=("JPEG", "PNG")) as selected:
-            if not all(32 <= side <= 2048 for side in selected.size) or selected.is_animated:
+            if not all(32 <= side <= 2048 for side in selected.size) or getattr(selected, "is_animated", False):
                 raise ValueError
             image = ImageOps.exif_transpose(selected).convert("RGB")
             image.thumbnail((768, 768), Image.Resampling.LANCZOS)
@@ -162,12 +167,69 @@ def normalize_reference(value):
         raise ApiError(422, "INVALID_INPUT", "Referencebilledet kunne ikke læses som et foto.") from exc
 
 
-def image(prompt: str, *, reference=None, client: requests.Session | None = None, timeout: float = 300) -> bytes:
+def _edit_mask(value, reference):
+    from PIL import Image
+
+    try:
+        if reference is None or not isinstance(value, str) or not 1 <= len(value) <= 350_000:
+            raise ValueError
+        raw = base64.b64decode(value, validate=True)
+        with Image.open(BytesIO(raw), formats=("PNG",)) as selected:
+            if not all(32 <= side <= 1024 for side in selected.size) or getattr(selected, "is_animated", False):
+                raise ValueError
+            with Image.open(BytesIO(reference)) as photo:
+                if abs(selected.width / selected.height - photo.width / photo.height) > 0.12:
+                    raise ValueError
+                mask = selected.convert("L").resize(photo.size, Image.Resampling.NEAREST)
+            mask = mask.point(lambda level: 255 if level >= 128 else 0)
+            if mask.getextrema()[1] == 0:
+                raise ValueError
+            output = BytesIO()
+            mask.save(output, "PNG")
+            return output.getvalue()
+    except (binascii.Error, OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise ApiError(422, "INVALID_INPUT", "Markeringen passer ikke til referencefotoet. Prøv at tegne den igen.") from exc
+
+
+def _temp_upload(client, name, data):
+    uploaded = client.post(COMFY + "/upload/image", data={"type": "temp"},
+                           files={"image": (name, data, "image/png")}, timeout=(3, 20), allow_redirects=False)
+    uploaded.raise_for_status()
+    receipt = uploaded.json()
+    if (not isinstance(receipt, dict) or receipt.get("type") != "temp"
+            or receipt.get("name") != name or receipt.get("subfolder", "") != ""):
+        raise ApiError(502, "NOT_READY", "PC’en kunne ikke klargøre referencebilledet.")
+
+
+def _remove_private_image_files(files):
+    root = Path(os.environ.get("FADEDAI_COMFY_TEMP_DIR", "F:/FadedAI/ComfyUI/temp")).resolve()
+    for name in files:
+        if not re.fullmatch(r"(?:fadedai-private-[a-f0-9]{32}|ComfyUI_temp_[A-Za-z0-9_]{1,80})\.png", name):
+            continue
+        path = root / name
+        try:
+            if path.is_file() and not path.is_symlink():
+                path.unlink()
+        except OSError:
+            pass
+
+
+def image(prompt: str, *, reference=None, client: requests.Session | None = None, timeout: float = 300,
+          private=False, mask=None, strength=None, seed=None, negative=None) -> bytes:
     prompt = _message(prompt, limit=1000)
     reference = normalize_reference(reference) if reference is not None else None
+    mask = _edit_mask(mask, reference) if mask is not None else None
+    if strength is not None and (type(strength) not in (int, float) or not 0.1 <= strength <= 1):
+        raise ApiError(422, "INVALID_INPUT", "Vælg hvor meget referencebilledet må ændres.")
+    if seed is not None and (type(seed) is not int or not 0 <= seed <= 0xFFFFFFFF):
+        raise ApiError(422, "INVALID_INPUT", "Det valgte seed er ugyldigt.")
+    if negative is not None and (not isinstance(negative, str) or len(negative) > 1_000):
+        raise ApiError(422, "INVALID_INPUT", "Forkort beskrivelsen af, hvad billedet skal undgå.")
     owned = client is None
     client = client or _client()
     submitted = False
+    finished = False
+    temporary_files = []
     try:
         info = client.get(COMFY + "/object_info/CheckpointLoaderSimple", timeout=(3, 15), allow_redirects=False)
         info.raise_for_status()
@@ -177,27 +239,32 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
         graph = {
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": IMAGE_MODEL}},
             "2": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
-            "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "low quality, blurry, distorted", "clip": ["1", 1]}},
+            "3": {"class_type": "CLIPTextEncode", "inputs": {"text": negative or "low quality, blurry, distorted", "clip": ["1", 1]}},
             "4": {"class_type": "EmptyLatentImage", "inputs": {"width": 768, "height": 768, "batch_size": 1}},
-            "5": {"class_type": "KSampler", "inputs": {"seed": int(time.time_ns() % (2**53)),
+            "5": {"class_type": "KSampler", "inputs": {"seed": seed if seed is not None else int(time.time_ns() % (2**53)),
                   "steps": 25, "cfg": 5.5, "sampler_name": "euler", "scheduler": "normal", "denoise": 1,
                   "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0], "latent_image": ["4", 0]}},
             "6": {"class_type": "VAEDecode", "inputs": {"samples": ["5", 0], "vae": ["1", 2]}},
             "7": {"class_type": "PreviewImage", "inputs": {"images": ["6", 0]}},
         }
         if reference is not None:
-            name = f"fadedai-lumi-{uuid4().hex}.png"
-            uploaded = client.post(COMFY + "/upload/image", data={"type": "temp"},
-                                   files={"image": (name, reference, "image/png")}, timeout=(3, 20),
-                                   allow_redirects=False)
-            uploaded.raise_for_status()
-            receipt = uploaded.json()
-            if (not isinstance(receipt, dict) or receipt.get("type") != "temp"
-                    or receipt.get("name") != name or receipt.get("subfolder", "") != ""):
-                raise ApiError(502, "NOT_READY", "PC’en kunne ikke klargøre referencebilledet.")
+            prefix = "fadedai-private" if private else "fadedai-lumi"
+            name = f"{prefix}-{uuid4().hex}.png"
+            temporary_files.append(name)
+            _temp_upload(client, name, reference)
             graph["8"] = {"class_type": "LoadImage", "inputs": {"image": name + " [temp]"}}
             graph["4"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["8", 0], "vae": ["1", 2]}}
-            graph["5"]["inputs"]["denoise"] = 0.55
+            graph["5"]["inputs"]["denoise"] = 0.55 if strength is None else strength
+            if mask is not None:
+                name = f"{prefix}-{uuid4().hex}.png"
+                temporary_files.append(name)
+                _temp_upload(client, name, mask)
+                graph["9"] = {"class_type": "LoadImageMask", "inputs": {"image": name + " [temp]", "channel": "red"}}
+                graph["10"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["4", 0], "mask": ["9", 0]}}
+                graph["5"]["inputs"]["latent_image"] = ["10", 0]
+                graph["11"] = {"class_type": "ImageCompositeMasked", "inputs": {
+                    "destination": ["8", 0], "source": ["6", 0], "mask": ["9", 0], "x": 0, "y": 0, "resize_source": True}}
+                graph["7"]["inputs"]["images"] = ["11", 0]
         queued = client.post(COMFY + "/prompt", json={"prompt": graph}, timeout=(3, 20), allow_redirects=False)
         queued.raise_for_status()
         prompt_id = str(queued.json()["prompt_id"])
@@ -209,10 +276,14 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
             entry = result.json().get(prompt_id)
             if entry:
                 if entry.get("status", {}).get("status_str") == "error":
+                    finished = True
                     raise ApiError(502, "NOT_READY", "ComfyUI kunne ikke lave billedet.")
                 outputs = entry.get("outputs", {}).get("7", {}).get("images", [])
                 if outputs:
                     item = outputs[0]
+                    finished = True
+                    if private and item.get("type") == "temp" and not item.get("subfolder"):
+                        temporary_files.append(item["filename"])
                     rendered = client.get(COMFY + "/view", params={"filename": item["filename"],
                         "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")},
                         timeout=(3, 30), allow_redirects=False)
@@ -220,12 +291,28 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
                     data = rendered.content
                     if len(data) > 15_000_000 or not data.startswith(b"\x89PNG\r\n\x1a\n"):
                         raise ApiError(502, "NOT_READY", "ComfyUI sendte ikke et gyldigt billede.")
+                    if private:
+                        from PIL import Image
+
+                        with Image.open(BytesIO(data), formats=("PNG",)) as preview:
+                            clean = preview.convert("RGB")
+                            clean.info.clear()
+                            plain = BytesIO()
+                            clean.save(plain, "PNG")
+                            return plain.getvalue()
                     return data
             time.sleep(1)
         raise ApiError(504, "NOT_READY", "Billedet tog for lang tid. Prøv igen.")
     except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
         raise ApiError(503, "NOT_READY", "ComfyUI svarer ikke på PC'en.") from exc
     finally:
+        if private and (finished or not submitted):
+            _remove_private_image_files(temporary_files)
+            if finished:
+                try:
+                    client.post(COMFY + "/history", json={"delete": [prompt_id]}, timeout=(2, 3), allow_redirects=False)
+                except requests.RequestException:
+                    pass
         if submitted:
             try:
                 client.post(COMFY + "/free", json={"unload_models": True, "free_memory": True},
@@ -236,7 +323,8 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
             client.close()
 
 
-def video(prompt: str, *, client: requests.Session | None = None, timeout: float = 1200) -> bytes:
+def video(prompt: str, *, client: requests.Session | None = None, timeout: float = 1200,
+          output_id: str | None = None) -> bytes:
     """Render a short Wan 2.1 clip, then convert ComfyUI's WebM for iPhone playback."""
     prompt = _message(prompt, limit=1000)
     ffmpeg = shutil.which("ffmpeg")
@@ -265,9 +353,11 @@ def video(prompt: str, *, client: requests.Session | None = None, timeout: float
             "8": {"class_type": "KSampler", "inputs": {"seed": int(time.time_ns() % (2**53)),
                   "steps": 20, "cfg": 6, "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1,
                   "model": ["2", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["7", 0]}},
-            "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0], "vae": ["6", 0]}},
+            "9": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["8", 0], "vae": ["6", 0],
+                  "tile_size": 192, "overlap": 32, "temporal_size": 8, "temporal_overlap": 4}},
             "10": {"class_type": "SaveWEBM", "inputs": {"images": ["9", 0],
-                   "filename_prefix": "FadedAI_Lumi", "codec": "vp9", "fps": 12, "crf": 32}},
+                   "filename_prefix": VIDEO_OUTPUT_FOLDER if output_id is None else f"{VIDEO_OUTPUT_FOLDER}/{output_id}",
+                   "codec": "vp9", "fps": 12, "crf": 32}},
         }
         queued = client.post(COMFY + "/prompt", json={"prompt": graph}, timeout=(3, 20), allow_redirects=False)
         queued.raise_for_status()
@@ -284,6 +374,9 @@ def video(prompt: str, *, client: requests.Session | None = None, timeout: float
                 files = output.get("images", []) or output.get("gifs", []) or output.get("videos", [])
                 if files:
                     item = files[0]
+                    if output_id and (item.get("type") != "output" or item.get("subfolder") != VIDEO_OUTPUT_FOLDER
+                                      or not _video_filename(output_id).fullmatch(item.get("filename", ""))):
+                        raise ApiError(502, "NOT_READY", "Videomotoren sendte en uventet fil.")
                     rendered = client.get(COMFY + "/view", params={"filename": item["filename"],
                         "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")},
                         timeout=(3, 60), allow_redirects=False)
@@ -311,10 +404,32 @@ def video(prompt: str, *, client: requests.Session | None = None, timeout: float
             client.close()
 
 
+def _video_filename(job_id: str):
+    return re.compile(re.escape(job_id) + r"_[0-9]{5}_[.]webm")
+
+
+def _remove_owned_video(job_id: str) -> None:
+    output = Path(os.environ.get("FADEDAI_COMFY_OUTPUT_DIR", "F:/FadedAI/ComfyUI/output"))
+    try:
+        if not output.is_absolute() or not output.is_dir():
+            raise OSError("Missing output folder")
+        directory = output.resolve(strict=True) / VIDEO_OUTPUT_FOLDER
+        if directory.resolve() != directory:
+            raise OSError("Unexpected output folder")
+        pattern = _video_filename(job_id)
+        files = [file for file in directory.iterdir() if pattern.fullmatch(file.name)] if directory.exists() else []
+        if any(file.resolve() != file or not stat.S_ISREG(file.lstat().st_mode) for file in files):
+            raise OSError("Unexpected file type")
+        for file in files:
+            file.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ApiError(503, "NOT_READY", "Lumis videofil kunne ikke slettes på PC’en.") from exc
+
+
 def _render_video(job_id: str, prompt: str) -> None:
     try:
-        payload = video(prompt)
-        result = {"status": "ready", "data": payload}
+        payload = video(prompt, output_id=job_id)
+        result = {"status": "ready", "data": payload, "removable": True}
     except Exception as exc:
         result = {"status": "failed", "message": getattr(exc, "message", "Videoen fejlede på PC'en.")}
     with _video_lock:
@@ -347,6 +462,13 @@ def register_lumi(app: FastAPI, settings, authorize) -> None:
         return Response(image(body.get("prompt"), reference=body.get("reference")), media_type="image/png",
                         headers={"Cache-Control": "no-store"})
 
+    @router.post("/private-image")
+    def private_image_route(bot_id: str, body: dict = Body(...)):
+        _bot(bot_id)
+        data = image(body.get("prompt"), reference=body.get("reference"), private=True, mask=body.get("mask"),
+                     seed=body.get("seed"), strength=body.get("strength"), negative=body.get("negative"))
+        return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
+
     @router.post("/video")
     def video_route(bot_id: str, body: dict = Body(...)):
         _bot(bot_id)
@@ -378,5 +500,22 @@ def register_lumi(app: FastAPI, settings, authorize) -> None:
                 raise ApiError(404, "NOT_FOUND", "Videoen er ikke klar.")
             payload = job["data"]
         return Response(payload, media_type="video/mp4", headers={"Cache-Control": "no-store"})
+
+    @router.put("/video/{job_id}/remove")
+    def remove_video(bot_id: str, job_id: str):
+        _bot(bot_id)
+        try:
+            valid = str(UUID(job_id)) == job_id
+        except (ValueError, TypeError):
+            valid = False
+        if not valid:
+            raise ApiError(422, "INVALID_INPUT", "Ugyldigt videojob.")
+        with _video_lock:
+            job = _video_jobs.get(job_id)
+            if job is not None and job["status"] == "working":
+                raise ApiError(409, "NOT_READY", "Vent til videojobbet er afsluttet.")
+            _remove_owned_video(job_id)
+            _video_jobs.pop(job_id, None)
+        return {"ok": True}
 
     app.include_router(router)

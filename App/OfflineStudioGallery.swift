@@ -163,9 +163,7 @@ extension OfflineStudio {
             if privateSession {
                 guard privateImages.removeValue(forKey: file) != nil else { return }
             } else {
-                guard file.isFileURL, file.deletingLastPathComponent() == historyFolder else { return }
-                try FileManager.default.removeItem(at: file)
-                try? FileManager.default.removeItem(at: Self.metadataURL(file))
+                try StudioImageFiles.deleteSavedImage(file)
                 galleryMutation &+= 1
                 galleryIndex.files.removeAll { $0 == file }
                 galleryIndex.dates.removeValue(forKey: file)

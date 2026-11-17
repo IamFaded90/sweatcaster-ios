@@ -14,6 +14,8 @@ private struct FadedGlassSurface: ViewModifier {
             .background {
                 if reduceTransparency {
                     shape.fill(surface)
+                } else if palette.theme == .faded {
+                    FadedMaterialLayer(radius: radius, tint: surface, highlight: FadedBrand.mint)
                 } else {
                     shape.fill(.regularMaterial)
                         .overlay { shape.fill(surface.opacity(0.25)) }
@@ -21,6 +23,29 @@ private struct FadedGlassSurface: ViewModifier {
             }
             .overlay { shape.strokeBorder(border ?? palette.border).allowsHitTesting(false) }
             .contentShape(shape)
+    }
+}
+
+private struct FadedMaterialLayer: View {
+    let radius: CGFloat
+    let tint: Color
+    let highlight: Color
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: radius)
+        Group {
+            if #available(iOS 26.0, *) {
+                Color.clear.glassEffect(.regular.tint(tint.opacity(0.64)), in: shape)
+            } else {
+                shape.fill(.regularMaterial)
+            }
+        }
+        .overlay {
+            shape.fill(LinearGradient(colors: [highlight.opacity(0.13), tint.opacity(0.35), FadedBrand.blue.opacity(0.07)],
+                                      startPoint: .topLeading, endPoint: .bottomTrailing))
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 }
 
@@ -106,6 +131,7 @@ struct FadedButtonStyle: ButtonStyle {
     @Environment(\.fadedPalette) private var palette
     @Environment(\.isEnabled) private var enabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @AppStorage(AppStorageKeys.qolHaptics) private var haptics = true
     @AppStorage(AppStorageKeys.qolReduceMotion) private var calmMotion = false
 
@@ -123,6 +149,9 @@ struct FadedButtonStyle: ButtonStyle {
             .foregroundStyle(text)
             .background {
                 if enabled && primary && palette.theme == .faded { shape.fill(FadedBrand.gradient) }
+                else if enabled && !destructive && palette.theme == .faded && !reduceTransparency {
+                    FadedMaterialLayer(radius: FadedRadius.small, tint: fill, highlight: FadedBrand.mint)
+                }
                 else { shape.fill(fill) }
             }
             .overlay { shape.strokeBorder(destructive && enabled ? palette.coral : palette.border, lineWidth: primary && enabled ? 0 : 1) }
@@ -222,8 +251,7 @@ struct FadedCard<Content: View>: View {
                 if reduceTransparency || palette.theme != .faded {
                     shape.fill(tint)
                 } else {
-                    shape.fill(.regularMaterial)
-                        .overlay { shape.fill(tint.opacity(0.28)) }
+                    FadedMaterialLayer(radius: size.radius, tint: tint, highlight: accent ?? FadedBrand.mint)
                 }
             }
             .overlay(alignment: .leading) {

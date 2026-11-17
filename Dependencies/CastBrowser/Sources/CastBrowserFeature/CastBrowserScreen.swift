@@ -106,17 +106,25 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
     private let background: AnyView
     private let showsPlaybackControls: Bool
     private let onOpen: () -> Void
+    private let onPhoneCastWake: (Bool) -> Void
+    private let pcRelayID: String?
+    private let pcRelay: CastPCRelay?
     private let content: () -> Content
     @Environment(\.scenePhase) private var phase
     @State private var model: CastAppModel?
     @State private var playingOnPhone = false
 
     public init(isSelected: Bool, background: AnyView, showsPlaybackControls: Bool = true,
-                onOpen: @escaping () -> Void, @ViewBuilder content: @escaping () -> Content) {
+                onOpen: @escaping () -> Void, onPhoneCastWake: @escaping (Bool) -> Void = { _ in },
+                pcRelayID: String? = nil, pcRelay: CastPCRelay? = nil,
+                @ViewBuilder content: @escaping () -> Content) {
         self.isSelected = isSelected
         self.background = background
         self.showsPlaybackControls = showsPlaybackControls
         self.onOpen = onOpen
+        self.onPhoneCastWake = onPhoneCastWake
+        self.pcRelayID = pcRelayID
+        self.pcRelay = pcRelay
         self.content = content
     }
 
@@ -126,10 +134,13 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
                 CastBrowserScreen(model: model)
                     .allowsHitTesting(isSelected)
                     .accessibilityHidden(!isSelected)
+                    .background(CastWakeObserver(model: model, update: onPhoneCastWake))
             }
             content()
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    if showsPlaybackControls && !isSelected && playingOnPhone { playbackBar }
+                    if showsPlaybackControls && !isSelected, let model {
+                        playbackBar(model)
+                    }
                 }
                 .background {
                     if !isSelected && model != nil { background }
@@ -139,8 +150,13 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
                 .accessibilityHidden(isSelected)
         }
         .task(id: isSelected) {
-            if isSelected && model == nil { model = CastAppModel() }
+            if isSelected && model == nil {
+                let controller = CastAppModel()
+                controller.pcRelay = pcRelay
+                model = controller
+            }
         }
+        .onChange(of: pcRelayID) { _, _ in model?.pcRelay = pcRelay }
         .task(id: model != nil && phase == .active) {
             guard phase == .active, let webView = model?.browser.webView else { return }
             while !Task.isCancelled {
@@ -155,21 +171,57 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
         }
     }
 
-    private var playbackBar: some View {
-        HStack(spacing: 8) {
+    private func playbackBar(_ model: CastAppModel) -> some View {
+        CastPlaybackBar(model: model, playingOnPhone: playingOnPhone, open: onOpen,
+                        pausePhone: { playingOnPhone = false })
+    }
+}
+
+@MainActor private struct CastWakeObserver: View {
+    @ObservedObject var model: CastAppModel
+    @Environment(\.scenePhase) private var phase
+    let update: (Bool) -> Void
+
+    var body: some View {
+        Color.clear
+            .allowsHitTesting(false)
+            .onChange(of: phase == .active && model.needsPhoneAwake, initial: true) { _, value in update(value) }
+            .onDisappear { update(false) }
+    }
+}
+
+@MainActor private struct CastPlaybackBar: View {
+    @ObservedObject var model: CastAppModel
+    let playingOnPhone: Bool
+    let open: () -> Void
+    let pausePhone: () -> Void
+
+    var body: some View {
+        if model.hasActiveMedia || model.canRetryCast || playingOnPhone { controls }
+    }
+
+    private var controls: some View {
+        let television = model.hasActiveMedia || model.canRetryCast
+        let pause = television ? model.isPlaying : playingOnPhone
+        return HStack(spacing: 8) {
             Button {
-                model?.selectedTab = .browser
-                onOpen()
+                model.selectedTab = television ? .remote : .browser
+                open()
             } label: {
-                Label("Tilbage til afspilleren", systemImage: "play.rectangle")
+                Label(television ? model.connectionTitle : "Tilbage til afspilleren", systemImage: television ? "tv" : "play.rectangle")
+                    .lineLimit(1)
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             }
             Button {
-                model?.browser.webView.pauseAllMediaPlayback { playingOnPhone = false }
+                if model.canRetryCast { model.retryCast() }
+                else if television { model.togglePlayback() }
+                else { model.browser.webView.pauseAllMediaPlayback(completionHandler: pausePhone) }
             } label: {
-                Image(systemName: "pause.fill").frame(width: 44, height: 44)
+                Image(systemName: model.canRetryCast ? "arrow.clockwise" : pause ? "pause.fill" : "play.fill")
+                    .frame(width: 44, height: 44)
             }
-            .accessibilityLabel("Sæt afspilning på pause")
+            .accessibilityLabel(model.canRetryCast ? "Prøv Cast igen" : pause ? "Sæt afspilning på pause" : "Fortsæt afspilning")
+            .disabled(television && !model.canRetryCast && model.castFeedback != nil)
         }
         .buttonStyle(.plain)
         .font(.subheadline.weight(.semibold))

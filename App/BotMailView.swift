@@ -11,6 +11,7 @@ struct BotMailboxState: Decodable, Sendable {
 struct BotMailMessages: Decodable, Sendable {
     struct Message: Decodable, Identifiable, Sendable {
         let id, sender, subject, timestamp: String
+        let threadID: String?
     }
 
     let messages: [Message]
@@ -272,213 +273,30 @@ struct MailAppointmentState: Decodable, Sendable {
     let api: LiveAPI?
     let bot: VillageBot
     var onUse: ((String) -> Bool)? = nil
-    @State private var mailbox: BotMailboxState?
-    @State private var messages: [BotMailMessages.Message] = []
-    @State private var notice: String?
-    @State private var busy = false
-    @State private var confirmCreate = false
-    @State private var ownerEmail = ""
-    @State private var code = ""
-
-    private enum SetupAction { case start, verify, resend }
 
     var body: some View {
-        List {
-            if api == nil {
-                Text("Forbind FadedAI med din PC for at se agentens e-mail.")
-            } else if let mailbox {
-                mailboxSection(mailbox)
-                if mailbox.active { messageSection }
-            }
-            if busy { ProgressView("Henter postkassen…") }
-            if let notice { Text(notice).foregroundStyle(.secondary) }
-        }
-        .navigationTitle("E-mail · \(bot.name)")
-        .navigationBarTitleDisplayMode(.inline)
-        .privacySensitive()
-        .task(id: api?.queueTargetID) {
-            mailbox = nil
-            messages = []
-            await load()
-        }
-        .refreshable { await load() }
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button("Opdatér postkasse", systemImage: "arrow.clockwise") { Task { await load() } }
-                    .labelStyle(.iconOnly)
-                    .disabled(api == nil || busy)
-            }
-        }
-        .confirmationDialog("Opret e-mail til \(bot.name)?", isPresented: $confirmCreate, titleVisibility: .visible) {
-            Button("Opret postkasse") { Task { await load(create: true) } }
-        } message: {
-            Text("AgentMail opretter én adresse på din konto.")
-        }
-    }
-
-    private func mailboxSection(_ mailbox: BotMailboxState) -> some View {
-        Section("Postkasse") {
-            if let address = mailbox.address {
-                Text(address).font(.subheadline.monospaced()).textSelection(.enabled)
-                if !mailbox.active {
-                    Text("Postkassen er slået fra i AgentMail.").foregroundStyle(.secondary)
-                }
-            } else if mailbox.configured {
-                Button("Opret e-mailadresse", systemImage: "envelope.badge.person.crop") { confirmCreate = true }
-                    .disabled(busy)
-            } else if mailbox.verificationRequired == true {
-                TextField("Engangskode fra din mail", text: $code)
-                    .textContentType(.oneTimeCode)
-                    .keyboardType(.numberPad)
-                Button("Bekræft AgentMail") { Task { await configure(.verify) } }
-                    .disabled(busy || code.utf8.count != 6 || !code.utf8.allSatisfy { (48...57).contains($0) })
-                Button("Bed om engangskoden igen") { Task { await configure(.resend) } }
-                    .disabled(busy)
-            } else if mailbox.verificationElsewhere == true {
-                Text("Indtast engangskoden på den agent, hvor du startede opsætningen.")
-                    .foregroundStyle(.secondary)
-            } else {
-                Text("AgentMail sender dig en engangskode. FadedAI gemmer derefter adgangen på din PC.")
-                    .foregroundStyle(.secondary)
-                TextField("Din e-mailadresse", text: $ownerEmail)
-                    .textContentType(.emailAddress)
-                    .keyboardType(.emailAddress)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                Button("Opret AgentMail og send kode") { Task { await configure(.start) } }
-                    .disabled(busy || !ownerEmail.contains("@"))
-                Text("Har du allerede AgentMail? Brug Forbind AgentMail i FadedAI-opdateringen på PC’en.")
-                    .font(.footnote).foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var messageSection: some View {
-        Section("Seneste mails") {
-            if messages.isEmpty && !busy && notice == nil {
-                Text("Der er endnu ingen mails.").foregroundStyle(.secondary)
-            }
-            ForEach(messages) { message in
-                NavigationLink {
-                    if let api {
-                        BotMailMessageView(api: api, botID: bot.id, message: message, onUse: onUse)
+        if let api, let onUse {
+            GmailReadView(api: api, onUse: onUse)
+        } else {
+            List {
+                if let api {
+                    NavigationLink {
+                        MailAppointmentsView(api: api, bot: bot)
+                    } label: {
+                        Label("Find aftaler i Gmail", systemImage: "calendar.badge.envelope")
                     }
-                } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(message.subject.isEmpty ? "Uden emne" : message.subject)
-                            .font(.subheadline.weight(.semibold))
-                        Text(message.sender).font(.caption).foregroundStyle(.secondary)
+                    NavigationLink {
+                        GmailReadView(api: api, onUse: nil)
+                    } label: {
+                        Label("Søg, læs og skriv mail", systemImage: "envelope")
                     }
-                    .frame(minHeight: 44)
+                } else {
+                    Text("Forbind FadedAI med din PC for at bruge Gmail.")
                 }
             }
-        }
-    }
-
-    private func load(create: Bool = false) async {
-        guard let api, !busy else { return }
-        busy = true
-        notice = nil
-        defer { busy = false }
-        do {
-            let state = try await api.botMailbox(bot.id, createFor: create ? bot.name : nil)
-            guard !Task.isCancelled else { return }
-            mailbox = state
-            if state.active {
-                let inbox = try await api.botMailMessages(bot.id)
-                guard !Task.isCancelled else { return }
-                messages = inbox.messages
-            } else {
-                messages = []
-            }
-        } catch {
-            guard !Task.isCancelled else { return }
-            let fallback = "Postkassen kunne ikke åbnes. Tjek FadedAI-opdateringen og AgentMail på PC’en."
-            if case APIError.http(_, let problem) = error {
-                notice = problem?.message ?? fallback
-            } else {
-                notice = fallback
-            }
-        }
-    }
-
-    private func configure(_ action: SetupAction) async {
-        guard let api, !busy else { return }
-        busy = true
-        notice = nil
-        do {
-            let state: BotMailboxState
-            switch action {
-            case .verify:
-                state = try await api.verifyAgentMail(bot.id, code: code)
-                code = ""
-            case .start:
-                state = try await api.enrollAgentMail(
-                    bot.id, email: ownerEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-                )
-                ownerEmail = ""
-            case .resend:
-                state = try await api.resendAgentMailCode(bot.id)
-                if !Task.isCancelled && state.verificationRequired == true {
-                    notice = "Tjek din indbakke. Hvis den første kode stadig er gyldig, kan du bruge den."
-                }
-            }
-            guard !Task.isCancelled else { busy = false; return }
-            mailbox = state
-            busy = false
-            if state.active { await load() }
-        } catch {
-            busy = false
-            guard !Task.isCancelled else { return }
-            if case APIError.http(_, let problem) = error, let message = problem?.message {
-                notice = message
-            } else {
-                notice = "AgentMail kunne ikke færdiggøre opsætningen. Prøv at opdatere postkassen."
-            }
-        }
-    }
-}
-
-@MainActor private struct BotMailMessageView: View {
-    let api: LiveAPI
-    let botID: UUID
-    let message: BotMailMessages.Message
-    let onUse: ((String) -> Bool)?
-    @State private var mail: BotMailContent?
-    @State private var notice: String?
-
-    var body: some View {
-        List {
-            Section {
-                Text(message.sender).font(.subheadline)
-                Text(message.subject.isEmpty ? "Uden emne" : message.subject).font(.headline)
-            }
-            if let mail {
-                Text(mail.text.isEmpty ? "Mailen har ingen læsbar tekst." : mail.text)
-                    .textSelection(.enabled)
-                if let onUse, !mail.text.isEmpty {
-                    Button("Vedhæft til agentens opgave", systemImage: "paperclip") {
-                        let context = "E-mail. Fra: \(message.sender)\nEmne: \(message.subject)\n\n\(mail.text)"
-                        if !onUse(context) { notice = "Mailen kunne ikke vedhæftes." }
-                    }
-                }
-            } else if notice == nil {
-                ProgressView("Læser mail…")
-            }
-            if let notice { Text(notice).foregroundStyle(.secondary) }
-        }
-        .navigationTitle("Læs e-mail")
-        .navigationBarTitleDisplayMode(.inline)
-        .privacySensitive()
-        .task(id: message.id) {
-            do {
-                let result = try await api.botMailMessage(botID, id: message.id)
-                guard !Task.isCancelled else { return }
-                mail = result
-            } catch {
-                guard !Task.isCancelled else { return }
-                notice = "Mailen kunne ikke læses."
-            }
+            .navigationTitle("Gmail · \(bot.name)")
+            .navigationBarTitleDisplayMode(.inline)
+            .privacySensitive()
         }
     }
 }

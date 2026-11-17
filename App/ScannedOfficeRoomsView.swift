@@ -1,6 +1,7 @@
 import AVFoundation
 import QuickLook
 import RoomPlan
+import SceneKit
 import SwiftUI
 
 @MainActor struct ScannedOfficeRoomsView: View {
@@ -28,11 +29,23 @@ import SwiftUI
             Section("Mine rum") {
                 if rooms.isEmpty { FadedDetailText("Gem en scanning for at få et rum, du kan indrette.") }
                 ForEach(rooms) { room in
-                    Button {
-                        selected = room
-                    } label: {
-                        Label(room.createdAt.formatted(date: .abbreviated, time: .shortened), systemImage: "cube")
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    HStack(spacing: 8) {
+                        Button {
+                            selected = room
+                        } label: {
+                            Label(room.createdAt.formatted(date: .abbreviated, time: .shortened), systemImage: "cube")
+                                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                        Button(role: .destructive) {
+                            removal = room
+                        } label: {
+                            Image(systemName: "trash").frame(width: 44, height: 44)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.borderless)
+                        .accessibilityLabel("Slet rum")
                     }
                     .swipeActions {
                         Button("Slet", systemImage: "trash", role: .destructive) { removal = room }
@@ -101,6 +114,7 @@ import SwiftUI
     @State private var preview: URL?
     @State private var failure: String?
     @GestureState private var drag: CGSize = .zero
+    @State private var showScene = false
 
     init(room: ScannedOfficeRoom, bots: [VillageLifeBot]) {
         _room = State(initialValue: room)
@@ -113,8 +127,28 @@ import SwiftUI
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: FadedSpacing.m) {
-                    FadedDetailText("Træk et møbel eller en bot for at indrette. Scanningen kan åbnes i 3D.")
-                    plan.frame(height: 360)
+                    Picker("Visning", selection: $showScene) {
+                        Text("Plantegning").tag(false)
+                        Text("Indret i 3D").tag(true)
+                    }
+                    .pickerStyle(.segmented)
+                    if showScene {
+                        FadedDetailText("Drej rummet med én finger. Tryk på et møbel eller en bot for at flytte den.")
+                        ScannedOfficeScene(room: room, selection: $selection)
+                            .frame(height: 360)
+                            .clipShape(.rect(cornerRadius: FadedRadius.medium))
+                            .accessibilityHidden(true)
+                        Menu("Vælg møbel eller bot", systemImage: "selection.pin.in.out") {
+                            ForEach(room.items.filter { !$0.wall }) { item in
+                                Button(item.title) { selection = item.id }
+                            }
+                        }
+                        .frame(minHeight: 44)
+                        .disabled(!room.items.contains { !$0.wall })
+                    } else {
+                        FadedDetailText("Træk et møbel eller en bot for at indrette.")
+                        plan.frame(height: 360)
+                    }
                     if let selected {
                         selectedTools(selected)
                     }
@@ -130,6 +164,10 @@ import SwiftUI
                     }.frame(minHeight: 44)
                     ShareLink(item: ScannedOfficeStore.modelURL(room.id)) {
                         Label("Del USDZ-fil", systemImage: "square.and.arrow.up")
+                            .frame(minHeight: 44)
+                    }
+                    ShareLink(item: ScannedOfficePCExport(room), preview: SharePreview("FadedAI-kontor")) {
+                        Label("Del plantegning til PC", systemImage: "desktopcomputer")
                             .frame(minHeight: 44)
                     }
                 }
@@ -262,5 +300,82 @@ import SwiftUI
     private func save(_ updated: ScannedOfficeRoom) {
         do { try ScannedOfficeStore.save(updated); room = updated; failure = nil }
         catch { failure = "Indretningen kunne ikke gemmes. Prøv igen, mens telefonen er låst op." }
+    }
+}
+
+@MainActor private struct ScannedOfficeScene: UIViewRepresentable {
+    let room: ScannedOfficeRoom
+    @Binding var selection: UUID?
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> SCNView {
+        let view = SCNView()
+        let scene = SCNScene()
+        let bounds = room.bounds
+        let span = max(bounds.width, bounds.height)
+        scene.rootNode.addChildNode(context.coordinator.layout)
+        let camera = SCNNode()
+        camera.camera = SCNCamera()
+        camera.camera?.zFar = max(100, Double(span) * 8)
+        camera.position = SCNVector3(Float(bounds.midX + span * 0.75), Float(span * 1.05 + 1),
+                                     Float(bounds.midY + span * 0.85))
+        camera.look(at: SCNVector3(Float(bounds.midX), 0.4, Float(bounds.midY)))
+        scene.rootNode.addChildNode(camera)
+        view.scene = scene
+        view.pointOfView = camera
+        view.backgroundColor = UIColor(red: 0.06, green: 0.09, blue: 0.12, alpha: 1)
+        view.autoenablesDefaultLighting = true
+        view.allowsCameraControl = true
+        view.defaultCameraController.target = SCNVector3(Float(bounds.midX), 0.4, Float(bounds.midY))
+        view.addGestureRecognizer(UITapGestureRecognizer(target: context.coordinator,
+                                                        action: #selector(Coordinator.pick(_:))))
+        return view
+    }
+
+    func updateUIView(_ view: SCNView, context: Context) {
+        let coordinator = context.coordinator
+        coordinator.selection = $selection
+        guard coordinator.items != room.items || coordinator.highlight != selection else { return }
+        coordinator.items = room.items
+        coordinator.highlight = selection
+        coordinator.layout.childNodes.forEach { $0.removeFromParentNode() }
+        let bounds = room.bounds
+        let floor = SCNBox(width: bounds.width, height: 0.06, length: bounds.height, chamferRadius: 0)
+        let floorNode = SCNNode(geometry: floor)
+        floorNode.position = SCNVector3(Float(bounds.midX), -0.03, Float(bounds.midY))
+        floor.firstMaterial?.diffuse.contents = UIColor(red: 0.34, green: 0.29, blue: 0.23, alpha: 1)
+        coordinator.layout.addChildNode(floorNode)
+        for item in room.items {
+            let height = item.displayHeight
+            let shape = SCNBox(width: item.width, height: height, length: item.depth,
+                               chamferRadius: item.wall ? 0 : min(0.04, item.width / 5, item.depth / 5))
+            let node = SCNNode(geometry: shape)
+            node.position = SCNVector3(Float(item.x), Float(height / 2), Float(item.z))
+            node.eulerAngles.y = Float(-item.angle)
+            if !item.wall { node.name = item.id.uuidString }
+            let color: UIColor = item.wall ? .lightGray : item.botID == nil ? .systemTeal : .systemGreen
+            shape.firstMaterial?.diffuse.contents = color
+            if item.id == selection { shape.firstMaterial?.emission.contents = UIColor.systemYellow.withAlphaComponent(0.6) }
+            if item.wall { shape.firstMaterial?.transparency = 0.42 }
+            coordinator.layout.addChildNode(node)
+        }
+    }
+
+    @MainActor final class Coordinator: NSObject {
+        let layout = SCNNode()
+        var selection: Binding<UUID?>?
+        var items: [ScannedOfficeRoom.Item]?
+        var highlight: UUID?
+
+        @objc func pick(_ gesture: UITapGestureRecognizer) {
+            guard let view = gesture.view as? SCNView else { return }
+            for hit in view.hitTest(gesture.location(in: view), options: [.searchMode: SCNHitTestSearchMode.all.rawValue]) {
+                if let name = hit.node.name, let id = UUID(uuidString: name) {
+                    selection?.wrappedValue = id
+                    return
+                }
+            }
+        }
     }
 }

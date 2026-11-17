@@ -8,7 +8,8 @@ from tempfile import NamedTemporaryFile
 
 from sweatcaster.emby_settings import _protect
 
-FIELDS = ("key", "googledrive", "github", "gmail")
+PROVIDERS = ("googledrive", "github", "gmail", "googlesheets", "notion")
+FIELDS = ("key", *PROVIDERS, "gmail_consumer_key")
 
 
 def settings_path():
@@ -16,16 +17,19 @@ def settings_path():
 
 
 def validate(values):
-    if not isinstance(values, dict) or set(values) not in (set(FIELDS), set(FIELDS) - {"gmail"}):
+    if not isinstance(values, dict) or not {"key", "googledrive", "github"} <= set(values) <= set(FIELDS):
         raise ValueError("Ugyldig Composio-opsætning.")
-    values = {"gmail": "", **values}
+    values = dict.fromkeys(FIELDS, "") | values
     if not all(isinstance(value, str) and len(value) <= 1024 for value in values.values()):
         raise ValueError("Ugyldig Composio-opsætning.")
     if not values["key"] or not re.fullmatch(r"[!-~]{1,1024}", values["key"]):
         raise ValueError("Indsæt Composio-projektnøglen uden mellemrum.")
-    configs = [values[provider] for provider in FIELDS[1:] if values[provider]]
+    configs = [values[provider] for provider in PROVIDERS if values[provider]]
     if not all(re.fullmatch(r"ac_[A-Za-z0-9_-]{1,128}", config) for config in configs):
         raise ValueError("Et valgfrit login-id skal begynde med ac_.")
+    consumer_key = values["gmail_consumer_key"]
+    if consumer_key and not re.fullmatch(r"ck_[A-Za-z0-9_-]{8,1021}", consumer_key):
+        raise ValueError("Gmail-nøglen fra Composio For You skal begynde med ck_.")
     return values
 
 

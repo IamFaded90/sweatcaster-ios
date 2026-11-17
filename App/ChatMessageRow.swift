@@ -138,6 +138,8 @@ private struct ChatGeneratedImage: View {
     @State private var photo: UIImage?
     @State private var file: URL?
     @State private var loaded = false
+    @State private var confirmDeletion = false
+    @State private var deletionFailed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -146,13 +148,23 @@ private struct ChatGeneratedImage: View {
                     .resizable().scaledToFit()
                     .clipShape(.rect(cornerRadius: 12))
                     .accessibilityLabel("AI-genereret billede")
-                ShareLink(item: file) { Label("Del billede", systemImage: "square.and.arrow.up") }
-                    .frame(minHeight: 44)
+                HStack {
+                    ShareLink(item: file) { Label("Del billede", systemImage: "square.and.arrow.up") }
+                        .frame(minHeight: 44)
+                    Button("Slet billede", systemImage: "trash", role: .destructive) { confirmDeletion = true }
+                        .frame(minHeight: 44)
+                }
             } else if loaded {
                 Text("Billedet er ikke længere i galleriet.").foregroundStyle(.secondary)
             } else {
                 ProgressView("Åbner billede…")
             }
+        }
+        .confirmationDialog("Slet billedet fra FadedAI?", isPresented: $confirmDeletion) {
+            Button("Slet billede", role: .destructive, action: deleteImage)
+        }
+        .alert("Billedet kunne ikke slettes", isPresented: $deletionFailed) {
+            Button("OK", role: .cancel) { }
         }
         .task(id: name) {
             loaded = false
@@ -164,6 +176,19 @@ private struct ChatGeneratedImage: View {
             photo = thumbnail.map { UIImage(cgImage: $0) }
             file = url
             loaded = true
+        }
+    }
+
+    private func deleteImage() {
+        guard let file else { return }
+        do {
+            try StudioImageFiles.deleteSavedImage(file)
+            photo = nil
+            self.file = nil
+            loaded = true
+        } catch {
+            AppDiagnostics.record(error)
+            deletionFailed = true
         }
     }
 
@@ -298,7 +323,8 @@ extension ChatView {
     }
 
     private func replyColor(_ source: String?) -> Color {
-        switch source ?? "" {
+        if source?.contains("Composio") == true || source?.contains("NVIDIA") == true || source == "OpenRouter" { return palette.purple }
+        return switch source ?? "" {
         case "Telefon": palette.green
         case "PC": palette.cyan
         case GrokAPI.sourceLabel: palette.purple

@@ -43,6 +43,9 @@ struct AppErrorPresentation {
     }
 
     private static func describe(_ error: Error) -> Self {
+        if let cloud = error as? ComposioCloudError {
+            return .init(title: cloud.errorDescription ?? "Composio kunne ikke svare.")
+        }
         if let problem = error as? GGUFPhoneRuntime.Failure {
             switch problem {
             case .unsupportedModel: return .init(title: "Denne GGUF-model kan ikke åbnes på iPhone. Prøv en understøttet tekstmodel.")

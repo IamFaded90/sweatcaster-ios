@@ -2,12 +2,33 @@
 
 import AVFAudio
 import LocalAuthentication
-import Network
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
 extension OfflineStudio {
+    func privateImageModelMenu(current: String) -> some View {
+        let installed = StudioImageModel.allCases.filter { isImageModelReady($0.id) }
+        let onPC = sessionPreferences.imageRoute == .pc
+        return Menu {
+            ForEach(installed) { model in
+                Button {
+                    sessionPreferences.imageRoute = .phone
+                    sessionPreferences.imageModel = model.id
+                } label: {
+                    Label("iPhone · " + model.title, systemImage: !onPC && current == model.id ? "checkmark" : "iphone")
+                }
+            }
+            Button { sessionPreferences.imageRoute = .pc } label: {
+                Label("PC · RealVisXL", systemImage: onPC ? "checkmark" : "desktopcomputer")
+            }.disabled(privateImagePC == nil)
+        } label: {
+            Label(onPC ? "PC · RealVisXL" : "iPhone · " + (StudioImageModel(rawValue: current)?.title ?? "Vælg model"),
+                  systemImage: "chevron.down")
+                .font(.caption.weight(.semibold)).frame(minHeight: 44)
+        }.disabled(task != nil)
+    }
+
     var canShowStudio: Bool {
         guard sessionUnlocked, studioPhase == .active else { return false }
         return !privateSession || !sessionExpired
@@ -110,35 +131,6 @@ extension OfflineStudio {
             : "Oprydningen blev ikke færdig. Lås op igen for at prøve på ny."
     }
 
-    func monitorPrivateConnectivity() async {
-        guard privateSession, loaded, sessionUnlocked else { return }
-        let monitor = NWPathMonitor()
-        privatePathMonitor = monitor
-        privateNetworkOffline = nil
-        let changes = AsyncStream<Bool>(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            monitor.pathUpdateHandler = { path in continuation.yield(path.status == .unsatisfied) }
-            continuation.onTermination = { _ in monitor.cancel() }
-            monitor.start(queue: DispatchQueue(label: "dk.fadedai.studio-private-network"))
-        }
-        defer {
-            monitor.cancel()
-            if privatePathMonitor === monitor {
-                privatePathMonitor = nil
-                privateNetworkOffline = nil
-            }
-        }
-        for await offline in changes {
-            guard privateSession, loaded, sessionUnlocked, !Task.isCancelled else { return }
-            privateNetworkOffline = offline
-            if !offline && loadingBaseImage { basePhoto = nil }
-            if !offline && (generatingImages || privateImageRendering) {
-                pendingImages.removeAll()
-                task?.cancel()
-                status = "Netværket er aktivt. Billedet blev stoppet. Slå flytilstand til og Wi-Fi fra for at prøve igen."
-            }
-        }
-    }
-
     func activateChatIfNeeded() {
         guard sessionUnlocked, !loaded else { return }
         loaded = true
@@ -212,6 +204,8 @@ extension OfflineStudio {
             privateModelDownload?.cancel()
             privateModelProblem = nil
             removeTemporaryStudioImages()
+            basePhoto = nil
+            setReferenceImage(nil)
             privateDeadline = nil
             sessionPreferences = StudioSessionPreferences()
             sessionNote = ""
@@ -280,9 +274,7 @@ extension OfflineStudio {
                 if sessionID.map(isCurrentPrivateSession) == false { return }
                 switch error {
                 case is CancellationError:
-                    if !status.hasPrefix("Netværket er aktivt") { status = "Stoppet." }
-                case StudioImageInterruption.network:
-                    status = privateImageOfflineInstructions
+                    status = "Stoppet."
                 case LocalComputeError.busy:
                     status = "Telefonen kører allerede en lokal AI-opgave. Prøv igen om lidt."
                 case LocalComputeError.lowMemory:
@@ -346,9 +338,9 @@ extension OfflineStudio {
                         .frame(minHeight: 44)
                 }.disabled(turns.isEmpty)
             }
-            Text(textReady && imageReady ? "Klar til flytilstand · Chat og billeder"
-                 : textReady ? "Klar til flytilstand · Chat"
-                 : imageReady ? "Klar til flytilstand · Billeder" : "Lokale modeller mangler")
+            Text(textReady && imageReady ? "Klar på iPhone · Chat og billeder"
+                 : textReady ? "Klar på iPhone · Chat"
+                 : imageReady ? "Klar på iPhone · Billeder" : "Lokale modeller mangler")
                 .font(.caption.bold())
         }
     }
@@ -404,6 +396,28 @@ extension OfflineStudio {
             } else {
                 FadedDetailText("Klar til lokal chat.")
             }
+            if privateModelDownload == nil, DolphinPhoneRuntime.hasLocalFiles {
+                FadedSecondaryButton("Slet Dolphin fra telefonen", icon: "trash", role: .destructive) {
+                    confirmPrivateModelRemoval = true
+                }.disabled(task != nil)
+            }
+        }
+        .confirmationDialog("Slet Dolphin?", isPresented: $confirmPrivateModelRemoval) {
+            Button("Slet modellen", role: .destructive) {
+                do {
+                    try DolphinPhoneRuntime.removeLocalFiles()
+                    privateModelProblem = nil
+                    privateModelProgress = 0
+                    status = "Dolphin er slettet fra telefonen."
+                } catch LocalComputeError.busy {
+                    status = "Vent til den lokale opgave eller hentning er færdig."
+                } catch {
+                    AppDiagnostics.record(error)
+                    status = "Dolphin kunne ikke slettes."
+                }
+            }
+        } message: {
+            Text("Lokale modelfiler fjernes fra telefonen.")
         }
     }
 

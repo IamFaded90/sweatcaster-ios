@@ -2,6 +2,7 @@
 // Kører modelhentning, lokal billedgenerering, ressourcekontrol og opskalering.
 
 import CoreImage
+import ImageIO
 import MediaGenerationKit
 import Observation
 import SwiftUI
@@ -10,6 +11,7 @@ import UIKit
 @MainActor enum StudioImageGeneration {
     static func render(model: StudioImageModel, prompt: String, negative: String = "", lora: String = "",
                        seed: UInt32, source: Data? = nil, variation: Bool = false, destination: URL? = nil,
+                       referenceMode: StudioReferenceMode? = nil, referenceMask: StudioReferenceMask? = nil,
                        onLoaded: () throws -> Void = {}) async throws -> Data? {
         try Task.checkCancellation()
         guard model.isInstalled else { throw PhoneModelError.unavailable }
@@ -26,7 +28,24 @@ import UIKit
         var inputs: [MediaGenerationPipeline.Input] = []
         if let source {
             inputs = [MediaGenerationPipeline.data(source)]
-            pipeline.configuration.strength = variation ? 0.32 : 0.55
+            pipeline.configuration.strength = variation ? 0.32 : (referenceMode?.strength ?? 0.55)
+            if let referenceMode {
+                let photo = referenceSize(source)
+                let frame = StudioReferenceMode.dimensions(width: Int(photo.width), height: Int(photo.height), edge: model.renderSize)
+                pipeline.configuration.width = frame.width
+                pipeline.configuration.height = frame.height
+                pipeline.configuration.steps = model.referenceRenderSteps(masked: referenceMask != nil)
+                if let referenceMask {
+                    let mask = try referenceMask.encoded(source: photo, width: frame.width, height: frame.height)
+                    inputs.append(MediaGenerationPipeline.data(mask).mask())
+                    pipeline.configuration.strength = referenceMode.maskedStrength
+                    pipeline.configuration.preserveOriginalAfterInpaint = true
+                    pipeline.configuration.maskBlur = 0
+                    pipeline.configuration.maskBlurOutset = 0
+                    pipeline.configuration.faceRestoration = nil
+                    pipeline.configuration.upscaler = nil
+                }
+            }
         }
         let results = try await pipeline.generate(prompt: prompt, negativePrompt: negative, inputs: inputs)
         try Task.checkCancellation()
@@ -41,6 +60,15 @@ import UIKit
             }
             return png
         }
+    }
+
+    // Picker JPEGs have already been rotated to the displayed orientation.
+    static func referenceSize(_ data: Data) -> CGSize {
+        guard let image = CGImageSourceCreateWithData(data as CFData, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(image, 0, nil) as? [String: Any],
+              let width = props[kCGImagePropertyPixelWidth as String] as? Int, width > 0,
+              let height = props[kCGImagePropertyPixelHeight as String] as? Int, height > 0 else { return .zero }
+        return CGSize(width: width, height: height)
     }
 }
 
@@ -73,9 +101,49 @@ enum StudioImageFiles {
         else { return false }
         return header.elementsEqual([137, 80, 78, 71, 13, 10, 26, 10])
     }
+
+    static func deleteSavedImage(_ file: URL) throws {
+        let folder = library
+        guard file.isFileURL,
+              file.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
+                  == folder.resolvingSymlinksInPath().standardizedFileURL.path,
+              file.pathExtension.lowercased() == "png" else { throw LocalFileStore.Failure.invalidPath }
+        let store = LocalFileStore(root: folder)
+        try store.delete(file)
+        try? store.delete(file.appendingPathExtension("json"))
+    }
 }
 
 extension OfflineStudio {
+    var loraPreviews: URL { URL.applicationSupportDirectory.appending(path: "StudioLoRAPreviews", directoryHint: .isDirectory) }
+    var loraLabels: [String: String] {
+        (try? JSONDecoder().decode([String: String].self, from: loraLabelsData)) ?? [:]
+    }
+
+    func removeImportedLoRA(_ name: String) {
+        let prefix = "fadedai-"
+        let suffix = "_lora_f16.ckpt"
+        guard !privateSession, task == nil, name.hasPrefix(prefix), name.hasSuffix(suffix),
+              UUID(uuidString: String(name.dropFirst(prefix.count).dropLast(suffix.count))) != nil else { return }
+        let roots = ModelDiskStorage.allowedImageRoots(MediaGenerationEnvironment.default.externalUrls)
+        guard let file = roots.lazy.map({ $0.appendingPathComponent(name) }).first(where: {
+            (try? LocalFileStore.checkedFileSize($0, maximumBytes: Int.max)) != nil
+        }) else { return }
+        loraPreviewSelection = nil
+        run("Sletter LoRA…") {
+            try await LocalCompute.run(minimumMiB: 0) {
+                try ModelDiskStorage.delete(.init(url: file, name: name, kind: "LoRA", bytes: 0), within: roots)
+            }
+            try? LocalFileStore(root: loraPreviews).delete(loraPreviews.appendingPathComponent(name + ".jpg"))
+            var labels = loraLabels
+            labels.removeValue(forKey: name)
+            loraLabelsData = try JSONEncoder().encode(labels)
+            if loraName == name { loraName = ""; useLoRA = false }
+            loraPreviewRefresh += 1
+            status = "LoRA er slettet."
+        }
+    }
+
     func downloadImageModel() {
         guard !privateSession, task == nil, let selected = StudioImageModel(rawValue: imageModel) else { return }
         StudioImageDownloads.shared.start(selected)
@@ -140,7 +208,9 @@ extension OfflineStudio {
         guard request.isPrivate == privateSession else { throw CancellationError() }
         let sessionID = temporaryImagesID
         let folder = request.isPrivate ? privateImageFolder : historyFolder
-        if request.isPrivate && !canRenderPrivateImages { throw StudioImageInterruption.network }
+        if request.isPrivate {
+            guard request.route != .automatic, isCurrentPrivateSession(sessionID) else { throw CancellationError() }
+        }
         let pcAllowed = request.supportsPC && !privateSession && api != nil
         let canFallBack = request.route == .automatic && request.allowPCFallback && pcAllowed
         try Task.checkCancellation()
@@ -151,10 +221,13 @@ extension OfflineStudio {
             try Task.checkCancellation()
             let destination = imageDestination(in: folder)
             let seed = request.seed.map { $0 &+ UInt32(index) } ?? UInt32.random(in: 1...UInt32.max)
-            let variation = request.seed != nil && index > 0 ? created.first : nil
+            let variation = request.referenceMask == nil && request.seed != nil && index > 0 ? created.first : nil
             let source: String
             let metadata: StudioImageDetails
-            if request.route == .pc {
+            if request.isPrivate && request.route == .pc {
+                metadata = try await renderPrivateStudioImageOnPC(request, seed: seed, sessionID: sessionID, destination: destination)
+                source = "PC"
+            } else if request.route == .pc {
                 metadata = try await renderStudioImageOnPC(request, to: destination, in: folder)
                 source = "PC"
             } else {
@@ -165,7 +238,9 @@ extension OfflineStudio {
                                                       destination: destination, folder: folder)
                     source = "Telefon"
                     metadata = StudioImageDetails(prompt: request.prompt, negativePrompt: request.negative,
-                                                  seed: seed, model: model.id, steps: model.renderSteps)
+                                                  seed: seed, model: model.id,
+                                                  steps: request.referenceMode == nil ? model.renderSteps :
+                                                    model.referenceRenderSteps(masked: request.referenceMask != nil))
                 } catch {
                     try Task.checkCancellation()
                     guard canFallBack else { throw error }
@@ -212,7 +287,8 @@ extension OfflineStudio {
                                                sourceImage: request.sourceImage, variation: variation,
                                                destination: request.isPrivate ? nil : destination, within: folder,
                                                label: label, negativePrompt: request.negative,
-                                               requireOffline: request.isPrivate)
+                                               privateOutput: request.isPrivate, referenceMode: request.referenceMode,
+                                               referenceMask: request.referenceMask)
         try Task.checkCancellation()
         if request.isPrivate {
             guard privateSession, sessionUnlocked, !sessionExpired, sessionID == temporaryImagesID else { throw CancellationError() }
@@ -221,9 +297,28 @@ extension OfflineStudio {
         }
     }
 
+    private func renderPrivateStudioImageOnPC(_ request: StudioImageRequest, seed: UInt32,
+                                               sessionID: UUID, destination: URL) async throws -> StudioImageDetails {
+        guard privateSession, request.isPrivate, request.route == .pc,
+              let api = privateImagePC else { throw V2Failure.invalidInput }
+        var mask: Data?
+        if let reference = request.sourceImage, let selection = request.referenceMask {
+            let size = StudioImageGeneration.referenceSize(reference)
+            mask = try selection.encoded(source: size, width: Int(size.width), height: Int(size.height), repaintValue: 255)
+        }
+        status = "RealVisXL laver dit billede på PC’en…"
+        let mode = request.referenceMode
+        let bytes = try await api.privateStudioImage(prompt: request.prompt, negative: request.negative,
+                                                      reference: request.sourceImage, mask: mask,
+                                                      strength: mask == nil ? mode?.strength : mode?.maskedStrength, seed: seed)
+        try Task.checkCancellation()
+        guard isCurrentPrivateSession(sessionID) else { throw CancellationError() }
+        try storePrivateImage(bytes, for: destination)
+        return StudioImageDetails(prompt: request.prompt, negativePrompt: request.negative, seed: seed, model: "RealVisXL")
+    }
+
     private func renderStudioImageOnPC(_ request: StudioImageRequest, to destination: URL,
                                        in folder: URL) async throws -> StudioImageDetails {
-        // Privat: aldrig PC, aldrig Grok, aldrig forbindelser.
         guard !privateSession, request.supportsPC, let api else { throw V2Failure.invalidInput }
         status = "PC’en laver dit billede…"
         let png = try await api.v2GenerateImage(prompt: request.prompt)
@@ -233,6 +328,7 @@ extension OfflineStudio {
     }
 
     func studioImageErrorMessage(_ error: Error, model: String) -> String {
+        if case APIError.http(_, let problem) = error, let message = problem?.message { return message }
         if let failure = error as? V2Failure, case .http(let status, let code, let message) = failure {
             if status == 401 { return "PC’en afviste forbindelsen. Forbind til PC’en igen fra Hjem." }
             if status == 404 { return "Denne PC-installation mangler billedgenerering. Vælg Telefon, eller opdatér FadedAI på PC’en." }
@@ -259,14 +355,14 @@ extension OfflineStudio {
     func renderStudioImage(model: StudioImageModel, prompt: String, lora: String, seed: UInt32,
                                    sourceImage: Data?, variation: URL?, destination: URL?, within outputDirectory: URL,
                                    label: String, negativePrompt: String = "",
-                                   requireOffline: Bool = false) async throws -> Data? {
+                                   privateOutput: Bool = false, referenceMode: StudioReferenceMode? = nil,
+                                   referenceMask: StudioReferenceMask? = nil) async throws -> Data? {
+        if privateOutput, destination != nil { throw CocoaError(.fileWriteUnsupportedScheme) }
         let destination = try destination.map { try LocalFileStore.safeWriteURL($0, within: outputDirectory) }
-        if requireOffline { privateImageRendering = true }
-        defer { imageCooling = false; privateImageRendering = false }
+        defer { imageCooling = false }
         var mustCool = isImageThermallyConstrained
         while true {
             try Task.checkCancellation()
-            if requireOffline && !canRenderPrivateImages { throw StudioImageInterruption.network }
             try checkImageBattery()
             if mustCool || isImageThermallyConstrained {
                 imageCooling = true
@@ -282,14 +378,13 @@ extension OfflineStudio {
                     try await withThrowingTaskGroup(of: Optional<Data>.self) { group in
                         group.addTask { @MainActor in
                             try Task.checkCancellation()
-                            if requireOffline && !canRenderPrivateImages { throw StudioImageInterruption.network }
                             status = "Indlæser \(model.title) på telefonen…"
                             let input: Data?
                             let isVariation: Bool
                             if let variation, let bytes = privateImages[variation] {
                                 input = bytes
                                 isVariation = true
-                            } else if let variation, variation.isFileURL, !requireOffline {
+                            } else if let variation, variation.isFileURL, !privateOutput {
                                 input = try LocalFileStore.readBytes(from: variation, maximumBytes: 80_000_000)
                                 isVariation = true
                             } else {
@@ -298,15 +393,14 @@ extension OfflineStudio {
                             }
                             return try await StudioImageGeneration.render(model: model, prompt: prompt, negative: negativePrompt,
                                                                           lora: lora, seed: seed, source: input,
-                                                                          variation: isVariation, destination: destination) {
-                                if requireOffline && !canRenderPrivateImages { throw StudioImageInterruption.network }
+                                                                          variation: isVariation, destination: destination,
+                                                                          referenceMode: referenceMode, referenceMask: referenceMask) {
                                 status = label
                             }
                         }
                         group.addTask { @MainActor in
                             while !Task.isCancelled {
                                 try self.checkImageBattery()
-                                if requireOffline && !self.canRenderPrivateImages { throw StudioImageInterruption.network }
                                 if self.isImageThermallyConstrained { throw StudioImageInterruption.heat }
                                 try await Task.sleep(for: .seconds(1))
                             }
@@ -333,9 +427,9 @@ extension OfflineStudio {
 
     func benchmarkImageModel() {
         guard let selected = StudioImageModel(rawValue: imageModel) else { return }
-        let requireOffline = privateSession
+        let privateOutput = privateSession
         let directory = FileManager.default.temporaryDirectory
-        let destination = requireOffline ? nil : directory.appendingPathComponent("\(UUID()).png")
+        let destination = privateOutput ? nil : directory.appendingPathComponent("\(UUID()).png")
         imageBenchmark = nil
         run("Måler billedmodellens hastighed…") {
             defer { if let destination { try? FileManager.default.removeItem(at: destination) } }
@@ -343,7 +437,7 @@ extension OfflineStudio {
             do {
                 _ = try await renderStudioImage(model: selected, prompt: "A red apple on a light table", lora: "",
                                                 seed: 42, sourceImage: nil, variation: nil, destination: destination, within: directory,
-                                                label: "Måler billedmodellens hastighed…", requireOffline: requireOffline)
+                                                label: "Måler billedmodellens hastighed…", privateOutput: privateOutput)
                 let time = start.duration(to: .now).components
                 let seconds = Double(time.seconds) + Double(time.attoseconds) / 1e18
                 imageBenchmark = "\(selected.title): \(seconds.formatted(.number.precision(.fractionLength(1)))) sek. pr. billede (\(selected.renderSize) px, \(selected.renderSteps) trin, inkl. indlæsning)."
@@ -442,6 +536,10 @@ extension OfflineStudio {
 }
 
 private extension StudioImageModel {
+    func referenceRenderSteps(masked: Bool) -> Int {
+        self == .stableDiffusion ? (masked ? 28 : 24) : renderSteps
+    }
+
     func applyRenderProfile(to configuration: inout MediaGenerationPipeline.Configuration) {
         // The SDK may fall back to a generic preset when its catalog cannot be loaded offline.
         configuration.width = renderSize

@@ -400,6 +400,66 @@ def test_christel_escapes_markup_and_uses_the_danish_voice():
     assert "\x00" not in body
 
 
+def test_composio_reads_only_the_selected_sheet_notion_page_and_repo(tmp_path, monkeypatch):
+    library = ComposioLibrary(tmp_path)
+    page = str(uuid4())
+    monkeypatch.setattr(library, "connection", lambda provider: f"ca_{provider}")
+    calls = []
+    text_run = {"plain_text": "Testnote"}
+
+    def request(method, path, *, payload, version):
+        assert (method, path, version) == ("POST", "/tools/execute/proxy", "v3.1")
+        assert all(set(parameter) == {"name", "value", "type"} for parameter in payload["parameters"])
+        url = payload["endpoint"]
+        calls.append(payload)
+        if url.endswith("/drive/v3/files"):
+            assert payload["connected_account_id"] == "ca_googledrive"
+            assert any("application/vnd.google-apps.spreadsheet" in p["value"] for p in payload["parameters"])
+            body = {"files": [{"id": "sheet-test", "name": "Indkøb"}]}
+        elif url.endswith("/spreadsheets/sheet-test"):
+            body = {"properties": {"title": "Indkøb"}, "sheets": [{"properties": {"title": "Denne uge"}}]}
+        elif url.endswith("/values/%27Denne%20uge%27%21A1%3AJ25"):
+            body = {"values": [["Mælk", 2]]}
+        elif url.endswith("/search"):
+            assert payload["method"] == "POST"
+            assert payload["body"]["filter"] == {"property": "object", "value": "page"}
+            body = {"results": [{"object": "page", "id": page, "properties": {
+                "Name": {"type": "title", "title": [text_run]}}}]}
+        elif url.endswith(f"/blocks/{page}/children"):
+            body = {"results": [{"type": "paragraph", "paragraph": {"rich_text": [text_run]}}]}
+        elif url.endswith("/repos/test/repo"):
+            body = {"description": "Testrepo", "has_issues": True}
+        elif url.endswith("/issues"):
+            body = [{"number": 4, "title": "Ret menu"}, {"number": 5, "title": "Skjul PR", "pull_request": {}}]
+        elif url.endswith("/pulls"):
+            body = [{"number": 7, "title": "Ret tema"}]
+        else:
+            raise AssertionError(url)
+        return {"status": 200, "data": body}
+
+    monkeypatch.setattr(library, "request", request)
+    assert library.items("googlesheets") == {"items": [{"id": "sheet-test", "title": "Indkøb"}]}
+    assert "Mælk | 2" in library.context("googlesheets", "sheet-test")["text"]
+    assert library.items("notion") == {"items": [{"id": page, "title": "Testnote"}]}
+    assert "Testnote" in library.context("notion", page)["text"]
+    listing = library.context("github", "test/repo")["text"]
+    assert "Opgave #4" in listing and "Pull request #7" in listing and "#5" not in listing
+    assert all(call["method"] == "GET" or call["endpoint"] == "https://api.notion.com/v1/search" for call in calls)
+    with pytest.raises(ApiError):
+        library.context("notion", "../private")
+    assert len(calls) == 8
+
+
+def test_composio_uses_an_approved_drive_account_for_sheets_when_needed(tmp_path, monkeypatch):
+    library = ComposioLibrary(tmp_path)
+    monkeypatch.setattr(library, "config", lambda provider: provider)
+    accounts = {"googledrive": "ca_drive"}
+    monkeypatch.setattr(library, "account", lambda provider, _config: accounts.get(provider))
+    assert library.connection("googlesheets") == "ca_drive"
+    accounts["googlesheets"] = "ca_sheets"
+    assert library.connection("googlesheets") == "ca_sheets"
+
+
 def test_external_lookups_require_pairing_before_contacting_service(tmp_path, monkeypatch):
     called = []
 
@@ -467,11 +527,54 @@ def test_bot_activity_requires_pairing_and_bounds_requested_ids(tmp_path, monkey
     assert requested == [[bot_id]]
 
 
-def test_module_mcp_rejects_untrusted_clients_and_lists_read_tools(tmp_path):
+def test_code_snapshot_removal_requires_pairing_and_matching_confirmation(tmp_path, monkeypatch):
+    from sweatcaster.code_batch import CodeBatch
+    from sweatcaster.repository_library import RepositoryInUse
+
+    calls = []
+    def remove(_batch, repo):
+        calls.append(repo)
+        if repo == "example/busy":
+            raise RepositoryInUse("Projektet er i brug.")
+        return repo == "example/demo"
+
+    monkeypatch.setattr(CodeBatch, "remove_repository", remove)
+    settings = make_settings(tmp_path)
+    app = create_app(settings)
+    url = "/api/modules/v1/code-repositories/removal"
+    endpoint = next(route.endpoint for route in app.routes if getattr(route, "path", None) == url)
+    unpaired = Request({"type": "http", "headers": []})
+    paired = Request({"type": "http", "headers": [(b"authorization", ("Bearer " + settings.token).encode())]})
+    valid = {"repo": "example/demo", "confirm_repo": "example/demo"}
+    with pytest.raises(ApiError) as rejection:
+        endpoint(unpaired, valid)
+    assert rejection.value.status_code == 401
+    with pytest.raises(ApiError) as rejection:
+        endpoint(paired, {**valid, "confirm_repo": "example/other"})
+    assert rejection.value.status_code == 422
+    assert calls == []
+    with pytest.raises(ApiError) as rejection:
+        endpoint(paired, {"repo": "example/busy", "confirm_repo": "example/busy"})
+    assert rejection.value.status_code == 409
+    assert endpoint(paired, valid) == {"removed": True}
+    assert endpoint(paired, {"repo": "example/other", "confirm_repo": "example/other"}) == {"removed": False}
+
+
+def test_module_mcp_rejects_untrusted_clients_and_exposes_agent_tools(tmp_path, monkeypatch):
     fastmcp = pytest.importorskip("mcp.server.fastmcp")
     if "max_request_body_size" not in signature(fastmcp.FastMCP).parameters:
         pytest.skip("HTTP MCP requires an SDK with bounded request bodies.")
     settings = make_settings(tmp_path)
+    from sweatcaster import comfy, studio_video
+    from sweatcaster.code_batch import CodeBatch
+
+    monkeypatch.setattr(comfy, "generate_png", lambda prompt: b"\x89PNG\r\n\x1a\n" + prompt.encode())
+    monkeypatch.setattr(CodeBatch, "enqueue", lambda self, repo, goal, files, priority:
+                        "proposal" if (repo, files, priority) == ("example/demo", ["main.py"], 0) else "unexpected")
+    monkeypatch.setattr(studio_video.StudioVideos, "submit", lambda self, body:
+                        {"id": body["id"], "mode": body["mode"], "state": "working"})
+    monkeypatch.setattr(studio_video.StudioVideos, "status", lambda self, job_id:
+                        {"id": job_id, "state": "ready"})
     headers = {"Authorization": "Bearer " + settings.token, "Accept": "application/json, text/event-stream"}
     request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
     with TestClient(create_app(settings), base_url="http://127.0.0.1:8765") as client:
@@ -481,7 +584,29 @@ def test_module_mcp_rejects_untrusted_clients_and_lists_read_tools(tmp_path):
         assert client.post(url, headers={**headers, "Origin": "http://127.0.0.1:8765"}, json=request).status_code == 403
         reply = client.post(url, headers=headers, json=request)
         assert reply.status_code == 200, reply.text
-        assert {tool["name"] for tool in reply.json()["result"]["tools"]} == {"read_repository_file", "search_repository"}
+        assert {tool["name"] for tool in reply.json()["result"]["tools"]} == {
+            "read_repository_file", "search_repository", "create_code_proposal", "generate_image",
+            "studio_video_models", "create_video", "studio_video_status",
+        }
+
+        def tool(name, **arguments):
+            result = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 2,
+                "method": "tools/call", "params": {"name": name, "arguments": arguments}})
+            assert result.status_code == 200, result.text
+            return result.json()["result"]
+
+        def object_result(result):
+            import json
+            assert not result.get("isError"), result
+            return result.get("structuredContent") or json.loads(result["content"][0]["text"])
+
+        assert object_result(tool("create_code_proposal", repository="example/demo", goal="Improve the title",
+                                  files=["main.py"]))["id"] == "proposal"
+        assert tool("generate_image", prompt="a desk lamp")["content"][0]["mimeType"] == "image/png"
+        assert tool("generate_image", prompt=" ")["isError"]
+        key = str(uuid4())
+        assert object_result(tool("create_video", request_id=key, mode="wan-text", prompt="a desk lamp"))["id"] == key
+        assert object_result(tool("studio_video_status", job_id=key))["state"] == "ready"
 
 
 def test_removing_unavailable_video_record_keeps_existing_videos_and_originals(tmp_path):

@@ -23,6 +23,8 @@ struct PhoneModelsView: View {
     @State private var storageRevision = 0
     @State private var benchmarkRunning = false
     @State private var benchmarkResult: String?
+    @State private var benchmarkChoice: String?
+    @State private var benchmarkNotice: String?
     @State private var deleteTarget: DeleteTarget?
     @State private var page: Page = .models
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -43,6 +45,10 @@ struct PhoneModelsView: View {
             case .image(let item): item.name
             }
         }
+    }
+    private struct BenchmarkModel: Identifiable {
+        let id: String
+        let name: String
     }
     private var downloader: ModelDownloader { .shared }
     private var mutationBusy: Bool {
@@ -406,12 +412,29 @@ struct PhoneModelsView: View {
     }
 
     private var benchmarkCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            FadedSectionHeader("Benchmark", detail: "Mål den valgte model direkte på telefonen.")
+        let available = benchmarkModels
+        let id = benchmarkModelID
+        return VStack(alignment: .leading, spacing: 12) {
+            FadedSectionHeader("Benchmark", detail: "Mål en tekstmodel direkte på iPhone.")
+            if !available.isEmpty {
+                Picker("Model til testen", selection: Binding(
+                    get: { benchmarkModelID ?? "" },
+                    set: { benchmarkChoice = $0; benchmarkResult = nil; benchmarkNotice = nil }
+                )) {
+                    ForEach(available) { model in Text(model.name).tag(model.id) }
+                }
+                .disabled(benchmarkBusy)
+            }
             FadedPrimaryButton(benchmarkRunning ? "Måler…" : "Start benchmark", icon: "speedometer", action: benchmark)
-                .disabled(mutationBusy || !PhoneModels.isReady(selected))
-            if !PhoneModels.isReady(selected) {
-                Text("Vælg en klar model for at måle hastigheden.").font(.caption).foregroundStyle(palette.secondary)
+                .disabled(benchmarkBusy || id == nil)
+            if id == nil {
+                Text("Hent en tekstmodel, eller slå Apple Intelligence til, før du kører testen.")
+                    .font(.caption).foregroundStyle(palette.secondary)
+                Button("Se telefonmodeller", systemImage: "iphone") { page = .models }.frame(minHeight: 44)
+            }
+            if let benchmarkNotice {
+                Text(benchmarkNotice).font(.caption).foregroundStyle(palette.secondary)
+                    .accessibilityAddTraits(.updatesFrequently)
             }
             if let benchmarkResult {
                 Text(benchmarkResult).font(.system(.headline, design: .monospaced)).foregroundStyle(palette.text)
@@ -422,6 +445,24 @@ struct PhoneModelsView: View {
         .background(LinearGradient(colors: [palette.lime.opacity(0.19), palette.card, palette.purple.opacity(0.15)],
                                    startPoint: .topLeading, endPoint: .bottomTrailing), in: .rect(cornerRadius: 20))
         .overlay { RoundedRectangle(cornerRadius: 20).strokeBorder(palette.lime.opacity(0.28)) }
+    }
+
+    private var benchmarkModels: [BenchmarkModel] {
+        var models = [BenchmarkModel(id: "apple", name: "Apple Foundation Models")]
+        models += orderedCatalog.map { .init(id: $0.id, name: $0.name) }
+        models += GGUFPhoneModel.installed.map { .init(id: $0.id, name: $0.name) }
+        models.append(.init(id: "imported", name: "Importeret model"))
+        return models.filter { PhoneModels.isReady($0.id) }
+    }
+
+    private var benchmarkModelID: String? {
+        let ids = benchmarkModels.map(\.id)
+        if let benchmarkChoice, ids.contains(benchmarkChoice) { return benchmarkChoice }
+        return ids.contains(selected) ? selected : ids.first
+    }
+
+    private var benchmarkBusy: Bool {
+        working || importing || benchmarkRunning || PhoneModelDownloads.shared.preparingModelID != nil
     }
     private func select(_ id: String) {
         guard PhoneModels.isReady(id) else { return }
@@ -527,18 +568,21 @@ struct PhoneModelsView: View {
     }
 
     private func benchmark() {
-        guard !mutationBusy, PhoneModels.isReady(selected) else { return }
-        let id = selected
+        guard !benchmarkBusy, let id = benchmarkModelID else { return }
         benchmarkRunning = true
         benchmarkResult = nil
+        benchmarkNotice = nil
         Task {
             defer { benchmarkRunning = false }
             do {
                 let result = try await PhoneModels.benchmark(modelID: id)
-                if selected == id { benchmarkResult = result }
-            } catch LocalComputeError.busy { AppDiagnostics.record(LocalComputeError.busy); notice = "Vent til den lokale AI-opgave er færdig." }
-            catch LocalComputeError.lowMemory { AppDiagnostics.record(LocalComputeError.lowMemory); notice = "Der er for lidt ledig hukommelse til benchmark lige nu." }
-            catch { AppDiagnostics.record(error); notice = "Benchmark kunne ikke gennemføres. Vælg en klar model og prøv igen." }
+                if benchmarkModelID == id { benchmarkResult = result }
+            } catch is CancellationError { }
+            catch LocalComputeError.busy { benchmarkNotice = "Vent til den lokale AI-opgave er færdig, og prøv igen." }
+            catch LocalComputeError.lowMemory { benchmarkNotice = "Der er for lidt fri hukommelse. Vælg en mindre model." }
+            catch PhoneModelError.unavailable { benchmarkNotice = "Modellen er ikke længere klar. Vælg en anden model." }
+            catch PhoneModelError.emptyResponse { benchmarkNotice = "Modellen gav intet svar på prøven. Prøv en anden model." }
+            catch { AppDiagnostics.record(error); benchmarkNotice = "Modellen kunne ikke gennemføre prøven. Vælg en anden model." }
         }
     }
 }

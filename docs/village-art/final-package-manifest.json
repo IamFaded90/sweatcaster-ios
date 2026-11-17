@@ -1,0 +1,209 @@
+[
+  {
+    "file": "map-night.png",
+    "source": "imagegen/exec-d2be992e-38d7-4c8a-a854-d009ee2da137.png",
+    "size": [
+      1150,
+      1367
+    ],
+    "sha256": "2b9ed2ce82993cc85620999d89ec6f974f103170a2e27a4aedbee99db859bbb4"
+  },
+  {
+    "file": "map-day.png",
+    "source": "imagegen/exec-6f1a57df-922f-4c7a-8d77-ec1c7fb5f1aa.png",
+    "size": [
+      1150,
+      1367
+    ],
+    "sha256": "fee908d861327c5e8ddcc08f1a817d2ff4b3f58a22e61538a41201e86d1d65e1"
+  },
+  {
+    "file": "expressions-harper.png",
+    "source": "imagegen/exec-a4c7c009-4f56-4b94-ad65-cc0dca75a091.png",
+    "size": [
+      1024,
+      1536
+    ],
+    "sha256": "8a555f9836ca805c28c8622ffe8c2c01910d075a197d8f195dfdbcf123b1cc92"
+  },
+  {
+    "file": "expressions-lumi.png",
+    "source": "imagegen/exec-1b7a9747-5f29-4af5-9e1b-62f8a74ff27a.png",
+    "size": [
+      1024,
+      1536
+    ],
+    "sha256": "d79236ad8668639a855863a7d36ae358c6b17e4cb3517b67049323fc6ec09956"
+  },
+  {
+    "file": "portrait-harper.png",
+    "source": "user-package/characters/harper/harper-conversation-large.png",
+    "size": [
+      1280,
+      1920
+    ],
+    "sha256": "af84aa24b8a33ec2b061729701dbfb6981c9467b00c9a158ca542a3e2c01dc17"
+  },
+  {
+    "file": "portrait-lumi.png",
+    "source": "user-package/characters/lumi/lumi-portrait.png",
+    "size": [
+      1120,
+      2240
+    ],
+    "sha256": "68387968feba4d64ee481069c6d80861761b10d248895c82186fef1589ce844f"
+  },
+  {
+    "file": "cemetery.png",
+    "source": "user-package/environment/building-workshop.png",
+    "size": [
+      1920,
+      1280
+    ],
+    "sha256": "4eb680bcddab91253ad6d6ceedc48f5bb82ca4f703e36cbecf7c260e38ee3ee1"
+  },
+  {
+    "file": "personal-office.png",
+    "source": "user-package/environment/memory-garden.png",
+    "size": [
+      2240,
+      1120
+    ],
+    "sha256": "d94c14851099ef8089e1b8cc0f2bf7f814b6ce027694bfa0c56273eeec8d41da"
+  },
+  {
+    "file": "office-slice.png",
+    "source": "user-package/environment/office-slice.png",
+    "size": [
+      2240,
+      1120
+    ],
+    "sha256": "a46e5d06131c4412a28df3f7bb9b562749de87907ea4c0319b39699fe0d1dd2b"
+  },
+  {
+    "file": "room-cafe.png",
+    "source": "user-package/environment/interiors/room-cafe.png",
+    "size": [
+      1920,
+      1280
+    ],
+    "sha256": "6bab8295a71417ec24daf392b8880c2b8bd91e03dc80447661db1d3865df226b"
+  },
+  {
+    "file": "room-media-studio.png",
+    "source": "user-package/environment/interiors/room-media-studio.png",
+    "size": [
+      2240,
+      1120
+    ],
+    "sha256": "fe79a3915ae14a144eb6ac906f10562dbf4235f97e1d4350d7bb9cf4cafd41e7"
+  },
+  {
+    "file": "room-research-lab.png",
+    "source": "user-package/environment/interiors/room-research-lab.png",
+    "size": [
+      1920,
+      1280
+    ],
+    "sha256": "9e64479dd36a1579062b11a18271d124ff6b6956f6f20438e264f04ab012f9fa"
+  },
+  {
+    "file": "room-sleeping-corner.png",
+    "source": "user-package/environment/interiors/room-sleeping-corner.png",
+    "size": [
+      2240,
+      1120
+    ],
+    "sha256": "9cadaede46c798b65adf0a639858a4d4c2745a08dd8aac491553bdce2ae8fb37"
+  },
+  {
+    "file": "walk-adam.png",
+    "source": "imagegen/exec-6b8e71a3-3e82-4567-8ddc-d875ba6b9892.png",
+    "size": [
+      887,
+      1774
+    ],
+    "sha256": "9eabee515e7e51f4bf8b520b376c616a0d179e56ee37869ef5f89fd56604c87e"
+  },
+  {
+    "file": "walk-atlas.png",
+    "source": "imagegen/exec-ccbd3c22-9e31-47de-87df-70b02e183e5e.png",
+    "size": [
+      887,
+      1774
+    ],
+    "sha256": "8e3aad1a65ac0d721673196e93a27205a4521f7ebb5e084362e6d50fa51a5e9e"
+  },
+  {
+    "file": "walk-milo.png",
+    "source": "imagegen/exec-a8609031-7b8d-493f-8030-6cb3d3f42142.png",
+    "size": [
+      887,
+      1774
+    ],
+    "sha256": "edc77ec795ceb65cbfdc4f97b2d0240b30dc2cbfb8f7e1bc8fd11d54d4b85f31"
+  },
+  {
+    "file": "walk-noah.png",
+    "source": "imagegen/exec-b7d185bd-e54f-401d-909f-7cdb649ed216.png",
+    "size": [
+      887,
+      1774
+    ],
+    "sha256": "da0e88fda18d3b3a3dd8d9380e6629938b9a428163d200867e81d4411a6e7c9b"
+  },
+  {
+    "file": "walk-theo.png",
+    "source": "imagegen/exec-f34272d4-2d12-4065-bbb1-f18796e3d15c.png",
+    "size": [
+      887,
+      1774
+    ],
+    "sha256": "ffc4adfde2dd825d61aebbe083cedc3ccfe86b2744bee21b00a03f25d2c3d8c1"
+  },
+  {
+    "file": "walk-eva.png",
+    "source": "imagegen/exec-9d75a3ef-5f04-45aa-9df3-79f05eddbc65.png",
+    "size": [
+      887,
+      1774
+    ],
+    "sha256": "68cc5cee08bd9789c3b6eda208fc66731d15b8f065c6a0d100784ca134333c24"
+  },
+  {
+    "file": "walk-luna.png",
+    "source": "imagegen/exec-cdf7bab8-4465-438c-89f9-ae6518d435c9.png",
+    "size": [
+      887,
+      1774
+    ],
+    "sha256": "2314e59e72f637b58c5eb3b76410c1880175b561426f87c4362ee05458509667"
+  },
+  {
+    "file": "walk-iris.png",
+    "source": "imagegen/exec-3c739fbb-8987-48a9-9814-7151868834b9.png",
+    "size": [
+      887,
+      1774
+    ],
+    "sha256": "57a6096cc1e608923244b0ba452ca582cfc8a6957820888a49b4d7d04ed7cfb7"
+  },
+  {
+    "file": "walk-nova.png",
+    "source": "imagegen/exec-11874f0b-5a07-456d-a664-5b344a60f605.png",
+    "size": [
+      887,
+      1774
+    ],
+    "sha256": "3628a6d9623c3faafc8713a6850020a3dcaa3af59076168ac8397db5235db557"
+  },
+  {
+    "file": "walk-saga.png",
+    "source": "imagegen/exec-f704663c-0998-469e-bc2c-3d7ac579612b.png",
+    "size": [
+      887,
+      1774
+    ],
+    "sha256": "7597192c33548d331bd5f33d8c0a0ba4f751c67cf095c958b70294947b11e688"
+  }
+]

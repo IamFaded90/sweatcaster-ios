@@ -1,5 +1,7 @@
 # Landsbyen: sammenligning med desktoppreviewet
 
+**Ny grafik 16. november:** Dette er den historiske kontrol af det tidligere desktoppreview. Aktuel integration af brugerens nye pakke, figurvælgeren med 5 mænd/5 kvinder og dens åbne begrænsninger står i [FINAL-INTEGRATION.md](village-art/FINAL-INTEGRATION.md). Den tidligere beskrivelse nedenfor dokumenterer ikke de nye billeders kvalitet.
+
 Gennemgangen sammenligner iPhone-implementeringen med Craft Anything-previewet i `unitycrashhandler64/app`. Den bygger på previewets `src/main.rs`, `README.md`, `design/HANDOFF.md` og `assets/fadedai`.
 
 | Del i previewet | iPhone-integration |

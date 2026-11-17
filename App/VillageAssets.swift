@@ -5,21 +5,16 @@ enum VillageAssets {
     private static let images = NSCache<NSString, UIImage>()
     private static let sheets = NSCache<NSString, SpriteSheet>()
     private static let newFrames = NSCache<NSString, UIImage>()
-    private static let newNames = ["adam", "eva", "atlas", "luna", "milo", "iris", "noah", "nova", "saga", "theo"]
-
     static func newArtName(name: String, id: String) -> String {
-        let name = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        if newNames.contains(name) {
-            return name
-        }
-        let hash = id.utf8.reduce(UInt64(14695981039346656037)) {
-            ($0 ^ UInt64($1)) &* 1099511628211
-        }
-        return newNames[Int(hash % UInt64(newNames.count))]
+        VillageCharacterCatalog.resolved(name: name, id: id)
     }
 
     static func newBotFrame(_ bot: VillageLifeBot, at time: Date? = nil) -> UIImage? {
         let stable = newArtName(name: bot.displayName, id: bot.id)
+        if let image = VillageProductionArt.frame(character: stable, direction: directionRow(for: bot),
+                                                  step: bot.pose == .walk ? VillageProductionArt.step(at: time) : 0) {
+            return image
+        }
         let pose = bot.pose.rawValue
         let frame = time.map { Int($0.timeIntervalSinceReferenceDate * (pose == "walk" || pose == "work" || pose == "talk" ? 8 : 4)) % 8 } ?? 0
         let direction = directionRow(for: bot)
@@ -36,21 +31,13 @@ enum VillageAssets {
 
     static func directionRow(for bot: VillageLifeBot) -> Int {
         guard bot.pose == .walk, let destination = bot.destinationZoneID else { return 0 }
-        func point(_ zone: VillageZoneID) -> (Double, Double) {
-            switch zone {
-            case .research: (768, 380)
-            case .video: (1080, 520)
-            case .cafe: (450, 520)
-            case .sleep: (768, 710)
-            }
-        }
-        let plaza = (768.0, 512.0)
-        let from = bot.pathProgress < 0.5 ? point(bot.zoneID) : plaza
-        let to = bot.pathProgress < 0.5 ? plaza : point(destination)
-        let dx = to.0 - from.0
-        let dy = to.1 - from.1
+        let plaza = VillageMapLayout.plaza
+        let from = bot.pathProgress < 0.5 ? VillageMapLayout.entrance(bot.zoneID) : plaza
+        let to = bot.pathProgress < 0.5 ? plaza : VillageMapLayout.entrance(destination)
+        let dx = to.x - from.x
+        let dy = to.y - from.y
         guard dx != 0 || dy != 0 else { return 0 }
-        let clockwiseFromSouth = atan2(-dx, dy)
+        let clockwiseFromSouth = atan2(-Double(dx), Double(dy))
         let turns = clockwiseFromSouth / (2 * Double.pi)
         return (Int((turns * 16).rounded()) + 16) % 16
     }
@@ -58,9 +45,17 @@ enum VillageAssets {
     static func image(named name: String, subdirectory: String) -> UIImage? {
         let key = "\(subdirectory)/\(name)" as NSString
         if let image = images.object(forKey: key) { return image }
+        if subdirectory == "new", name.hasPrefix("room-"),
+           let image = VillageProductionArt.image(VillageProductionArt.room(for: String(name.dropFirst(5)))) {
+            return image
+        }
         let image = resource(named: name, fileExtension: "png", subdirectory: subdirectory)
             .flatMap { UIImage(contentsOfFile: $0.path) } ?? UIImage(named: name)
-        if let image { images.setObject(image, forKey: key) }
+        if let image {
+            images.totalCostLimit = 48 * 1024 * 1024
+            let cost = (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0)
+            images.setObject(image, forKey: key, cost: cost)
+        }
         return image
     }
 
@@ -169,24 +164,30 @@ struct VillagePixelImage: View {
 
     var body: some View {
         let moving = animateWalk && !reduceMotion && !calmMotion && phase == .active
-        TimelineView(.animation(minimumInterval: 1.0 / 12,
-                                paused: !moving || (bot.pose == .sleep && !speechMotion.isSpeaking(bot.id)))) { context in
+        TimelineView(.animation(minimumInterval: bot.pose == .walk ? 1.0 / 12 : 1.0 / 8,
+                                paused: !moving)) { context in
             let displayed = displayedBot(moving: moving)
             let date: Date? = moving ? context.date : nil
             let frame = date.map {
                 Int($0.timeIntervalSinceReferenceDate * ([VillageActivity.walk, .work, .talk].contains(displayed.pose) ? 8 : 4)) % 8
             } ?? 0
-            let image = VillageAssets.newBotFrame(displayed, at: date)
-            poseImage(image)
-                .overlay {
-                    if image != nil {
-                        VillageSpriteFace(artName: VillageAssets.newArtName(name: displayed.displayName, id: displayed.id),
-                                          pose: displayed.pose, frame: frame,
-                                          direction: VillageAssets.directionRow(for: displayed),
-                                          blink: moving && VillageBlink.closed(id: bot.id, at: context.date),
-                                          mouth: moving ? speechMotion.mouth(for: bot.id, at: context.date) : 0)
+            let art = VillageAssets.newArtName(name: displayed.displayName, id: displayed.id)
+            if VillageProductionArt.hasCharacter(art) {
+                VillageCharacterMotion(character: art, pose: displayed.pose,
+                                       direction: VillageAssets.directionRow(for: displayed), date: date,
+                                       mouth: moving ? speechMotion.mouth(for: bot.id, at: context.date) : 0)
+            } else {
+                let image = VillageAssets.newBotFrame(displayed, at: date)
+                poseImage(image)
+                    .overlay {
+                        if image != nil {
+                            VillageSpriteFace(artName: art, pose: displayed.pose, frame: frame,
+                                              direction: VillageAssets.directionRow(for: displayed),
+                                              blink: moving && VillageBlink.closed(id: bot.id, at: context.date),
+                                              mouth: moving ? speechMotion.mouth(for: bot.id, at: context.date) : 0)
+                        }
                     }
-                }
+            }
             }
         .frame(width: size, height: size)
         .accessibilityHidden(true)
@@ -194,7 +195,7 @@ struct VillagePixelImage: View {
 
     private func displayedBot(moving: Bool) -> VillageLifeBot {
         var displayed = bot
-        if speechMotion.isSpeaking(bot.id), moving { displayed.pose = .talk }
+        if speechMotion.isSpeaking(bot.id), moving, bot.pose != .walk { displayed.pose = .talk }
         return displayed
     }
 

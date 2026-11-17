@@ -280,7 +280,7 @@ class MailAppointments:
             notice = "PC-modellen er optaget. Aftalesøgningen prøver igen om lidt."
         except ApiError as exc:
             more = False
-            notice = exc.message
+            notice = str(exc)
         except (BotComputerError, OSError, ValueError, KeyError, TypeError, OverflowError):
             more = False
             notice = "Aftalerne kunne ikke tjekkes nu. Kontrollér Gmail-login og den lokale model på PC’en."
@@ -315,7 +315,11 @@ class MailAppointments:
             if not isinstance(mail, dict) or mail.get("id") != message_id:
                 raise ValueError("Unexpected Gmail message")
             now = datetime.now(timezone.utc)
-            received_ms = int(mail["internalDate"])
+            try:
+                received_ms = int(mail["internalDate"])
+            except (KeyError, TypeError, ValueError):
+                self.record(selection, account, hashed, None, 0, "unrelated", None)
+                continue
             received = datetime.fromtimestamp(received_ms / 1000, tz=zone)
             text = mail_text(mail)
             summary = None

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from sweatcaster.api import create_app
 from sweatcaster.composio_library import ComposioLibrary, GMAIL_CONFIG_NAME, GMAIL_READ_SCOPE
+from sweatcaster.composio_gmail import ConsumerGmail, MESSAGES
 from sweatcaster.mail_appointments import GMAIL, MailAppointments, decode_appointment, decode_proposal, mail_text
 from tests.conftest import make_settings
 
@@ -128,6 +129,50 @@ def test_gmail_login_requests_read_only_oauth_scope(tmp_path, monkeypatch):
 
     monkeypatch.setattr(library, "request", request)
     assert library.config("gmail", create=True) == "ac_read_only"
+
+
+def test_consumer_gmail_normalizes_the_actual_composio_message_shape(monkeypatch):
+    gmail = ConsumerGmail("fixture-secret")
+
+    def execute(slug, args):
+        if slug == "GMAIL_FETCH_EMAILS":
+            assert args["only_ids"] and args["query"] == "subject:aftale"
+            return {"messages": [{"messageId": "fixture-mail"}], "nextPageToken": "fixture-next"}
+        assert args["message_id"] == "fixture-mail"
+        return {"messageId": "fixture-mail", "threadId": "fixture-thread",
+                "messageTimestamp": "2026-11-17T01:02:03Z", "messageText": "Bekræftet aftale", "payload": {}}
+
+    monkeypatch.setattr(gmail, "_execute", execute)
+    assert gmail.read(MESSAGES, {"q": "subject:aftale"}) == {
+        "messages": [{"id": "fixture-mail"}], "nextPageToken": "fixture-next"}
+    result = gmail.read(MESSAGES + "/fixture-mail")
+    assert result["id"] == "fixture-mail"
+    assert result["internalDate"] == "1794877323000"
+    assert result["snippet"] == "Bekræftet aftale"
+
+
+def test_reviewed_gmail_send_is_paired_and_does_not_send_twice(tmp_path, monkeypatch):
+    calls = []
+    gmail = ConsumerGmail("fixture-secret")
+
+    def send(recipient, subject, body):
+        calls.append((recipient, subject, body))
+        return {"id": "fixture-receipt"}
+
+    monkeypatch.setattr(gmail, "send", send)
+    monkeypatch.setattr(ComposioLibrary, "gmail", lambda _self: gmail)
+    settings = make_settings(tmp_path)
+    path = "/api/modules/v1/composio/gmail/send"
+    draft = {"id": str(uuid4()), "recipient": "test@example.org", "subject": "Hej", "body": "Testmail"}
+    headers = {"Authorization": "Bearer " + settings.token}
+    with TestClient(create_app(settings)) as client:
+        assert client.put(path, json=draft).status_code == 401
+        assert not calls
+        assert client.put(path, headers=headers, json=draft).json() == {"sent": True}
+        assert client.put(path, headers=headers, json=draft).json() == {"sent": True}
+        assert client.put(path, headers=headers, json=draft | {"body": "Andet"}).status_code == 409
+        assert client.put(path, headers=headers, json=draft | {"recipient": "one@example.org,two@example.org"}).status_code == 422
+    assert calls == [("test@example.org", "Hej", "Testmail")]
 
 
 def test_newer_changes_replace_suggestions_and_old_mail_cannot_reopen_them(tmp_path):

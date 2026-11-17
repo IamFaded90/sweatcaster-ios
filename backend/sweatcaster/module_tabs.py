@@ -120,11 +120,12 @@ def collection_answer(settings, message: str) -> str | None:
 
 
 def register_modules(app: FastAPI, settings, authorize) -> None:
+    from sweatcaster.cast_relay import register_cast_relay
     from sweatcaster.bot_computer_routes import register_bot_computers
     from sweatcaster.lumi_companion import register_lumi
     from sweatcaster.bot_computers import BotComputerError, BotComputerWorker, ollama_reports, wire_uuid
     from sweatcaster.code_batch import BatchWorker, configured_batch
-    from sweatcaster.repository_library import RepositoryError
+    from sweatcaster.repository_library import RepositoryError, RepositoryInUse
 
     workspace = Path(os.environ.get("SWEATCASTER_WORKSPACE_DIR", "workspace"))
     batch = configured_batch(settings, workspace)
@@ -138,10 +139,13 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
     from sweatcaster.pc_metrics import desktop_setup, gmail_setup, image_setup, read_metrics, web_setup
     from sweatcaster.store import Store
     from sweatcaster.studio_video import register_studio_video
+    from sweatcaster.studio_meshes import register_studio_meshes
     from sweatcaster.video_review import register_video_review
 
     register_lumi(app, settings, authorize)
-    register_studio_video(app, settings, authorize)
+    studio_videos = register_studio_video(app, settings, authorize)
+    register_studio_meshes(app, settings, authorize)
+    register_cast_relay(app, settings, authorize)
     library = register_composio(app, settings, authorize)
     appointments = register_mail_appointments(app, settings, authorize, library,
                                               ollama_reports(settings, mail_appointments=True))
@@ -209,8 +213,41 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             logging.getLogger(__name__).warning("HTTP MCP requires mcp>=1.29.1,<2; the remaining API is available.")
 
     if mcp is not None:
+        from mcp.server.fastmcp import Image
         from starlette.routing import Route
         from sweatcaster.security import is_phone_host
+
+        @mcp.tool()
+        def create_code_proposal(repository: str, goal: str, files: list[str], priority: int = 0) -> dict:
+            """Queue a code proposal for selected source files. Review and approval happen in Code Bot."""
+            return {"id": batch.enqueue(repository, goal, files, priority=priority)}
+
+        @mcp.tool()
+        def generate_image(prompt: str):
+            """Generate a PNG on the paired PC from an image description."""
+            from sweatcaster.comfy import generate_png
+
+            if not 1 <= len(prompt.strip()) <= 1_000:
+                raise ValueError("Skriv en billedbeskrivelse på 1–1.000 tegn.")
+            png = generate_png(prompt.strip())
+            if len(png) > 15_000_000 or not png.startswith(b"\x89PNG\r\n\x1a\n"):
+                raise ValueError("PC’en leverede ikke et gyldigt PNG-billede.")
+            return Image(data=png, format="png")
+
+        @mcp.tool()
+        def studio_video_models() -> dict:
+            """List the configured video models and report what is missing on the paired PC."""
+            return studio_videos.catalog()
+
+        @mcp.tool()
+        def create_video(request_id: str, mode: str, prompt: str) -> dict:
+            """Queue a video from text. Send the same UUID as request_id when retrying the same input."""
+            return studio_videos.submit({"id": request_id, "mode": mode, "prompt": prompt, "photos": []})
+
+        @mcp.tool()
+        def studio_video_status(job_id: str) -> dict:
+            """Check a video job. Finished videos are available in Kreativt Studio."""
+            return studio_videos.status(job_id)
 
         mcp.streamable_http_app()
 
@@ -256,6 +293,19 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             raise ApiError(exc.status, "NOT_READY", exc.message) from exc
         response.headers["Cache-Control"] = "no-store"
         return channels
+
+    from sweatcaster.google_drive import DriveError, read_files
+
+    @app.get("/api/modules/v1/google-drive/files", include_in_schema=False)
+    def drive_files(request: Request, response: Response, parent: str | None = None, page: str | None = None):
+        authorize(request, settings)
+        try:
+            files = read_files(parent=parent, page=page)
+        except DriveError as exc:
+            code = "INVALID_INPUT" if exc.status == 422 else "NOT_READY"
+            raise ApiError(exc.status, code, exc.message) from exc
+        response.headers["Cache-Control"] = "no-store"
+        return files
 
     @app.put("/api/modules/v1/web-search", include_in_schema=False)
     def web_search(request: Request, response: Response, body: dict = Body(...)):
@@ -372,6 +422,21 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
         authorize(request, settings)
         return {"routines": workflows.routine_status(datetime.now(timezone.utc))}
 
+    @app.put("/api/modules/v1/code-repositories/removal", include_in_schema=False)
+    def remove_repository(request: Request, body: dict = Body(...)):
+        authorize(request, settings)
+        repo = body.get("repo")
+        if not isinstance(repo, str) or len(repo) > 150 or body != {"repo": repo, "confirm_repo": repo}:
+            raise ApiError(422, "INVALID_INPUT", "Bekræft, hvilken lokal Git-kopi du vil slette.")
+        try:
+            return {"removed": batch.remove_repository(repo)}
+        except RepositoryInUse as exc:
+            raise ApiError(409, "NOT_READY", str(exc)) from exc
+        except RepositoryError as exc:
+            raise ApiError(422, "INVALID_INPUT", str(exc)) from exc
+        except OSError as exc:
+            raise ApiError(500, "NOT_READY", "PC’en kunne ikke slette den lokale Git-kopi.") from exc
+
     @app.put("/api/modules/v1/routines", include_in_schema=False)
     def configure_routines(request: Request, body: dict = Body(...)):
         authorize(request, settings)
@@ -379,7 +444,8 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
         if not isinstance(entries, list):
             raise ApiError(422, "INVALID_INPUT", "Angiv rutiner som en liste.")
         try:
-            workflows.configure_routines(entries)
+            with workflows.library.snapshot_changes:
+                workflows.configure_routines(entries)
         except RepositoryError as exc:
             raise ApiError(422, "INVALID_INPUT", str(exc)) from exc
         return {"routines": workflows.routines()}

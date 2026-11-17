@@ -95,8 +95,10 @@ struct Home: View {
     @State var model: Model
     @State var showLogin = false
     @State var showDashboardActivity = false
+    @State var showAgentAssistant = false
     @State var showMoreDestinations = false
     @State var showCreativeStudioShortcut = false
+    @State var showFadedCamera = false
     @State var showProjects = false
     @State var showHoldchatFromMore = false
     @State var showBackupFromMore = false
@@ -248,6 +250,7 @@ struct Home: View {
             EntertainmentView(isSelected: selectedHomeTab == Space.entertainment.rawValue,
                               background: AnyView(homeBackground),
                               showsPlaybackControls: !privateStudioPresented,
+                              api: model.isDemo ? nil : model.api as? LiveAPI,
                               onOpen: { selectTab(.entertainment) }) {
                 homeTabs
             }
@@ -339,7 +342,7 @@ struct Home: View {
                     }
                         .id(api.queueTargetID + ":" + tab.id)
                         .toolbarVisibility(.hidden, for: .tabBar)
-                        .tabItem { Label(tab.title, systemImage: tab.kind == "cards" ? "rectangle.on.rectangle" : "info.circle") }
+                        .tabItem { Label(tab.title, systemImage: "info.circle") }
                         .tag("module:" + tab.id)
                 }
             }
@@ -366,7 +369,9 @@ struct Home: View {
         var seen = Set<String>()
         moduleAddress = address
         moduleTargetID = api.queueTargetID
-        moduleTabs = Array(manifest.tabs.filter { $0.supported && seen.insert($0.id).inserted }.prefix(8))
+        moduleTabs = Array(manifest.tabs.filter {
+            $0.kind == "information" && $0.supported && seen.insert($0.id).inserted
+        }.prefix(8))
         if let selectedModuleTab, !moduleTabs.contains(where: { "module:" + $0.id == selectedModuleTab }) {
             self.selectedModuleTab = nil
         }
@@ -394,6 +399,7 @@ struct Home: View {
             .navigationDestination(isPresented: $showDashboardActivity) {
                 dashboardActivityScreen.onAppear { onScreenAppeared?(.dashboardActivity) }
             }
+            .navigationDestination(isPresented: $showAgentAssistant) { AgentAssistantHome(api: studioAPI) }
             .safeAreaInset(edge: .top, spacing: 0) {
                 VStack(alignment: .leading, spacing: FadedSpacing.s) {
                     dashboardConnection
@@ -402,7 +408,7 @@ struct Home: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, FadedSpacing.edge)
                 .padding(.vertical, 8)
-                .background(.ultraThinMaterial)
+                .background { ChatGlassSurface(radius: FadedRadius.card, colors: [FadedBrand.mint, FadedBrand.blue]) }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -18,11 +18,17 @@ final class BrowserController: NSObject, ObservableObject, WKNavigationDelegate,
     @Published var isLoading = false
     @Published var canGoBack = false
     @Published var canGoForward = false
+    @Published private(set) var adBlockingEnabled = false
+    @Published private(set) var settingAdBlocking = false
+    @Published private(set) var adBlockingNotice: String?
     var onVideo: ((VideoCandidate) -> Void)?
     var onPageStarted: (() -> Void)?
     var onPageLoaded: ((URL?, String?) -> Void)?
     let webView: WKWebView
     private var playingVideoFrame: WKFrameInfo?
+    private static let adBlockingKey = "castbrowser.adBlocking"
+    private var adRules: WKContentRuleList?
+    private var pendingNavigation: URLRequest?
     private let capturedHeadersLock = NSLock()
     private var capturedMediaHeaders: [String: [String: String]] = [:]
 
@@ -158,6 +164,51 @@ final class BrowserController: NSObject, ObservableObject, WKNavigationDelegate,
         super.init()
         controller.add(CastMediaMessageHandler(browser: self), name: "videoFound")
         webView.navigationDelegate = self
+        if UserDefaults.standard.bool(forKey: Self.adBlockingKey) {
+            configureAdBlocking(true, showReloadHint: false)
+        }
+    }
+
+    func setAdBlocking(_ enabled: Bool) {
+        configureAdBlocking(enabled, showReloadHint: true)
+    }
+
+    private func configureAdBlocking(_ enabled: Bool, showReloadHint: Bool) {
+        guard !settingAdBlocking, enabled != adBlockingEnabled else { return }
+        let controller = webView.configuration.userContentController
+        adBlockingNotice = nil
+        if enabled, adRules == nil {
+            settingAdBlocking = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    guard let url = Bundle.module.url(forResource: "AdBlockingRules", withExtension: "json") else {
+                        throw CocoaError(.fileNoSuchFile)
+                    }
+                    let rules = try String(contentsOf: url, encoding: .utf8)
+                    self.adRules = try await WKContentRuleListStore.default().compileContentRuleList(
+                        forIdentifier: "FadedAI.CastBrowser.Ads.v1", encodedContentRuleList: rules)
+                    self.settingAdBlocking = false
+                    self.configureAdBlocking(true, showReloadHint: showReloadHint)
+                } catch {
+                    self.settingAdBlocking = false
+                    self.adBlockingNotice = "Reklameblokering kunne ikke startes."
+                }
+                if let request = self.pendingNavigation {
+                    self.pendingNavigation = nil
+                    self.webView.load(request)
+                }
+            }
+            return
+        }
+        guard let adRules else { return }
+        if enabled { controller.add(adRules) }
+        else { controller.remove(adRules) }
+        adBlockingEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.adBlockingKey)
+        if showReloadHint, webView.url != nil {
+            adBlockingNotice = "Genindlæs siden, når det passer dig."
+        }
     }
 
     func startPictureInPicture() async -> Bool {
@@ -217,13 +268,16 @@ final class BrowserController: NSObject, ObservableObject, WKNavigationDelegate,
     func load(_ raw: String) {
         guard let url = URL(string: raw), ["http", "https"].contains(url.scheme?.lowercased() ?? "") else { return }
         address = url.absoluteString
-        webView.load(URLRequest(url: url))
+        let request = URLRequest(url: url)
+        if settingAdBlocking { pendingNavigation = request }
+        else { webView.load(request) }
     }
     func goBack() { if webView.canGoBack { webView.goBack() } }
     func goForward() { if webView.canGoForward { webView.goForward() } }
     func reload() { webView.reload() }
     func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
         isLoading = true
+        if adRules != nil { adBlockingNotice = nil }
         playingVideoFrame = nil
         syncNavigation(webView)
         onPageStarted?()

@@ -115,12 +115,14 @@ extension ChatView {
     }
 
     @ViewBuilder private var composerStatus: some View {
-        HStack(alignment: .firstTextBaseline) {
+        HStack(alignment: .center) {
             let destination = demo ? "Demo" : effectiveReplySource.rawValue
-            let routeLabel = chatRouteModelTitle.map { "\(destination) · \($0)" } ?? destination
-            Label(routeLabel, systemImage: demo ? "testtube.2" : effectiveReplySource.icon)
-                .font(.caption.weight(.semibold)).foregroundStyle(demo || !palette.isDark ? palette.secondary : sourceColor(effectiveReplySource))
-                .accessibilityLabel("Sendes til \(routeLabel)")
+            if demo {
+                Label(destination, systemImage: "testtube.2").font(.caption.weight(.semibold))
+                    .foregroundStyle(palette.secondary)
+            } else {
+                chatModelSelectionButton(showCurrentModel: true)
+            }
             if effectiveReplySource == .phone, phoneBatteryLevel >= 0, phoneBatteryLevel < 0.20,
                PhoneModels.liteModeActive(for: phoneModel), resolvedRoute.modelID == PhoneModels.effectiveModelID(phoneModel) {
                 Label("Lite Mode", systemImage: "battery.25percent").font(.caption).foregroundStyle(palette.secondary)

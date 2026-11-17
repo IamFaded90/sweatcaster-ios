@@ -29,6 +29,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
     var prompt: String
     var voice: String
     var sprite: Data?
+    var villageFigure: String
     var personality: String?
     var notifications: Bool?
     var voiceRate: Double?
@@ -43,13 +44,14 @@ struct VillageBot: Codable, Identifiable, Equatable {
          voice: String = "da-DK", sprite: Data? = nil, personality: String? = nil,
          notifications: Bool? = true, voiceRate: Double? = 1.0, language: String? = "da-DK",
          specialty: String? = nil, responsibility: String? = nil,
-         traits: [String] = VillageBot.defaultTraits, bestFriendID: UUID? = nil, dailyMemory: [String] = []) {
+         traits: [String] = VillageBot.defaultTraits, bestFriendID: UUID? = nil, dailyMemory: [String] = [], villageFigure: String? = nil) {
         self.id = id
         self.name = name
         self.color = color
         self.prompt = prompt
         self.voice = voice
         self.sprite = sprite
+        self.villageFigure = VillageCharacterCatalog.valid(villageFigure) ?? VillageCharacterCatalog.initial(name: name, id: id.uuidString)
         self.personality = personality
         self.notifications = notifications
         self.voiceRate = voiceRate
@@ -120,7 +122,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
         return "Hej, jeg er \(name.isEmpty ? "din bot" : name). Jeg er \(trait.lowercased())."
     }
 
-    var voiceDetails: String { playbackVoice.map(LocalSpeechVoice.label) ?? "Systemstemme" }
+    var voiceDetails: String { AgentPCVoice(rawValue: voice)?.label ?? playbackVoice.map(LocalSpeechVoice.label) ?? "Systemstemme" }
 
     var voiceQuality: String { playbackVoice.map(LocalSpeechVoice.qualityLabel) ?? "Systemstemme" }
 
@@ -130,7 +132,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, color, prompt, voice, sprite, personality, notifications, voiceRate, language
-        case specialty, responsibility, traits, bestFriendID, dailyMemory
+        case specialty, responsibility, traits, bestFriendID, dailyMemory, villageFigure
     }
 
     init(from decoder: Decoder) throws {
@@ -141,6 +143,8 @@ struct VillageBot: Codable, Identifiable, Equatable {
         prompt = try container.decode(String.self, forKey: .prompt)
         voice = try container.decode(String.self, forKey: .voice)
         sprite = try container.decodeIfPresent(Data.self, forKey: .sprite)
+        villageFigure = VillageCharacterCatalog.valid(try? container.decode(String.self, forKey: .villageFigure))
+            ?? VillageCharacterCatalog.initial(name: name, id: id.uuidString)
         personality = try container.decodeIfPresent(String.self, forKey: .personality)
         notifications = try container.decodeIfPresent(Bool.self, forKey: .notifications)
         voiceRate = try container.decodeIfPresent(Double.self, forKey: .voiceRate)
@@ -160,6 +164,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
         try container.encode(prompt, forKey: .prompt)
         try container.encode(voice, forKey: .voice)
         try container.encodeIfPresent(sprite, forKey: .sprite)
+        try container.encode(villageFigure, forKey: .villageFigure)
         try container.encodeIfPresent(personality, forKey: .personality)
         try container.encodeIfPresent(notifications, forKey: .notifications)
         try container.encodeIfPresent(voiceRate, forKey: .voiceRate)
@@ -252,18 +257,62 @@ struct VillageSpritePhoto: Transferable {
     }
 }
 
-struct VillageBotAvatar: View {
+@MainActor enum VillageAvatarCache {
+    private static let privateCache: ImageCache = {
+        let cache = ImageCache(name: "FadedAIAvatarMemory")
+        cache.memoryStorage.config.totalCostLimit = 16_000_000
+        return cache
+    }()
+
+    private static let ordinaryCache: ImageCache = {
+        let cache = ImageCache(name: "FadedAIAvatars")
+        cache.memoryStorage.config.totalCostLimit = 16_000_000
+        cache.diskStorage.config.sizeLimit = 4_000_000
+        cache.diskStorage.config.expiration = .days(7)
+        cache.cleanExpiredDiskCache(completion: nil)
+        return cache
+    }()
+
+    static func cache(for id: UUID) -> ImageCache {
+        id == VillageBot.lumiID ? privateCache : ordinaryCache
+    }
+
+    static func key(id: UUID, data: Data) -> String {
+        id.uuidString + ":" + SHA256.hash(data: data).description
+    }
+
+    static func storeCurrentAvatar(_ image: UIImage, id: UUID, data: Data, key: String) {
+        guard id != VillageBot.lumiID,
+              VillageBot.list(from: MigratedAppData.shared.villageBots).contains(where: { $0.id == id && $0.sprite == data })
+        else { return }
+        let options = KingfisherParsedOptionsInfo([.diskStoreWriteOptions([.atomic, .completeFileProtection])])
+        ordinaryCache.store(image, original: data, forKey: key, options: options)
+        ordinaryCache.cleanExpiredDiskCache(completion: nil)
+    }
+
+    static func discardChanged(from previous: [VillageBot], keeping current: [VillageBot]) {
+        let currentKeys = Set(current.compactMap { bot in bot.sprite.map { key(id: bot.id, data: $0) } })
+        for bot in previous {
+            guard let data = bot.sprite else { continue }
+            let oldKey = key(id: bot.id, data: data)
+            if !currentKeys.contains(oldKey) {
+                cache(for: bot.id).removeImage(forKey: oldKey, fromDisk: bot.id != VillageBot.lumiID, completionHandler: nil)
+            }
+        }
+    }
+
+    static func clear() {
+        privateCache.clearMemoryCache()
+        ordinaryCache.clearCache()
+    }
+}
+
+@MainActor struct VillageBotAvatar: View {
     let bot: VillageBot
     let size: CGFloat
     let radius: CGFloat
     @Environment(\.fadedPalette) private var palette
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private static let avatarCache: ImageCache = {
-        let cache = ImageCache(name: "FadedAIAvatarMemory")
-        cache.memoryStorage.config.totalCostLimit = 16_000_000
-        return cache
-    }()
 
     private var tint: Color {
         switch bot.color {
@@ -277,17 +326,26 @@ struct VillageBotAvatar: View {
         ZStack {
             LinearGradient(colors: [tint.opacity(0.42), palette.raised], startPoint: .topLeading, endPoint: .bottomTrailing)
             if let data = bot.sprite {
-                let hash = SHA256.hash(data: data).description
-                let source = RawImageDataProvider(data: data, cacheKey: bot.id.uuidString + ":" + hash)
+                let cacheKey = VillageAvatarCache.key(id: bot.id, data: data)
+                let source = RawImageDataProvider(data: data, cacheKey: cacheKey)
                 KFImage(source: .provider(source))
-                    .targetCache(Self.avatarCache)
+                    .targetCache(VillageAvatarCache.cache(for: bot.id))
                     .cacheMemoryOnly()
+                    .onSuccess { result in
+                        // Keep stale views from writing to disk after a portrait has changed or been deleted.
+                        guard case .none = result.cacheType, bot.id != VillageBot.lumiID else { return }
+                        let id = bot.id
+                        Task { @MainActor in
+                            VillageAvatarCache.storeCurrentAvatar(result.image, id: id, data: data, key: cacheKey)
+                        }
+                    }
                     .cancelOnDisappear(true)
                     .fade(duration: reduceMotion ? 0 : 0.15)
                     .placeholder { placeholder }
                     .onFailureView { placeholder }
                     .resizable()
                     .scaledToFill()
+                    .id(cacheKey)
             } else {
                 placeholder
             }
@@ -299,8 +357,16 @@ struct VillageBotAvatar: View {
     }
 
     private var placeholder: some View {
-        Image(systemName: "face.smiling.inverse")
-            .font(.system(size: size * 0.43, weight: .medium)).foregroundStyle(tint)
+        Group {
+            if let name = VillagePortraitIdentity.name(for: bot), let image = VillageProductionArt.portrait(name) {
+                Image(uiImage: image).resizable().scaledToFill()
+            } else if let image = VillageProductionArt.frame(character: bot.villageFigure, direction: 0, step: 0) {
+                Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
+            } else {
+                Image(systemName: "face.smiling.inverse")
+                    .font(.system(size: size * 0.43, weight: .medium)).foregroundStyle(tint)
+            }
+        }
     }
 }
 

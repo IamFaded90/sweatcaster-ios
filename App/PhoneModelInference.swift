@@ -104,8 +104,12 @@ extension PhoneModels {
                 let session = LanguageModelSession()
                 LocalCompute.didLoadModel()
                 let start = Date()
-                _ = try await session.respond(to: prompt)
+                // An English prompt also works when Apple's installed model lacks Danish.
+                let result = try await session.respond(to: "In two short sentences, explain how rain forms.")
                 try Task.checkCancellation()
+                guard !result.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw PhoneModelError.emptyResponse
+                }
                 let seconds = Date().timeIntervalSince(start).formatted(.number.precision(.fractionLength(1)))
                 return "Apple Foundation Models: \(seconds) sek. pr. svar."
             }
@@ -117,13 +121,19 @@ extension PhoneModels {
                 return "\(name): \(result.rate.formatted(.number.precision(.fractionLength(1)))) tokens/sek. inkl. promptbehandling."
             }
             var reply = ""
+            let start = ContinuousClock.now
             let rate = try await streamCoreML(folder: folder, modelID: modelID,
                                              messages: [.init(role: .user, content: prompt)], maxTokens: 64) {
                 reply = $0
             }
             try Task.checkCancellation()
-            guard !reply.isEmpty, rate.isFinite, rate > 0 else { throw PhoneModelError.emptyResponse }
+            guard !reply.isEmpty else { throw PhoneModelError.emptyResponse }
             let name = catalog.first(where: { $0.id == modelID })?.name ?? "Importeret model"
+            if !rate.isFinite || rate <= 0 {
+                let elapsed = start.duration(to: .now).components
+                let seconds = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+                return "\(name): \(seconds.formatted(.number.precision(.fractionLength(1)))) sek. pr. svar."
+            }
             return "\(name): \(rate.formatted(.number.precision(.fractionLength(1)))) tokens/sek."
         }
     }

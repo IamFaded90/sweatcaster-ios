@@ -91,6 +91,7 @@ struct ExperimentalVillageView: View {
     @State private var seedError: String?
 
     let bots: [VillageBot]
+    let api: LiveAPI?
     let work: ExperimentalVillageWork
     let paused: Bool
     let isVisible: Bool
@@ -131,7 +132,7 @@ struct ExperimentalVillageView: View {
         .onChange(of: work.completedIDs, initial: true) { _, ids in ExperimentalVillageGate.record(ids) }
         .sheet(isPresented: $showSquare) {
             NavigationStack {
-                TeamWorkflowView(mode: .group, bots: bots)
+                TeamWorkflowView(mode: .group, bots: bots, api: api)
                     .toolbar { Button("Luk") { showSquare = false } }
             }
         }

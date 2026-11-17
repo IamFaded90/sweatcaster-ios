@@ -87,6 +87,8 @@ struct SweatCasterShortcuts: AppShortcutsProvider {
                     shortTitle: "Åbn Landsbyen", systemImageName: "house.fill")
         AppShortcut(intent: OpenFadedAIVideoBrief(), phrases: ["Lav videokladde i \(.applicationName)"],
                     shortTitle: "Lav videokladde", systemImageName: "film")
+        AppShortcut(intent: OpenFadedAICamera(), phrases: ["Åbn kamera i \(.applicationName)"],
+                    shortTitle: "Åbn kamera", systemImageName: "video")
     }
 }
 

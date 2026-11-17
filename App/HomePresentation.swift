@@ -84,6 +84,7 @@ extension Home {
 
     private var homeStartup: some View {
         homePresentation
+        .assistantShareInbox(api: studioAPI, enabled: !model.isDemo && !privateStudioPresented)
         .onAppear {
             FadedTheme.migrateIfNeeded()
             UIDevice.current.isBatteryMonitoringEnabled = true
@@ -131,7 +132,7 @@ extension Home {
         .overlay(alignment: .top) {
             if let studioToast {
                 Text(studioToast.text).font(.callout)
-                    .padding(12).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
+                    .padding(12).fadedGlassSurface(radius: 14, tint: FadedBrand.panel)
                     .padding(.top, 8)
             }
         }
@@ -248,11 +249,13 @@ extension Home {
             }
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
+        .sheet(isPresented: $showFadedCamera) { NavigationStack { FadedCaptureView(modal: true) } }
         .sheet(isPresented: $showOfflineStudio) {
             OfflineStudio(api: studioAPI, sessionUnlocked: $nsfwSessionUnlocked,
                           onPrivateSessionEnded: showPrivateSessionNotice,
                           initialPage: studioPage == .chat ? nil : studioPage, initialImagePrompt: studioImagePrompt,
-                          ephemeralOnly: studioPage == .chat, imageOnly: studioPage == .images)
+                          ephemeralOnly: studioPage == .chat, imageOnly: studioPage == .images,
+                          privateImagePC: model.isDemo || model.needsPairing ? nil : model.api as? LiveAPI)
         }
         .sheet(isPresented: $showBots) {
             VillageBotLibrary(api: studioAPI, studioUnlocked: $nsfwSessionUnlocked,
@@ -265,7 +268,7 @@ extension Home {
         .sheet(isPresented: $showProjects) { FadedProjectsView() }
         .sheet(isPresented: $showHoldchatFromMore) {
             NavigationStack {
-                TeamWorkflowView(mode: .group, bots: FadedMoreScreenData.bots)
+                TeamWorkflowView(mode: .group, bots: FadedMoreScreenData.bots, api: studioAPI)
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { showHoldchatFromMore = false } } }
             }
         }

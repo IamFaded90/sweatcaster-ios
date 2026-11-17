@@ -158,6 +158,11 @@ import UniformTypeIdentifiers
                 get: { draft.responsibility ?? "" }, set: { draft.responsibility = String($0.prefix(400)) }
             ), axis: .vertical).lineLimit(2...4)
             Text("Profilbilledet vises ved botten. Landsbyfiguren bruger sit eget pixelbillede.").font(.footnote).foregroundStyle(.secondary)
+            NavigationLink {
+                VillageFigurePicker(selection: $draft.villageFigure)
+            } label: {
+                Label("Vælg landsbyfigur · " + draft.villageFigure.capitalized, systemImage: "person.crop.square")
+            }
             PhotosPicker("Vælg profilbillede fra Fotos", selection: $selectedSprite, matching: .images)
                 .onChange(of: selectedSprite) { _, item in
                     guard let item else { return }
@@ -212,6 +217,9 @@ import UniformTypeIdentifiers
     private var voiceSettings: some View {
         Section("Oplæsning på telefonen") {
             Picker("Stemme", selection: $draft.voice) {
+                if let pcVoice = AgentPCVoice(rawValue: draft.voice) {
+                    Text(pcVoice.label).tag(pcVoice.id)
+                }
                 Text("Bedste danske stemme").tag("da-DK")
                 Text("Bedste engelske stemme").tag("en-US")
                 ForEach(LocalSpeechVoice.options(language: "da-DK", includePersonalVoices: true) + LocalSpeechVoice.options(language: "en-US"),
@@ -226,6 +234,10 @@ import UniformTypeIdentifiers
             }
             let playing = voicePreviewBox.playback == .preview
             FadedSecondaryButton(playing ? "Stop stemmeprøve" : "Prøv stemme", icon: playing ? "stop.circle" : "play.circle") { speakPreview(draft.previewSentence) }
+                .disabled(AgentPCVoice(rawValue: draft.voice) != nil)
+            if AgentPCVoice(rawValue: draft.voice) != nil {
+                Text("Hør PC-stemmen fra agentens profil eller chat.").font(.footnote)
+            }
         }
     }
 
@@ -350,7 +362,7 @@ import UniformTypeIdentifiers
             return
         }
         if !fixedProfile && bots.contains(where: { $0.id == bot.id }) { return }
-        if bot.name.isEmpty && bot.prompt.isEmpty && bot.sprite == nil && !fixedProfile {
+        if bot.name.isEmpty && bot.prompt.isEmpty && bot.sprite == nil && bot.villageFigure == VillageCharacterCatalog.initial(name: "", id: bot.id.uuidString) && !fixedProfile {
             savedEditorDraft = Data()
         } else if let data = try? JSONEncoder().encode(bot) {
             savedEditorDraft = data

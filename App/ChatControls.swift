@@ -76,6 +76,9 @@ extension ChatView {
         case .pc:
             modelID = manualRoute?.modelID ?? (selectedModel.isEmpty ? nil : selectedModel)
         case .grok: modelID = nil
+        case .composio: modelID = manualRoute?.modelID ?? "deepseek-chat"
+        case .nvidia: modelID = manualRoute?.modelID ?? nvidiaCloud.models.first
+        case .openrouter: modelID = manualRoute?.modelID ?? "openrouter/free"
         }
         return ResolvedRoute(source: source, modelID: modelID, automatic: nil)
     }
@@ -138,7 +141,7 @@ extension ChatView {
         switch source {
         case .phone: palette.green
         case .pc: palette.cyan
-        case .grok: palette.purple
+        case .grok, .composio, .nvidia, .openrouter: palette.purple
         }
     }
 
@@ -160,6 +163,9 @@ extension ChatView {
         case .grok: cloudKeyAvailable
             ? "Beskeden og de seneste Grok-udvekslinger sendes til xAI. Forbrug kan koste penge."
             : "Gem en xAI-nøgle under Chatindstillinger for at sende til Grok."
+        case .openrouter: "Gratis svar via OpenRouter over internet, også med PC’en slukket."
+        case .nvidia: "Svar via NVIDIA over internet, også med PC’en slukket. Gratis prøveadgang har en brugsgrænse."
+        case .composio: "Svar via Composio over internet. Virker med PC’en slukket. Forbrug kan koste penge."
         }
     }
 
@@ -172,6 +178,9 @@ extension ChatView {
         case .phone: PhoneModels.isReady(route.modelID ?? phoneModel)
         case .pc: (api != nil && !modelsLoading && hasRequestedPCModel(route)) || canQueuePC
         case .grok: cloudKeyAvailable
+        case .composio: composioCloud.enabled
+        case .nvidia: nvidiaCloud.enabled
+        case .openrouter: openRouterCloud.enabled
         }
     }
 

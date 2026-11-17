@@ -34,6 +34,19 @@ struct BrowserScreen: View {
                 .padding(.leading, Style.space)
                 .background(Style.card, in: RoundedRectangle(cornerRadius: 16))
 
+                VStack(alignment: .leading, spacing: Style.small) {
+                    Toggle(isOn: Binding(get: { browser.adBlockingEnabled }, set: browser.setAdBlocking)) {
+                        Label("Blokér reklamer", systemImage: browser.adBlockingEnabled ? "shield.fill" : "shield")
+                    }
+                    .frame(minHeight: 44)
+                    .disabled(browser.settingAdBlocking)
+                    if let notice = browser.adBlockingNotice {
+                        Text(notice).font(.footnote).foregroundStyle(Style.muted)
+                    }
+                }
+                .padding(.horizontal, Style.space)
+                .background(Style.card, in: RoundedRectangle(cornerRadius: 16))
+
                 if browser.isLoading {
                     ProgressView().progressViewStyle(.linear).tint(Style.accent)
                         .accessibilityLabel("Indlæser hjemmeside")
@@ -74,7 +87,7 @@ struct BrowserScreen: View {
                 HStack(spacing: Style.small) {
                     BrowserAction(icon: "chevron.left", label: "Tilbage", disabled: !browser.canGoBack) { browser.goBack() }
                     BrowserAction(icon: "chevron.right", label: "Frem", disabled: !browser.canGoForward) { browser.goForward() }
-                    BrowserAction(icon: "arrow.clockwise", label: "Genindlæs") { browser.reload() }
+                    BrowserAction(icon: "arrow.clockwise", label: "Genindlæs", disabled: browser.settingAdBlocking) { browser.reload() }
                     BrowserAction(icon: "star", label: "Favoritsider") { showBookmarks = true }
                     BrowserAction(icon: "clock", label: "Historik") { showHistory = true }
                 }

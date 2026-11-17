@@ -1,5 +1,7 @@
+import CoreTransferable
 import Foundation
 import RoomPlan
+import UniformTypeIdentifiers
 import simd
 
 struct ScannedOfficeRoom: Codable, Identifiable {
@@ -13,6 +15,13 @@ struct ScannedOfficeRoom: Codable, Identifiable {
         var x: Double
         var z: Double
         var angle: Double
+        var height: Double? = nil
+
+        var displayHeight: Double {
+            if botID != nil { return 1.2 }
+            if let height, (0.04...12).contains(height) { return height }
+            return wall ? 2.4 : 0.8
+        }
 
         var span: (x: Double, z: Double) {
             let cosine = abs(cos(angle))
@@ -68,7 +77,9 @@ struct ScannedOfficeRoom: Codable, Identifiable {
         guard abs(x) < 150, abs(z) < 150, angle.isFinite, (0.04...60).contains(width), (0.04...60).contains(depth) else {
             return nil
         }
-        return Item(id: id, title: type, width: width, depth: depth, wall: wall, x: x, z: z, angle: angle)
+        let height = Double(dimensions.y)
+        return Item(id: id, title: type, width: width, depth: depth, wall: wall, x: x, z: z, angle: angle,
+                    height: (0.04...12).contains(height) ? height : nil)
     }
 
     private static func furnitureName(_ category: String, index: Int) -> String {
@@ -84,6 +95,43 @@ struct ScannedOfficeRoom: Codable, Identifiable {
         case "sink": "Vask"
         default: "Møbel \(index + 1)"
         }
+    }
+}
+
+struct ScannedOfficePCExport: Encodable, Transferable {
+    struct Item: Encodable {
+        let title: String
+        let x: Double
+        let z: Double
+        let width: Double
+        let depth: Double
+        let height: Double
+        let angle: Double
+        let wall: Bool
+        let bot: Bool
+
+        init(_ item: ScannedOfficeRoom.Item) {
+            title = String(item.title.prefix(60))
+            x = item.x
+            z = item.z
+            width = item.width
+            depth = item.depth
+            height = item.displayHeight
+            angle = item.angle
+            wall = item.wall
+            bot = item.botID != nil
+        }
+    }
+
+    let format = "fadedai-office"
+    let version = 1
+    let items: [Item]
+
+    init(_ room: ScannedOfficeRoom) { items = room.items.map(Item.init) }
+
+    static var transferRepresentation: some TransferRepresentation {
+        DataRepresentation(exportedContentType: .json) { layout in try JSONEncoder().encode(layout) }
+            .suggestedFileName("FadedAI-kontor.json")
     }
 }
 

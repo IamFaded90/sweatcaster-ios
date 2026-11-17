@@ -74,5 +74,18 @@ private struct RenderingWidget: Widget {
 @main struct FadedAIWidgets: WidgetBundle {
     var body: some Widget {
         RenderingWidget()
+        FadedCameraControl()
+    }
+}
+
+private struct FadedCameraControl: ControlWidget {
+    var body: some ControlWidgetConfiguration {
+        StaticControlConfiguration(kind: "dk.fadedai.camera") {
+            ControlWidgetButton(action: OpenFadedAICamera()) {
+                Label("Kamera", systemImage: "video")
+            }
+        }
+        .displayName("FadedAI Kamera")
+        .description("Åbn kameraet i FadedAI.")
     }
 }

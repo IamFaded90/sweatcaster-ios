@@ -42,8 +42,7 @@ extension Home {
     private var tabButtons: some View {
         let fixed = dockSpaces.map { FadedWheelItem(id: $0.rawValue, title: spaceTitle($0), icon: spaceIcon($0)) }
         let modules = (visibleModuleTarget == nil ? [] : moduleTabs).map {
-            FadedWheelItem(id: "module:" + $0.id, title: $0.title,
-                           icon: $0.kind == "cards" ? "rectangle.on.rectangle" : "info.circle")
+            FadedWheelItem(id: "module:" + $0.id, title: $0.title, icon: "info.circle")
         }
         return FadedNavigationWheel(items: fixed + modules + [.init(id: "more", title: "Mere", icon: "ellipsis")],
                                     selectedID: showMoreDestinations ? "more" : selectedModuleTab ?? space.rawValue,

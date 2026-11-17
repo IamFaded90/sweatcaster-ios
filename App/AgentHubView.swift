@@ -110,7 +110,7 @@ import SwiftUI
                                     reduceMotion: $calmMotion, zoom: $villageZoom)
             }
             .navigationDestination(isPresented: $showBuilding) {
-                VillageBuildingRoomView(zone: selectedBuilding, bots: life.bots, onOpenProfile: openLifeProfile)
+                VillageBuildingRoomView(zone: selectedBuilding, life: life, onOpenProfile: openLifeProfile)
             }
             .sensoryFeedback(.success, trigger: completions)
             .sheet(isPresented: $showBuilder) { botLibrary }
@@ -277,7 +277,7 @@ import SwiftUI
             }
             if !cinematic {
                 if !showOffice && ExperimentalVillageGate.available && experimentalVillageEnabled {
-                    ExperimentalVillageView(bots: localVillageBots, work: experimentalWork, paused: villagePause,
+                    ExperimentalVillageView(bots: localVillageBots, api: api, work: experimentalWork, paused: villagePause,
                                             isVisible: villageVisible, openProfile: { localBot = $0 },
                                             openWork: onExperimentalAction)
                 }

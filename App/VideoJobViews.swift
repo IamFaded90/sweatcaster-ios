@@ -292,11 +292,7 @@ extension Home {
                 videoJobCard(job).id("video-job:\(job.id)")
             }
         }
-        .sheet(item: $shareResult) { result in
-            ShareLink(item: result.url) {
-                Label("Del video", systemImage: "square.and.arrow.up").frame(minHeight: 48)
-            }.buttonStyle(FadedButtonStyle(kind: .secondary)).padding()
-        }
+        .sheet(item: $shareResult) { videoJobShareSheet($0) }
     }
 
     private var archivedVideoJobsByPC: [String: [String]] {
@@ -561,7 +557,8 @@ extension Home {
                 }
             }.navigationTitle("Gemte videoer")
                 .navigationDestination(for: URL.self) { file in
-                    Preview(media: Media(url: file, demo: false))
+                    Preview(media: Media(url: file, demo: false), savedFolder: videoFolder,
+                            onDelete: reloadSavedVideos)
                 }
                 .toolbar { Button("Luk") { showSavedVideos = false } }
                 .confirmationDialog("Slet den gemte video fra telefonen?", isPresented: Binding(
@@ -569,7 +566,7 @@ extension Home {
                     set: { if !$0 { pendingLocalDeletion = nil } }
                 ), presenting: pendingLocalDeletion) { file in
                     Button("Slet fra telefonen", role: .destructive) {
-                        do { try FileManager.default.removeItem(at: file); reloadSavedVideos() }
+                        do { try LocalFileStore(root: videoFolder).delete(file); reloadSavedVideos() }
                         catch { AppDiagnostics.record(error); localDeletionError = true }
                         pendingLocalDeletion = nil
                     }
@@ -578,74 +575,5 @@ extension Home {
                     Button("OK", role: .cancel) {}
                 }
         }
-    }
-}
-
-struct Preview: View {
-    @Environment(\.dismiss) private var dismiss
-    let media: Media
-    @State private var player: AVPlayer?
-    @State private var invalid = false
-    @State private var audioReady = false
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text(media.demo ? "Testvideo · Demo" : "Din video")
-                    .font(.title.bold()).accessibilityAddTraits(.isHeader)
-                Button("Luk") { dismiss() }.frame(minHeight: 48)
-                if invalid {
-                    FadedEmptyState(icon: "exclamationmark.circle", title: "Videoen kan ikke afspilles",
-                                    detail: "Gå tilbage, og prøv at åbne videoen igen.")
-                }
-                else if let player {
-                    VideoPlayer(player: player).aspectRatio(9.0 / 16.0, contentMode: .fit)
-                        .frame(maxHeight: 540).accessibilityLabel("Videoafspiller")
-                    if !audioReady { Text("Lydudgangen kunne ikke aktiveres. Prøv igen.") }
-                    Button("Afspil fra starten") {
-                        activateAudio()
-                        player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { completed in
-                            if completed { player.play() }
-                        }
-                    }.frame(minHeight: 48)
-                    ShareLink(item: media.url) { Text("Del video").frame(minHeight: 48) }
-                        .buttonStyle(.bordered)
-                } else { LoadingSkeleton(label: "Åbner video…") }
-            }.padding(FadedSpacing.edge)
-        }.task {
-            do {
-                try LocalFileStore.checkedFileSize(media.url, maximumBytes: Int.max)
-                let asset = AVURLAsset(url: media.url)
-                guard try await asset.load(.isPlayable) else { invalid = true; return }
-                try Task.checkCancellation()
-                let preview = AVPlayer(playerItem: AVPlayerItem(asset: asset))
-                preview.isMuted = false
-                preview.volume = 1
-                player = preview
-                activateAudio()
-            } catch { AppDiagnostics.record(error); if !Task.isCancelled { invalid = true } }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { notice in
-            guard let raw = notice.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                  let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
-            if type == .began { player?.pause(); audioReady = false }
-            if type == .ended { activateAudio() }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.routeChangeNotification)) { notice in
-            if notice.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ==
-                AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue { player?.pause() }
-        }
-        .onDisappear {
-            player?.pause()
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-        }
-    }
-
-    private func activateAudio() {
-        do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .moviePlayback)
-            try session.setActive(true)
-            audioReady = true
-        } catch { AppDiagnostics.record(error); audioReady = false }
     }
 }

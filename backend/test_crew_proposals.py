@@ -1,6 +1,6 @@
 import pytest
 
-from sweatcaster.crew_proposals import crew_generator, validate_candidate
+from sweatcaster.crew_proposals import crew_generator, isolated_crew_generator, validate_candidate
 
 
 class LocalFlow:
@@ -65,3 +65,15 @@ def test_second_job_gets_no_first_job_context():
     run("Two", {"a.py": "x = 1"}, {"note": "Second"})
     assert seen[2] == {"note": "Second"}
     assert seen[3]["local_context"] == {"note": "Second"}
+
+
+def test_missing_isolated_runtime_keeps_single_pass_code_bot(tmp_path):
+    seen = []
+
+    def generate(goal, files, context):
+        seen.append((goal, files, context))
+        return proposal()
+
+    fallback = isolated_crew_generator(generate, tmp_path / "missing-python")
+    assert fallback("Improve", {"a.py": "answer = 1"}) == proposal()
+    assert len(seen) == 1

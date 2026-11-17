@@ -25,11 +25,16 @@ extension CastAppModel {
         }
         loadStarted = Date()
         castFeedback = "Indlæser…"
-        status = "Forbereder videostream fra iPhone…"
+        status = mediaRoute == .pc ? "Gør PC’en klar til at overtage filmen…" : "Forbereder filmen…"
+        selectedTab = .remote
+        if mediaRoute == .pc {
+            startPCRelay(video, url: mediaURL, id: id, position: initialPosition)
+            return
+        }
         PhoneStreamProxy.shared.onActivity = { [weak self] message in
             DispatchQueue.main.async { self?.addDiagnostic(message) }
         }
-        let viaPhone = preferPhoneStream
+        let viaPhone = mediaRoute == .phone
         browser.captureBrowserSession { [weak self] cookies, userAgent, capturedHeaders in
             guard let self, self.attemptID == id else { return }
             PhoneStreamProxy.shared.prepare(cookies: cookies, userAgent: userAgent, referer: video.pageURL, capturedHeadersByURL: capturedHeaders) { result in
@@ -72,6 +77,32 @@ extension CastAppModel {
         selectedTab = .remote
     }
 
+    private func startPCRelay(_ video: VideoCandidate, url: URL, id: UUID, position: Double) {
+        guard let pcRelay else { recoverCast(id); return }
+        Task { @MainActor in
+            do {
+                let relayURL = try await pcRelay(url, URL(string: video.pageURL))
+                guard attemptID == id, let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession else { return }
+                let isHLS = video.isHLSMaster == true || video.mime.localizedCaseInsensitiveContains("mpegurl")
+                    || url.pathExtension.lowercased() == "m3u8"
+                if isHLS {
+                    PhoneStreamProxy.shared.inspectHLS(relayURL) { [weak self] formats in
+                        DispatchQueue.main.async {
+                            guard let self, self.attemptID == id else { return }
+                            self.load(video, from: relayURL, on: session, hlsFormats: formats, initialPosition: position)
+                        }
+                    }
+                } else {
+                    load(video, from: relayURL, on: session, hlsFormats: nil, initialPosition: position)
+                }
+            } catch {
+                guard attemptID == id else { return }
+                addDiagnostic("PC’en kunne ikke overtage Cast. Prøver den næste forbindelse.")
+                recoverCast(id)
+            }
+        }
+    }
+
     func load(_ video: VideoCandidate, from mediaURL: URL, on session: GCKCastSession, hlsFormats: HLSFormats?, initialPosition: Double = 0) {
         if session.currentDeviceVolume < 0.01 {
             _ = session.setDeviceVolume(0.5)
@@ -79,11 +110,12 @@ extension CastAppModel {
             status = "Chromecast var lydløs — skruer lydstyrken op til 50 %."
         }
         let builder = GCKMediaInformationBuilder(contentURL: mediaURL)
-        let isHLS = video.isHLSMaster == true || video.mime.localizedCaseInsensitiveContains("mpegurl") || mediaURL.pathExtension.lowercased() == "m3u8"
+        let isHLS = video.isHLSMaster == true || video.mime.localizedCaseInsensitiveContains("mpegurl")
+            || URL(string: video.url)?.pathExtension.lowercased() == "m3u8"
         builder.contentType = isHLS ? "application/x-mpegurl" : video.mime
         builder.streamType = .buffered
         builder.customData = ["fadedaiAttempt": attemptID.uuidString,
-                              "fadedaiRoute": preferPhoneStream ? "phone" : "direct"]
+                              "fadedaiRoute": mediaRoute.rawValue]
         if isHLS {
             let rawValue = hlsFormats?.audioSegmentFormat ?? 5 // Test TS_AAC when playlist inspection cannot identify audio.
             if let format = GCKHLSSegmentFormat(rawValue: rawValue) {
@@ -105,7 +137,7 @@ extension CastAppModel {
         builder.metadata = metadata
         let tracks = video.subtitles.enumerated().compactMap { index, item -> GCKMediaTrack? in
             guard let source = URL(string: item.url), ["http", "https"].contains(source.scheme?.lowercased() ?? ""),
-                  let url = preferPhoneStream ? PhoneStreamProxy.shared.proxiedURL(for: source) : source else { return nil }
+                  let url = mediaRoute == .phone ? PhoneStreamProxy.shared.proxiedURL(for: source) : source else { return nil }
             return GCKMediaTrack(identifier: Int(index + 1), contentIdentifier: url.absoluteString,
                                  contentType: item.mime, type: .text, textSubtype: .subtitles,
                                  name: item.name, languageCode: item.language, customData: nil)
@@ -144,7 +176,9 @@ extension CastAppModel {
         addDiagnostic("LOAD-request oprettet; afventer svar fra Chromecast.")
         nowPlayingTitle = video.title
         currentPoster = video.poster
-        if !preferPhoneStream {
+        if mediaRoute == .pc {
+            status = "PC’en leverer filmen til TV’et. Afventer afspilning…"
+        } else if mediaRoute == .direct {
             status = "TV’et henter filmen direkte. Afventer afspilning…"
         } else if hlsFormats?.audioSegmentFormat != nil || hlsFormats?.videoSegmentFormat != nil {
             status = "HLS-formater kontrolleret — sender til \(session.device.friendlyName ?? "Chromecast")…"

@@ -113,6 +113,13 @@ struct VillageMemorial: Codable, Identifiable, Equatable {
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .fadedGlassSurface(radius: FadedRadius.medium)
                 }
+                NavigationLink {
+                    VillageLifeGarden()
+                } label: {
+                    Label("Livshaven", systemImage: "square.grid.3x3")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .fadedGlassSurface(radius: FadedRadius.medium)
+                }
                 Text("Personlige computere")
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)
@@ -246,7 +253,8 @@ struct VillageMemorial: Codable, Identifiable, Equatable {
                 }
                 Spacer(minLength: 0)
             }
-            VillageCreationScene()
+            VillageInteriorArtwork(name: "office-slice", label: "Skaberens værksted")
+                .frame(height: 180)
             HStack {
                 Text("SKABERVÆRKSTEDET")
                 Spacer()
@@ -369,31 +377,8 @@ private struct VillageCreationScene: View {
     }
 
     private var memorialGarden: some View {
-        ZStack {
-            LinearGradient(colors: [Color(red: 0.10, green: 0.22, blue: 0.24),
-                                    Color(red: 0.07, green: 0.13, blue: 0.19)],
-                           startPoint: .topLeading, endPoint: .bottomTrailing)
-            Ellipse().fill(Color(red: 0.21, green: 0.37, blue: 0.34))
-                .frame(width: 290, height: 110).offset(y: 44)
-            HStack(alignment: .bottom, spacing: 20) {
-                ForEach(Array(memorials.suffix(5))) { memorial in
-                    VStack(spacing: 2) {
-                        Image(systemName: "leaf").font(.caption)
-                        Text(memorial.name).font(.system(size: 9, weight: .semibold)).lineLimit(1)
-                    }
-                    .frame(width: 43, height: 52)
-                    .background(Color(red: 0.55, green: 0.66, blue: 0.64),
-                                in: RoundedRectangle(cornerRadius: 12))
-                    .foregroundStyle(Color(red: 0.09, green: 0.19, blue: 0.20))
-                }
-            }
-            .offset(y: 18)
-            Image(systemName: "building.columns.fill")
-                .font(.system(size: 44)).foregroundStyle(.white.opacity(0.6))
-                .offset(x: 105, y: -45)
-        }
-        .frame(height: 230)
-        .clipShape(RoundedRectangle(cornerRadius: FadedRadius.card))
+        VillageInteriorArtwork(name: "cemetery", label: "Kirkegården")
+            .frame(height: 230)
         .accessibilityLabel("Mindehave med \(memorials.count) minder")
     }
 }
@@ -451,16 +436,16 @@ private struct VillageCreationScene: View {
 
 @MainActor struct VillageBuildingRoomView: View {
     let zone: VillageZoneID
-    let bots: [VillageLifeBot]
+    @ObservedObject var life: VillageLifeSimulator
     let onOpenProfile: (VillageLifeBot) -> Void
     @Environment(\.fadedPalette) private var palette
 
     private var imageName: String {
         switch zone {
-        case .research: "building-research"
-        case .video: "building-atelier"
-        case .cafe: "building-social"
-        case .sleep: "building-rest"
+        case .research: "room-research-lab"
+        case .video: "room-media-studio"
+        case .cafe: "room-cafe"
+        case .sleep: "room-sleeping-corner"
         }
     }
 
@@ -474,14 +459,19 @@ private struct VillageCreationScene: View {
     }
 
     private var residents: [VillageLifeBot] {
-        bots.filter { $0.zoneID == zone || $0.destinationZoneID == zone }
+        life.bots.filter { $0.zoneID == zone && $0.destinationZoneID == nil }
+    }
+
+    private var incoming: [VillageLifeBot] {
+        life.bots.filter { $0.zoneID != zone && $0.destinationZoneID == zone }
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text(description).font(.subheadline).foregroundStyle(palette.secondary)
-                VillagePixelImage(name: imageName, folder: "new")
+                VillageInteriorArtwork(name: imageName, label: zone.title,
+                                       residents: residents, animateResidents: !life.paused)
                     .frame(height: 230)
                     .frame(maxWidth: .infinity)
                     .background(palette.card, in: RoundedRectangle(cornerRadius: 18))
@@ -494,20 +484,10 @@ private struct VillageCreationScene: View {
                             .foregroundStyle(palette.secondary)
                     }
                 }
-                ForEach(residents) { bot in
-                    Button { onOpenProfile(bot) } label: {
-                        FadedCard {
-                            HStack {
-                                Text(bot.displayName).font(.headline)
-                                Spacer()
-                                Text(bot.poseLabel).font(.caption).foregroundStyle(palette.secondary)
-                                Image(systemName: "chevron.right")
-                            }
-                            .frame(minHeight: 44)
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Åbn profil for \(bot.displayName)")
+                ForEach(residents) { bot in residentRow(bot, status: bot.poseLabel) }
+                if !incoming.isEmpty {
+                    Text("På vej hertil").font(.headline)
+                    ForEach(incoming) { bot in residentRow(bot, status: "På vej") }
                 }
             }
             .padding(FadedSpacing.edge)
@@ -518,6 +498,24 @@ private struct VillageCreationScene: View {
         .foregroundStyle(palette.text)
         .navigationTitle(zone.title)
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func residentRow(_ bot: VillageLifeBot, status: String) -> some View {
+        Button { onOpenProfile(bot) } label: {
+            FadedCard {
+                HStack {
+                    VillageBotSprite(bot: bot, size: 36)
+                    Text(bot.displayName).font(.headline)
+                    Spacer()
+                    Text(status).font(.caption).foregroundStyle(palette.secondary)
+                    Image(systemName: "chevron.right")
+                }
+                .frame(minHeight: 44)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Åbn profil for \(bot.displayName)")
+        .accessibilityValue(status)
     }
 }
 

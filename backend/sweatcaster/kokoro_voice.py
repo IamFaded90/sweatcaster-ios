@@ -46,6 +46,7 @@ def kokoro_ready() -> tuple[bool, str]:
 
 _engine_lock = threading.Lock()
 _SPEED_BY_MOOD = {"roast": 0.98, "hype": 1.08, "sweaty": 0.95, "funny_npc": 1.03}
+CHAT_VOICES = ("af_heart", "am_michael")
 
 
 @lru_cache(maxsize=1)
@@ -60,7 +61,9 @@ def _engine(model: Path, voices: Path):
     return Kokoro.from_session(session, str(voices))
 
 
-def synthesize_kokoro(text: str, wav_path: Path, *, mood: str | None = None) -> float:
+def synthesize_kokoro(text: str, wav_path: Path, *, mood: str | None = None, voice: str = "af_heart") -> float:
+    if voice not in CHAT_VOICES:
+        raise ValueError("Unknown Kokoro voice.")
     found = kokoro_files()
     if found is None:
         raise FileNotFoundError("The local Kokoro voice files are missing.")
@@ -69,7 +72,7 @@ def synthesize_kokoro(text: str, wav_path: Path, *, mood: str | None = None) -> 
 
         with _engine_lock:
             engine = _engine(*found)
-            samples, rate = engine.create(text[:500], voice="af_heart", speed=_SPEED_BY_MOOD.get(mood, 1.0), lang="en-us")
+            samples, rate = engine.create(text[:500], voice=voice, speed=_SPEED_BY_MOOD.get(mood, 1.0), lang="en-us")
         samples = np.asarray(samples)
         rate = int(rate)
         if samples.ndim != 1 or not samples.size or rate <= 0 or not np.isfinite(samples).all():

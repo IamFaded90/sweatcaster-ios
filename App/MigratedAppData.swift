@@ -117,13 +117,23 @@ import Observation
             } catch { AppDiagnostics.record(error) }
         }
         cachedBots = recover(.bots) ?? Data()
+        VillageCharacterCatalog.index(VillageBot.list(from: cachedBots), defaults: defaults)
         cachedNotes = recover(.notes).flatMap { String(data: $0, encoding: .utf8) } ?? ""
         cachedPreviews = recover(.previews) ?? Data()
     }
 
     func saveVillageBots(_ data: Data) throws {
+        let previous = VillageBot.list(from: villageBots)
         try persist(data, for: .bots)
+        let current = VillageBot.list(from: data)
         cachedBots = data
+        VillageCharacterCatalog.index(current, defaults: defaults)
+        VillageAvatarCache.discardChanged(from: previous, keeping: current)
+        let currentIDs = Set(current.map(\.id))
+        for id in Set(previous.map(\.id)).subtracting(currentIDs) {
+            do { try VillageVRMLibrary(botID: id).remove() }
+            catch { AppDiagnostics.record(error) }
+        }
         botsReadError = nil
     }
 

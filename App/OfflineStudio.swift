@@ -2,7 +2,6 @@
 // Ejer studiets delte tilstand og sammensætter de tre faner.
 
 import LocalAuthentication
-import Network
 import PhotosUI
 import SwiftUI
 import UIKit
@@ -10,6 +9,7 @@ import UniformTypeIdentifiers
 
 struct OfflineStudio: View {
     let api: LiveAPI?
+    let privateImagePC: LiveAPI?
     @Binding private var regularStudioUnlocked: Bool
     @State private var privateSessionOpen = true
     let onPrivateSessionEnded: () -> Void
@@ -26,13 +26,11 @@ struct OfflineStudio: View {
     @State var importPromptFile = false
     @State var importChatText = false
     @State var privateDeadline: ContinuousClock.Instant?
-    @State var privateNetworkOffline: Bool?
-    @State var privatePathMonitor: NWPathMonitor?
-    @State var privateImageRendering = false
     @State var sessionPreferences = StudioSessionPreferences()
     @State var privateModelDownload: Task<Void, Never>?
     @State var privateModelProgress = 0.0
     @State var privateModelProblem: String?
+    @State var confirmPrivateModelRemoval = false
     @State var showSessionNote = false
     @State var sessionNote = ""
     @State var dictation = ChatDictation()
@@ -106,6 +104,8 @@ struct OfflineStudio: View {
     @State var makeFourImages = false
     @State var basePhoto: PhotosPickerItem?
     @State var baseImage: Data?
+    @State var referenceMask: StudioReferenceMask?
+    @State var showReferenceMaskEditor = false
     @State var loadingBaseImage = false
     @State var batchImageURLs: [URL] = []
     @State var batchTurnID: UUID?
@@ -124,6 +124,7 @@ struct OfflineStudio: View {
     @State var privateBatteryLevel: Float = -1
     @StateObject var speech = SpeechBox()
     @State var pendingImageDeletion: URL?
+    @State var pendingLoRADeletion: String?
     @FocusState var promptFocused: Bool
 
     enum Page: String, CaseIterable, Identifiable {
@@ -133,8 +134,9 @@ struct OfflineStudio: View {
 
     init(api: LiveAPI?, sessionUnlocked: Binding<Bool>, onPrivateSessionEnded: @escaping () -> Void = {},
          initialPage: Page? = nil, initialImagePrompt: String = "", initialBotID: UUID? = nil,
-         ephemeralOnly: Bool = false, imageOnly: Bool = false) {
+         ephemeralOnly: Bool = false, imageOnly: Bool = false, privateImagePC: LiveAPI? = nil) {
         self.api = ephemeralOnly ? nil : api
+        self.privateImagePC = ephemeralOnly ? (privateImagePC ?? api) : nil
         _regularStudioUnlocked = sessionUnlocked
         self.onPrivateSessionEnded = onPrivateSessionEnded
         self.ephemeralOnly = ephemeralOnly
@@ -157,11 +159,28 @@ struct OfflineStudio: View {
     var studioEnabled: Bool { privateSession || imageOnly || enabled }
     var imageModel: String { privateSession ? sessionPreferences.imageModel : savedImageModel }
     var sessionExpired: Bool { privateDeadline.map { $0 <= .now } ?? false }
-    var canRenderPrivateImages: Bool {
-        privateNetworkOffline == true && privatePathMonitor?.currentPath.status == .unsatisfied
+
+    var privateReferenceOptions: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button(referenceMask == nil ? "Markér det, du vil ændre" : "Ret markeringen",
+                   systemImage: "paintbrush.pointed") {
+                imagePromptFocused = false
+                showReferenceMaskEditor = true
+            }.frame(minHeight: 44)
+            Picker("Hvor meget må billedet ændres?", selection: $sessionPreferences.referenceMode) {
+                ForEach(StudioReferenceMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.menu)
+            FadedDetailText("Skriv ændringen, fx “Fjern min T-shirt”. Du kan også prøve “same person, bare chest”.")
+        }
     }
-    var privateImageOfflineInstructions: String {
-        "Åbn Kontrolcenter, slå flytilstand til og Wi-Fi fra. Gå tilbage hertil, og tryk Lav billede."
+
+    func setReferenceImage(_ data: Data?) {
+        baseImage = data
+        referenceMask = nil
+        showReferenceMaskEditor = false
     }
 
     var historyFolder: URL { StudioImageFiles.library }
@@ -253,6 +272,16 @@ struct OfflineStudio: View {
                                   onBack: { showBotBuilder = false })
             }
             .fullScreenCover(isPresented: $showPromptEditor) { studioPromptEditor }
+            .sheet(isPresented: $showReferenceMaskEditor) {
+                if canShowStudio, let baseImage, let photo = UIImage(data: baseImage) {
+                    StudioReferenceMaskEditor(photo: photo, mask: referenceMask, onActivity: { resetIdleTimer() }) { chosen in
+                        if canShowStudio && self.baseImage == baseImage {
+                            referenceMask = chosen
+                            resetIdleTimer()
+                        }
+                    }
+                }
+            }
             .sheet(item: $imageDetailsSheet) { item in
                 if canShowStudio { imageDetailsView(item.url) }
             }
@@ -280,6 +309,11 @@ struct OfflineStudio: View {
                 get: { pendingImageDeletion != nil }, set: { if !$0 { pendingImageDeletion = nil } }
             ), presenting: pendingImageDeletion) { file in
                 Button("Slet billede", role: .destructive) { deleteImage(file) }
+            }
+            .confirmationDialog("Slet den importerede LoRA fra FadedAI?", isPresented: Binding(
+                get: { pendingLoRADeletion != nil }, set: { if !$0 { pendingLoRADeletion = nil } }
+            ), presenting: pendingLoRADeletion) { name in
+                Button("Slet LoRA", role: .destructive) { removeImportedLoRA(name) }
             }
     }
 
@@ -336,7 +370,6 @@ struct OfflineStudio: View {
                 await refreshPublicGallery()
             }
             .task(id: privateDeadline) { await awaitPrivateExpiry() }
-            .task(id: privateSession && sessionUnlocked && loaded) { await monitorPrivateConnectivity() }
     }
 
     private var studioNavigation: some View {
@@ -361,7 +394,7 @@ struct OfflineStudio: View {
                 privateBatteryLevel = UIDevice.current.batteryLevel
             }
             .onDisappear {
-                guard !showModels, !showBotBuilder, !showPromptEditor, !showSessionNote, imageViewer == nil,
+                guard !showModels, !showBotBuilder, !showPromptEditor, !showSessionNote, !showReferenceMaskEditor, imageViewer == nil,
                       imageDetailsSheet == nil, studioShareSheet == nil else { return }
                 stopStudioImageQueue()
                 closeChatSession()
@@ -453,5 +486,99 @@ struct OfflineStudio: View {
             }
             if !status.isEmpty { Text(status).font(.callout).foregroundStyle(palette.secondary) }
         }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, FadedSpacing.edge)
+    }
+}
+
+@MainActor private struct StudioReferenceMaskEditor: View {
+    let photo: UIImage
+    let onActivity: () -> Void
+    let onApply: (StudioReferenceMask?) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft: StudioReferenceMask
+    @State private var dragging = false
+
+    init(photo: UIImage, mask: StudioReferenceMask?, onActivity: @escaping () -> Void,
+         onApply: @escaping (StudioReferenceMask?) -> Void) {
+        self.photo = photo
+        self.onActivity = onActivity
+        self.onApply = onApply
+        _draft = State(initialValue: mask ?? StudioReferenceMask())
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 12) {
+                FadedDetailText("Mal hen over det, du vil ændre. Lad resten af billedet være umarkeret.")
+                GeometryReader { proxy in
+                    let width = min(proxy.size.width, proxy.size.height * photo.size.width / photo.size.height)
+                    let size = CGSize(width: width, height: width * photo.size.height / photo.size.width)
+                    Image(uiImage: photo).resizable().frame(width: size.width, height: size.height)
+                        .overlay { brushPreview.allowsHitTesting(false) }
+                        .contentShape(Rectangle())
+                        .gesture(DragGesture(minimumDistance: 0).onChanged { value in
+                            addPoint(value.location, in: size)
+                        }.onEnded { _ in dragging = false })
+                        .clipShape(.rect(cornerRadius: 12))
+                        .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
+                        .accessibilityLabel("Tegn på referencebilledet")
+                }
+                HStack {
+                    Button("Fortryd streg", systemImage: "arrow.uturn.backward") {
+                        if !draft.isEmpty { draft.strokes.removeLast() }
+                    }
+                    Spacer()
+                    Button("Ryd", role: .destructive) { draft.strokes.removeAll() }
+                }
+                .disabled(draft.isEmpty)
+                .buttonStyle(.bordered)
+            }
+            .padding(FadedSpacing.edge)
+            .navigationTitle("Markér området")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Annullér") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(draft.isEmpty ? "Uden markering" : "Brug markering") {
+                        onApply(draft.isEmpty ? nil : draft)
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+
+    private var brushPreview: some View {
+        Canvas { context, size in
+            let brush = StudioReferenceMask.brushWidth * min(size.width, size.height)
+            for stroke in draft.strokes {
+                let points = stroke.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) }
+                guard let first = points.first else { continue }
+                let color = Color.mint.opacity(0.65)
+                if points.count == 1 {
+                    let dot = CGRect(x: first.x - brush / 2, y: first.y - brush / 2, width: brush, height: brush)
+                    context.fill(Path(ellipseIn: dot), with: .color(color))
+                } else {
+                    var path = Path()
+                    path.addLines(points)
+                    context.stroke(path, with: .color(color),
+                                   style: StrokeStyle(lineWidth: brush, lineCap: .round, lineJoin: .round))
+                }
+            }
+        }
+    }
+
+    private func addPoint(_ point: CGPoint, in size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        let p = CGPoint(x: min(1, max(0, point.x / size.width)), y: min(1, max(0, point.y / size.height)))
+        if !dragging {
+            guard draft.strokes.count < 128 else { return }
+            onActivity()
+            draft.strokes.append([p])
+            dragging = true
+        } else if let index = draft.strokes.indices.last, draft.strokes[index].count < 512 {
+            if let last = draft.strokes[index].last, hypot(last.x - p.x, last.y - p.y) >= 0.005 {
+                draft.strokes[index].append(p)
+            }
+        }
     }
 }

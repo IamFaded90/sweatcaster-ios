@@ -96,7 +96,7 @@ enum AppStorageKeys {
     static let spacesMotion = "spaces.motion"
     static let spacesNotes = "spaces.notes"
     static let spacesOnboarded = "spaces.onboarded"
-    static let spacesShortcut = "spaces.shortcut"
+    static let spacesShortcut = OpenFadedAICamera.shortcutKey
     static let spacesTheme = "spaces.theme"
     static let studioImagesAllowPCFallback = "studio.images.allowPCFallback"
     static let studioImagesAutoSavePhotos = "studio.images.autoSavePhotos"

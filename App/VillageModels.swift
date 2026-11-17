@@ -8,7 +8,7 @@ enum VillageZoneID: String, Codable, CaseIterable, Hashable, Sendable {
 
     var title: String {
         switch self {
-        case .research: "Research Lab"
+        case .research: "Forskningsværksted"
         case .video: "Video Studio"
         case .cafe: "Café"
         case .sleep: "Sovekrog"

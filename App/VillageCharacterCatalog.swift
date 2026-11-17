@@ -1,0 +1,111 @@
+import SwiftUI
+
+/// A figure is a saved choice, independent of name, voice and profile photograph.
+enum VillageCharacterCatalog {
+    struct Character: Identifiable {
+        let id: String
+        let name: String
+        let detail: String
+        let female: Bool
+    }
+
+    static let all: [Character] = [
+        .init(id: "adam", name: "Adam", detail: "Briller · petroljakke", female: false),
+        .init(id: "atlas", name: "Atlas", detail: "Blond · værktøjsbælte", female: false),
+        .init(id: "milo", name: "Milo", detail: "Hue · grøn skjorte", female: false),
+        .init(id: "noah", name: "Noah", detail: "Hovedtelefoner · lys frakke", female: false),
+        .init(id: "theo", name: "Theo", detail: "Hestehale · kamera", female: false),
+        .init(id: "eva", name: "Eva", detail: "Krøller · gul jakke", female: true),
+        .init(id: "luna", name: "Luna", detail: "Sølvhår · mørk hættetrøje", female: true),
+        .init(id: "iris", name: "Iris", detail: "Fletning · grøn blazer", female: true),
+        .init(id: "nova", name: "Nova", detail: "Pink hår · limejakke", female: true),
+        .init(id: "saga", name: "Saga", detail: "Lys fletning · strik", female: true)
+    ]
+    // Keep the original ordering for legacy UUID assignments.
+    private static let legacy = ["adam", "eva", "atlas", "luna", "milo", "iris", "noah", "nova", "saga", "theo"]
+
+    static func valid(_ value: String?) -> String? {
+        guard let value, all.contains(where: { $0.id == value }) else { return nil }
+        return value
+    }
+
+    static func initial(name: String, id: String) -> String {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if legacy.contains(name) { return name }
+        let hash = id.utf8.reduce(UInt64(14695981039346656037)) { ($0 ^ UInt64($1)) &* 1099511628211 }
+        return legacy[Int(hash % UInt64(legacy.count))]
+    }
+
+    static func resolved(name: String, id: String, defaults: UserDefaults = .standard) -> String {
+        valid(defaults.string(forKey: key(id))) ?? initial(name: name, id: id)
+    }
+
+    /// Derived render index. The profile JSON remains the authoritative source and travels in backups.
+    static func index(_ profiles: [VillageBot], defaults: UserDefaults = .standard) {
+        for profile in profiles {
+            defaults.set(profile.villageFigure, forKey: key(profile.id.uuidString))
+        }
+    }
+
+    private static func key(_ id: String) -> String { "village.figure.v2." + id.lowercased() }
+}
+
+struct VillageFigurePicker: View {
+    @Binding var selection: String
+    @Environment(\.fadedPalette) private var palette
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Din bot, din figur").font(.largeTitle.bold())
+                Text("Vælg mellem 5 mænd og 5 kvinder. Figuren bliver den samme, når du skifter navn eller profilbillede.")
+                    .foregroundStyle(palette.secondary)
+                group("Mænd", female: false)
+                group("Kvinder", female: true)
+            }
+            .padding(FadedSpacing.edge)
+            .frame(maxWidth: 640).frame(maxWidth: .infinity)
+        }
+        .background { FadedBackground(variant: .village) }
+        .navigationTitle("Landsbyfigur")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func group(_ title: String, female: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.title2.bold()).accessibilityAddTraits(.isHeader)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: typeSize.isAccessibilitySize ? 240 : 145))], spacing: 12) {
+                ForEach(VillageCharacterCatalog.all.filter { $0.female == female }) { character in
+                    choice(character)
+                }
+            }
+        }
+    }
+
+    private func choice(_ character: VillageCharacterCatalog.Character) -> some View {
+        let selected = selection == character.id
+        return Button { selection = character.id } label: {
+            VStack(spacing: 8) {
+                if let image = VillageProductionArt.frame(character: character.id, direction: 0, step: 0) {
+                    Image(uiImage: image).resizable().interpolation(.none).scaledToFit()
+                        .frame(height: 112)
+                }
+                HStack(spacing: 6) {
+                    Text(character.name).font(.headline)
+                    if selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(palette.lime) }
+                }
+                Text(character.detail).font(.caption).foregroundStyle(palette.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity, minHeight: 172)
+            .padding(12)
+            .fadedGlassSurface(radius: 20)
+            .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(selected ? palette.lime : .clear, lineWidth: 2))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(palette.text)
+        .accessibilityLabel("\(character.name), \(character.detail)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+}

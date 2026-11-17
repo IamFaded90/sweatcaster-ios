@@ -63,10 +63,17 @@ private struct StudioImageTransferFile: Sendable {
     static let backgroundIdentifier = "dk.fadedai.image-model-download"
     private static let pendingKey = "offline.studio.pendingImageDownload"
 
+    private enum RestoredValidation {
+        case allowed, requiresConfirmation, paused
+    }
+
     private(set) var activeModel: StudioImageModel?
     private(set) var progress: Double?
     private(set) var notice: String?
     private(set) var isInterrupted = false
+    var isWaitingForModelCheck: Bool { restoredValidation == .paused }
+    private var restoredValidation: RestoredValidation = .allowed
+    private var modelRevision = 0
     private var transfer: StudioImageTransfer?
     private var fractions: [String: Double] = [:]
     private var verifiedFiles = Set<String>()
@@ -90,6 +97,7 @@ private struct StudioImageTransferFile: Sendable {
         if let identifier = UserDefaults.standard.string(forKey: Self.pendingKey),
            let transfer = StudioImageTransfer(identifier) {
             track(transfer)
+            if transfer.model == .fluxKlein { restoredValidation = .requiresConfirmation }
         }
     }
 
@@ -125,9 +133,16 @@ private struct StudioImageTransferFile: Sendable {
 
     func resume() {
         guard let transfer, isInterrupted else { return }
+        let resumeModelCheck = isWaitingForModelCheck
+        restoredValidation = .allowed
         isInterrupted = false
         notice = nil
         blockedFiles.removeAll()
+        if resumeModelCheck {
+            // The background session may still be fetching other files.
+            reconcile()
+            return
+        }
         let missing = transfer.model.downloadFiles.filter { file in
             !file.isPresent && !delegate.isStaged(.init(transfer: transfer, file: file))
         }
@@ -161,6 +176,50 @@ private struct StudioImageTransferFile: Sendable {
         clear(transfer, notice: "Download stoppet.")
     }
 
+    func isInstalled(_ model: StudioImageModel) -> Bool {
+        _ = modelRevision
+        return model.isInstalled
+    }
+
+    func hasLocalFiles(_ model: StudioImageModel) -> Bool {
+        _ = modelRevision
+        return !localFiles(for: model, in: imageRoots).isEmpty
+    }
+
+    func removeLocalFiles(_ model: StudioImageModel) {
+        guard transfer == nil, !LocalCompute.isRunning else {
+            notice = "Vent til billedopgaven eller hentningen er færdig."
+            return
+        }
+        let roots = imageRoots
+        defer { modelRevision += 1 }
+        do {
+            for file in localFiles(for: model, in: roots) {
+                try ModelDiskStorage.delete(file, within: roots)
+            }
+            notice = "\(model.title) er slettet fra telefonen."
+        } catch {
+            AppDiagnostics.record(error)
+            notice = "Billedmodellen kunne ikke slettes helt. Prøv igen."
+        }
+    }
+
+    private var imageRoots: [URL] {
+        ModelDiskStorage.allowedImageRoots(MediaGenerationEnvironment.default.externalUrls)
+    }
+
+    private func localFiles(for model: StudioImageModel, in roots: [URL]) -> [ModelDiskStorage.Item] {
+        let shared = Set(StudioImageModel.allCases.filter { $0 != model }.flatMap { $0.downloadFiles.map(\.name) })
+        let names = model.downloadFiles.map(\.name).filter { !shared.contains($0) }
+        return roots.flatMap { root in
+            names.compactMap { name in
+                let url = root.appendingPathComponent(name)
+                guard let bytes = try? LocalFileStore.checkedFileSize(url, maximumBytes: Int.max) else { return nil }
+                return ModelDiskStorage.Item(url: url, name: name, kind: "Billedmodelfil", bytes: Int64(bytes))
+            }
+        }
+    }
+
     func handleBackgroundEvents(completion: @escaping () -> Void) {
         backgroundCompletion = completion
         _ = session
@@ -176,6 +235,7 @@ private struct StudioImageTransferFile: Sendable {
         progress = nil
         notice = nil
         isInterrupted = false
+        restoredValidation = .allowed
     }
 
     private func receive(_ event: StudioImageDownloadDelegate.Event) {
@@ -188,8 +248,10 @@ private struct StudioImageTransferFile: Sendable {
             updateProgress(for: file.transfer)
         case let .staged(file):
             guard file.transfer == transfer else { return }
-            isInterrupted = false
-            notice = nil
+            if !isWaitingForModelCheck {
+                isInterrupted = false
+                notice = nil
+            }
             receive(.progress(file, 1))
             reconcile()
         case let .failed(file, error):
@@ -221,17 +283,27 @@ private struct StudioImageTransferFile: Sendable {
             fractions[file.name] = 1
         }
         updateProgress(for: transfer)
-        if verifiedFiles.count == files.count {
+        let allFilesPresent = verifiedFiles.count == files.count
+        let staged = files.filter { file in
+            !verifiedFiles.contains(file.name) && !blockedFiles.contains(file.name)
+                && delegate.isStaged(.init(transfer: transfer, file: file))
+        }
+        // Give the user a chance to stop an unfinished FLUX install after reopening the app.
+        // The background session can still finish downloading files while validation waits.
+        if restoredValidation == .paused || (restoredValidation == .requiresConfirmation
+                                              && (allFilesPresent || !staged.isEmpty)) {
+            restoredValidation = .paused
+            isInterrupted = true
+            notice = "FLUX blev afbrudt sidst. Fortsæt modelkontrollen, eller stop download."
+            return
+        }
+        if allFilesPresent {
             if transfer.model.isInstalled {
                 finish(transfer)
             } else {
                 clear(transfer, notice: "Telefonen kunne ikke åbne billedmodellen. Genåbn FadedAI, og prøv igen.")
             }
             return
-        }
-        let staged = files.filter { file in
-            !verifiedFiles.contains(file.name) && !blockedFiles.contains(file.name)
-                && delegate.isStaged(.init(transfer: transfer, file: file))
         }
         if !staged.isEmpty {
             for file in staged { fractions[file.name] = 1 }
@@ -283,7 +355,7 @@ private struct StudioImageTransferFile: Sendable {
             reconciliation = nil
             guard isForeground else { return }
             guard self.transfer == transfer else { reconcile(); return }
-            guard validation == nil,
+            guard validation == nil, !isWaitingForModelCheck,
                   !tasks.contains(where: { task in
                       task.state != .completed && task.state != .canceling && StudioImageTransferFile(task)?.transfer == transfer
                   }) else { return }
@@ -320,6 +392,7 @@ private struct StudioImageTransferFile: Sendable {
         blockedFiles.removeAll()
         progress = nil
         isInterrupted = false
+        restoredValidation = .allowed
         self.notice = notice
         session.getAllTasks { tasks in
             for task in tasks where StudioImageTransferFile(task)?.transfer == transfer { task.cancel() }

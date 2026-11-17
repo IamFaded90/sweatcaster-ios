@@ -1,6 +1,13 @@
 MIT License
 
 Copyright (c) 2023-2024 The ggml authors
+Copyright (c) 2022 OpenAI (upstream Whisper model)
+
+The optional Danish model is thorhojhus/whisper-small-danish (MIT),
+quantized to Whisper GGML Q8_0 by AladdinChen for trans-local-speech-models.
+Model and third-party notices:
+https://huggingface.co/thorhojhus/whisper-small-danish
+https://huggingface.co/AladdinChen/trans-local-speech-models/blob/035921168a44cf4702e81eed7f3c9094c538323b/provenance/da/THIRD_PARTY_NOTICES.md
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

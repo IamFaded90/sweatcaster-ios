@@ -33,7 +33,7 @@ import UIKit
                             else { FadedPrimaryButton("Gem scanningen", icon: "checkmark") { finish = true } }
                         }
                         .padding(FadedSpacing.edge)
-                        .background(.regularMaterial)
+                        .fadedGlassSurface(radius: FadedRadius.card, tint: FadedBrand.panel)
                     }
                 }
             }

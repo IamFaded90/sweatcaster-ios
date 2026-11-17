@@ -53,10 +53,14 @@ def _validated(value):
 
 
 def load_connection():
+    return _load_connection(_settings_path) if os.name == "nt" else None
+
+
+def _load_connection(path):
     if os.name != "nt":
         return None
     try:
-        with _settings_path().open("rb") as source:
+        with path().open("rb") as source:
             data = source.read(MAX_SETTINGS + 1)
     except FileNotFoundError:
         return None
@@ -75,13 +79,17 @@ def load_connection():
 
 
 def save_connection(connection):
-    target = _settings_path()
+    _save_connection(_settings_path, connection)
+
+
+def _save_connection(path, connection):
+    target = path()
     target.parent.mkdir(parents=True, exist_ok=True)
     raw = json.dumps(_validated(connection)).encode("utf-8")
     record = {"version": 1, "protected": base64.b64encode(_protect(raw)).decode("ascii")}
     temporary = None
     try:
-        with tempfile.NamedTemporaryFile("w", encoding="ascii", dir=target.parent, prefix=".youtube-",
+        with tempfile.NamedTemporaryFile("w", encoding="ascii", dir=target.parent, prefix=f".{target.stem}-",
                                          suffix=".tmp", delete=False) as output:
             temporary = Path(output.name)
             json.dump(record, output)
@@ -108,7 +116,7 @@ def channels_for_token(token, *, redact=()):
             if (channel := _channel(row, (*redact, token))) is not None]
 
 
-def _google_json(request, *, denied):
+def _google_json(request, *, denied, unreachable="PC’en kunne ikke nå YouTube."):
     try:
         deadline = monotonic() + 10
         with build_opener(ProxyHandler({}), NoRedirects()).open(request, timeout=6) as response:
@@ -131,7 +139,7 @@ def _google_json(request, *, denied):
             raise YouTubeError(502, denied) from exc
         raise YouTubeError(502, "Google returnerede et uventet svar.") from exc
     except (OSError, http.client.HTTPException) as exc:
-        raise YouTubeError(503, "PC’en kunne ikke nå YouTube.") from exc
+        raise YouTubeError(503, unreachable) from exc
     except (ValueError, RecursionError) as exc:
         raise YouTubeError(502, "Google returnerede et uventet svar.") from exc
     return result

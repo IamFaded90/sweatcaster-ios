@@ -178,7 +178,7 @@ import SwiftUI
     }
 
     private func voiceCard(_ bot: VillageBot) -> some View {
-        AgentVoiceProfileCard(bot: bot)
+        AgentVoiceProfileCard(bot: bot, api: api)
     }
 
     private func personalityCard(_ bot: VillageBot) -> some View {

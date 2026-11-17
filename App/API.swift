@@ -69,6 +69,7 @@ struct LumiVideoJob: Decodable {
     let id: String
     let status: String
     let message: String?
+    let removable: Bool?
 }
 
 struct LiveAPI: SweatAPI, ChatAPI {
@@ -254,6 +255,20 @@ struct LiveAPI: SweatAPI, ChatAPI {
     }
 
     func downloadVideo(at url: URL) async throws -> URL {
+        try await downloadPairedFile(at: url, name: "Sweat-\(UUID()).mp4",
+                                     mediaType: "video/mp4", maximumBytes: LocalFileStore.maximumVideoBytes,
+                                     invalidFile: .unsafeVideo) { $0.dropFirst(4).elementsEqual("ftyp".utf8) }
+    }
+
+    func downloadStudioMesh(_ id: UUID) async throws -> URL {
+        let url = server.origin.appending(path: "api/modules/v1/studio-3d/\(id.uuidString.lowercased())/file")
+        return try await downloadPairedFile(at: url, name: "Faded-3D-\(UUID()).usdz",
+                                            mediaType: "model/vnd.usdz+zip", maximumBytes: 40_000_000,
+                                            invalidFile: .malformed) { $0.starts(with: [0x50, 0x4b, 0x03, 0x04]) }
+    }
+
+    private func downloadPairedFile(at url: URL, name: String, mediaType: String, maximumBytes: Int,
+                                    invalidFile: APIError, validate: (Data) -> Bool) async throws -> URL {
         do {
             let (temporary, response) = try await session.download(for: request(url))
             defer { try? FileManager.default.removeItem(at: temporary) }
@@ -262,13 +277,13 @@ struct LiveAPI: SweatAPI, ChatAPI {
                 envelope = try? LocalFileStore.readPrefix(from: temporary, count: 65_536, maximumBytes: 65_536)
             } else { envelope = nil }
             try checked(response, expected: 200, data: envelope)
-            guard response.mimeType == "video/mp4",
-                  let header = try? LocalFileStore.readPrefix(from: temporary, count: 8, maximumBytes: LocalFileStore.maximumVideoBytes),
-                  header.dropFirst(4).elementsEqual("ftyp".utf8) else {
-                throw APIError.unsafeVideo
+            guard response.mimeType == mediaType,
+                  let header = try? LocalFileStore.readPrefix(from: temporary, count: 8, maximumBytes: maximumBytes),
+                  validate(header) else {
+                throw invalidFile
             }
             let folder = FileManager.default.temporaryDirectory
-            let target = try LocalFileStore.safeWriteURL(folder.appendingPathComponent("Sweat-\(UUID()).mp4"), within: folder)
+            let target = try LocalFileStore.safeWriteURL(folder.appendingPathComponent(name), within: folder)
             do {
                 try FileManager.default.moveItem(at: temporary, to: target)
                 do { try LocalFileStore.protectFile(target) }
