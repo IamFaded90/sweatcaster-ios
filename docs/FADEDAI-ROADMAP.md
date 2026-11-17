@@ -136,3 +136,10 @@ Spotube er valgt som grundlag for den næste Musik-ændring. Målet er afspilnin
 - 21 lokale Python-tests bestod, én eksisterende Docker-integrationstest blev sprunget over. Swift-test med selve AgentReplyDriver bestod værktøjsrunde, historik, instruktioner, modelnavn og fallback til verificeret værktøjsresultat. Swift-syntaks og Xcode-projektreferencer er kontrolleret. Ændringerne er ikke i den allerede startede bygning 72.
 
 - PC-opdateringen til Nemotron-opgaver er installeret med sikkerhedskopi og genstart uden aktive jobs. Sundhedstjek bestod. Opgavemodellisten kræver parring (401 uden, 200 med), svarer no-store og afviser betalte model-id’er med 422. Appens nye modelvælger afventer næste IPA; den allerede startede bygning 72 ændres ikke.
+
+## Leveret bygning 72 og næste native musiktrin
+
+- GitHub-run 44172145792 er gennemført uden byggefejl. XCTest kørte 172 tests med tre udeladte og nul fejl; ContractTests bestod. IPA'en er hentet, ZIP-integritet kontrolleret, og verify_ipa.py godkendte build 72, otte arm64-binærer og de indlejrede afhængigheder. Den usignerede IPA er 117.436.481 bytes. Fysisk installation og test på iPhone samt Chromecast afventer stadig.
+- integrations/spotube-native indeholder nu en rigtig Kotlin-bro til samme NewPipe KMP-bibliotek som Spotube på iOS. Koden er kompileret og afprøvet lokalt: 20 musiknumre og faktisk audio/mp4, HTTP 200, 4096 bytes. Mac-XCFramework og kobling til appens aktive Musik-fane er stadig åbne. Det nye ligger på den separate gren og er ikke med i IPA 72.
+- Brugerens Cast-ønske er fastholdt: film skal fortsætte ved faneskift, anden app og låst skærm. Del relevant lydlivscyklus med musikafspilleren. Chromecast-receiveren og en eventuel PC-relay skal håndteres særskilt; dette er ikke bevist ved en TV-prøve endnu.
+- Gemma 4 blev genprøvet efter bygningen og får stadig HTTP 429 hos gratisudbyderen. North Mini Code og automatisk gratisvalg er tidligere afprøvet med faktiske svar. De nye Nemotron-valg er ikke med i IPA 72.
