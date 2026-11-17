@@ -125,7 +125,7 @@ Videovalgene er afledt af [ComfyUI's LTX-opskrift](https://comfyanonymous.github
 
 ## Musikvalg, bekræftet 17. november efter push til bygning 72
 
-Spotube er valgt som grundlag for den næste Musik-ændring. Målet er afspilning inde i FadedAI, playlister, kø og lyd ved låst skærm. Det aktuelle Spotube-masterprojekt bygger til Android og computer. iPhone-tilpasningen og afprøvning af de valgte musikkilder er en åben opgave. Bygning 72 blev startet før dette valg og indeholder den eksisterende musikløsning. Kilde: https://github.com/team-spotube/spotube
+Spotube er valgt som grundlag for den næste Musik-ændring. Målet er afspilning inde i FadedAI, playlister, kø og lyd ved låst skærm. **Rettet kildekontrol:** Spotube 6.0 har en fuld iPhone-udgave med NewPipe KMP og MobileVLCKit; den findes i både koden og releases. Den skal bruges som grundlag for iPhone-tilpasningen. Prototypen, kilder, testresultater og resterende arbejde er samlet i integrations/spotube-prototype/README.md. Den tilpassede Swift-kø er prøvet lokalt. Native afspilning og integration af iOS-kilden afventer. Bygning 72 blev startet før dette valg og indeholder den eksisterende musikløsning. Kilde: https://github.com/team-spotube/spotube/releases/tag/v6.0.0
 
 
 ## Nemotron-opgaver, næste gren efter bygning 72
