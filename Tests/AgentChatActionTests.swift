@@ -204,4 +204,14 @@ final class AgentChatActionTests: XCTestCase {
         XCTAssertEqual(provider["max_price"] as? [String: Int], ["prompt": 0, "completion": 0, "request": 0])
     }
 
+    func testNemotronTasksOnlyOfferFreeModelIdentifiers() throws {
+        let models = ["nvidia/nemotron-3-ultra-550b-a55b:free", "nvidia/nemotron-3.5-lightning:free"]
+        let rows: [[String: Any]] = models.map { ["id": $0, "pricing": ["prompt": "0", "completion": "0"]] }
+        XCTAssertEqual(OpenRouterCloud.freeChoices(in: ["data": rows]), models)
+        for model in models {
+            XCTAssertNoThrow(try OpenRouterCloud.body(model: model, messages: []))
+            XCTAssertThrowsError(try OpenRouterCloud.body(model: String(model.dropLast(5)), messages: []))
+        }
+    }
+
 }

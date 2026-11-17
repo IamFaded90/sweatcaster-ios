@@ -33,6 +33,16 @@ enum OpenRouterKey {
     @Published private(set) var enabled = OpenRouterKey.load() != nil
     @Published private(set) var models = UserDefaults.standard.stringArray(forKey: "fadedai.openrouter.models.v1") ?? []
 
+    private init() {
+        Task {
+            guard let key = OpenRouterKey.load(),
+                  let catalog = try? await OpenRouterCloud.request(path: "models", key: key) else { return }
+            let available = OpenRouterCloud.freeChoices(in: catalog)
+            models = available
+            UserDefaults.standard.set(available, forKey: "fadedai.openrouter.models.v1")
+        }
+    }
+
     func install(_ key: String) async throws {
         guard key.hasPrefix("sk-or-v1-"), key.count > 20, key.count < 1024,
               !key.contains(where: { $0.isWhitespace }) else { throw APIError.input }
@@ -40,7 +50,7 @@ enum OpenRouterKey {
         let result = try await OpenRouterCloud.request(path: "models", key: key)
         let choices = OpenRouterCloud.freeChoices(in: result)
         guard !choices.isEmpty else {
-            throw ComposioCloudError.unavailable("OpenRouter viser ingen af de tre valgte modeller med gratis pris lige nu.")
+            throw ComposioCloudError.unavailable("OpenRouter viser ingen af de valgte modeller med gratis pris lige nu.")
         }
         try OpenRouterKey.save(key)
         UserDefaults.standard.set(choices, forKey: "fadedai.openrouter.models.v1")
@@ -59,7 +69,9 @@ enum OpenRouterKey {
 }
 
 enum OpenRouterCloud {
-    static let preferredModels = ["google/gemma-4-31b-it:free", "cohere/north-mini-code:free", "openrouter/free"]
+    static let preferredModels = ["google/gemma-4-31b-it:free", "cohere/north-mini-code:free",
+                                  "nvidia/nemotron-3-ultra-550b-a55b:free",
+                                  "nvidia/nemotron-3.5-lightning:free", "openrouter/free"]
 
     struct Reply {
         let text: String
@@ -70,6 +82,8 @@ enum OpenRouterCloud {
         switch id {
         case "google/gemma-4-31b-it:free": "Gemma 4 31B · OpenRouter"
         case "cohere/north-mini-code:free": "North Mini Code · OpenRouter"
+        case "nvidia/nemotron-3-ultra-550b-a55b:free": "Nemotron Ultra · OpenRouter"
+        case "nvidia/nemotron-3.5-lightning:free": "Nemotron Lightning · OpenRouter"
         case "openrouter/free": "Automatisk gratisvalg · OpenRouter"
         default: id
         }
@@ -161,7 +175,7 @@ enum OpenRouterCloud {
         FadedCard(accent: .green) {
             VStack(alignment: .leading, spacing: 12) {
                 Label("OpenRouter · Gratis modeller", systemImage: "cloud").font(.headline)
-                FadedDetailText("Gemma 4, North Mini Code og automatisk gratisvalg. Virker med internet, også med PC’en slukket. Gratis adgang har en brugsgrænse.")
+                FadedDetailText("Gemma 4, North Mini Code, Nemotron Ultra, Lightning og automatisk gratisvalg. Virker med internet, også med PC’en slukket. Gratis adgang har en brugsgrænse.")
                 if let api {
                     Button("Forbind via denne PC") {
                         busy = true

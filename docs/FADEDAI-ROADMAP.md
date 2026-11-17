@@ -120,4 +120,19 @@ Videovalgene er afledt af [ComfyUI's LTX-opskrift](https://comfyanonymous.github
 - OpenRouter-nøglen er gemt krypteret på PC’en. Appen gemmer sin kopi i Keychain. Modelvalget begrænses til de tre gratis model-id’er, og API-kald har et prisloft på nul. Automatisk gratisvalg viser den faktiske model fra svaret.
 - North Mini Code og automatisk gratisvalg svarede korrekt gennem Swift-klienten. OpenRouter rapporterede pris 0 i API-testen. Begge gratis Gemma 4-varianter blev afvist med midlertidig 429 hos udbyderen. Gemma 4 afventer en vellykket svartest.
 - PC-opdateringen er installeret. OpenRouter-overførsel kræver parring og har Cache-Control no-store. 12 lokale regressionstests bestod. Xcode-projektkontrol og Swift-syntakskontrol bestod.
-- Den samlede IPA med OpenRouter er ikke bygget endnu. Limrun afviste build 68 med HTTP 403, fordi kontoen hverken har credits eller abonnement. GitHub- og Codemagic-opsætningerne bygger koden fra Git. Ingen push er udført. Mac-kompilering, nye XCTest-kontroller og iPhone-test af denne ændring afventer.
+- Efter brugerens godkendelse er commit 2fa36b307cd292dd1e1729e0f04fd4c7feb304fe pushet til codex/ipa-fadedai-complete-20261117. GitHub-bygning 72 har bestået Release XCTest i simulatoren og bygger nu iPhone-appen. IPA og fysisk iPhone-test afventer. Limrun bruges ikke; kontoen har ingen credits.
+
+
+## Musikvalg, bekræftet 17. november efter push til bygning 72
+
+Spotube er valgt som grundlag for den næste Musik-ændring. Målet er afspilning inde i FadedAI, playlister, kø og lyd ved låst skærm. Det aktuelle Spotube-masterprojekt bygger til Android og computer. iPhone-tilpasningen og afprøvning af de valgte musikkilder er en åben opgave. Bygning 72 blev startet før dette valg og indeholder den eksisterende musikløsning. Kilde: https://github.com/team-spotube/spotube
+
+
+## Nemotron-opgaver, næste gren efter bygning 72
+
+- Nemotron Ultra og Lightning er tilføjet som eksplicitte gratisvalg via OpenRouter til agentchat og botcomputernes opgaver. Lokal PC er fortsat standard. Begge gratis-id’er svarede korrekt med rapporteret pris 0; Lightning gennemførte også den rigtige opgavekø. Ultras opgavetest fik efterfølgende HTTP 503 fra udbyderen; genprøves senere. Ingen betalt NVIDIA-test er udført.
+- Valgt model gemmes med opgaven, vises på resultatet og indgår i kontrollen mod dobbeltopgaver. Ældre lokale opgaver bevarer deres adfærd. Ingen automatisk overgang til en betalt model. Cloudvalg viser, at opgave og eventuelle vedhæftninger sendes til OpenRouter.
+- Cloudagenters svar bruger nu samme lokale værktøjsforløb som telefon- og PC-modellerne, inklusive verificeret værktøjsresultat og faktisk OpenRouter-modelnavn.
+- 21 lokale Python-tests bestod, én eksisterende Docker-integrationstest blev sprunget over. Swift-test med selve AgentReplyDriver bestod værktøjsrunde, historik, instruktioner, modelnavn og fallback til verificeret værktøjsresultat. Swift-syntaks og Xcode-projektreferencer er kontrolleret. Ændringerne er ikke i den allerede startede bygning 72.
+
+- PC-opdateringen til Nemotron-opgaver er installeret med sikkerhedskopi og genstart uden aktive jobs. Sundhedstjek bestod. Opgavemodellisten kræver parring (401 uden, 200 med), svarer no-store og afviser betalte model-id’er med 422. Appens nye modelvælger afventer næste IPA; den allerede startede bygning 72 ændres ikke.

@@ -5,10 +5,12 @@ import Foundation
     enum Provider {
         case phone
         case computer(LiveAPI)
+        case cloud
     }
 
     let provider: Provider
     let model: String
+    var onModel: (@MainActor (String) -> Void)? = nil
 
     func respond(to prompt: String, original: String, instructions: String, history: [PhoneModels.ChatExchange],
                  usesTools: Bool, showsPartialText: Bool, update: @escaping @MainActor (String) -> Void) async throws -> String {
@@ -44,6 +46,22 @@ import Foundation
             let brief = history.suffix(2).map { "Dig: \($0.prompt)\nAgent: \($0.reply)" }.joined(separator: "\n")
             text = try await api.agentChat(model: model, prompt: String(prompt.unicodeScalars.prefix(2_000)),
                                            instructions: String(instructions.prefix(1_800)) + "\nTidligere samtale:\n" + brief)
+        case .cloud:
+            var messages = [["role": "system", "content": instructions]]
+            for item in history {
+                messages.append(["role": "user", "content": item.prompt])
+                messages.append(["role": "assistant", "content": item.reply])
+            }
+            messages.append(["role": "user", "content": prompt])
+            if OpenRouterCloud.preferredModels.contains(model) {
+                let result = try await OpenRouterCloud.reply(model: model, messages: messages)
+                text = result.text
+                onModel?(result.modelID ?? "OpenRouter · Model ikke oplyst")
+            } else if NvidiaCloud.preferredModels.contains(model) {
+                text = try await NvidiaCloud.reply(model: model, messages: messages)
+            } else {
+                text = try await ComposioCloud.reply(model: model, messages: messages)
+            }
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PhoneModelError.emptyResponse }
         return text

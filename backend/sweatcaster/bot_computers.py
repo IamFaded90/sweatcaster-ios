@@ -152,6 +152,8 @@ class BotComputers:
                 db.execute("ALTER TABLE jobs ADD COLUMN web_requested INTEGER NOT NULL DEFAULT 0")
             if "web_sources" not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN web_sources TEXT")
+            if "task_model" not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN task_model TEXT")
             db.execute("UPDATE jobs SET status = 'failed', error = ?, task_context = NULL, agent_profile = NULL WHERE status = 'running'",
                        ("PC’en genstartede under arbejdet. Prøv opgaven igen.",))
 
@@ -169,6 +171,8 @@ class BotComputers:
             job["webSearch"] = True
             if row["web_sources"]:
                 job["webSources"] = json.loads(row["web_sources"])
+        if row["task_model"] is not None:
+            job["taskModel"] = row["task_model"]
         return job
 
     @staticmethod
@@ -251,12 +255,17 @@ class BotComputers:
         return {"bots": [{"id": bot, "jobs": jobs} for bot, jobs in summaries.items()]}
 
     def enqueue(self, bot, request_id, prompt, source, *, phone_kind=None, phone_time=None, task_context=None,
-                agent_profile=None, web_search=False):
+                agent_profile=None, web_search=False, task_model=None):
+        from sweatcaster.bot_task_models import validate_model
+
+        validate_model(task_model)
         if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= MAX_PROMPT:
             raise BotComputerError(422, "Skriv en opgave på mellem 1 og 2.000 tegn.")
         prompt = prompt.strip()
         text_bytes(prompt)
         device_request = phone_request(phone_kind, phone_time)
+        if device_request is not None and task_model is not None:
+            raise BotComputerError(422, "iPhone-forslag bruger den lokale PC-model.")
         if type(web_search) is not bool or (web_search and any(value is not None for value in (source, task_context, device_request))):
             raise BotComputerError(422, "En websøgning bruger opgaveteksten. Fjern filen eller det vedhæftede opslag.")
         if web_search and self.derive_query is None:
@@ -289,8 +298,8 @@ class BotComputers:
             old = db.execute("SELECT * FROM jobs WHERE bot = ? AND id = ?", (bot, request_id)).fetchone()
             if old:
                 if (old["prompt"], old["source"], old["phone_request"], old["context_digest"], old["profile_digest"],
-                    old["web_requested"]) != (
-                    prompt, source, device_request, context_digest, profile_digest, int(web_search)
+                    old["web_requested"], old["task_model"]) != (
+                    prompt, source, device_request, context_digest, profile_digest, int(web_search), task_model
                 ):
                     raise BotComputerError(409, "Det samme opgave-id er allerede brugt.")
                 return self._job(old)
@@ -301,10 +310,10 @@ class BotComputers:
             if pending >= MAX_PENDING:
                 raise BotComputerError(429, "Botten har allerede seks opgaver i kø.")
             db.execute("""INSERT INTO jobs (bot, id, prompt, source, status, phone_request, task_context,
-                                             context_digest, context_expires, agent_profile, profile_digest, web_requested)
-                          VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, CASE WHEN ? THEN unixepoch() + 1800 END, ?, ?, ?)""",
+                                             context_digest, context_expires, agent_profile, profile_digest, web_requested, task_model)
+                          VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, CASE WHEN ? THEN unixepoch() + 1800 END, ?, ?, ?, ?)""",
                        (bot, request_id, prompt, source, device_request, task_context, context_digest,
-                        task_context is not None, agent_profile, profile_digest, int(web_search)))
+                        task_context is not None, agent_profile, profile_digest, int(web_search), task_model))
             return self._job(self._require(db, "jobs", bot, request_id))
 
     def cancel(self, bot, job):
@@ -448,7 +457,9 @@ class BotComputers:
                 if not self._running(bot, job_id):
                     return True
                 options["research"] = True
-            # Inference uses the PC's existing Ollama model and lease.
+            if job["task_model"] is not None:
+                options["model"] = job["task_model"]
+            # Local inference keeps the existing lease; cloud models require an explicit task choice.
             result = self.generate(job["prompt"], source_text, **options)
             if not isinstance(result, str) or not result.strip():
                 raise BotComputerError(502, "PC-modellen returnerede et tomt svar.")
@@ -497,7 +508,7 @@ class BotComputers:
 
 
 def ollama_reports(settings, *, phone_actions=False, mail_appointments=False, web_query=False, add_on=False):
-    def generate(prompt, source, *, profile=None, research=False):
+    def generate(prompt, source, *, profile=None, research=False, model=None):
         from sweatcaster.ollama_gate import chat_payload
 
         if add_on:
@@ -552,7 +563,12 @@ def ollama_reports(settings, *, phone_actions=False, mail_appointments=False, we
             if profile is not None:
                 details["botprofil"] = profile
             user = json.dumps(details, ensure_ascii=False)
-        payload = chat_payload(settings, [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        if model is not None:
+            from sweatcaster.bot_task_models import reply
+
+            return reply(model, messages)
+        payload = chat_payload(settings, messages,
                                stream=False, temperature=0.2)
         payload["options"]["num_predict"] = 350 if phone_actions or mail_appointments or web_query else 900
         if phone_actions or mail_appointments or web_query or add_on:

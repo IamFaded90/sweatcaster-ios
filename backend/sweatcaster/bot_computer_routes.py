@@ -32,8 +32,10 @@ def register_bot_computers(app: FastAPI, settings, authorize, service=None):
 
     @router.get("/{bot_id}")
     def status(bot=Depends(computer_id)):
+        from sweatcaster.bot_task_models import available_models
+
         return {**run(service.status, bot), "phoneActions": service.propose is not None, "taskContext": True,
-                "agentProfile": True, "webSearch": service.derive_query is not None}
+                "agentProfile": True, "webSearch": service.derive_query is not None, "taskModels": available_models()}
 
     @router.post("/{bot_id}/start")
     def start(bot=Depends(computer_id)):
@@ -75,7 +77,7 @@ def register_bot_computers(app: FastAPI, settings, authorize, service=None):
         return run(lambda: service.enqueue(bot, request_id, payload.get("prompt"), source_id,
                                            phone_kind=payload.get("phoneKind"), phone_time=payload.get("phoneTime"),
                                            task_context=payload.get("taskContext"), agent_profile=payload.get("agentProfile"),
-                                           web_search=payload.get("webSearch", False)))
+                                           web_search=payload.get("webSearch", False), task_model=payload.get("taskModel")))
 
     @router.post("/{bot_id}/jobs/{job_id}/cancel")
     def cancel(job_id: str, bot=Depends(computer_id)):

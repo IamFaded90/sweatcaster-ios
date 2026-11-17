@@ -20,6 +20,7 @@ struct BotComputerStatus: Decodable, Sendable {
     let taskContext: Bool?
     let agentProfile: Bool?
     let webSearch: Bool?
+    let taskModels: [String]?
 }
 
 enum BotPhoneActionKind: String, Codable, CaseIterable, Sendable {
@@ -88,6 +89,7 @@ struct BotComputerJob: Decodable, Identifiable, Sendable {
     let hasTaskContext: Bool?
     let webSearch: Bool?
     let webSources: [WebSource]?
+    let taskModel: String?
 }
 
 struct BotComputerFile: Decodable, Identifiable, Sendable {
@@ -185,6 +187,7 @@ struct BotComputerClient: Sendable {
         let taskContext: String?
         let agentProfile: String?
         let webSearch: Bool?
+        let taskModel: String?
     }
     private struct Import: Encodable { let name: String; let content: String }
     private struct Share: Encodable { let sourceBotID: String; let fileID: String }
@@ -210,10 +213,11 @@ struct BotComputerClient: Sendable {
 
     func submit(prompt: String, fileID: UUID?, requestID: UUID,
                 phoneKind: BotPhoneActionKind?, phoneTime: String?, taskContext: String?,
-                agentProfile: String?, webSearch: Bool) async throws -> BotComputerJob {
+                agentProfile: String?, webSearch: Bool, taskModel: String? = nil) async throws -> BotComputerJob {
         let draft = Draft(requestID: requestID.uuidString.lowercased(), prompt: prompt,
                           fileID: fileID?.uuidString.lowercased(), phoneKind: phoneKind, phoneTime: phoneTime,
-                          taskContext: taskContext, agentProfile: agentProfile, webSearch: webSearch ? true : nil)
+                          taskContext: taskContext, agentProfile: agentProfile, webSearch: webSearch ? true : nil,
+                          taskModel: taskModel)
         return try await json(.submitJob, body: JSONEncoder().encode(draft))
     }
 

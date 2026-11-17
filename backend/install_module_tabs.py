@@ -141,7 +141,7 @@ def install(root: Path) -> None:
         staged[cleanup] = (original, updated)
     modules = {}
     for name in (source.name, "lumi_companion.py", "code_batch.py", "crew_proposals.py", "repository_library.py", "agent_workflows.py",
-                 "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py",
+                 "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py", "bot_task_models.py",
                  "emby_library.py", "emby_settings.py", "composio_library.py", "composio_settings.py", "composio_gmail.py",
                  "agentmail_inboxes.py", "addons.py", "github_addons.py", "grok_templates.py", "mail_appointments.py",
                  "microsoft_voice.py", "kokoro_voice.py", "pc_metrics.py", "video_review.py",
