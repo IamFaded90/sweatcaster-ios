@@ -97,8 +97,14 @@ struct SpeechMouthPulse {
 enum VillageBlink {
     static func closed(id: String, at date: Date) -> Bool {
         let hash = id.utf8.reduce(UInt64(5381)) { ($0 &* 33) &+ UInt64($1) }
-        let phase = Double(hash % 500) / 100
-        let elapsed = (date.timeIntervalSinceReferenceDate + phase).truncatingRemainder(dividingBy: 5.3)
-        return elapsed >= 0 && elapsed < 0.16
+        // A portrait must be able to blink during a short spoken reply as well as
+        // while it is idle.  The previous 5.3-second cadence could place every
+        // short blink between word-boundary mouth pulses.  Keep a stable per-agent
+        // offset, but use a natural-looking 2.2-second cadence with a 0.2-second
+        // closure so speech, blink and breathing can be seen together.
+        let phase = Double(hash % 220) / 100
+        let elapsed = (date.timeIntervalSinceReferenceDate + phase)
+            .truncatingRemainder(dividingBy: 2.2)
+        return elapsed >= 0 && elapsed < 0.2
     }
 }
