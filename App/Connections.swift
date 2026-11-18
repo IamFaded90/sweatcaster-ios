@@ -249,33 +249,6 @@ struct ConnectionsView: View {
         self.onChooseNote = onChooseNote
     }
 
-    private struct Provider: Identifiable {
-        let name, icon, detail: String
-        var id: String { name }
-    }
-
-    private let providers: [Provider] = [
-        .init(name: "Dropbox", icon: "externaldrive", detail: "Kræver Dropbox OAuth og en registreret app."),
-        .init(name: "Google Photos Picker", icon: "photo.stack", detail: "Kræver en godkendt Google OAuth-klient. Google lader ikke apps se hele biblioteket. Vælg fotos i Googles egen picker."),
-        .init(name: "Spotify", icon: "music.note", detail: "Spotify-indhold kan ikke bruges som AI-kontekst under tjenestens vilkår."),
-        .init(name: "Google Drive", icon: "folder", detail: "Kræver Google OAuth og tilladelse til valgte filer."),
-        .init(name: "OneDrive", icon: "cloud", detail: "Kræver Microsoft-login og læseadgang til valgte filer."),
-        .init(name: "GitHub", icon: "chevron.left.forwardslash.chevron.right", detail: "Kræver særskilt adgang til de repositories, du vil bruge."),
-        .init(name: "Gmail", icon: "envelope", detail: "Kræver Google OAuth med godkendte mailtilladelser."),
-        .init(name: "Todoist", icon: "checklist", detail: "Kræver Todoist OAuth og adgang til valgte projekter."),
-        .init(name: "Notion", icon: "doc.text", detail: "Kræver en Notion-integration med adgang til valgte sider."),
-        .init(name: "X", icon: "text.bubble", detail: "Kræver en X-udviklerapp og passende API-adgang."),
-        .init(name: "Discord", icon: "bubble.left.and.bubble.right", detail: "Kræver en Discord-app og tilladelser i de valgte kanaler."),
-        .init(name: "Slack", icon: "bubble.left", detail: "Kræver en Slack-app med læsetilladelse i dit arbejdsområde."),
-        .init(name: "Trello", icon: "rectangle.split.3x1", detail: "Kræver kontoautorisation til de relevante tavler."),
-        .init(name: "Figma", icon: "square.stack", detail: "Kræver Figma OAuth og adgang til de valgte filer.")
-    ]
-
-    private var otherProviders: [Provider] {
-        guard openPairing != nil || pcAPI != nil else { return providers }
-        return providers.filter { !["Gmail", "Google Drive", "Notion", "GitHub"].contains($0.name) }
-    }
-
     var body: some View {
         @Bindable var photoConnector = photos
         @Bindable var fileConnector = files
@@ -354,10 +327,6 @@ struct ConnectionsView: View {
                     .foregroundStyle(palette.secondary)
                 pickerCard(photos, detail: "Vælg op til tre billeder i Apples billedvælger. Her vises små lokale forhåndsvisninger.")
                 pickerCard(files, detail: "Vælg én fil op til 5 MB fra iCloud Drive eller en anden placering i Filer. Se billeder og uddrag fra tekstfiler her.")
-                DisclosureGroup("Tjenester uden direkte forbindelse") {
-                    VStack(spacing: 10) { ForEach(otherProviders) { providerCard($0) } }
-                        .padding(.top, 10)
-                }
             }
             .padding(FadedSpacing.edge).frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
@@ -432,15 +401,6 @@ struct ConnectionsView: View {
         return excerpt.isEmpty ? nil : excerpt
     }
 
-    private func providerCard(_ provider: Provider) -> some View {
-        FadedCard {
-            VStack(alignment: .leading, spacing: 6) {
-                Label(provider.name, systemImage: provider.icon).font(FadedTypography.section)
-                Text(ConnectorStatus.unavailable.title).font(.caption.weight(.semibold))
-                Text(provider.detail).font(.subheadline).foregroundStyle(palette.secondary)
-            }
-        }
-    }
 }
 struct PCDriveFiles: Decodable, Sendable {
     struct Entry: Decodable, Hashable, Identifiable, Sendable {

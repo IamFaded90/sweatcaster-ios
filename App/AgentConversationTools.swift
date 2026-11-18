@@ -25,7 +25,7 @@ import UIKit
 
 extension AgentPhoneChat {
     func shouldCheckGmail(_ message: String) -> Bool {
-        keepHistory && !web && nextDocument == nil && AgentGmailCheck.matches(message)
+        keepHistory && !web && nextDocument == nil && (AgentGmailCheck.matches(message) || AgentGmailCheck.matchesLatest(message))
     }
 
     func startGmailCheck(_ message: String) {
@@ -49,6 +49,11 @@ extension AgentPhoneChat {
         let prompt: String
         let afterTurn: UUID?
         private(set) var state: MailAppointmentState?
+        private(set) var latestMail: BotMailMessages.Message?
+        private(set) var latestContent: String?
+        private(set) var messages: [BotMailMessages.Message] = []
+        var isLatest: Bool { AgentGmailCheck.matchesLatest(prompt) }
+        var isUnreadList: Bool { AgentGmailCheck.isUnreadList(prompt) }
         private(set) var status = "Tjekker Gmail…"
         private(set) var isChecking = false
         private var started = false
@@ -68,6 +73,24 @@ extension AgentPhoneChat {
             isChecking = true
             defer { isChecking = false }
             do {
+                if isLatest {
+                    let lower = prompt.lowercased()
+                    let query = lower.contains("ulæst") || isUnreadList ? "in:inbox is:unread" : "in:inbox"
+                    let result: BotMailMessages = try await api.moduleJSON(
+                        "composio/gmail/messages", timeout: 75, query: [URLQueryItem(name: "q", value: query)]
+                    )
+                    guard let mail = result.messages.first else {
+                        status = query.contains("unread") ? "Du har ingen ulæste mails i indbakken." : "Din indbakke er tom."
+                        return
+                    }
+                    if isUnreadList {
+                        messages = Array(result.messages.prefix(12))
+                        status = "Her er op til 12 ulæste mails. Tryk på en mail for at læse den."
+                    } else {
+                        try await load(mail, api: api)
+                    }
+                    return
+                }
                 let initial = try await api.mailAppointments(bot.id)
                 guard initial.enabled else {
                     status = initial.otherBot ? "En anden agent står for aftalesøgningen."
@@ -97,6 +120,26 @@ extension AgentPhoneChat {
                 else { status = AppErrorPresentation(error).title }
             }
         }
+
+        func open(_ mail: BotMailMessages.Message, api: LiveAPI?) async {
+            guard let api, !isChecking else { return }
+            isChecking = true
+            defer { isChecking = false }
+            do { try await load(mail, api: api) }
+            catch {
+                if case APIError.http(_, let problem) = error, let message = problem?.message { status = message }
+                else { status = "Kunne ikke læse mailen. Tjek PC-forbindelsen og prøv igen." }
+            }
+        }
+
+        private func load(_ mail: BotMailMessages.Message, api: LiveAPI) async throws {
+            let content: BotMailContent = try await api.moduleJSON(
+                "composio/gmail/message/\(Server.segment(mail.id))", timeout: 75
+            )
+            latestMail = mail
+            latestContent = content.text.isEmpty ? "Mailen indeholder ingen læsbar tekst." : content.text
+            status = isUnreadList ? "Her er den valgte mail:" : "Her er din seneste mail:"
+        }
     }
 
     let request: Request
@@ -110,6 +153,23 @@ extension AgentPhoneChat {
         return words.range(of: pattern, options: .regularExpression) != nil
     }
 
+    nonisolated static func matchesLatest(_ message: String) -> Bool {
+        let words = message.lowercased()
+        if words.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("hvordan ") { return false }
+        let mail = words.contains("mail") || words.contains("indbakke")
+        let recent = ["seneste", "nyeste", "sidste", "ulæst", "latest", "newest"].contains { words.contains($0) }
+        let action = words.range(of: #"(?:^|\s)(?:se|vis|læs|læse|tjek|find|hent|hvad|read|show|check)(?:\s|[?.!]|$)"#, options: .regularExpression) != nil
+        return mail && ((recent && action) || isUnreadList(message))
+    }
+
+    nonisolated static func isUnreadList(_ message: String) -> Bool {
+        let words = message.lowercased()
+        let pluralMail = words.range(of: #"\b(?:e-?mails|mails|emails|indbakken)\b"#, options: .regularExpression) != nil
+        let unread = words.contains("ulæst") || words.range(of: #"\b(?:nye|ny)\b"#, options: .regularExpression) != nil
+        let action = words.range(of: #"\b(?:har|er|se|vis|læs|tjek|find|hent|hvad)\b"#, options: .regularExpression) != nil
+        return pluralMail && unread && action
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             AgentChatBubble(user: true, title: "Dig", pc: false) {
@@ -118,6 +178,31 @@ extension AgentPhoneChat {
             AgentChatBubble(user: false, title: "\(bot.name) · Gmail", pc: true) {
                 if request.isChecking { ProgressView(request.status) }
                 else { Text(request.status) }
+                if !request.messages.isEmpty {
+                    ForEach(request.messages) { mail in
+                        Button {
+                            Task { await request.open(mail, api: api) }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(mail.subject.isEmpty ? "Uden emne" : mail.subject).font(.subheadline.weight(.semibold))
+                                Text(mail.sender).font(.caption).foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                        }
+                        .disabled(request.isChecking)
+                    }
+                }
+                if let mail = request.latestMail, let content = request.latestContent {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(mail.subject.isEmpty ? "Uden emne" : mail.subject).font(.headline)
+                        Text("Fra: \(mail.sender)").font(.subheadline)
+                        if let value = Double(mail.timestamp), value.isFinite, (1...4_200_000_000_000).contains(value) {
+                            Text(Date(timeIntervalSince1970: value > 10_000_000_000 ? value / 1_000 : value),
+                                 format: .dateTime.day().month(.abbreviated).hour().minute()).font(.caption)
+                        }
+                        Text(content).textSelection(.enabled)
+                    }
+                }
                 if let state = request.state, state.notice == nil {
                     ForEach(Array(state.appointments.prefix(5))) { appointment in
                         VStack(alignment: .leading, spacing: 4) {
@@ -132,7 +217,7 @@ extension AgentPhoneChat {
                         .textSelection(.enabled)
                     }
                 }
-                if api != nil {
+                if api != nil && !request.isLatest {
                     Button("Åbn Gmail-aftaler", systemImage: "calendar.badge.envelope") { showReview = true }
                         .frame(minHeight: 44)
                 }

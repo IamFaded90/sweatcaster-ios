@@ -115,6 +115,32 @@ enum StudioImageFiles {
 }
 
 extension OfflineStudio {
+    var privatePCModelPicker: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Picker("Billedmodel på PC", selection: $sessionPreferences.pcImageModel) {
+                Text(StudioPCImageModel.realvis.title).tag(StudioPCImageModel.realvis)
+                Text(StudioPCImageModel.pony.title + (pcPonyAvailable == true ? "" : " · ikke klar"))
+                    .tag(StudioPCImageModel.pony).disabled(pcPonyAvailable != true)
+                Text(StudioPCImageModel.flux2.title + (pcFluxAvailable == true ? "" : " · ikke klar"))
+                    .tag(StudioPCImageModel.flux2).disabled(pcFluxAvailable != true)
+                Text(StudioPCImageModel.flux2Adult.title + (pcFluxAdultAvailable == true ? "" : " · ikke klar"))
+                    .tag(StudioPCImageModel.flux2Adult).disabled(pcFluxAdultAvailable != true)
+            }
+            if pcFluxAvailable != true {
+                FadedDetailText(pcFluxAvailable == nil ? "Kontrollerer FLUX 2 på PC’en…" : "FLUX 2 kunne ikke findes. Opdatér PC-programmet, og kontrollér igen.")
+                Button("Kontrollér PC igen") { pcFluxRefresh += 1 }.frame(minHeight: 44)
+            }
+        }
+        .task(id: "\(privateImagePC?.queueTargetID ?? ""):\(pcFluxRefresh)") {
+            pcFluxAvailable = nil
+            pcFluxAdultAvailable = nil
+            pcPonyAvailable = nil
+            guard let api = privateImagePC else { pcFluxAvailable = false; pcFluxAdultAvailable = false; pcPonyAvailable = false; return }
+            do { let models = try await api.privateStudioFluxAvailable(); pcFluxAvailable = models.0; pcFluxAdultAvailable = models.1; pcPonyAvailable = models.2 }
+            catch { if !Task.isCancelled { pcFluxAvailable = false; pcFluxAdultAvailable = false; pcPonyAvailable = false } }
+        }
+    }
+
     var loraPreviews: URL { URL.applicationSupportDirectory.appending(path: "StudioLoRAPreviews", directoryHint: .isDirectory) }
     var loraLabels: [String: String] {
         (try? JSONDecoder().decode([String: String].self, from: loraLabelsData)) ?? [:]
@@ -306,15 +332,16 @@ extension OfflineStudio {
             let size = StudioImageGeneration.referenceSize(reference)
             mask = try selection.encoded(source: size, width: Int(size.width), height: Int(size.height), repaintValue: 255)
         }
-        status = "RealVisXL laver dit billede på PC’en…"
+        status = "\(request.pcModel.title) laver dit billede på PC’en…"
         let mode = request.referenceMode
         let bytes = try await api.privateStudioImage(prompt: request.prompt, negative: request.negative,
                                                       reference: request.sourceImage, mask: mask,
-                                                      strength: mask == nil ? mode?.strength : mode?.maskedStrength, seed: seed)
+                                                      strength: mask == nil ? mode?.strength : mode?.maskedStrength, seed: seed,
+                                                      engine: request.pcModel == .realvis ? nil : request.pcModel.rawValue)
         try Task.checkCancellation()
         guard isCurrentPrivateSession(sessionID) else { throw CancellationError() }
         try storePrivateImage(bytes, for: destination)
-        return StudioImageDetails(prompt: request.prompt, negativePrompt: request.negative, seed: seed, model: "RealVisXL")
+        return StudioImageDetails(prompt: request.prompt, negativePrompt: request.negative, seed: seed, model: request.pcModel.title)
     }
 
     private func renderStudioImageOnPC(_ request: StudioImageRequest, to destination: URL,

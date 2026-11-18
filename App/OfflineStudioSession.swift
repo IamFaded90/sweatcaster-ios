@@ -20,10 +20,10 @@ extension OfflineStudio {
                 }
             }
             Button { sessionPreferences.imageRoute = .pc } label: {
-                Label("PC · RealVisXL", systemImage: onPC ? "checkmark" : "desktopcomputer")
+                Label("PC · " + sessionPreferences.pcImageModel.title, systemImage: onPC ? "checkmark" : "desktopcomputer")
             }.disabled(privateImagePC == nil)
         } label: {
-            Label(onPC ? "PC · RealVisXL" : "iPhone · " + (StudioImageModel(rawValue: current)?.title ?? "Vælg model"),
+            Label(onPC ? "PC · " + sessionPreferences.pcImageModel.title : "iPhone · " + (StudioImageModel(rawValue: current)?.title ?? "Vælg model"),
                   systemImage: "chevron.down")
                 .font(.caption.weight(.semibold)).frame(minHeight: 44)
         }.disabled(task != nil)

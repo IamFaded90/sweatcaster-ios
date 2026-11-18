@@ -15,7 +15,7 @@ import SwiftUI
     @Published private(set) var sleepUntil: Date?
     @Published var notice: String?
     private let player = AVPlayer()
-    private var api: LiveAPI?
+    private let catalog = NativeMusicCatalog.shared
     private var activeID: String?
     private var generation = UUID()
     private var resolving: Task<Void, Never>?
@@ -47,11 +47,6 @@ import SwiftUI
                 if raw == AVAudioSession.RouteChangeReason.oldDeviceUnavailable.rawValue { self?.pause() }
             }.store(in: &subscriptions)
         installRemoteControls()
-    }
-
-    func configure(_ api: LiveAPI?) {
-        if self.api?.queueTargetID != api?.queueTargetID { streams = [:]; prefetching?.cancel() }
-        self.api = api
     }
 
     func load(_ tracks: [MusicTrack], index: Int = 0) {
@@ -123,7 +118,7 @@ import SwiftUI
                 prefetch(after: queue.currentIndex ?? 0)
             } catch {
                 if !Task.isCancelled, generation == token {
-                    notice = (error as? APIError)?.title ?? "PC’en kunne ikke finde lyd til nummeret. Tjek forbindelsen og prøv igen."
+                    notice = (error as? MusicCatalogError)?.errorDescription ?? "Kunne ikke finde lyd til nummeret. Tjek internetforbindelsen og prøv igen."
                 }
             }
         }
@@ -131,12 +126,10 @@ import SwiftUI
 
     private func stream(for track: MusicTrack) async throws -> URL {
         if let (url, expiry) = streams[track.id], expiry > Date() { return url }
-        guard let api else { throw APIError.offline }
-        struct Stream: Decodable { let url: URL; let expiresIn: Int }
-        let result: Stream = try await api.moduleJSON("music/stream", upload: JSONEncoder().encode(["id": track.id]), timeout: 60)
-        guard result.url.scheme == "https", result.url.host?.hasSuffix(".googlevideo.com") == true else { throw APIError.malformed }
-        streams[track.id] = (result.url, Date().addingTimeInterval(Double(min(1800, max(0, result.expiresIn)))))
-        return result.url
+        let (url, lifetime) = try await catalog.stream(track.id)
+        try Task.checkCancellation()
+        streams[track.id] = (url, Date().addingTimeInterval(lifetime))
+        return url
     }
     private func prefetch(after index: Int) {
         prefetching?.cancel()

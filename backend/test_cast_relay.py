@@ -29,6 +29,16 @@ class Fixture(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "http://127.0.0.1/private")
             body = b""
+        elif self.path == "/browser-video.mp4":
+            if (self.headers.get("Origin") != "https://cinema.invalid" or
+                    self.headers.get("Referer") != "https://cinema.invalid/" or
+                    self.headers.get("User-Agent") != "Mozilla/5.0"):
+                self.send_response(403)
+                body = b""
+            else:
+                body = b"video-data"
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
         elif self.path in {"/init.mp4", "/segment.mp4"}:
             body = b"video-data"
             if self.headers.get("Range") == "bytes=2-5":
@@ -102,6 +112,13 @@ class CastRelayTests(unittest.TestCase):
         self.assertEqual(self.client.get(self.create("http://fixture.invalid/redirect")).status_code, 502)
         with TestClient(self.app, client=("8.8.8.8", 50000)) as outside:
             self.assertEqual(outside.get(self.create("http://fixture.invalid/stream.m3u8")).status_code, 404)
+
+    def test_pc_relay_includes_public_browser_origin_for_media_host(self):
+        response = self.client.put(cast_relay.PREFIX,
+            json={"url": "http://fixture.invalid/browser-video.mp4", "origin": "https://cinema.invalid/watch"},
+            headers={"Authorization": "Bearer fixture"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self.client.get(response.json()["path"]).content, b"video-data")
 
     def test_recognizes_a_mislabeled_variant_without_serving_a_jpeg(self):
         master = self.client.get(self.create("http://fixture.invalid/master.m3u8"))

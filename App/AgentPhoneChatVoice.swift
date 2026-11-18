@@ -3,6 +3,16 @@ import FadedAIWhisperRuntime
 import SwiftUI
 
 extension AgentPhoneChat {
+    func selectRequestedAdamVoiceIfAvailable() async {
+        let key = PhoneModels.agentVoiceKey(bot.id)
+        guard bot.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "adam",
+              bot.voice == "da-DK", voiceOverride.isEmpty,
+              UserDefaults.standard.object(forKey: key) == nil, let api else { return }
+        guard let choices = try? await api.agentPCVoices(), choices.contains(.roestMic),
+              voiceOverride.isEmpty, UserDefaults.standard.object(forKey: key) == nil else { return }
+        voiceOverride = AgentPCVoice.roestMic.rawValue
+    }
+
     var voiceActions: some View {
         let isDanish = AgentWhisper.languageCode(dictationLanguage) == "da"
         let installedModels = whisper.installedModels

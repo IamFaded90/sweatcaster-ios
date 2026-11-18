@@ -222,7 +222,10 @@ import UIKit
                 }
                 loaded = true
             }
-            .task(id: api?.queueTargetID) { await loadPCModels() }
+            .task(id: api?.queueTargetID) {
+                await loadPCModels()
+                await selectRequestedAdamVoiceIfAvailable()
+            }
             .task(id: gmailCheck?.id) { await gmailCheck?.run(bot: bot, api: api) }
             .onChange(of: running != nil, initial: true) {
                 ChatScreenWake.hold(wakeID, whileReplying: running != nil && phase == .active)

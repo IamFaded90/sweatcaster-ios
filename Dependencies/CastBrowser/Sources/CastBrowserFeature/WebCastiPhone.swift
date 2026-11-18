@@ -395,7 +395,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
         guard !key.isEmpty, key != resumeKey(for: "Intet afspilles"),
               playbackPosition.isFinite, playbackPosition >= 15 else { return }
         if playbackDuration > 0, playbackPosition >= playbackDuration - 20 {
-            resumePositions.removeValue(forKey: "castbrowser." + key)
+            resumePositions.removeValue(forKey: key)
             persist(resumePositions, key: "resumePositions")
             return
         }

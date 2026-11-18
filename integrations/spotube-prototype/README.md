@@ -4,6 +4,10 @@ Dette er en bevaret prototype, ikke appens aktive Musik-fane. Bygning 72 indehol
 
 Den valgte løsning er en iPhone-tilpasning af Spotube inde i FadedAI. Korrigeret kildekontrol: Spotube 6.0 har en rigtig iPhone-udgave. Brug dens iOS-integration som udgangspunkt, så musik ikke unødigt kræver PC’en. Den indbyggede lydkilde er YouTube. Spotify-indhold og musiktekster må aldrig sendes til AI.
 
+## Native adapter klargjort lokalt
+
+`NativeMusicCatalog.swift` forbinder den isolerede Swift-prototype til `FadedMusicCore` med søgning og opslag af en lydstrøm. Prototypens kø og afspiller bruger adapteren direkte frem for de tidligere PC-kald. Når modulet ikke er bygget, vises en utilgængelig tilstand; appens eksisterende Musik-fane er fortsat uændret. Der er ingen fallback til PC. Den samlede prototype og den Kotlin-genererede Swift-grænseflade er endnu ikke kompileret på Mac eller afprøvet på iPhone.
+
 ## Konkrete kilder
 
 - Spotube, undersøgt ved commit `5768ad7568665130bdbc057348bc2b9e1cf8cc38`.
@@ -16,7 +20,7 @@ Den valgte løsning er en iPhone-tilpasning af Spotube inde i FadedAI. Korrigere
 ## Afprøvning
 
 - MusicQueue.swift bestod en rigtig Swift-test af indeksgrænser, aktuelt nummer efter flytning/sletning, indsæt som næste, gem/genåbn playliste og tøm kø.
-- AVPlayer-, Now Playing-, fjernbetjening- og sovetimerprototypen er syntakskontrolleret, men ikke typekontrolleret på Mac eller prøvet på iPhone. Den er derfor ikke klar til release.
+- AVPlayer-, Now Playing-, fjernbetjening- og sovetimerprototypen blev tidligere syntakskontrolleret. Den ændrede native adapter og prototypen er ikke typekontrolleret på Mac eller prøvet på iPhone. De er derfor ikke klar til release.
 - Den alternative Python/PC-kilde fandt 12 søgeresultater. En opdateret yt-dlp-læser fik én gang HTTP 200 og 4096 bytes, men efterfølgende prøver fik 403, også med en lokal token-hjælper. Det er ikke en bestået afspilningstest. Dette spor er ikke installeret i den kørende PC-app.
 - Testpakken ligger isoleret under build/music-test-env. Den midlertidige Docker-container fadedai-music-proof-test er stoppet. Ingen brugerlogin eller adgangskoder blev brugt i musiktæstene.
 

@@ -57,21 +57,6 @@ struct PCServicesView: View {
                     Label("PC-status og målinger", systemImage: "gauge.with.dots.needle.50percent")
                 }
             }
-            NavigationLink {
-                PCServiceLookupView(api: api, service: .youtube, onUse: attach)
-            } label: {
-                Label("YouTube", systemImage: "play.rectangle")
-            }
-            NavigationLink {
-                PCDriveView(api: api)
-            } label: {
-                Label("Google Drive direkte", systemImage: "folder")
-            }
-            NavigationLink {
-                PCServiceLookupView(api: api, service: .web, onUse: attach)
-            } label: {
-                Label("Websøgning via SearXNG", systemImage: "magnifyingglass")
-            }
         }
         .navigationTitle("Tjenester på PC’en")
         .navigationBarTitleDisplayMode(.inline)

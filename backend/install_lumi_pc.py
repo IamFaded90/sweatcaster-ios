@@ -12,7 +12,9 @@ def install(checkpoint: Path, *, apply: bool = False) -> list[Path]:
     if package.is_symlink() or not (package / "api.py").is_file():
         raise ValueError("Choose the existing FadedAI PC checkpoint.")
     source = Path(__file__).resolve().parent / "sweatcaster" / "lumi_companion.py"
+    flux_source = source.with_name("lumi_flux.py")
     module = package / source.name
+    flux_module = package / flux_source.name
     hook = package / "module_tabs.py"
     original = hook.read_text(encoding="utf-8")
     import_line = "    from sweatcaster.lumi_companion import register_lumi\n"
@@ -30,14 +32,17 @@ def install(checkpoint: Path, *, apply: bool = False) -> list[Path]:
         updated = updated.replace(anchor, anchor + call_line)
     compile(updated, str(hook), "exec")
     compile(source.read_text(encoding="utf-8"), str(source), "exec")
+    compile(flux_source.read_text(encoding="utf-8"), str(flux_source), "exec")
     changes = [path for path, old, new in ((hook, original.encode(), updated.encode()),
-               (module, module.read_bytes() if module.exists() else b"", source.read_bytes())) if old != new]
+               (module, module.read_bytes() if module.exists() else b"", source.read_bytes()),
+               (flux_module, flux_module.read_bytes() if flux_module.exists() else b"", flux_source.read_bytes())) if old != new]
     if not apply or not changes:
         return changes
     backup = hook.with_suffix(".py.before-lumi")
     if not backup.exists():
         backup.write_text(original, encoding="utf-8")
     module.write_bytes(source.read_bytes())
+    flux_module.write_bytes(flux_source.read_bytes())
     try:
         hook.write_text(updated, encoding="utf-8")
     except OSError:

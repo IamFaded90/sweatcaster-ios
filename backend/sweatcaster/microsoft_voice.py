@@ -136,7 +136,9 @@ def register_christel(app, settings, authorize):
 
         authorize(request, settings)
         response.headers["Cache-Control"] = "no-store"
-        voices = ["piper-da"] if danish_piper(settings) else []
+        voices = []
+        if roest_installation():
+            voices += ["roest-mic", "roest-nic"]
         if kokoro_ready()[0]:
             voices += ["kokoro-heart", "kokoro-michael"]
         return {"voices": voices}
@@ -147,12 +149,61 @@ def register_christel(app, settings, authorize):
         response.headers["Cache-Control"] = "no-store"
         if body.get("voice") == "piper-da":
             return synthesize_danish(body.get("text"), settings)
+        if body.get("voice") in {"roest-mic", "roest-nic"}:
+            return synthesize_roest(body.get("text"), body["voice"])
         kokoro_voice = {"kokoro-heart": "af_heart", "kokoro-michael": "am_michael"}.get(
             body.get("voice") if isinstance(body.get("voice"), str) else ""
         )
         if kokoro_voice is None:
             raise ApiError(422, "INVALID_INPUT", "Vælg en dansk eller engelsk PC-stemme.")
         return synthesize_local(body.get("text"), kokoro_voice)
+
+
+def roest_installation():
+    configured = os.environ.get("FADEDAI_ROEST_ROOT", "").strip()
+    if not configured:
+        try:
+            from .roest_location import ROOT as configured
+        except ImportError:
+            configured = ""
+    root = Path(configured) if configured else Path(__file__).resolve().parents[2] / "build"
+    python = root / "roest-venv" / "Scripts" / "python.exe"
+    model = root / "roest-model"
+    package = root / "roest-venv" / "Lib" / "site-packages" / "chatterbox" / "mtl_tts.py"
+    required = [python, package, root / "roest-ready.json", model / "t3_mtl23ls_v2.safetensors", model / "s3gen.pt",
+                model / "ve.pt", model / "grapheme_mtl_merged_expanded_v1.json"]
+    if not all(item.is_file() for item in required):
+        return None
+    if any(len(list((model / "audio_samples").glob(f"00_{speaker}_00_*.wav"))) != 1
+           for speaker in ("mic", "nic")):
+        return None
+    return python, model
+
+
+def synthesize_roest(text, voice):
+    if not isinstance(text, str) or not 1 <= len(text.strip()) <= 500:
+        raise ApiError(422, "INVALID_INPUT", "Vælg op til 500 tegn dansk tekst.")
+    installation = roest_installation()
+    if not installation:
+        raise ApiError(503, "NOT_READY", "Røst-stemmen mangler på PC’en.")
+    python, model = installation
+    try:
+        with TemporaryDirectory(prefix="fadedai-roest-") as directory:
+            audio = Path(directory) / "reply.wav"
+            result = subprocess.run([str(python), str(Path(__file__).with_name("roest_worker.py")),
+                                     str(model), str(audio), voice.removeprefix("roest-")],
+                                    input=json.dumps({"text": text.strip()}, ensure_ascii=True).encode("utf-8"),
+                                    capture_output=True, check=False, timeout=180,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if result.returncode:
+                raise ValueError("Røst did not produce audio.")
+            with audio.open("rb") as handle:
+                data = handle.read(4_000_001)
+            if not 44 < len(data) <= 4_000_000 or data[:4] != b"RIFF" or data[8:12] != b"WAVE":
+                raise ValueError("Invalid WAV.")
+            return {"audio": b64encode(data).decode("ascii")}
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise ApiError(503, "NOT_READY", "Røst-stemmen kunne ikke læse teksten op på PC’en.") from exc
 
 
 def danish_piper(settings):
@@ -166,7 +217,13 @@ def danish_piper(settings):
     model = next((path for path in candidates if path.is_file() and path.with_suffix(".onnx.json").is_file()), None)
     configured_bin = getattr(settings, "piper_bin", "piper")
     windows_bin = Path(os.environ.get("LOCALAPPDATA", "")) / "SweatCaster/bin/piper/piper.exe"
-    binary = shutil.which(configured_bin) or (str(windows_bin) if windows_bin.is_file() else None)
+    # Optional isolated development install, beside the checkout. A deployed PC can
+    # instead configure its existing Piper installation through FADEDAI_PIPER_BIN.
+    local_bin = Path(__file__).resolve().parents[3] / ".local-piper" / "Scripts" / "piper.exe"
+    override = os.environ.get("FADEDAI_PIPER_BIN", "").strip()
+    binary = (shutil.which(override) if override else None) or shutil.which(configured_bin)
+    if not binary:
+        binary = next((str(path) for path in (windows_bin, local_bin) if path.is_file()), None)
     return (binary, model) if binary and model is not None else None
 
 

@@ -41,7 +41,14 @@ extension OfflineStudio {
         return VStack(alignment: .leading, spacing: 8) {
             if privateSession {
                 privateImageModelMenu(current: request.model)
-                if request.route == .pc { FadedDetailText("Din beskrivelse og dit valgte foto sendes til din parrede PC.") }
+                if request.route == .pc {
+                    privatePCModelPicker
+                    FadedDetailText("Din beskrivelse og dit valgte foto sendes til din parrede PC.")
+                    if request.pcModel.isFlux {
+                        FadedDetailText("FLUX 2 følger din beskrivelse. Beskriv gerne resultatet på engelsk.")
+                    }
+                    if request.pcModel == .pony && baseImage != nil { FadedDetailText("Til ændringer af et foto kan FLUX 2 · voksen være bedre.") }
+                }
             } else {
                 Picker("Lav billedet på", selection: $studioImageRoute) {
                     ForEach(StudioImageRoute.allCases) { route in Text(route.title).tag(route) }
@@ -90,6 +97,9 @@ extension OfflineStudio {
         let modelReady = isImageModelReady(request.model)
         if request.isPrivate && request.route == .pc {
             if privateImagePC == nil { return "Forbind PC’en, eller vælg en iPhone-model." }
+            if request.pcModel == .flux2 && pcFluxAvailable != true { return "FLUX 2 er ikke fundet på PC’en. Kontrollér forbindelsen, eller vælg RealVisXL." }
+            if request.pcModel == .flux2Adult && pcFluxAdultAvailable != true { return "FLUX 2 · voksen er ikke fundet på PC’en. Kontrollér forbindelsen, eller vælg en anden model." }
+            if request.pcModel == .pony && pcPonyAvailable != true { return "CyberRealistic Pony er ikke fundet på PC’en. Kontrollér forbindelsen, eller vælg en anden model." }
             if request.prompt.count > 1_000 { return "Forkort billedbeskrivelsen til højst 1.000 tegn." }
         } else if request.isPrivate {
             if !modelReady { return "Billedmodellen mangler. Hent den under Hjem → ⋯ → Lokale modeller → Billeder, og åbn Privat Studio igen." }
@@ -163,7 +173,7 @@ extension OfflineStudio {
     @ViewBuilder var privateImageSettings: some View {
         if privateSession && sessionPreferences.imageRoute == .pc {
             VStack(alignment: .leading, spacing: 6) {
-                Label("RealVisXL på din PC", systemImage: "desktopcomputer")
+                Label(sessionPreferences.pcImageModel.title + " på din PC", systemImage: "desktopcomputer")
                 FadedDetailText("Brug modelmenuen ved skrivefeltet, hvis du vil skifte tilbage til iPhone.")
             }
         } else {
@@ -277,10 +287,12 @@ extension OfflineStudio {
                 FadedFieldLabel("Billedmodel på telefonen")
                 AnyView(privateImageSettings)
             }
-            FadedFieldLabel("Negativ prompt")
-            TextField("Negativ prompt", text: $negativeImagePrompt, axis: .vertical)
-                .textFieldStyle(.roundedBorder).lineLimit(1...3).frame(minHeight: 44)
-                .accessibilityHint("Motiver og detaljer, der skal undgås")
+            if !(privateSession && sessionPreferences.imageRoute == .pc && sessionPreferences.pcImageModel.isFlux) {
+                FadedFieldLabel("Negativ prompt")
+                TextField("Negativ prompt", text: $negativeImagePrompt, axis: .vertical)
+                    .textFieldStyle(.roundedBorder).lineLimit(1...3).frame(minHeight: 44)
+                    .accessibilityHint("Motiver og detaljer, der skal undgås")
+            }
             Toggle("Lav 4 forslag", isOn: $makeFourImages)
             HStack(spacing: 10) {
                 Button {
@@ -446,11 +458,9 @@ extension OfflineStudio {
         Button("Slet billede", systemImage: "trash", role: .destructive) { pendingImageDeletion = file }
             .frame(minHeight: 44).disabled(task != nil)
     }
-
     func imageTurnActions(_ file: URL) -> some View {
         imageActionMenu(file)
     }
-
     private func loadBasePhoto() async {
         guard let item = basePhoto else { loadingBaseImage = false; return }
         loadingBaseImage = true
@@ -481,7 +491,6 @@ extension OfflineStudio {
             status = "Prompt gemt i favoritter."
         }
     }
-
     func selectBatchImage(_ file: URL) {
         imageURL = file
         if let batchTurnID, let index = turns.firstIndex(where: { $0.id == batchTurnID }) {
@@ -489,23 +498,22 @@ extension OfflineStudio {
             savePrivateConversation()
         }
     }
-
     func selectHistoryImage(_ file: URL) {
         batchImageURLs = []
         batchTurnID = nil
         imageURL = file
     }
-
     private var studioImageRequest: StudioImageRequest {
         let route = privateSession ? sessionPreferences.imageRoute : studioImageRoute
         let usesPhoneOptions = route != .pc
         let model = usesPhoneOptions && !imageReady
             ? StudioImageModel.allCases.first(where: { isImageModelReady($0.id) })?.id ?? imageModel
             : imageModel
-        let negative = usesPhoneOptions || privateSession ? negativeImagePrompt.trimmingCharacters(in: .whitespacesAndNewlines) : ""
+        let usesNegative = (usesPhoneOptions || privateSession) && !(privateSession && route == .pc && sessionPreferences.pcImageModel.isFlux)
+        let negative = usesNegative ? negativeImagePrompt.trimmingCharacters(in: .whitespacesAndNewlines) : ""
         let lora = usesPhoneOptions && (privateSession || useLoRA) ? installedLoRA ?? "" : ""
         return StudioImageRequest(
-            model: model, route: route, prompt: imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            model: model, route: route, pcModel: sessionPreferences.pcImageModel, prompt: imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
             negative: negative, lora: lora, count: usesPhoneOptions && makeFourImages ? 4 : 1,
             seed: usesPhoneOptions || privateSession ? studioSeed : nil, sourceImage: usesPhoneOptions || privateSession ? baseImage : nil,
             referenceMode: privateSession && baseImage != nil ? sessionPreferences.referenceMode : nil, referenceMask: privateSession ? referenceMask : nil,
@@ -513,7 +521,6 @@ extension OfflineStudio {
             botID: selectedPrivateBot?.id, allowPCFallback: !privateSession && allowPCFallback
         )
     }
-
     private func generateImage(_ request: StudioImageRequest) {
         guard studioEnabled, canShowStudio, canEnqueueImage, pendingImages.count < 5,
               !request.prompt.isEmpty, request.prompt.count <= 2_000, request.negative.count <= 1_000,
@@ -553,12 +560,10 @@ extension OfflineStudio {
             }
         }
     }
-
     func stopStudioImageQueue() {
         pendingImages.removeAll()
         if generatingImages { task?.cancel() }
     }
-
     func loadLoRA(_ source: URL) {
         guard !privateSession, source.pathExtension.lowercased() == "safetensors",
               let directory = MediaGenerationEnvironment.default.externalUrls.first else {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 
@@ -43,6 +44,33 @@ def install_launcher_status(package: Path) -> None:
     path.write_bytes(code.encode("utf-8"))
 
 
+def install_roest_location(package: Path, root: Path) -> None:
+    """Point the installed backend at the tested local Røst runtime when available."""
+    destination = package / "roest_location.py"
+    # Keep a previously installed or user-configured location intact.
+    if destination.exists() or destination.is_symlink():
+        return
+    try:
+        root = root.resolve(strict=True)
+        ready = json.loads((root / "roest-ready.json").read_text(encoding="utf-8"))
+        required = [root / "roest-venv" / "Scripts" / "python.exe",
+                    root / "roest-venv" / "Lib" / "site-packages" / "chatterbox" / "mtl_tts.py",
+                    root / "roest-model" / "t3_mtl23ls_v2.safetensors",
+                    root / "roest-model" / "s3gen.pt", root / "roest-model" / "ve.pt",
+                    root / "roest-model" / "grapheme_mtl_merged_expanded_v1.json"]
+        if not isinstance(ready, dict) or not {"mic", "nic"}.issubset(ready.get("tested", [])):
+            return
+        if not all(path.is_file() for path in required):
+            return
+        samples = root / "roest-model" / "audio_samples"
+        if any(len(list(samples.glob(f"00_{speaker}_00_*.wav"))) != 1 for speaker in ("mic", "nic")):
+            return
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return
+    destination.write_text("# Generated from the tested local Røst installation.\nROOT = " + repr(str(root)) + "\n",
+                           encoding="utf-8")
+
+
 def install(root: Path, *, apply: bool = True) -> list[Path]:
     from install_module_tabs import install as install_modules
     from install_pc_video_voice import install as install_voice
@@ -68,6 +96,7 @@ def install(root: Path, *, apply: bool = True) -> list[Path]:
         install_voice(staged_root, apply=True)
         install_review(staged_root)
         install_launcher_status(staged_package)
+        install_roest_location(staged_package, Path(__file__).resolve().parents[1] / "build")
 
         changes = {}
         for path in sorted(staged_package.glob("*.py")):

@@ -64,7 +64,7 @@ enum AgentChatIntent {
             return .remember(setting)
         }
         if text.range(of: #"^(?:hvad (?:skal jeg (?:nå |lave )?|har jeg )i dag|(?:vis(?: mig)?|giv mig) (?:mit |et )?(?:overblik over dagen|dagsoversigt|dagsplan)|dagens overblik)$"#,
-                      options: .regularExpression) != nil {
+                      options: .regularExpression) != nil || matchesTodayOverview(text) {
             return .action(.today)
         }
         if AgentGmailReply.matches(input) {
@@ -83,6 +83,11 @@ enum AgentChatIntent {
     static func normalize(_ text: String) -> String {
         text.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
             .trimmingCharacters(in: CharacterSet(charactersIn: "?!., "))
+    }
+
+    static func matchesTodayOverview(_ text: String) -> Bool {
+        let pattern = #"^(?:(?:kan|vil) du (?:lige )?)?(?:(?:vis(?:e)?(?: mig)?|giv(?:e)? mig|lav(?:e)?(?: mig)?) (?:mit |et |en )?(?:overblik over (?:min dag|hele dagen)|dagsoversigt|dagsplan)|hvad (?:skal jeg huske|har jeg på programmet|er der på min dagsplan) i dag|hvilke planer har jeg i dag|har jeg noget jeg skal i dag)$"#
+        return text.range(of: pattern, options: .regularExpression) != nil
     }
 
     static func topicWords(_ text: String) -> Set<String> {

@@ -4,6 +4,8 @@ import SwiftUI
 
 enum AgentPCVoice: String, Codable, CaseIterable, Identifiable {
     case danish = "piper-da"
+    case roestMic = "roest-mic"
+    case roestNic = "roest-nic"
     case heart = "kokoro-heart"
     case michael = "kokoro-michael"
 
@@ -11,12 +13,14 @@ enum AgentPCVoice: String, Codable, CaseIterable, Identifiable {
     var name: String {
         switch self {
         case .danish: "Talesyntese"
+        case .roestMic: "Mic"
+        case .roestNic: "Nic"
         case .heart: "Heart"
         case .michael: "Michael"
         }
     }
-    var language: String { self == .danish ? "da-DK" : "en-US" }
-    var label: String { name + " · " + (self == .danish ? "Dansk PC-stemme" : "Engelsk PC-stemme") }
+    var language: String { [.danish, .roestMic, .roestNic].contains(self) ? "da-DK" : "en-US" }
+    var label: String { name + " · " + (language == "da-DK" ? "Dansk PC-stemme" : "Engelsk PC-stemme") }
 }
 
 extension LiveAPI {
@@ -29,7 +33,7 @@ extension LiveAPI {
     func agentPCVoiceAudio(_ text: String, voice: AgentPCVoice) async throws -> Data {
         struct Speech: Decodable { let audio: Data }
         let body = try JSONEncoder().encode(["text": text, "voice": voice.rawValue])
-        let result: Speech = try await moduleJSON("agent-local-voices", upload: body, timeout: 60, maximumBytes: 6_000_000)
+        let result: Speech = try await moduleJSON("agent-local-voices", upload: body, timeout: 190, maximumBytes: 6_000_000)
         guard !result.audio.isEmpty else { throw APIError.malformed }
         return result.audio
     }
@@ -69,6 +73,7 @@ struct AgentVoicePicker: View {
     @StateObject private var pcSpeech = ChristelPlayer()
     @State private var voices: [AVSpeechSynthesisVoice] = []
     @State private var pcVoices: [AgentPCVoice] = []
+    @State private var pcVoiceConnectionFailed = false
     @State private var refreshPC = 0
     @State private var englishPage = 0
     @State private var previewID: String?
@@ -128,9 +133,24 @@ struct AgentVoicePicker: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Færdig") { dismiss() } } }
             .onAppear { refresh() }
             .task(id: "\(api?.queueTargetID ?? ""):\(phase == .active):\(refreshPC)") {
-                guard phase == .active, let api else { return }
-                let result = (try? await api.agentPCVoices()) ?? []
-                if !Task.isCancelled { pcVoices = result }
+                guard phase == .active else { return }
+                guard let api else {
+                    pcVoices = []
+                    pcVoiceConnectionFailed = false
+                    return
+                }
+                do {
+                    let result = try await api.agentPCVoices()
+                    if !Task.isCancelled {
+                        pcVoices = result
+                        pcVoiceConnectionFailed = false
+                    }
+                } catch {
+                    if !Task.isCancelled {
+                        pcVoices = []
+                        pcVoiceConnectionFailed = true
+                    }
+                }
             }
             .onChange(of: language) { _, _ in englishPage = 0; stopPreview(); refresh() }
             .onChange(of: phase) { _, value in
@@ -236,7 +256,8 @@ struct AgentVoicePicker: View {
             let choices = pcVoices.filter { $0.language == language }
             if choices.isEmpty {
                 Text(api == nil ? "Forbind din PC for at vælge dens stemmer."
-                     : "Ingen PC-stemmer på dette sprog. Tjek, at FadedAI på PC’en er opdateret.")
+                     : pcVoiceConnectionFailed ? "Kunne ikke hente stemmer fra PC’en. Tjek forbindelsen og tryk Opdatér stemmelisten."
+                     : "PC’en har ingen klar stemme på dette sprog. Den danske stemme kræver en installeret stemmeafspiller og stemmepakke på PC’en.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             ForEach(choices) { voice in

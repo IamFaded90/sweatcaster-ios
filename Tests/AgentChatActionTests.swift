@@ -5,6 +5,30 @@ import XCTest
 @testable import SweatCaster
 
 final class AgentChatActionTests: XCTestCase {
+    @MainActor func testNaturalTodayOverviewRequestsAndUnrelatedQuestions() {
+        let requests = ["Kan du give mig et overblik over min dag?", "Hvad skal jeg huske i dag?",
+                        "Hvilke planer har jeg i dag?", "Har jeg noget jeg skal i dag?",
+                        "Hvad har jeg på programmet i dag?", "Lav en dagsplan"]
+        for text in requests {
+            guard case .action(.today)? = AgentChatIntent.match(text) else {
+                XCTFail("Dagens overblik blev ikke åbnet: \(text)")
+                continue
+            }
+        }
+        for text in ["Hvordan får jeg et overblik over min dag?", "Hvad sker der i verden i dag?",
+                     "Hvad skal jeg huske i morgen?", "Hvad er klokken i dag?"] {
+            XCTAssertNil(AgentChatIntent.match(text), text)
+        }
+    }
+
+    func testGmailRequestsDistinguishLatestFromUnreadListAndGuides() {
+        XCTAssertTrue(AgentGmailCheck.matchesLatest("Kan du se min seneste e-mail?"))
+        XCTAssertFalse(AgentGmailCheck.isUnreadList("Kan du se min seneste e-mail?"))
+        XCTAssertTrue(AgentGmailCheck.matchesLatest("Har jeg nye mails?"))
+        XCTAssertTrue(AgentGmailCheck.isUnreadList("Vis mine ulæste e-mails"))
+        XCTAssertFalse(AgentGmailCheck.matchesLatest("Hvordan kan jeg se min seneste mail?"))
+        XCTAssertFalse(AgentGmailCheck.matchesLatest("Hvad er klokken?"))
+    }
     @MainActor func testComposioBillingFailureHasAnActionableDanishExplanation() {
         let error = ComposioCloud.failure(["data": ["status_code": 402, "message": "Insufficient Balance"]])
         XCTAssertTrue(error.localizedDescription.contains("saldo"))
@@ -60,6 +84,10 @@ final class AgentChatActionTests: XCTestCase {
         guard case .action(.gmailReply)? = AgentChatIntent.match("Svar tandlægen, at fredag passer.") else {
             return XCTFail("The reply should open Gmail review")
         }
+        guard case .action(.gmailReply)? = AgentChatIntent.match("Kan du svare tandlægen at fredag passer?") else {
+            return XCTFail("A polite request should open Gmail review")
+        }
+        XCTAssertFalse(AgentGmailReply.matches("Svar tandlægen at   "))
         guard case .action(.gmailReply)? = AgentChatIntent.match("Find lige den mail fra ham med bilen og sig, at torsdag er fin") else {
             return XCTFail("Natural phrasing should open Gmail review")
         }

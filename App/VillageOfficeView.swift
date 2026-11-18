@@ -113,13 +113,6 @@ struct VillageMemorial: Codable, Identifiable, Equatable {
                         .frame(maxWidth: .infinity, minHeight: 44)
                         .fadedGlassSurface(radius: FadedRadius.medium)
                 }
-                NavigationLink {
-                    VillageLifeGarden()
-                } label: {
-                    Label("Livshaven", systemImage: "square.grid.3x3")
-                        .frame(maxWidth: .infinity, minHeight: 44)
-                        .fadedGlassSurface(radius: FadedRadius.medium)
-                }
                 Text("Personlige computere")
                     .font(.headline)
                     .accessibilityAddTraits(.isHeader)

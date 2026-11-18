@@ -17,36 +17,6 @@ final class VillageDesignTests: XCTestCase {
         XCTAssertTrue(detector.ended(at: 8.31, level: -75))
     }
 
-    func testLifeGardenStillLifeAndOscillator() {
-        func pattern(_ cells: [Int]) -> UInt64 {
-            cells.reduce(0) { $0 | (UInt64(1) << $1) }
-        }
-        let square = pattern([9, 10, 17, 18])
-        var board = VillageLifeBoard(bits: square)
-        board.advance()
-        XCTAssertEqual(board.bits, square)
-        let horizontal = pattern([25, 26, 27])
-        board = VillageLifeBoard(bits: horizontal)
-        board.advance()
-        XCTAssertEqual(board.bits, pattern([18, 26, 34]))
-        board.advance()
-        XCTAssertEqual(board.bits, horizontal)
-        XCTAssertEqual(board.generation, 2)
-    }
-
-    func testLifeGardenDoesNotWrapAcrossEdgesAndRestoresBoard() {
-        var board = VillageLifeBoard.empty
-        for index in [0, 7, 8] { board.toggle(index) }
-        board.advance()
-        XCTAssertFalse(board.contains(15))
-        XCTAssertEqual(board.population, 0)
-        board = .glider
-        for _ in 0..<4 { board.advance() }
-        XCTAssertEqual(board.bits, VillageLifeBoard.glider.bits << 9)
-        XCTAssertEqual(VillageLifeBoard(rawValue: board.rawValue), board)
-        XCTAssertNil(VillageLifeBoard(rawValue: "0:-1"))
-    }
-
     func testOldOfficeFurnitureDecodesAndKeepsNewDimensionsWhenMoved() throws {
         let id = UUID()
         let json = """

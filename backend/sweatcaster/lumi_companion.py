@@ -25,6 +25,7 @@ from sweatcaster.dto import ApiError
 LUMI_ID = "ecba4ff7-69b2-5a9c-a028-d93ef6ec7983"
 TEXT_MODEL = "hf.co/bartowski/Lumimaid-v0.2-12B-GGUF:Q4_K_M"
 IMAGE_MODEL = "RealVisXL_V5.0_fp16.safetensors"
+PONY_MODEL = "CyberRealisticPony_V18.0_F16.safetensors"
 VIDEO_MODEL = "wan2.1_t2v_1.3B_fp16.safetensors"
 VIDEO_CLIP = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 VIDEO_VAE = "wan_2.1_vae.safetensors"
@@ -214,9 +215,21 @@ def _remove_private_image_files(files):
             pass
 
 
+def _flux_available(client, adult=False):
+    from sweatcaster import lumi_flux
+    return lumi_flux.availability(client, COMFY, PONY_MODEL)["flux2Adult" if adult else "flux2"]
+
+
+def _pony_available(client):
+    from sweatcaster import lumi_flux
+    return lumi_flux.availability(client, COMFY, PONY_MODEL)["pony"]
+
+
 def image(prompt: str, *, reference=None, client: requests.Session | None = None, timeout: float = 300,
-          private=False, mask=None, strength=None, seed=None, negative=None) -> bytes:
+          private=False, mask=None, strength=None, seed=None, negative=None, engine=None) -> bytes:
     prompt = _message(prompt, limit=1000)
+    if engine not in (None, "realvis", "pony", "flux2", "flux2-adult"):
+        raise ApiError(422, "INVALID_INPUT", "Vælg en af PC'ens billedmodeller.")
     reference = normalize_reference(reference) if reference is not None else None
     mask = _edit_mask(mask, reference) if mask is not None else None
     if strength is not None and (type(strength) not in (int, float) or not 0.1 <= strength <= 1):
@@ -231,15 +244,17 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
     finished = False
     temporary_files = []
     try:
-        info = client.get(COMFY + "/object_info/CheckpointLoaderSimple", timeout=(3, 15), allow_redirects=False)
-        info.raise_for_status()
-        choices = info.json()["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
-        if IMAGE_MODEL not in choices:
-            raise ApiError(503, "NOT_READY", "Lumis billedmodel mangler i ComfyUI på PC'en.")
+        if engine not in ("flux2", "flux2-adult"):
+            info = client.get(COMFY + "/object_info/CheckpointLoaderSimple", timeout=(3, 15), allow_redirects=False)
+            info.raise_for_status()
+            choices = info.json()["CheckpointLoaderSimple"]["input"]["required"]["ckpt_name"][0]
+            selected_model = {"pony": PONY_MODEL}.get(engine, IMAGE_MODEL)
+            if selected_model not in choices:
+                raise ApiError(503, "NOT_READY", "Lumis billedmodel mangler i ComfyUI på PC'en.")
         graph = {
-            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": IMAGE_MODEL}},
+            "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": {"pony": PONY_MODEL}.get(engine, IMAGE_MODEL)}},
             "2": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
-            "3": {"class_type": "CLIPTextEncode", "inputs": {"text": negative or "low quality, blurry, distorted", "clip": ["1", 1]}},
+            "3": {"class_type": "CLIPTextEncode", "inputs": {"text": negative or "low quality, blurry, distorted, deformed anatomy, extra limbs, monster", "clip": ["1", 1]}},
             "4": {"class_type": "EmptyLatentImage", "inputs": {"width": 768, "height": 768, "batch_size": 1}},
             "5": {"class_type": "KSampler", "inputs": {"seed": seed if seed is not None else int(time.time_ns() % (2**53)),
                   "steps": 25, "cfg": 5.5, "sampler_name": "euler", "scheduler": "normal", "denoise": 1,
@@ -260,11 +275,28 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
                 temporary_files.append(name)
                 _temp_upload(client, name, mask)
                 graph["9"] = {"class_type": "LoadImageMask", "inputs": {"image": name + " [temp]", "channel": "red"}}
-                graph["10"] = {"class_type": "SetLatentNoiseMask", "inputs": {"samples": ["4", 0], "mask": ["9", 0]}}
-                graph["5"]["inputs"]["latent_image"] = ["10", 0]
+                # Prepare the marked region as an inpaint latent instead of encoding
+                # the original clothes into the region that should be repainted.
+                graph["4"] = {"class_type": "VAEEncodeForInpaint", "inputs": {
+                    "pixels": ["8", 0], "vae": ["1", 2], "mask": ["9", 0], "grow_mask_by": 8}}
                 graph["11"] = {"class_type": "ImageCompositeMasked", "inputs": {
                     "destination": ["8", 0], "source": ["6", 0], "mask": ["9", 0], "x": 0, "y": 0, "resize_source": True}}
                 graph["7"]["inputs"]["images"] = ["11", 0]
+        if engine in ("flux2", "flux2-adult"):
+            from sweatcaster import lumi_flux
+            # Validate before submission; never fall back silently to a different model.
+            if not _flux_available(client, adult=engine == "flux2-adult"):
+                raise ApiError(503, "NOT_READY", "FLUX 2 mangler på PC’en. Vælg RealVisXL eller hent modellen.")
+            width, height = 768, 768
+            reference_name = temporary_files[0] if reference is not None else None
+            mask_name = temporary_files[1] if mask is not None else None
+            if reference is not None:
+                from PIL import Image
+                with Image.open(BytesIO(reference)) as source:
+                    width = max(16, source.width - source.width % 16)
+                    height = max(16, source.height - source.height % 16)
+            graph = lumi_flux.graph(prompt, seed if seed is not None else int(time.time_ns() % (2**53)),
+                                    width, height, reference_name, mask_name, adult=engine == "flux2-adult")
         queued = client.post(COMFY + "/prompt", json={"prompt": graph}, timeout=(3, 20), allow_redirects=False)
         queued.raise_for_status()
         prompt_id = str(queued.json()["prompt_id"])
@@ -466,8 +498,19 @@ def register_lumi(app: FastAPI, settings, authorize) -> None:
     def private_image_route(bot_id: str, body: dict = Body(...)):
         _bot(bot_id)
         data = image(body.get("prompt"), reference=body.get("reference"), private=True, mask=body.get("mask"),
-                     seed=body.get("seed"), strength=body.get("strength"), negative=body.get("negative"))
+                     seed=body.get("seed"), strength=body.get("strength"), negative=body.get("negative"),
+                     engine=body.get("engine"))
         return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+    @router.post("/private-image-models")
+    def private_image_models(bot_id: str):
+        _bot(bot_id)
+        client = _client()
+        try:
+            from sweatcaster import lumi_flux
+            return lumi_flux.availability(client, COMFY, PONY_MODEL)
+        finally:
+            client.close()
 
     @router.post("/video")
     def video_route(bot_id: str, body: dict = Body(...)):

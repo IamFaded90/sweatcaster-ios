@@ -200,6 +200,20 @@ enum StudioImageRoute: String, CaseIterable, Identifiable {
     }
 }
 
+enum StudioPCImageModel: String, CaseIterable, Identifiable {
+    case realvis, pony, flux2, flux2Adult = "flux2-adult"
+    var id: Self { self }
+    var isFlux: Bool { self == .flux2 || self == .flux2Adult }
+    var title: String {
+        switch self {
+        case .realvis: "RealVisXL"
+        case .pony: "CyberRealistic Pony · voksen"
+        case .flux2: "FLUX 2 · redigering"
+        case .flux2Adult: "FLUX 2 · voksen"
+        }
+    }
+}
+
 enum StudioReferenceMode: String, CaseIterable, Identifiable {
     case preserve = "Behold motiv"
     case edit = "Redigér"
@@ -297,6 +311,7 @@ struct StudioReferenceMask {
 struct StudioImageRequest {
     let model: String
     let route: StudioImageRoute
+    let pcModel: StudioPCImageModel
     let prompt: String
     let negative: String
     let lora: String
@@ -318,6 +333,7 @@ struct StudioImageRequest {
 
 struct StudioSessionPreferences {
     var imageRoute = StudioImageRoute.phone
+    var pcImageModel = StudioPCImageModel.realvis
     var imageModel = "sd_v1.5_f16.ckpt"
     var referenceMode = StudioReferenceMode.preserve
     var lora = ""

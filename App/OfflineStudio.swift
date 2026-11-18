@@ -27,6 +27,10 @@ struct OfflineStudio: View {
     @State var importChatText = false
     @State var privateDeadline: ContinuousClock.Instant?
     @State var sessionPreferences = StudioSessionPreferences()
+    @State var pcFluxAvailable: Bool?
+    @State var pcFluxAdultAvailable: Bool?
+    @State var pcPonyAvailable: Bool?
+    @State var pcFluxRefresh = 0
     @State var privateModelDownload: Task<Void, Never>?
     @State var privateModelProgress = 0.0
     @State var privateModelProblem: String?
@@ -167,13 +171,15 @@ struct OfflineStudio: View {
                 imagePromptFocused = false
                 showReferenceMaskEditor = true
             }.frame(minHeight: 44)
-            Picker("Hvor meget må billedet ændres?", selection: $sessionPreferences.referenceMode) {
-                ForEach(StudioReferenceMode.allCases) { mode in
-                    Text(mode.rawValue).tag(mode)
+            if sessionPreferences.imageRoute != .pc || !sessionPreferences.pcImageModel.isFlux {
+                Picker("Hvor meget må billedet ændres?", selection: $sessionPreferences.referenceMode) {
+                    ForEach(StudioReferenceMode.allCases) { mode in
+                        Text(mode.rawValue).tag(mode)
+                    }
                 }
+                .pickerStyle(.menu)
             }
-            .pickerStyle(.menu)
-            FadedDetailText("Skriv ændringen, fx “Fjern min T-shirt”. Du kan også prøve “same person, bare chest”.")
+            FadedDetailText("Markér hele området, der skal ændres, for eksempel hele trøjen. Beskriv derefter resultatet, fx “samme person med bar overkrop” eller “same person, bare chest”.")
         }
     }
 

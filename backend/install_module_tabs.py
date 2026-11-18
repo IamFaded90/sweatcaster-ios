@@ -4,6 +4,26 @@ import argparse
 from pathlib import Path
 
 
+def collect_modules(source: Path) -> dict[str, str]:
+    modules = {}
+    for name in (source.name, "lumi_companion.py", "lumi_flux.py", "code_batch.py", "crew_proposals.py", "repository_library.py", "agent_workflows.py",
+                 "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py", "bot_task_models.py",
+                 "emby_library.py", "emby_settings.py", "composio_library.py", "composio_settings.py", "composio_gmail.py",
+                 "agentmail_inboxes.py", "addons.py", "github_addons.py", "grok_templates.py", "mail_appointments.py",
+                 "microsoft_voice.py", "roest_worker.py", "kokoro_voice.py", "pc_metrics.py", "video_review.py",
+                 "studio_video.py", "studio_video_workflows.py", "studio_meshes.py", "cast_relay.py",
+                 "searxng_search.py", "web_research.py", "google_desktop.py", "youtube_connection.py", "google_drive.py"):
+        path = source.parent / name
+        module = path.read_text(encoding="utf-8")
+        compile(module, str(path), "exec")
+        modules[name] = module
+    generator = source.parent.parent / "generate_studio_3d.py"
+    module = generator.read_text(encoding="utf-8")
+    compile(module, str(generator), "exec")
+    modules[generator.name] = module
+    return modules
+
+
 def install(root: Path) -> None:
     package = root / "sweatcaster"
     source = Path(__file__).resolve().parent / "sweatcaster" / "module_tabs.py"
@@ -139,22 +159,7 @@ def install(root: Path) -> None:
         updated = current.replace(anchor, unavailable_job + anchor)
         compile(updated, str(cleanup), "exec")
         staged[cleanup] = (original, updated)
-    modules = {}
-    for name in (source.name, "lumi_companion.py", "code_batch.py", "crew_proposals.py", "repository_library.py", "agent_workflows.py",
-                 "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py", "bot_task_models.py",
-                 "emby_library.py", "emby_settings.py", "composio_library.py", "composio_settings.py", "composio_gmail.py",
-                 "agentmail_inboxes.py", "addons.py", "github_addons.py", "grok_templates.py", "mail_appointments.py",
-                 "microsoft_voice.py", "kokoro_voice.py", "pc_metrics.py", "video_review.py",
-                 "studio_video.py", "studio_video_workflows.py", "studio_meshes.py", "cast_relay.py",
-                 "searxng_search.py", "web_research.py", "google_desktop.py", "youtube_connection.py", "google_drive.py"):
-        path = source.parent / name
-        module = path.read_text(encoding="utf-8")
-        compile(module, str(path), "exec")
-        modules[name] = module
-    generator = source.parent.parent / "generate_studio_3d.py"
-    module = generator.read_text(encoding="utf-8")
-    compile(module, str(generator), "exec")
-    modules[generator.name] = module
+    modules = collect_modules(source)
     for path, (original, _) in staged.items():
         backup = path.with_suffix(".py.before-module-tabs")
         if not backup.exists():

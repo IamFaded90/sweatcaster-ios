@@ -201,13 +201,17 @@ struct VeoCloudJob: Codable, Identifiable {
             let names = rows + fallback
             models = Array(Set(names.compactMap { ($0["name"] ?? $0["id"]) as? String }
                 .map { $0.hasPrefix("models/") ? String($0.dropFirst(7)) : $0 }.filter { $0.hasPrefix("veo-") })).sorted()
-            if let raw = result["raw"] as? [String: Any], raw["nextPageToken"] is String {
+            if models.isEmpty || (result["raw"] as? [String: Any])?["nextPageToken"] is String {
                 models = try await Self.allModels(client, discovery: search)
             }
             if !models.contains(model) { model = models.first(where: { $0.contains("fast") }) ?? models.first ?? "" }
-            notice = models.isEmpty ? "Composio svarer, men din Google-konto viser ingen Veo-modeller. Tjek Veo-adgang og fakturering hos Google." : nil
+            notice = models.isEmpty ? "Google viser ingen Veo-modeller for denne forbindelse lige nu. Prøv Opdatér modeller igen senere. Du kan også lave video på PC’en i Video Studio." : nil
         } catch {
-            if !Task.isCancelled { notice = error.localizedDescription }
+            if !Task.isCancelled {
+                models = []
+                model = ""
+                notice = "Kunne ikke hente Veo-modeller. \(error.localizedDescription) Prøv Opdatér modeller igen."
+            }
         }
     }
 

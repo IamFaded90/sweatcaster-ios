@@ -200,7 +200,8 @@ struct VillageCharacterMotion: View {
     @ViewBuilder private var roomFigures: some View {
         if !residents.isEmpty {
             GeometryReader { canvas in
-                let size = min(54, canvas.size.width * 0.15, canvas.size.height * 0.24)
+                // The previous 54 pt cap made residents nearly invisible against a full room illustration.
+                let size = min(96, canvas.size.width * 0.24, canvas.size.height * 0.48)
                 ForEach(Array(residents.prefix(Self.spots.count).enumerated()), id: \.element.id) { index, bot in
                     let spot = Self.spots[index]
                     VillageBotSprite(bot: bot, size: size, animateWalk: animateResidents)

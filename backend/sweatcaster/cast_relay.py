@@ -79,11 +79,16 @@ def open_media(url, method, byte_range, referer):
         connection = cls(parsed.hostname, parsed.port, timeout=10, **options)
         # Use the checked socket address while retaining the original Host and TLS identity.
         connection._create_connection = connect_public
-        headers = {"Accept": "*/*", "Accept-Encoding": "identity", "User-Agent": "FadedAI-Cast/1"}
+        # Media hosts commonly validate browser headers even when Chromecast is
+        # fetching the stream from the paired PC. Do not forward phone cookies or
+        # credentials; this relay serves public sources only.
+        headers = {"Accept": "*/*", "Accept-Encoding": "identity", "User-Agent": "Mozilla/5.0"}
         if byte_range:
             headers["Range"] = byte_range
         if referer:
             headers["Referer"] = referer
+            origin = urlsplit(referer)
+            headers["Origin"] = f"{origin.scheme}://{origin.netloc}"
         path = parsed.path or "/"
         if parsed.query:
             path += "?" + parsed.query

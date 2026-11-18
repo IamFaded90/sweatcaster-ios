@@ -197,3 +197,50 @@ def test_reference_reaches_comfy_temp_storage_and_is_encoded_into_latent():
             return Reply({})
 
     assert lumi_companion.image("Et fyrtårn", reference=base64.b64encode(jpeg.getvalue()).decode(), client=Comfy()) == png
+
+
+def test_masked_reference_uses_inpaint_and_composites_over_original():
+    photo = BytesIO()
+    Image.new("RGB", (128, 96), "teal").save(photo, "PNG")
+    mask = BytesIO()
+    Image.new("L", (128, 96), 255).save(mask, "PNG")
+
+    class Reply:
+        content = photo.getvalue()
+
+        def __init__(self, data):
+            self.data = data
+
+        def json(self):
+            return self.data
+
+        def raise_for_status(self):
+            pass
+
+    class Comfy:
+        graph = None
+
+        def post(self, url, *, data=None, files=None, json=None, **kwargs):
+            if url.endswith("/upload/image"):
+                return Reply({"type": "temp", "subfolder": "", "name": files["image"][0]})
+            if url.endswith("/prompt"):
+                self.graph = json["prompt"]
+                return Reply({"prompt_id": "job"})
+            return Reply({})
+
+        def get(self, url, **kwargs):
+            if url.endswith("/CheckpointLoaderSimple"):
+                return Reply({"CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [[lumi_companion.IMAGE_MODEL]]}}}})
+            if url.endswith("/history/job"):
+                return Reply({"job": {"outputs": {"7": {"images": [{"filename": "generated.png", "type": "temp"}]}}}})
+            return Reply({})
+
+    comfy = Comfy()
+    lumi_companion.image("bare chest", reference=base64.b64encode(photo.getvalue()).decode(),
+                         mask=base64.b64encode(mask.getvalue()).decode(), client=comfy)
+    assert comfy.graph["4"]["class_type"] == "VAEEncodeForInpaint"
+    assert comfy.graph["4"]["inputs"]["mask"] == ["9", 0]
+    assert comfy.graph["5"]["inputs"]["latent_image"] == ["4", 0]
+    assert comfy.graph["11"]["inputs"]["destination"] == ["8", 0]
+    assert comfy.graph["11"]["inputs"]["mask"] == ["9", 0]
+    assert comfy.graph["7"]["inputs"]["images"] == ["11", 0]

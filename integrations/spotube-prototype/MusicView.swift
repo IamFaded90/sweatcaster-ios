@@ -23,7 +23,7 @@ import SwiftUI
                         VStack(alignment: .leading, spacing: 10) {
                             Label("Din musik. Din kø.", systemImage: "music.note.list").font(.title2.bold())
                             FadedDetailText("Afspil her, kig til landsbyen, og tag musikken med på låseskærmen.")
-                            FadedDetailText("PC’en finder musik fra YouTube. Lyd og musiktekster sendes aldrig til AI.")
+                            FadedDetailText("Find musik direkte på iPhone. Du behøver ikke have PC’en tændt.")
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if playback.queue.current != nil { playerCard }
@@ -44,10 +44,6 @@ import SwiftUI
             .navigationTitle("Musik")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("Tilbage", systemImage: "chevron.left", action: onBack) }
-            }
-            .onAppear { playback.configure(api) }
-            .onChange(of: api?.queueTargetID) {
-                searchTask?.cancel(); searching = false; results = []; playback.configure(api)
             }
             .onDisappear { searchTask?.cancel(); searching = false }
             .alert("Gem kø som playliste", isPresented: $namingPlaylist) {
@@ -107,8 +103,8 @@ import SwiftUI
                     TextField("Søg efter sang eller kunstner", text: $query)
                         .textFieldStyle(.roundedBorder).submitLabel(.search).onSubmit(search)
                     FadedPrimaryButton(searching ? "Søger…" : "Find musik", icon: "magnifyingglass", action: search)
-                        .disabled(searching || query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || api == nil)
-                    if api == nil { FadedDetailText("Forbind din PC under Hjem for at søge og finde nye lydkilder.") }
+                        .disabled(searching || query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !NativeMusicCatalog.shared.available)
+                    if !NativeMusicCatalog.shared.available { FadedDetailText("Musikkilden er ikke installeret på denne iPhone.") }
                 }
             }
             if !results.isEmpty {
@@ -190,18 +186,17 @@ import SwiftUI
 
     private func search() {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let api, !text.isEmpty, text.count <= 160, !searching else { return }
+        guard !text.isEmpty, text.count <= 160, !searching else { return }
         searching = true; notice = nil; searchTask?.cancel()
         searchTask = Task {
             defer { searching = false }
             do {
-                struct Results: Decodable { let tracks: [MusicTrack] }
-                let reply: Results = try await api.moduleJSON("music/search", upload: JSONEncoder().encode(["query": text]), timeout: 60)
+                let reply = try await NativeMusicCatalog.shared.search(text)
                 try Task.checkCancellation()
-                results = reply.tracks
+                results = reply
                 if results.isEmpty { notice = "Ingen musik fundet. Prøv sangens navn eller kunstneren." }
             } catch {
-                if !Task.isCancelled { notice = "Kunne ikke søge på PC’en. Tjek forbindelsen og prøv igen." }
+                if !Task.isCancelled { notice = (error as? MusicCatalogError)?.errorDescription ?? "Kunne ikke søge. Tjek internetforbindelsen og prøv igen." }
             }
         }
     }

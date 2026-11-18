@@ -32,18 +32,25 @@ extension LiveAPI {
     }
 
     func privateStudioImage(prompt: String, negative: String, reference: Data?, mask: Data?,
-                            strength: Float?, seed: UInt32) async throws -> Data {
+                            strength: Float?, seed: UInt32, engine: String? = nil) async throws -> Data {
         struct Edit: Encodable {
             let prompt: String, negative: String
             let reference: Data?, mask: Data?, strength: Float?
             let seed: UInt32
+            let engine: String?
         }
         let body = try JSONEncoder().encode(Edit(prompt: prompt, negative: negative, reference: reference,
-                                                  mask: mask, strength: strength, seed: seed))
+                                                  mask: mask, strength: strength, seed: seed, engine: engine))
         let (data, response) = try await lumiData("private-image", body: body, timeout: 330)
         try checked(response, expected: 200, data: data)
         guard data.count <= 15_000_000, data.starts(with: [0x89, 0x50, 0x4e, 0x47]) else { throw APIError.malformed }
         return data
+    }
+
+    func privateStudioFluxAvailable() async throws -> (Bool, Bool, Bool) {
+        struct Models: Decodable { let flux2: Bool; let flux2Adult: Bool?; let pony: Bool? }
+        let result: Models = try await lumiRequest("private-image-models", body: Data("{}".utf8), timeout: 15)
+        return (result.flux2, result.flux2Adult ?? false, result.pony ?? false)
     }
 
     func lumiStartVideo(prompt: String) async throws -> LumiVideoJob {
@@ -80,7 +87,7 @@ extension LiveAPI {
 
     private func lumiData(_ action: String, body: Data,
                           timeout: TimeInterval) async throws -> (Data, URLResponse) {
-        guard ["chat", "scene-chat", "image", "private-image", "video"].contains(action) else { throw APIError.input }
+        guard ["chat", "scene-chat", "image", "private-image", "private-image-models", "video"].contains(action) else { throw APIError.input }
         let url = try lumiURL(action)
         var endpoint = request(url, method: "POST")
         endpoint.setValue("application/json", forHTTPHeaderField: "Content-Type")

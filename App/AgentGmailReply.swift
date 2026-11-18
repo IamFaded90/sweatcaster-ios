@@ -27,15 +27,16 @@ import SwiftUI
 
         static func parse(_ prompt: String) -> Self? {
             let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-            let reply = #"(?i)^svar\s+(?:på\s+(?:mailen|e-mailen)\s+fra\s+|til\s+)?([^,\n]{1,100}?)(?:\s*,\s*|\s+)(?:at\s+)([\s\S]+)$"#
+            let reply = #"(?i)^(?:(?:kan|vil)\s+du\s+)?svar(?:e)?\s+(?:på\s+(?:mail(?:en)?|e-mail(?:en)?)\s+fra\s+|til\s+)?([^,\n]{1,100}?)(?:\s*,\s*|\s+)(?:at\s+)([\s\S]+)$"#
             if let (contact, body) = capture(reply, in: text) {
                 let lower = contact.lowercased()
-                guard contact.split(whereSeparator: \.isWhitespace).count <= 7,
+                guard !body.isEmpty, contact.split(whereSeparator: \.isWhitespace).count <= 7,
                       !["på ", "kort ", "kun ", "med "].contains(where: { lower.hasPrefix($0) }) else { return nil }
                 return replyDraft(contact, body)
             }
             let findAndReply = #"(?i)^find\s+(?:lige\s+)?(?:den\s+)?(?:mail|mailen|e-mailen)\s+fra\s+([^,\n]{1,100}?)\s+og\s+(?:sig|skriv|svar)\s*,?\s+at\s+([\s\S]+)$"#
             if let (contact, body) = capture(findAndReply, in: text) {
+                guard !body.isEmpty else { return nil }
                 return replyDraft(contact, body)
             }
             let booking = #"(?i)^(?:få|book|bestil|find)\s+(?:mig\s+)?(?:en\s+)?tid\s+(?:på|hos)\s+(?:et\s+|mit\s+)?(værksted(?:et)?)(?:\s+([^\n]+))?[.!?]?$"#
@@ -245,6 +246,14 @@ import SwiftUI
                     .disabled(loading)
             }
             if messages.count > 1 { Text("Vælg den mail, du vil svare på.").font(.subheadline) }
+            if !draft.isEmpty {
+                DisclosureGroup("Se og ret det foreslåede svar") {
+                    TextField("Dit svar", text: $draft, axis: .vertical)
+                        .lineLimit(3...9)
+                        .textFieldStyle(.roundedBorder)
+                        .focused($editing)
+                }
+            }
             ForEach(messages) { item in
                 Button { Task { await select(item) } } label: {
                     VStack(alignment: .leading, spacing: 3) {
@@ -304,7 +313,7 @@ import SwiftUI
         defer { loading = false }
         do {
             let response: BotMailMessages = try await api.moduleJSON("composio/gmail/messages", timeout: 75, query: [
-                .init(name: "q", value: "in:inbox newer_than:180d \(terms.prefix(130))")
+                .init(name: "q", value: "in:inbox \(terms.prefix(130))")
             ])
             try Task.checkCancellation()
             var seen = Set<String>()
