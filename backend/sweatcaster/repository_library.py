@@ -62,7 +62,7 @@ class RepositoryLibrary:
             env["GIT_INDEX_FILE"] = str(index)
         try:
             result = subprocess.run(
-                ["git", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+                ["git", "-c", "core.longpaths=true", "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
                  "-c", "http.followRedirects=false", *args], cwd=cwd, env=env,
                 input=stdin, capture_output=True, check=True, timeout=timeout,
             )

@@ -436,6 +436,7 @@ extension Home {
     var homePolling: some View {
         homeSheets
             .task { await JobNotifications.shared.configure() }
+            .traderaAlerts(using: phase == .active && model.connected && !privateStudioPresented && !showingBackupTools ? studioAPI : nil)
             .task(id: phase == .active && !privateStudioPresented && !showingBackupTools && !model.needsPairing) {
                 guard phase == .active, !privateStudioPresented, !showingBackupTools, !model.needsPairing else { return }
                 await supervisePC()

@@ -136,6 +136,62 @@ def desktop_setup(runtime):
         return "offline"
 
 
+def _image_engine_log_status():
+    log = Path(os.environ.get("FADEDAI_COMFY_ENGINE_LOG", "F:/FadedAI/ComfyUI/fadedai-image-engine.log"))
+    try:
+        if not log.is_absolute() or not log.is_file():
+            return None
+        with log.open("rb") as source:
+            info = os.fstat(source.fileno())
+            if time.time() - info.st_mtime > 120:
+                return None
+            source.seek(max(0, info.st_size - 16_384))
+            tail = source.read(16_384).lower()
+    except OSError:
+        return None
+
+    # These are explicit errors from ComfyUI or PyTorch. A failed HTTP
+    # request alone is not enough to diagnose the graphics card.
+    if any(marker in tail for marker in (
+        b"cuda error:", b"cuda out of memory", b"cuda_error_unknown", b"torch.acceleratorerror",
+    )):
+        return "gpuError"
+    if b"starting server" not in tail and any(marker in tail for marker in (
+        b"setup plugin alembic.", b"checkpoint files will always be loaded safely",
+        b"using pytorch attention",
+    )):
+        return "starting"
+    return None
+
+
+def image_engine_status():
+    # Unlike the model catalog, ComfyUI's system_stats checks the active
+    # device. The catalog can still respond after CUDA has failed.
+    connection = http.client.HTTPConnection("127.0.0.1", 8188, timeout=3)
+    failed = "offline"
+    try:
+        connection.request("GET", "/system_stats")
+        with connection.getresponse() as response:
+            failed = "unresponsive"
+            if response.status == 200:
+                data = response.read(65_537)
+                if len(data) <= 65_536:
+                    version = json.loads(data)["system"]["comfyui_version"]
+                    if isinstance(version, str) and version:
+                        return "ready"
+    except (TimeoutError, http.client.HTTPException):
+        failed = "unresponsive"
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        pass
+    finally:
+        connection.close()
+
+    logged = _image_engine_log_status()
+    if logged == "gpuError" or (logged == "starting" and failed == "offline"):
+        return logged
+    return failed
+
+
 def image_setup(supported):
     from sweatcaster.lumi_companion import IMAGE_MODEL
 

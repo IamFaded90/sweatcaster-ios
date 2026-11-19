@@ -41,7 +41,11 @@ enum VillageProductionArt {
         return image
     }
 
-    static func hasCharacter(_ name: String) -> Bool { atlas[name] != nil }
+    private static func walkAtlasName(_ character: String) -> String {
+        character == VillageCharacterCatalog.lumi.id ? "saga" : character
+    }
+
+    static func hasCharacter(_ name: String) -> Bool { atlas[walkAtlasName(name)] != nil }
 
     static func step(at date: Date?) -> Int {
         guard let date else { return 0 }
@@ -49,7 +53,8 @@ enum VillageProductionArt {
     }
 
     static func frame(character: String, direction: Int, step: Int) -> UIImage? {
-        guard let sheet = atlas[character], !sheet.rows.isEmpty, sheet.maxHeight > 0 else { return nil }
+        let atlasName = walkAtlasName(character)
+        guard let sheet = atlas[atlasName], !sheet.rows.isEmpty, sheet.maxHeight > 0 else { return nil }
         let row = Int((Double((direction % 16 + 16) % 16) / 16 * Double(sheet.rows.count)).rounded()) % sheet.rows.count
         let frames = sheet.rows[row]
         guard !frames.isEmpty else { return nil }
@@ -57,8 +62,9 @@ enum VillageProductionArt {
         let key = "\(character):\(row):\(column)" as NSString
         if let cached = frameCache.object(forKey: key) { return cached }
         let rect = frames[column]
-        guard let source = image("walk-" + character)?.cgImage,
+        guard let source = image("walk-" + atlasName)?.cgImage,
               let crop = source.cropping(to: CGRect(x: rect.x, y: rect.y, width: rect.width, height: rect.height)) else { return nil }
+        let sprite = character == VillageCharacterCatalog.lumi.id ? lumiWalkOutfit(crop) ?? crop : crop
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1
         format.opaque = false
@@ -66,10 +72,32 @@ enum VillageProductionArt {
             let scale = 104.0 / CGFloat(sheet.maxHeight)
             let width = CGFloat(rect.width) * scale
             let height = CGFloat(rect.height) * scale
-            UIImage(cgImage: crop).draw(in: CGRect(x: (128 - width) / 2, y: 114 - height, width: width, height: height))
+            UIImage(cgImage: sprite).draw(in: CGRect(x: (128 - width) / 2, y: 114 - height, width: width, height: height))
         }
         frameCache.setObject(result, forKey: key, cost: 128 * 128 * 4)
         return result
+    }
+
+    private static func lumiWalkOutfit(_ sprite: CGImage) -> CGImage? {
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue | CGImageAlphaInfo.premultipliedLast.rawValue
+        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+              let canvas = CGContext(data: nil, width: sprite.width, height: sprite.height,
+                                     bitsPerComponent: 8, bytesPerRow: sprite.width * 4,
+                                     space: colorSpace, bitmapInfo: bitmapInfo),
+              let pixels = canvas.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+        canvas.draw(sprite, in: CGRect(x: 0, y: 0, width: sprite.width, height: sprite.height))
+        // Change Saga's olive fabric to lilac. Gold hair, skin, and transparent pixels stay intact.
+        for offset in stride(from: 0, to: canvas.bytesPerRow * sprite.height, by: 4) {
+            let red = Int(pixels[offset])
+            let green = Int(pixels[offset + 1])
+            let blue = Int(pixels[offset + 2])
+            let alpha = Int(pixels[offset + 3])
+            guard (24..<145).contains(green), abs(red - green) <= 12, green - blue >= 12 else { continue }
+            pixels[offset] = UInt8(min(alpha, green * 7 / 5 + alpha / 14))
+            pixels[offset + 1] = UInt8(min(alpha, green * 9 / 10))
+            pixels[offset + 2] = UInt8(min(alpha, green * 8 / 5 + alpha / 9))
+        }
+        return canvas.makeImage()
     }
 
     static func room(for character: String) -> String {
@@ -200,13 +228,24 @@ struct VillageCharacterMotion: View {
     @ViewBuilder private var roomFigures: some View {
         if !residents.isEmpty {
             GeometryReader { canvas in
-                // The previous 54 pt cap made residents nearly invisible against a full room illustration.
-                let size = min(96, canvas.size.width * 0.24, canvas.size.height * 0.48)
-                ForEach(Array(residents.prefix(Self.spots.count).enumerated()), id: \.element.id) { index, bot in
-                    let spot = Self.spots[index]
-                    VillageBotSprite(bot: bot, size: size, animateWalk: animateResidents)
-                        .shadow(color: .black.opacity(0.75), radius: 2, x: 1, y: 3)
-                        .position(x: canvas.size.width * spot.x, y: canvas.size.height * spot.y)
+                let visible = residents.prefix(10)
+                let roomy = visible.count <= 3
+                let frontCount = min(5, visible.count)
+                let size = min(144, canvas.size.width * (roomy ? 0.38 : 0.29), canvas.size.height * (roomy ? 0.64 : 0.54))
+                ZStack {
+                    ForEach(Array(visible.enumerated()), id: \.element.id) { index, bot in
+                        let inBack = index >= frontCount
+                        let rowCount = inBack ? visible.count - frontCount : frontCount
+                        let column = inBack ? index - frontCount : index
+                        let inset: CGFloat = roomy ? (rowCount == 2 ? 0.31 : 0.24) : (inBack ? 0.20 : 0.15)
+                        let x = rowCount == 1 ? 0.5 : inset + (1 - 2 * inset) * CGFloat(column) / CGFloat(rowCount - 1)
+                        let figureSize = inBack ? size * 0.70 : size
+                        let feetY = canvas.size.height * (inBack ? 0.61 : 0.88)
+                        VillageBotSprite(bot: bot, size: figureSize, animateWalk: animateResidents)
+                            .shadow(color: .black.opacity(0.8), radius: 3, x: 1, y: 3)
+                            .position(x: canvas.size.width * x, y: feetY - figureSize * (114.0 / 128.0 - 0.5))
+                            .zIndex(inBack ? 0 : 1)
+                    }
                 }
             }
             .allowsHitTesting(false)
@@ -214,11 +253,4 @@ struct VillageCharacterMotion: View {
         }
     }
 
-    // Positions are relative to the room illustration, independent of screen size.
-    private static let spots: [CGPoint] = [
-        .init(x: 0.45, y: 0.79), .init(x: 0.64, y: 0.79), .init(x: 0.25, y: 0.80),
-        .init(x: 0.81, y: 0.80), .init(x: 0.10, y: 0.80), .init(x: 0.53, y: 0.53),
-        .init(x: 0.72, y: 0.54), .init(x: 0.34, y: 0.55), .init(x: 0.88, y: 0.54),
-        .init(x: 0.16, y: 0.55)
-    ]
 }

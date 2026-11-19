@@ -174,7 +174,7 @@ extension OfflineStudio {
             rebuildGalleryCache()
             selectedGalleryImages.remove(file)
             batchImageURLs.removeAll { $0 == file }
-            if imageComparisonSource?.result == file { imageComparisonSource = nil }
+            if imageComparisonSource?.results.remove(file) != nil, imageComparisonSource?.results.isEmpty == true { imageComparisonSource = nil }
             if imageURL == file {
                 imageURL = nil
                 if let first = batchImageURLs.first { selectBatchImage(first) }
@@ -487,6 +487,7 @@ extension OfflineStudio {
         photoAuthentication = nil
         temporaryImagesID = UUID()
         privateImages.removeAll()
+        imageComparisonSource = nil
         batchImageURLs.removeAll { !$0.isFileURL }
         transientDetails.removeAll()
         rebuildGalleryCache()
@@ -506,9 +507,8 @@ extension OfflineStudio {
         imageBenchmark = nil
         tagsDraft = ""
         basePhoto = nil
-        baseImage = nil
+        setReferenceImage(nil)
     }
-
     func storePrivateImage(_ data: Data, for file: URL) throws {
         guard !file.isFileURL, !data.isEmpty, data.count <= 48_000_000 else { throw CocoaError(.fileWriteOutOfSpace) }
         while privateImages.values.reduce(data.count, { $0 + $1.count }) > 48_000_000 || privateImages.count >= 16 {

@@ -213,6 +213,71 @@ struct PCVideoReview: Decodable {
     }
 }
 
+struct VideoQualitySource {
+    let api: LiveAPI
+    let jobID: String
+}
+
+struct VideoQualityResultView: View {
+    let source: VideoQualitySource
+    @State private var receipt: VideoQualityReceipt?
+    @State private var errorMessage: String?
+    @State private var attempt = 0
+    @State private var expanded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let receipt {
+                if receipt.outcome == .unavailable {
+                    FadedDetailText("Der er ingen gemt filkontrol for dette job.")
+                } else {
+                    DisclosureGroup(isExpanded: $expanded) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(Array(receipt.checks.enumerated()), id: \.offset) { _, check in
+                                if let label = check.label {
+                                    LabeledContent(label, value: check.result)
+                                }
+                            }
+                            if let message = receipt.message, !message.isEmpty { FadedDetailText(message) }
+                        }
+                        .font(.callout)
+                    } label: {
+                        switch receipt.outcome {
+                        case .passed: Label("Videofilen er kontrolleret", systemImage: "checkmark.circle")
+                        case .failed: Label("Fejl i videofilen", systemImage: "exclamationmark.circle")
+                        case .partial, .unavailable: Label("Filkontrollen er ufuldstændig", systemImage: "info.circle")
+                        }
+                    }
+                }
+            } else if let errorMessage {
+                FadedDetailText(errorMessage)
+                Button("Hent filkontrollen igen") { attempt += 1 }
+            } else {
+                ProgressView("Henter filkontrol fra PC’en…").font(.callout)
+            }
+        }
+        .task(id: "\(source.api.queueTargetID)/\(source.jobID)/\(attempt)") {
+            receipt = nil
+            errorMessage = nil
+            do {
+                guard validWireID(source.jobID) else { throw APIError.input }
+                let result: VideoQualityReceipt = try await source.api.moduleJSON(
+                    "video-jobs/" + source.jobID + "/quality", timeout: 12)
+                try Task.checkCancellation()
+                receipt = result
+                expanded = result.outcome == .failed || result.outcome == .partial
+            } catch {
+                guard !Task.isCancelled else { return }
+                if case APIError.http(404, _) = error {
+                    errorMessage = "PC’en har ingen filkontrol for dette job."
+                } else {
+                    errorMessage = "Filkontrollen kunne ikke hentes. " + AppErrorPresentation(error).title
+                }
+            }
+        }
+    }
+}
+
 struct Preview: View {
     @Environment(\.dismiss) private var dismiss
     let media: Media
@@ -229,6 +294,7 @@ struct Preview: View {
                 Text(media.demo ? "Testvideo · Demo" : "Din video")
                     .font(.title.bold()).accessibilityAddTraits(.isHeader)
                 Button("Luk") { dismiss() }.frame(minHeight: 48)
+                if let source = media.quality { VideoQualityResultView(source: source) }
                 if invalid {
                     FadedEmptyState(icon: "exclamationmark.circle", title: "Videoen kan ikke afspilles",
                                     detail: "Gå tilbage, og prøv at åbne videoen igen.")

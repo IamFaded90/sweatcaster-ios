@@ -56,6 +56,12 @@ private enum PersonalVaultStorage {
 }
 
 struct PersonalVaultView: View {
+    static func traderaCredentials() throws -> [(id: UUID, title: String, values: [String: String])] {
+        try PersonalVaultStorage.load().compactMap { entry in
+            guard let appID = entry.traderaAppID, !appID.isEmpty, !entry.value.isEmpty else { return nil }
+            return (entry.id, entry.title, ["appID": appID, "appKey": entry.value])
+        }
+    }
     @Environment(\.scenePhase) private var phase
     @Environment(\.openURL) private var openURL
     @State private var entries: [VaultEntry] = []

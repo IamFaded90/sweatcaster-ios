@@ -293,10 +293,14 @@ class InboxService:
         item = self.request(key, "GET", path)
         if not item or item.get("inbox_id") != address or item.get("message_id") != message_id:
             raise ApiError(404, "NOT_FOUND", "Mailen findes ikke i denne postkasse.")
-        return {"text": self.text(item.get("text") or item.get("extracted_text") or item.get("preview"), key, 7_000)}
+        body = item.get("text") or item.get("extracted_text")
+        if not body and isinstance(item.get("html"), str):
+            from sweatcaster.mail_appointments import MailHTML
+            body = "".join(MailHTML(item["html"][:100_000], include_links=True).parts)
+        return {"text": self.text(body or item.get("preview"), key, 7_000)}
 
 
-def register_agentmail(app, settings, authorize):
+def register_agentmail(app, settings, authorize, library=None):
     service = InboxService(settings.output_root / "agentmail.sqlite3")
 
     def paired(request: Request, response: Response):
@@ -334,3 +338,6 @@ def register_agentmail(app, settings, authorize):
         return service.message(bot_id, message_id)
 
     app.include_router(router)
+    if library is not None:
+        from sweatcaster.agent_email import register_agent_email
+        register_agent_email(app, service, library, paired)

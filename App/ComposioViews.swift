@@ -9,6 +9,7 @@ struct ComposioProviders: Decodable {
         let availability: String?
 
         var status: String {
+            if id == "instagram" { return "Forbindes for hver agent" }
             if connected { return availability == nil ? "Forbindelse registreret" : "Klar i FadedAI" }
             switch availability {
             case "composio": return "Forbundet i Composio"
@@ -26,6 +27,7 @@ struct ComposioProviders: Decodable {
             case "notion": "note.text"
             case "github": "chevron.left.forwardslash.chevron.right"
             case "googlephotos": "photo.on.rectangle"
+            case "instagram": "camera"
             case "google_maps": "map"
             case "veo", "youtube", "twitch": "play.rectangle"
             case "discord", "facebook": "bubble.left.and.bubble.right"
@@ -48,6 +50,7 @@ struct ComposioProviders: Decodable {
             case "twitch": "Kanaler og livestreams"
             case "discord": "Servere og kanaler"
             case "facebook": "Sider og opslag"
+            case "instagram": "Billedopslag fra agentens egen konto"
             case "veo": "Videogenerering"
             case "deepseek", "grok": "AI-modeller"
             default: ""
@@ -88,7 +91,15 @@ struct ComposioLogo: View {
     }
 }
 
-struct ComposioLink: Decodable { let url: URL }
+struct ComposioLink: Decodable {
+    let url: URL
+    var loginURL: URL? {
+        guard url.scheme == "https", url.user == nil, url.password == nil, let host = url.host?.lowercased(),
+              ["composio.dev", "composio.com"].contains(where: { host == $0 || host.hasSuffix("." + $0) })
+        else { return nil }
+        return url
+    }
+}
 struct ComposioContext: Decodable { let text: String }
 struct ComposioItems: Decodable {
     struct Item: Decodable, Identifiable { let id, title: String }
@@ -107,6 +118,7 @@ struct ComposioItems: Decodable {
     @State private var query = ""
     @State private var displayedTarget: String?
     @State private var reloadID: UUID?
+    @State private var instagramAgent: VillageBot?
 
     var body: some View {
         ScrollView {
@@ -150,6 +162,7 @@ struct ComposioItems: Decodable {
         .navigationTitle("Composio")
         .searchable(text: $query, prompt: "Find en forbindelse")
         .refreshable { await reload(force: true) }
+        .sheet(item: $instagramAgent) { agent in AgentPhoneChat(bot: agent, api: api) }
         .task(id: "\(api?.queueTargetID ?? ""):\(phase == .active)") {
             if phase == .active { await reload() }
         }
@@ -169,7 +182,19 @@ struct ComposioItems: Decodable {
                             .foregroundStyle(provider.connected ? FadedBrand.pc : Color.secondary)
                     }
                 }
-                if provider.connected {
+                if provider.id == "instagram" {
+                    let agents = VillageBot.list(from: MigratedAppData.shared.villageBots).filter { $0.id != VillageBot.lumiID }
+                    if agents.isEmpty {
+                        FadedDetailText("Opret en agent under Agenter, og forbind Instagram i agentens chat.")
+                    } else {
+                        Menu {
+                            ForEach(agents) { agent in
+                                Button(agent.name) { instagramAgent = agent }
+                            }
+                        } label: { Label("Vælg agent til Instagram", systemImage: "person.2").frame(minHeight: 44) }
+                        FadedDetailText("Skriv “Lav et Instagram-opslag” i agentens chat.")
+                    }
+                } else if provider.connected {
                     NavigationLink {
                         if provider.id == "gmail", let api { GmailReadView(api: api, onUse: onUse) }
                         else { ComposioItemsView(api: api, provider: provider, onUse: onUse) }
@@ -217,13 +242,8 @@ struct ComposioItems: Decodable {
             defer { starting = nil }
             do {
                 let link = try await api.composioLink(provider.id)
-                guard link.url.scheme == "https", link.url.user == nil, link.url.password == nil,
-                      let host = link.url.host,
-                      host == "composio.dev" || host.hasSuffix(".composio.dev") ||
-                      host == "composio.com" || host.hasSuffix(".composio.com") else {
-                    throw APIError.malformed
-                }
-                openURL(link.url)
+                guard let url = link.loginURL else { throw APIError.malformed }
+                openURL(url)
                 notice = "Gå tilbage hertil og opdatér, når du har logget ind."
             } catch {
                 notice = "Kunne ikke åbne login. Tjek Composio på PC’en."

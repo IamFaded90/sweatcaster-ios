@@ -413,7 +413,7 @@ struct VideoJobStatusLine: View {
         case .commentating: "text.bubble"
         case .synthesizing: "waveform"
         case .rendering: "film.stack"
-        case .completed: "checkmark.circle"
+        case .completed: outputAvailable ? "film" : "film.slash"
         case .failed: "exclamationmark.circle"
         case .cancelled: "stop.circle"
         }
@@ -426,7 +426,7 @@ struct VideoJobStatusLine: View {
         case .commentating: "PC’en skriver en kommentar ud fra klippet."
         case .synthesizing: "Kommentaren bliver lavet om til lyd."
         case .rendering: "PC’en samler billede og lyd til den færdige video."
-        case .completed: outputAvailable ? "Åbn videoen herfra." : "PC’en melder jobbet færdigt, men har ingen videofil at afspille."
+        case .completed: outputAvailable ? "PC’en har gemt videofilen." : "Jobbet er afsluttet, men PC’en kan ikke levere videofilen."
         case .failed: failureDetail ?? "PC’en kunne ikke gøre videoen færdig."
         case .cancelled: "PC’en har stoppet jobbet."
         }

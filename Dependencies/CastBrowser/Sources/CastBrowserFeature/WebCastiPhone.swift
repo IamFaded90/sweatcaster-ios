@@ -6,10 +6,7 @@ import UIKit
 import AVFoundation
 
 public typealias CastPCRelay = @MainActor (URL, URL?) async throws -> URL
-
-enum CastMediaRoute: String {
-    case direct, pc, phone
-}
+public typealias CastPCRelayWithContext = @MainActor (URL, URL?, String?) async throws -> URL
 
 @MainActor
 final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSessionManagerListener {
@@ -81,7 +78,11 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
     private var observingCast = false
     var retryTarget: (video: VideoCandidate, position: Double)?
     var mediaRoute = CastMediaRoute.direct
+    private var remainingRoutes: [CastMediaRoute] = []
     var pcRelay: CastPCRelay?
+    var pcRelayWithContext: CastPCRelayWithContext?
+    var filmAnalysis: CastFilmAnalysis?
+    var filmSpeech: CastFilmSpeech?
     var retryCount = 0
     var attemptID = UUID()
     var loadStarted: Date?
@@ -104,24 +105,29 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
         }
     }
 
+    private func prepareRoutes(for video: VideoCandidate) {
+        retryCount = 0
+        let routes = CastMediaRoute.order(page: URL(string: video.pageURL), browserPage: browser.webView.url,
+                                         hasPC: pcRelay != nil || pcRelayWithContext != nil)
+        mediaRoute = routes[0]
+        remainingRoutes = Array(routes.dropFirst())
+    }
+
     func retryCast() {
         guard let target = retryTarget else { return }
-        retryCount = 0
-        mediaRoute = .direct
+        prepareRoutes(for: target.video)
         startCast(target.video, initialPosition: target.position)
     }
 
     func recoverCast(_ id: UUID) {
         guard id == attemptID, let target = retryTarget else { return }
-        if mediaRoute == .direct, pcRelay != nil {
-            mediaRoute = .pc
-            addDiagnostic("TV’et kunne ikke hente kilden direkte. Prøver via PC…")
-            startCast(target.video, initialPosition: target.position)
-            return
-        }
-        if mediaRoute != .phone {
-            mediaRoute = .phone
-            addDiagnostic("TV’et kunne ikke hente kilden direkte. Prøver via iPhone…")
+        if !remainingRoutes.isEmpty {
+            mediaRoute = remainingRoutes.removeFirst()
+            switch mediaRoute {
+            case .direct: addDiagnostic("Prøver at lade TV’et hente filmen direkte.")
+            case .pc: addDiagnostic("Prøver at lade PC’en levere filmen.")
+            case .phone: addDiagnostic("TV og PC kunne ikke afspille kilden. Prøver via iPhone.")
+            }
             startCast(target.video, initialPosition: target.position)
             return
         }
@@ -254,8 +260,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
     func clearQueue() { queue.removeAll() }
 
     func castRecent(_ item: RecentCast) {
-        retryCount = 0
-        mediaRoute = .direct
+        prepareRoutes(for: item.video)
         let position = resumePositions[resumeKey(for: item.video.title)] ?? 0
         startCast(item.video, initialPosition: position)
     }
@@ -263,7 +268,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
     private func rememberSuccessfulCast() {
         guard recordedRecentAttempt != attemptID, let target = retryTarget else { return }
         recordedRecentAttempt = attemptID
-        let item = RecentCast(video: target.video, castAt: Date())
+        let item = RecentCast(video: target.video, castAt: Date(), receiverAttempt: attemptID)
         recentCasts.removeAll { $0.id == item.id }
         recentCasts.insert(item, at: 0)
         recentCasts = Array(recentCasts.prefix(10))
@@ -275,8 +280,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
             status = "Denne afspiller har ikke et direkte videolink, der kan sendes til Chromecast."
             return
         }
-        retryCount = 0
-        mediaRoute = .direct
+        prepareRoutes(for: video)
         let key = resumeKey(for: video.title)
         if let saved = resumePositions[key], saved >= 15 {
             resumePromptVideo = video
@@ -310,11 +314,6 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
         let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession
         hasSession = session != nil
         deviceName = session?.device.friendlyName
-        if let started = loadStarted, Date().timeIntervalSince(started) > 45 {
-            addDiagnostic("Cast-afspilning startede ikke inden for 45 sekunder.")
-            recoverCast(attemptID)
-            return
-        }
         if let session {
             if let pending = pendingAutoCast {
                 let position = pendingAutoCastPosition
@@ -362,6 +361,10 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
                 if media.playerState == .playing || media.playerState == .paused || media.playerState == .buffering {
                     savePlaybackProgress()
                 }
+            }
+            if let started = loadStarted, Date().timeIntervalSince(started) > 45 {
+                addDiagnostic("TV’et bekræftede ikke afspilningen inden for 45 sekunder.")
+                recoverCast(attemptID)
             }
         } else {
             savePlaybackProgress(force: true)

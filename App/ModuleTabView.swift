@@ -171,6 +171,11 @@ struct CodeAddOn: Codable, Identifiable, Sendable {
 
     private var creator: some View {
         Section("Lav med Code Bot") {
+            if let api {
+                NavigationLink {
+                    AgentBuiltTools(api: api, initialBrief: brief)
+                } label: { Label("Byg et værktøj til dine filer", systemImage: "hammer") }
+            }
             FadedDetailText("Bed fx om en pakkeliste med en tjeklisteknap. Du kan gennemgå forslaget før installation.")
             TextField("Hvad skal din tilføjelse gøre?", text: $brief, axis: .vertical)
                 .lineLimit(2...5)
@@ -287,7 +292,7 @@ struct CodeAddOn: Codable, Identifiable, Sendable {
     }
 }
 
-private struct CodeAddOnDetail: View {
+struct CodeAddOnDetail: View {
     private struct Website: Identifiable {
         let url: URL
         var id: URL { url }

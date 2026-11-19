@@ -9,6 +9,7 @@ let package = Package(
     targets: [
         .target(name: "CastBrowserFeature", dependencies: [
             .product(name: "GoogleCastDynamic", package: "google-cast-ios-sdk")
-        ], resources: [.process("Assets.xcassets"), .copy("AdBlockingRules.json")])
+        ], resources: [.process("Assets.xcassets"), .copy("AdBlockingRules.json")]),
+        .testTarget(name: "CastBrowserFeatureTests", dependencies: ["CastBrowserFeature"])
     ]
 )

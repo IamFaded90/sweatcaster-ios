@@ -7,16 +7,24 @@ struct AgentChatAction: Codable {
         case phone(AgentPhoneActionCard.Request)
         case today
         case preference
+        case workflow(String)
         case appointmentCheck
         case meetingPrep
         case mailReminder
         case followups
+        case agentEmail(AgentEmailRequest)
+        case instagramPost
+        case instagramAccount
+        case instagramPlans
+        case traderaWatch
+        case traderaWatches
     }
 
     let kind: Kind
     var receipt: String?
     var receiptLink: URL?
     var mailDraft: AgentGmailReply.StoredDraft? = nil
+    var instagramDraft: AgentInstagramDraft? = nil
 
     var title: String {
         switch kind {
@@ -25,77 +33,26 @@ struct AgentChatAction: Codable {
         case .phone: "Handling på iPhone"
         case .today: "Dagens overblik"
         case .preference: "Dine præferencer"
+        case .workflow(let title): title
         case .appointmentCheck: "Tjek aftale"
         case .meetingPrep: "Forbered din aftale"
         case .mailReminder: "Påmindelse fra Gmail"
         case .followups: "Følg op på mail"
+        case .agentEmail(let request): request.title
+        case .instagramPost: "Instagram-opslag"
+        case .instagramAccount: "Instagram-konto"
+        case .instagramPlans: "Planlagte Instagram-opslag"
+        case .traderaWatch: "Prisvagt på Tradera"
+        case .traderaWatches: "Mine prisvagter"
         }
     }
 
     var canFollowUp: Bool {
         switch kind {
-        case .gmailReply, .bookingRequest, .phone, .mailReminder: true
-        case .today, .preference, .appointmentCheck, .meetingPrep, .followups: false
+        case .gmailReply, .bookingRequest, .phone, .mailReminder, .agentEmail, .instagramPost, .instagramAccount,
+             .instagramPlans, .traderaWatch, .traderaWatches: true
+        case .today, .preference, .workflow, .appointmentCheck, .meetingPrep, .followups: false
         }
-    }
-}
-
-enum AgentChatIntent {
-    case action(AgentChatAction.Kind)
-    case resume(String)
-    case reviseMail(String)
-    case remember(String)
-    case showPreferences
-    case clearPreferences
-
-    @MainActor static func match(_ input: String) -> Self? {
-        let text = normalize(input)
-        guard !text.isEmpty, text.count <= 1_200 else { return nil }
-        if let tail = text.cut(afterAny: ["hvad blev der af ", "hvad er status på ", "fortsæt med "]) {
-            return .resume(tail)
-        }
-        if ["fortsæt opgaven", "fortsæt hvor vi slap", "vis min seneste opgave"].contains(text) {
-            return .resume("")
-        }
-        if text == "vis mine præferencer" { return .showPreferences }
-        if text == "glem mine præferencer" { return .clearPreferences }
-        if let tail = text.cut(afterAny: ["husk at jeg ", "husk, at jeg ", "husk at min ", "husk, at min "]), !tail.isEmpty {
-            let setting = String(input.trimmingCharacters(in: .whitespacesAndNewlines).prefix(240))
-            return .remember(setting)
-        }
-        if text.range(of: #"^(?:hvad (?:skal jeg (?:nå |lave )?|har jeg )i dag|(?:vis(?: mig)?|giv mig) (?:mit |et )?(?:overblik over dagen|dagsoversigt|dagsplan)|dagens overblik)$"#,
-                      options: .regularExpression) != nil || matchesTodayOverview(text) {
-            return .action(.today)
-        }
-        if AgentGmailReply.matches(input) {
-            return .action(AgentGmailReply.isBooking(input) ? .bookingRequest : .gmailReply)
-        }
-        if ["hvem har ikke svaret", "hvem venter jeg svar fra", "hvad venter jeg svar på", "vis mails til opfølgning"].contains(text) {
-            return .action(.followups)
-        }
-        if AgentMailReminderCard.matches(input) { return .action(.mailReminder) }
-        if AgentMeetingPrep.matches(input) { return .action(.meetingPrep) }
-        if AgentAvailabilityQuery.match(text) != nil { return .action(.appointmentCheck) }
-        if let request = AgentPhoneActionCard.Request.match(input) { return .action(.phone(request)) }
-        return nil
-    }
-
-    static func normalize(_ text: String) -> String {
-        text.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
-            .trimmingCharacters(in: CharacterSet(charactersIn: "?!., "))
-    }
-
-    static func matchesTodayOverview(_ text: String) -> Bool {
-        let pattern = #"^(?:(?:kan|vil) du (?:lige )?)?(?:(?:vis(?:e)?(?: mig)?|giv(?:e)? mig|lav(?:e)?(?: mig)?) (?:mit |et |en )?(?:overblik over (?:min dag|hele dagen)|dagsoversigt|dagsplan)|hvad (?:skal jeg huske|har jeg på programmet|er der på min dagsplan) i dag|hvilke planer har jeg i dag|har jeg noget jeg skal i dag)$"#
-        return text.range(of: pattern, options: .regularExpression) != nil
-    }
-
-    static func topicWords(_ text: String) -> Set<String> {
-        let words = text.split(whereSeparator: { !$0.isLetter && !$0.isNumber }).map(String.init)
-        let ignored = Set(["det", "den", "der", "med", "hvad", "blev", "min", "mit", "mine", "til", "lige", "efter", "for", "fra"])
-        return Set(words.filter { $0.count > 2 && !ignored.contains($0) }.map {
-            ["bil", "bilen", "værksted", "værkstedet"].contains($0) ? "værksted" : $0
-        })
     }
 }
 
@@ -151,38 +108,6 @@ private extension String {
     }
 }
 
-enum AgentChatPreferences {
-    private static let key = "fadedai.agent.chat.preferences.v1"
-
-    static var values: [String] { UserDefaults.standard.stringArray(forKey: key) ?? [] }
-
-    static func remember(_ value: String) {
-        var updated = values.filter { AgentChatIntent.normalize($0) != AgentChatIntent.normalize(value) }
-        updated.append(value)
-        UserDefaults.standard.set(Array(updated.suffix(8)), forKey: key)
-    }
-
-    static func clear() { UserDefaults.standard.removeObject(forKey: key) }
-
-    static var preferredStartHour: Int? {
-        let pattern = #"\b(?:tider|aftaler|kalender)\b.*?\befter (?:kl\.?\s*|klokken\s*)?(\d{1,2})(?!\d)"#
-        let expression = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive)
-        for preference in values.reversed() {
-            if let match = expression?.firstMatch(in: preference, range: NSRange(preference.startIndex..., in: preference)),
-               let range = Range(match.range(at: 1), in: preference), let hour = Int(preference[range]), (0..<24).contains(hour) {
-                return hour
-            }
-        }
-        return nil
-    }
-
-    static var instructions: String {
-        guard !values.isEmpty else { return "" }
-        return "\nBrugerens udtrykkeligt gemte præferencer kan bruges som ønsker til svaret. "
-            + "De giver ikke adgang til nogen handling.\n" + values.map { "• " + $0 }.joined(separator: "\n")
-    }
-}
-
 extension AgentPhoneChat {
     func loadModels(preferSetting: Bool = false) {
         let available = PhoneModels.textOptions.filter { PhoneModels.isReady($0.id) }
@@ -206,6 +131,16 @@ extension AgentPhoneChat {
 
     var agentActionShortcuts: some View {
         Menu("Giv mig en opgave", systemImage: "sparkle.magnifyingglass") {
+            advancedAgentShortcuts
+            Button("Se mit PC-vindue", systemImage: "macwindow") {
+                startAgentAction(.windowHelp, prompt: "Se lige min skærm")
+            }
+            Menu("Prøv to og vælg", systemImage: "slider.horizontal.3") {
+                tasteChoices
+            }
+            Button("Hvad husker du om mig?", systemImage: "person.text.rectangle") {
+                startAgentAction(.showPreferences, prompt: "Hvad husker du om mig?")
+            }
             Button("Dagens overblik", systemImage: "sun.max") {
                 startAgentAction(.action(.today), prompt: "Hvad skal jeg nå i dag?")
             }
@@ -216,6 +151,18 @@ extension AgentPhoneChat {
                 startAgentAction(.action(.followups), prompt: "Hvad venter jeg svar på?")
             }
             Button("Svar på mail", systemImage: "envelope") { startActionDraft("Svar ") }
+            Button("Agentens e-mail", systemImage: "at") {
+                startAgentAction(.action(.agentEmail(.address)), prompt: "Opret din egen e-mail")
+            }
+            Button("Lav Instagram-opslag", systemImage: "camera") {
+                startAgentAction(.action(.instagramPost), prompt: "Lav et Instagram-opslag")
+            }
+            Button("Planlagte Instagram-opslag", systemImage: "calendar.badge.clock") {
+                startAgentAction(.action(.instagramPlans), prompt: "Vis mine planlagte Instagram-opslag")
+            }
+            Button("Hold øje med en pris", systemImage: "tag") {
+                startAgentAction(.action(.traderaWatch), prompt: "Hold øje med en pris på Tradera")
+            }
             Button("Find tid i kalenderen", systemImage: "calendar") { startActionDraft("Find en ledig time ") }
             Button("Lav en påmindelse", systemImage: "checklist") { startActionDraft("Mind mig om at ") }
             Button("Sæt en alarm", systemImage: "alarm") { startActionDraft("Sæt en alarm ") }
@@ -232,6 +179,7 @@ extension AgentPhoneChat {
         guard keepHistory, !web, !answerAsCard, nextDocument == nil else { return nil }
         if editableMailTurn() != nil, AgentMailRevision.matches(message) { return .reviseMail(message) }
         guard let intent = AgentChatIntent.match(message) else { return nil }
+        if case .scheduleInstagram = intent, editableInstagramTurn() == nil { return nil }
         if case .resume(let topic) = intent, !topic.isEmpty, matchingAgentAction(topic) == nil { return nil }
         return intent
     }
@@ -239,6 +187,14 @@ extension AgentPhoneChat {
     private func editableMailTurn() -> PrivateChatTurn? {
         // Keep follow-up corrections tied to the task currently visible in this conversation.
         turns.last { $0.id == openAgentAction && $0.agentAction?.receipt == nil && $0.agentAction?.mailDraft != nil }
+    }
+
+    private func editableInstagramTurn() -> PrivateChatTurn? {
+        let drafts = turns.filter { turn in
+            guard case .instagramPost? = turn.agentAction?.kind else { return false }
+            return turn.agentAction?.receipt == nil && turn.agentAction?.instagramDraft?.approvedPC == nil
+        }
+        return drafts.first(where: { $0.id == openAgentAction }) ?? drafts.last
     }
 
     private func matchingAgentAction(_ topic: String) -> PrivateChatTurn? {
@@ -256,8 +212,37 @@ extension AgentPhoneChat {
         if cleanDraft == prompt { draft = "" }
         notice = nil
         switch intent {
+        case .milestone(let kind):
+            interactiveTool = .milestone(kind, prompt)
+        case .appointmentChange:
+            interactiveTool = .appointmentChange(prompt)
+        case .gmailCleanup:
+            interactiveTool = .gmailCleanup(prompt)
+        case .pcRepair:
+            interactiveTool = .pcRepair(prompt)
+        case .agentComputer(let goal):
+            interactiveTool = .agentComputer(goal)
+        case .phoneScreen:
+            interactiveTool = .phoneScreen(prompt)
+        case .sales:
+            interactiveTool = .sales(prompt)
+        case .surprise:
+            interactiveTool = .surprise(prompt)
+        case .builtTools:
+            interactiveTool = .builtTools(["vis agentværktøjer", "mine agentværktøjer"].contains(prompt.lowercased()) ? "" : prompt)
+        case .windowHelp:
+            interactiveTool = .window(prompt)
+        case .chooseTaste:
+            showTasteChoices = true
+        case .taste(let request):
+            presentTasteTest(request)
         case .action(let kind):
             addAgentAction(prompt, kind: kind, receipt: nil)
+        case .scheduleInstagram(let timing):
+            guard let turn = editableInstagramTurn() else { break }
+            instagramPlanRequest = .init(turn: turn.id, timing: timing)
+            openAgentAction = turn.id
+            notice = "Tidspunktet er udfyldt. Gennemgå opslaget, og tryk på Planlæg opslag."
         case .resume(let topic):
             if let existing = matchingAgentAction(topic) {
                 agentActionRefresh = UUID()
@@ -275,22 +260,26 @@ extension AgentPhoneChat {
                 notice = "Jeg kunne ikke rette kladden sikkert. Skriv ‘Skriv i stedet, at …’ eller ret teksten i kortet."
             }
         case .remember(let value):
+            AgentChatPreferences.remember(value, for: bot.id)
+            addAgentAction(prompt, kind: .preference, receipt: "Det husker jeg. Ønsket gælder hos " + bot.name + ".")
+        case .rememberForAll(let value):
             AgentChatPreferences.remember(value)
-            addAgentAction(prompt, kind: .preference, receipt: "Gemt på din iPhone. Du kan skrive ‘Vis mine præferencer’.")
+            addAgentAction(prompt, kind: .preference, receipt: "Gemt som fælles ønske til dine agenter.")
         case .showPreferences:
-            let items = AgentChatPreferences.values
-            let result = items.isEmpty ? "Du har ingen gemte præferencer." : items.map { "• " + $0 }.joined(separator: "\n")
-            addAgentAction(prompt, kind: .preference, receipt: result)
+            addAgentAction(prompt, kind: .preference, receipt: nil)
         case .clearPreferences:
+            AgentChatPreferences.clear(for: bot.id)
+            addAgentAction(prompt, kind: .preference, receipt: "Dine personlige ønsker hos " + bot.name + " er fjernet.")
+        case .clearSharedPreferences:
             AgentChatPreferences.clear()
-            addAgentAction(prompt, kind: .preference, receipt: "Dine gemte præferencer er ryddet.")
+            addAgentAction(prompt, kind: .preference, receipt: "Dine fælles ønsker er fjernet.")
         }
         saveDraft()
     }
 
-    private func addAgentAction(_ prompt: String, kind: AgentChatAction.Kind, receipt: String?) {
-        var turn = PrivateChatTurn(prompt: prompt, reply: receipt ?? "", botID: bot.id)
-        turn.agentAction = AgentChatAction(kind: kind, receipt: receipt)
+    func addAgentAction(_ prompt: String, kind: AgentChatAction.Kind, receipt: String?, source: String = "iPhone", link: URL? = nil) {
+        var turn = PrivateChatTurn(prompt: prompt, reply: receipt ?? "", source: source, botID: bot.id)
+        turn.agentAction = AgentChatAction(kind: kind, receipt: receipt, receiptLink: link)
         turns.append(turn)
         persistAgentAction(turn)
         openAgentAction = turn.id
@@ -313,6 +302,7 @@ extension AgentPhoneChat {
         turns[index].agentAction?.receipt = receipt
         turns[index].agentAction?.receiptLink = link
         turns[index].agentAction?.mailDraft = nil
+        turns[index].agentAction?.instagramDraft = nil
         turns[index].reply = receipt
         persistAgentAction(turns[index])
     }
@@ -324,11 +314,66 @@ extension AgentPhoneChat {
         persistAgentAction(turns[index])
     }
 
+    private func saveInstagramDraft(_ id: UUID, draft: AgentInstagramDraft) {
+        guard let index = turns.firstIndex(where: { $0.id == id }), let action = turns[index].agentAction,
+              action.receipt == nil, action.instagramDraft != draft else { return }
+        turns[index].agentAction?.instagramDraft = draft
+        persistAgentAction(turns[index])
+    }
+
+    private var trackedInstagramTurns: Set<UUID> {
+        guard loaded, keepHistory, phase == .active, let api else { return [] }
+        return Set(turns.compactMap { turn in
+            guard let action = turn.agentAction, action.receipt == nil,
+                  let draft = action.instagramDraft, draft.timing != nil,
+                  draft.approvedPC == api.queueTargetID else { return nil }
+            return turn.id
+        })
+    }
+
+    var instagramPollingID: String {
+        trackedInstagramTurns.isEmpty ? "" : (api?.queueTargetID ?? "") + bot.id.uuidString
+    }
+
+    func monitorInstagramReports() async {
+        guard let api, !trackedInstagramTurns.isEmpty else { return }
+        let query = [URLQueryItem(name: "bot_id", value: bot.id.uuidString)]
+        while !Task.isCancelled && !trackedInstagramTurns.isEmpty {
+            do {
+                let jobs: AgentInstagramJobList = try await api.moduleJSON("composio/instagram/schedule", timeout: 20, query: query)
+                try Task.checkCancellation()
+                for job in jobs.items where job.completed && trackedInstagramTurns.contains(job.id) {
+                    finishAgentAction(job.id, receipt: job.summary)
+                    if job.reportText != nil { notice = "Instagram-opfølgningen ligger nu ved opslaget i chatten." }
+                }
+            } catch { if Task.isCancelled { return } }
+            do { try await Task.sleep(for: .seconds(45)) } catch { return }
+        }
+    }
+
+    private func instagramCaption(_ subject: String) async throws -> String {
+        guard !currentModel.isEmpty else { throw PhoneModelError.unavailable }
+        let provider: AgentReplyDriver.Provider
+        switch source {
+        case .phone: provider = .phone
+        case .composio: provider = .cloud
+        case .pc:
+            guard let api else { throw APIError.offline }
+            provider = .computer(api)
+        }
+        let driver = AgentReplyDriver(provider: provider, model: currentModel)
+        let wishes = AgentChatPreferences.instructions(for: bot.id, question: "Instagram", useChatStyle: false)
+        return try await driver.respond(to: subject, original: subject, instructions:
+            OfflineStudio.companionInstructions(for: bot) + wishes +
+            "\nSkriv en kort dansk billedtekst til Instagram ud fra brugerens emne. Giv kun den færdige tekst.",
+            history: [], usesTools: false, showsPartialText: false) { _ in }
+    }
+
     @ViewBuilder func agentActionCard(_ turn: PrivateChatTurn) -> some View {
         if let action = turn.agentAction {
             VStack(alignment: .leading, spacing: 16) {
                 AgentChatBubble(user: true, title: "Dig", pc: false) { Text(turn.prompt).textSelection(.enabled) }
-                AgentChatBubble(user: false, title: bot.name + " · " + action.title, pc: false) {
+                AgentChatBubble(user: false, title: bot.name + " · " + action.title, pc: turn.source == "PC") {
                     if let receipt = action.receipt {
                         Text(receipt).textSelection(.enabled)
                         if let link = action.receiptLink {
@@ -345,7 +390,7 @@ extension AgentPhoneChat {
                         switch action.kind {
                         case .gmailReply, .bookingRequest:
                             if let api {
-                                AgentGmailReply(api: api, prompt: turn.prompt, requestID: turn.id, storedDraft: action.mailDraft,
+                                AgentGmailReply(api: api, prompt: turn.prompt, requestID: turn.id, botID: bot.id, storedDraft: action.mailDraft,
                                                onDraftChanged: { updateAgentDraft(turn.id, draft: $0) }) { address in
                                     guard let link = URL(string: address), link.scheme == "https", link.host == "mail.google.com" else {
                                         notice = "Gmail-kvitteringen kunne ikke verificeres. Tjek Sendt før du prøver igen."
@@ -362,7 +407,7 @@ extension AgentPhoneChat {
                                 if let draft = action.mailDraft { Text(draft.body).textSelection(.enabled) }
                             }
                         case .phone(let request):
-                            AgentPhoneActionCard(request: request, botName: bot.name) { receipt in
+                            AgentPhoneActionCard(request: request, botName: bot.name, botID: bot.id) { receipt in
                                 finishAgentAction(turn.id, receipt: receipt)
                             }
                         case .today:
@@ -377,8 +422,36 @@ extension AgentPhoneChat {
                             }
                         case .followups:
                             AgentFollowupList(api: api)
+                        case .instagramPost:
+                            AgentInstagramPost(api: api, bot: bot, id: turn.id, prompt: turn.prompt,
+                                               draft: action.instagramDraft, suggest: instagramCaption,
+                                               requestedPlan: instagramPlanRequest, planApplied: { instagramPlanRequest = nil },
+                                               save: { saveInstagramDraft(turn.id, draft: $0) },
+                                               published: { finishAgentAction(turn.id, receipt: $0) })
+                                .id(api?.queueTargetID ?? "offline")
+                        case .instagramPlans:
+                            AgentInstagramPlanner(api: api, bot: bot).id(api?.queueTargetID ?? "offline")
+                        case .traderaWatch:
+                            AgentTraderaWatch(api: api, bot: bot, id: turn.id, prompt: turn.prompt, listOnly: false)
+                                .id(api?.queueTargetID ?? "offline")
+                        case .traderaWatches:
+                            AgentTraderaWatch(api: api, bot: bot, id: turn.id, prompt: turn.prompt, listOnly: true)
+                                .id(api?.queueTargetID ?? "offline")
+                        case .instagramAccount:
+                            AgentInstagramAccount(api: api, bot: bot) {
+                                startAgentAction(.action(.instagramPost), prompt: "Lav et Instagram-opslag")
+                            }
+                        case .agentEmail(let request):
+                            if let api {
+                                AgentEmailCard(api: api, bot: bot, request: request, prompt: turn.prompt)
+                                    .id(api.queueTargetID)
+                            } else {
+                                FadedDetailText("Forbind til din PC for at bruge agentens e-mail.")
+                            }
                         case .preference:
-                            EmptyView()
+                            AgentPreferenceList(bot: bot)
+                        case .workflow:
+                            FadedDetailText("Der er endnu ingen kvittering for opgaven.")
                         }
                     } else {
                         Button("Åbn opgaven", systemImage: "arrow.turn.down.right") { openAgentAction = turn.id }
@@ -400,5 +473,34 @@ extension AgentPhoneChat {
 
     func send() {
         send(message: cleanDraft, source: source, model: currentModel, useWeb: web, asCard: answerAsCard)
+    }
+}
+
+private struct AgentPreferenceList: View {
+    let bot: VillageBot
+    @State private var entries: [AgentChatPreferences.Entry] = []
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if entries.isEmpty { Text("Du har endnu ingen gemte ønsker her.") }
+            ForEach(entries, id: \.self) { entry in
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(entry.value)
+                        Text(entry.bot == nil ? "Fælles for dine agenter" : "Kun " + bot.name)
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(role: .destructive) {
+                        AgentChatPreferences.remove(entry)
+                        entries = AgentChatPreferences.entries(for: bot.id)
+                    } label: {
+                        Image(systemName: "trash").frame(minWidth: 44, minHeight: 44)
+                    }.accessibilityLabel("Glem " + entry.value)
+                }
+            }
+            FadedDetailText("Skriv fx “Svar mig fremover kort”. Skriv “Til alle agenter: Husk, at jeg foretrækker aftaler efter kl. 10” for at dele et ønske. Relevante ønsker følger med til den model, du vælger.")
+        }
+        .onAppear { entries = AgentChatPreferences.entries(for: bot.id) }
     }
 }

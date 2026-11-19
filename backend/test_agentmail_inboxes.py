@@ -3,8 +3,11 @@ from urllib.parse import quote, unquote
 from uuid import uuid4
 
 import pytest
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
-from sweatcaster.agentmail_inboxes import InboxService
+from sweatcaster.agentmail_inboxes import InboxService, register_agentmail
+from sweatcaster.agent_email import AgentEmail
 from sweatcaster.dto import ApiError
 
 
@@ -78,6 +81,150 @@ def test_no_setup_key_means_no_inbox_request_or_database(tmp_path):
     service = InboxService(path, get_key=lambda: "")
     assert service.status(str(uuid4())) == {"configured": False, "address": None, "active": False}
     assert not path.exists()
+
+
+def test_signup_address_preserved_on_rename_and_provider_change(tmp_path):
+    service = MailFixture(tmp_path / "mail.sqlite3")
+    service.get_key = lambda: ""
+
+    class Gmail:
+        account = "person@example.org"
+
+        def read(self, provider, endpoint):
+            assert provider == "gmail" and endpoint.endswith("/users/me/profile")
+            return {"emailAddress": self.account}
+
+    gmail = Gmail()
+    agents = AgentEmail(service, gmail)
+    first = "00000000-0000-4000-8000-000000000001"
+    second = "00000000-0000-4000-8000-000000000002"
+    original = agents.create(first, "Eva")
+    assert original["kind"] == "gmailAlias"
+    assert original["address"].startswith("person+eva-")
+    assert agents.create(second, "Eva") != original
+    service.get_key = lambda: "test-owner-key"
+    assert AgentEmail(service, gmail).create(first, "Nyt navn") == original
+    assert service.created == 0
+    gmail.account = "another@example.org"
+    with pytest.raises(ApiError) as changed:
+        agents.create(first, "Eva")
+    assert changed.value.status_code == 409
+    with pytest.raises(ApiError):
+        agents.create("wrong", "Eva")
+
+
+def test_signup_supports_configured_dedicated_inbox(tmp_path):
+    service = MailFixture(tmp_path / "mail.sqlite3")
+    class Gmail:
+        def read(self, provider, endpoint):
+            return {"emailAddress": "user@example.org"}
+    agents = AgentEmail(service, Gmail())
+    bot = str(uuid4())
+    address = agents.create(bot, "Helene")
+    assert address["kind"] == "mailbox"
+    assert address["address"] == service.identity(bot)[1]
+    assert agents.create(bot, "Andet navn") == address
+    assert agents.messages(bot)["messages"][0]["subject"] == "First"
+    assert agents.message(bot, "<first@sender.test>")["text"]
+    alias = agents.create(bot, "Helene", gmail=True)
+    assert alias["kind"] == "gmailAlias" and alias["address"] != address["address"]
+    assert agents.create(bot, "Nyt navn") == address
+    assert agents.create(bot, "Nyt navn", gmail=True) == alias
+    assert agents.mailbox(bot, gmail=True) == (alias["address"], "gmailAlias")
+    assert service.created == 1
+
+
+def test_alias_only_opens_its_own_signup_messages(tmp_path):
+    service = InboxService(tmp_path / "mail.sqlite3", get_key=lambda: "")
+
+    class Gmail:
+        recipient = None
+        query = None
+
+        def gmail(self):
+            return self
+
+        def recent(self, query):
+            self.query = query
+            return [{"id": "private"}, {"id": "unknown"}, {"id": "own"}]
+
+        def read(self, provider, endpoint, options=None):
+            if endpoint.endswith("/profile"):
+                return {"emailAddress": "family@example.org"}
+            assert options == {"format": "metadata"}
+            identifier = endpoint.rsplit("/", 1)[1]
+            return {"id": identifier, "subject": "Kode 852931", "to": {
+                "private": "family+another@example.org", "unknown": None, "own": self.recipient}[identifier]}
+
+        def read_gmail_message(self, identifier):
+            return {"id": identifier, "payload": {"headers": [{"name": "Delivered-To", "value": self.recipient}]},
+                    "snippet": "Din tilmelding er klar."}
+
+    gmail = Gmail()
+    agents = AgentEmail(service, gmail)
+    bot = str(uuid4())
+    with pytest.raises(ApiError) as missing:
+        agents.messages(bot)
+    assert missing.value.status_code == 404
+    address = agents.create(bot, "Lumi")["address"]
+    gmail.recipient = address
+    assert agents.messages(bot) == {"messages": [
+        {"id": "own", "subject": "Kode 852931", "sender": "", "timestamp": ""}]}
+    assert f'deliveredto:"{address}"' in gmail.query
+    gmail.recipient = "family@example.org"
+    with pytest.raises(ApiError) as denied:
+        agents.message(bot, "other")
+    assert denied.value.status_code == 404
+    gmail.recipient = address
+    assert agents.message(bot, "own") == {"text": "Din tilmelding er klar."}
+
+
+def test_signup_routes_require_pairing_and_work_with_existing_gmail(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    class Gmail:
+        def read(self, provider, endpoint):
+            return {"emailAddress": "owner@example.org"}
+
+        def gmail(self):
+            return self
+
+        def recent(self, query):
+            assert "owner+eva-" in query
+            return []
+
+    def authorize(request, settings):
+        if request.headers.get("Authorization") != "Bearer paired":
+            raise HTTPException(401)
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.delenv("AGENTMAIL_API_KEY", raising=False)
+    app = FastAPI()
+    register_agentmail(app, SimpleNamespace(output_root=tmp_path), authorize, Gmail())
+    client = TestClient(app)
+    url = f"/api/modules/v1/agent-email/{uuid4()}"
+    assert client.put(url, json={"name": "Eva"}).status_code == 401
+    assert client.get(url + "/messages").status_code == 401
+    assert client.get(url + "/message?message_id=abc").status_code == 401
+    paired = {"Authorization": "Bearer paired"}
+    created = client.put(url, json={"name": "Eva"}, headers=paired)
+    assert created.status_code == 200
+    assert created.headers["cache-control"] == "no-store"
+    assert created.json()["kind"] == "gmailAlias"
+    assert client.get(url + "/messages", headers=paired).json() == {"messages": []}
+
+
+def test_html_confirmation_mail_preserves_visible_action_link_without_fetching_it():
+    import base64
+    from sweatcaster.mail_appointments import mail_text
+
+    html = ('<a href="https://example.org/verify?code=abc">Bekræft din adresse</a>'
+            '<a href="javascript:bad()">Footer</a>')
+    encoded = base64.urlsafe_b64encode(html.encode()).decode()
+    item = {"payload": {"mimeType": "text/html", "body": {"data": encoded}}}
+    assert "Bekræft din adresse (https://example.org/verify?code=abc)" in mail_text(item, include_links=True)
+    assert "javascript:" not in mail_text(item, include_links=True)
+    assert "https://" not in mail_text(item)
 
 
 def test_signup_verifies_only_on_starting_bot_and_keeps_original_inbox(tmp_path, monkeypatch):

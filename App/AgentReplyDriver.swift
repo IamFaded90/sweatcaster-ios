@@ -45,7 +45,7 @@ import Foundation
         case .computer(let api):
             let brief = history.suffix(2).map { "Dig: \($0.prompt)\nAgent: \($0.reply)" }.joined(separator: "\n")
             text = try await api.agentChat(model: model, prompt: String(prompt.unicodeScalars.prefix(2_000)),
-                                           instructions: String(instructions.prefix(1_800)) + "\nTidligere samtale:\n" + brief)
+                                           instructions: Self.computerInstructions(instructions, previous: brief))
         case .cloud:
             var messages = [["role": "system", "content": instructions]]
             for item in history {
@@ -65,5 +65,14 @@ import Foundation
         }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw PhoneModelError.emptyResponse }
         return text
+    }
+
+    nonisolated static func computerInstructions(_ instructions: String, previous: String) -> String {
+        // The PC accepts at most 3,000 Unicode scalars for both the agent profile and conversation context.
+        let current = String(instructions.unicodeScalars.prefix(3_000))
+        let heading = "\nTidligere samtale:\n"
+        let remaining = 3_000 - current.unicodeScalars.count - heading.unicodeScalars.count
+        guard !previous.isEmpty, remaining > 0 else { return current }
+        return current + heading + String(previous.unicodeScalars.suffix(remaining))
     }
 }

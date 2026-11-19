@@ -5,7 +5,7 @@ import PhotosUI
 import SwiftUI
 import UIKit
 
-/// Lumi has a separate screen and a fixed PC route; ordinary bot chats never select her models.
+/// Lumi's PC studio has dedicated routes and can open a private local image session.
 @MainActor struct LumiStudio: View {
     enum SceneSheet: String, Identifiable {
         case library, new, edit, saveAs
@@ -13,13 +13,17 @@ import UIKit
     }
 
     let api: LiveAPI?
+    let videoOnly: Bool
+    let onVideoActivity: () -> Void
     @Environment(\.dismiss) var dismiss
     @Environment(\.fadedPalette) var palette
-    @AppStorage(AppStorageKeys.lumiPendingVideoJob) var pendingVideoJobID = ""
+    @AppStorage(AppStorageKeys.lumiPendingVideoJob) private var savedVideoJobID = ""
+    @State private var privateVideoJobID = ""
     @State var mode = 0
     @State var draft = ""
     @FocusState var composerFocused: Bool
     @State var imageDraft = ""
+    @State var useImageTaste = true
     @State var videoDraft = ""
     @State var language = "da-DK"
     @State var dictation = ChatDictation()
@@ -47,9 +51,18 @@ import UIKit
     @State var confirmSceneSwitch = false
     @State var picture: Data?
     @State var pictureFile: URL?
+    @State var pictureReference: Data?
     @State var referenceSelection: PhotosPickerItem?
     @State var imageReference: Data?
     @State var loadingReference = false
+    @State private var videoReferenceSelection: PhotosPickerItem?
+    @State var videoReference: Data?
+    @State var loadingVideoReference = false
+    @State private var videoInputToPrepare: Data?
+    @State var pcImageModel = StudioPCImageModel.realvis
+    @State var pcImageCatalog = StudioPCImageCatalog.checking
+    @State private var pcImageRefresh = 0
+    @State private var showPhoneImageStudio = false
     @State var videoPlayer: AVPlayer?
     @State var videoFile: URL?
     @State var videoResultID: UUID?
@@ -59,24 +72,46 @@ import UIKit
     @State var busy = false
     @State var notice: String?
 
+    init(api: LiveAPI?, videoOnly: Bool = false, initialVideoReference: Data? = nil,
+         onVideoActivity: @escaping () -> Void = {}) {
+        self.api = api
+        self.videoOnly = videoOnly
+        self.onVideoActivity = onVideoActivity
+        _mode = State(initialValue: videoOnly ? 2 : 0)
+        _videoInputToPrepare = State(initialValue: initialVideoReference)
+    }
+
     var inheritedVoice: String {
         VillageBot.list(from: MigratedAppData.shared.villageBots).first { $0.id == VillageBot.lumiID }?.voice ?? "da-DK"
+    }
+
+    var pendingVideoJobID: String {
+        get { videoOnly ? privateVideoJobID : savedVideoJobID }
+        nonmutating set {
+            if videoOnly { privateVideoJobID = newValue }
+            else { savedVideoJobID = newValue }
+        }
     }
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 12) {
-                Picker("Vælg", selection: $mode) {
-                    Text("Samtale").tag(0)
-                    Text("Billeder").tag(1)
-                    Text("Video").tag(2)
-                }.pickerStyle(.segmented)
+                if !videoOnly {
+                    Picker("Vælg", selection: $mode) {
+                        Text("Samtale").tag(0)
+                        Text("Billeder").tag(1)
+                        Text("Video").tag(2)
+                    }.pickerStyle(.segmented)
+                }
 
                 ScrollViewReader { scroll in
                     ScrollView {
                         studioContent
                     }
                     .scrollDismissesKeyboard(.interactively)
+                    .onScrollPhaseChange { _, phase in
+                        if videoOnly && phase == .interacting { onVideoActivity() }
+                    }
                     .onChange(of: messages.count) {
                         guard mode == 0 else { return }
                         scroll.scrollTo("latest-lumi-message", anchor: .bottom)
@@ -87,9 +122,17 @@ import UIKit
             .padding(16)
             .background { FadedBackground() }
             .foregroundStyle(palette.text)
-            .navigationTitle("Lumi")
+            .navigationTitle(videoOnly ? "Privat video" : "Lumi")
             .navigationBarTitleDisplayMode(.inline)
             .privacySensitive()
+            .simultaneousGesture(TapGesture().onEnded { onVideoActivity() },
+                                 including: videoOnly ? .all : .subviews)
+            .onChange(of: videoDraft) {
+                if videoOnly { onVideoActivity() }
+            }
+            .onChange(of: videoReferenceSelection) {
+                if videoOnly { onVideoActivity() }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Luk") { dismiss() }
@@ -118,6 +161,10 @@ import UIKit
                     }
                 }
             }
+            .sheet(isPresented: $showPhoneImageStudio) {
+                OfflineStudio(api: nil, sessionUnlocked: .constant(false), initialPage: .images,
+                              initialBotID: VillageBot.lumiID, ephemeralOnly: true, imageOnly: true)
+            }
             .sheet(isPresented: $showChristelSettings, onDismiss: refreshChristel) {
                 ChristelSettingsView(pcReady: christelPCReady)
             }
@@ -131,11 +178,17 @@ import UIKit
                 Text("Du har nye beskeder eller ændringer i denne scene. Du kan blive her og gemme dem først.")
             }
             .task(id: "\(api?.queueTargetID ?? ""):\(phase == .active)") {
-                if phase == .active { await refreshChristelPC() }
+                if !videoOnly && phase == .active { await refreshChristelPC() }
             }
             .task {
-                refreshChristel()
-                loadScenes()
+                if !videoOnly {
+                    refreshChristel()
+                    loadScenes()
+                }
+                if let source = videoInputToPrepare {
+                    videoInputToPrepare = nil
+                    applyVideoReference(source)
+                }
                 await resumeVideoIfNeeded()
             }
             .task(id: nextSceneExpiry) { await waitForSceneExpiry() }
@@ -148,11 +201,15 @@ import UIKit
                 stopAudio()
             }
             .onChange(of: phase) {
-                if phase == .active { loadScenes() }
+                if phase == .active {
+                    if !videoOnly { loadScenes() }
+                }
                 else { stopAudio() }
             }
             .onDisappear { discardStudioSession() }
-            .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in loadScenes() }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in
+                if !videoOnly { loadScenes() }
+            }
             .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { _ in stopAudio() }
         }
     }
@@ -168,11 +225,14 @@ import UIKit
                 }
                 Color.clear.frame(height: 1).id("latest-lumi-message")
             } else if mode == 1 {
-                referencePicker
+                lumiImageControls
                 if let picture, let image = UIImage(data: picture) {
                     Image(uiImage: image).resizable().scaledToFit()
                         .clipShape(.rect(cornerRadius: 16))
                         .accessibilityLabel("Billede lavet af Lumi")
+                    if let pictureFile, let comparison = StudioImageComparisonSource(result: pictureFile, bytes: pictureReference) {
+                        StudioImageComparison(source: comparison, result: image).id(pictureFile)
+                    }
                 }
                 if let pictureFile {
                     ShareLink(item: pictureFile) {
@@ -184,6 +244,7 @@ import UIKit
                         .disabled(busy)
                 }
             } else {
+                videoReferenceControls
                 if let videoPlayer, let videoFile {
                     VideoPlayer(player: videoPlayer).frame(height: 300)
                     ShareLink(item: videoFile) {
@@ -193,8 +254,6 @@ import UIKit
                     Button("Slet kopi på iPhone", systemImage: "trash", role: .destructive) { deletePreview(isVideo: true) }
                         .frame(minHeight: 44)
                         .disabled(busy)
-                } else if videoResultID == nil {
-                    FadedDetailText("Lav et kort klip med PC’en. Det kan tage flere minutter.")
                 }
                 if videoResultID != nil {
                     Button("Slet video fra PC og iPhone", systemImage: "trash", role: .destructive) {
@@ -223,7 +282,7 @@ import UIKit
                 Text(notice).font(.footnote).foregroundStyle(palette.coralText)
                     .accessibilityAddTraits(.updatesFrequently)
             } else if api == nil {
-                FadedDetailText("Forbind din PC for at bruge Lumi.")
+                FadedDetailText(mode == 1 ? "Forbind PC’en, eller vælg Lav billeder på iPhone." : "Forbind din PC for at fortsætte.")
             }
             if busy { FadedThinkingIndicator(title: mode == 0 ? "Lumi svarer på PC’en…" : "Arbejder på PC’en…") }
             HStack(alignment: .bottom, spacing: 8) {
@@ -243,14 +302,46 @@ import UIKit
                     .labelStyle(.iconOnly)
                     .frame(width: 44, height: 44)
                     .buttonStyle(FadedButtonStyle(kind: .primary))
-                    .disabled(busy || (mode == 1 && loadingReference) || dictation.active || api == nil ||
-                              !isValidPrompt(currentDraft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)))
+                    .disabled(busy || (mode == 1 && (loadingReference || !pcImageCatalog.allows(pcImageModel))) ||
+                              (mode == 2 && loadingVideoReference) ||
+                              dictation.active || api == nil ||
+                              !isValidPrompt(currentDraft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines), for: mode))
             }
         }
         .padding(14)
         .background { ChatGlassSurface(radius: 22, colors: [FadedBrand.pc, FadedBrand.blue]) }
         .fadedWorkingBeam(active: busy, pc: true)
         .padding(.vertical, 6)
+    }
+
+    private var lumiImageControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let api {
+                StudioPCImageModelPicker(selection: $pcImageModel, catalog: pcImageCatalog) {
+                    pcImageRefresh += 1
+                }
+                .disabled(busy)
+                PCImageEngineStatusRow(api: api, refreshCount: pcImageRefresh)
+                if let blocker = pcImageCatalog.blocker(for: pcImageModel) {
+                    FadedDetailText(blocker)
+                }
+                referencePicker
+                if let style = AgentImageTasteStyle.selected(for: VillageBot.lumiID) {
+                    Toggle("Brug min billedstil · " + style.title, isOn: $useImageTaste).disabled(busy)
+                }
+            }
+            FadedSecondaryButton("Lav billeder på iPhone", icon: "iphone") {
+                composerFocused = false
+                showPhoneImageStudio = true
+            }
+            .disabled(busy)
+        }
+        .task(id: "\(api?.queueTargetID ?? ""):\(pcImageRefresh)") {
+            guard let api else { return }
+            pcImageCatalog = .checking
+            let catalog = await StudioPCImageCatalog.inspect(api)
+            if !Task.isCancelled { pcImageCatalog = catalog }
+        }
     }
 
     func messageCard(_ message: LumiSceneMessage) -> some View {
@@ -365,44 +456,73 @@ import UIKit
         christel.stop()
     }
 
+    private var videoReferenceControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            FadedDetailText("Lav et kort klip fra en beskrivelse. Tilføj et billede, hvis det skal være klippets første billede.")
+            mediaReferencePicker(selection: $videoReferenceSelection, reference: $videoReference,
+                                 loading: $loadingVideoReference, forVideo: true)
+            if let picture, videoReference == nil {
+                FadedSecondaryButton("Brug Lumis seneste billede", icon: "photo.badge.plus") {
+                    videoReferenceSelection = nil
+                    applyVideoReference(picture)
+                }.disabled(busy)
+            }
+        }
+    }
+
+    private func applyVideoReference(_ source: Data) {
+        guard let data = StudioPhotoInput.downsample(source), (1...1_000_000).contains(data.count) else {
+            notice = "Billedet til video kunne ikke åbnes."
+            return
+        }
+        videoReference = data
+    }
+
     var referencePicker: some View {
+        mediaReferencePicker(selection: $referenceSelection, reference: $imageReference,
+                             loading: $loadingReference, forVideo: false)
+    }
+
+    private func mediaReferencePicker(selection: Binding<PhotosPickerItem?>, reference: Binding<Data?>,
+                                      loading: Binding<Bool>, forVideo: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 8) {
-                if let imageReference, let preview = UIImage(data: imageReference) {
+                if let data = reference.wrappedValue, let preview = UIImage(data: data) {
                     Image(uiImage: preview).resizable().scaledToFill()
                         .frame(width: 44, height: 44).clipShape(.rect(cornerRadius: 8))
                         .accessibilityLabel("Valgt referencebillede")
                 }
-                PhotosPicker(selection: $referenceSelection, matching: .images) {
-                    Label(imageReference == nil ? "Tilføj referencebillede" : "Skift referencebillede",
+                PhotosPicker(selection: selection, matching: .images) {
+                    Label(reference.wrappedValue == nil ? "Tilføj referencebillede" : "Skift referencebillede",
                           systemImage: "photo.badge.plus").frame(minHeight: 44)
                 }
                 .disabled(busy)
-                if loadingReference { ProgressView() }
-                if imageReference != nil || loadingReference {
+                if loading.wrappedValue { ProgressView() }
+                if reference.wrappedValue != nil || loading.wrappedValue {
                     Button("Fjern referencebillede", systemImage: "xmark") {
-                        referenceSelection = nil
-                        imageReference = nil
+                        selection.wrappedValue = nil
+                        reference.wrappedValue = nil
                     }.labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(busy)
                 }
             }
-            if imageReference != nil {
-                Text("Referencebilledet sendes til ComfyUI på din PC, når du trykker Lav billede.")
+            if reference.wrappedValue != nil {
+                Text(forVideo ? "Referencebilledet sendes til din parrede PC, når du trykker Lav video."
+                      : "Referencebilledet sendes til din parrede PC, når du trykker Lav billede.")
                     .font(.caption).foregroundStyle(palette.secondary)
             }
         }
-        .task(id: referenceSelection) {
-            guard let item = referenceSelection else { loadingReference = false; return }
-            imageReference = nil
-            loadingReference = true
-            defer { if referenceSelection == item { loadingReference = false } }
+        .task(id: selection.wrappedValue) {
+            guard let item = selection.wrappedValue else { loading.wrappedValue = false; return }
+            reference.wrappedValue = nil
+            loading.wrappedValue = true
+            defer { if selection.wrappedValue == item { loading.wrappedValue = false } }
             do {
                 guard let input = try await item.loadTransferable(type: StudioPhotoInput.self),
                       (1...1_000_000).contains(input.data.count) else { throw APIError.input }
                 try Task.checkCancellation()
-                if referenceSelection == item { imageReference = input.data }
+                if selection.wrappedValue == item { reference.wrappedValue = input.data }
             } catch {
-                if !Task.isCancelled && referenceSelection == item {
+                if !Task.isCancelled && selection.wrappedValue == item {
                     notice = "Referencebilledet kunne ikke åbnes."
                 }
             }

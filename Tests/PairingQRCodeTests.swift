@@ -8,6 +8,23 @@ import XCTest
 final class PairingQRCodeTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_893_456_000)
 
+    @MainActor func testCastUsesTheHomePairingWhenChatUsesTailscale() throws {
+        let remote = try LiveAPI(server: Server("100.64.1.42"), token: "remote-fixture")
+        let pairing = try XCTUnwrap(CastHomePairing(active: remote, savedHomeAddress: "192.168.1.20"))
+        let home = try pairing.connection { address in
+            XCTAssertEqual(address, "192.168.1.20")
+            return "home-fixture"
+        }
+        XCTAssertEqual(home.server.profile, .home)
+        XCTAssertEqual(home.request(home.server.endpoint("health")).value(forHTTPHeaderField: "Authorization"), "Bearer home-fixture")
+        XCTAssertEqual(remote.server.profile, .tailscale)
+        XCTAssertThrowsError(try pairing.connection { _ in throw APIError.storage })
+        XCTAssertNil(CastHomePairing(active: remote, savedHomeAddress: "100.65.7.2"))
+        XCTAssertNil(CastHomePairing(active: nil, savedHomeAddress: "192.168.1.20"))
+        let alreadyHome = try XCTUnwrap(CastHomePairing(active: home, savedHomeAddress: nil))
+        XCTAssertEqual(try alreadyHome.connection { _ in throw APIError.storage }.queueTargetID, home.queueTargetID)
+    }
+
     @MainActor func testScannerAcceptsFractionalExpiryAndCanonicalizesAddress() throws {
         let expiry = now.addingTimeInterval(30.125)
         let payload = try PairingQRSession.accept(qr(address: "http://100.64.1.42:8765/api/v1", expiry: expiry), now: now)

@@ -33,6 +33,23 @@ final class PhoneStreamProxy {
 
     private init() {}
 
+    private func useBrowserSession(_ cookies: [HTTPCookie], userAgent: String?, referer: String?,
+                                   headers: [String: [String: String]]) {
+        self.cookies = cookies
+        self.userAgent = userAgent.flatMap { $0.isEmpty ? nil : $0 } ?? "Mozilla/5.0"
+        self.referer = referer ?? ""
+        capturedHeadersByURL = headers
+    }
+
+    func inspectDirect(_ url: URL, isHLS: Bool, cookies: [HTTPCookie], userAgent: String?,
+                       referer: String?, headers: [String: [String: String]], completion: @escaping (HLSFormats?) -> Void) {
+        queue.async {
+            self.useBrowserSession(cookies, userAgent: userAgent, referer: referer, headers: headers)
+            if isHLS { self.inspectHLS(url, completion: completion) }
+            else { completion(nil) }
+        }
+    }
+
     func prepare(cookies: [HTTPCookie], userAgent: String?, referer: String?, capturedHeadersByURL: [String: [String: String]] = [:], completion: @escaping (Result<URL, Error>) -> Void) {
         queue.async {
             self.routeLock.withLock {
@@ -40,10 +57,7 @@ final class PhoneStreamProxy {
                 self.routeTokens.removeAll()
                 self.routeOrder.removeAll()
             }
-            self.cookies = cookies
-            if let userAgent, !userAgent.isEmpty { self.userAgent = userAgent }
-            self.referer = referer ?? ""
-            self.capturedHeadersByURL = capturedHeadersByURL
+            self.useBrowserSession(cookies, userAgent: userAgent, referer: referer, headers: capturedHeadersByURL)
             if let host = self.hostAddress, let port = self.listenPort {
                 completion(.success(URL(string: "http://\(host):\(port)/")!))
                 return
@@ -79,8 +93,8 @@ final class PhoneStreamProxy {
 
     /// Inspect the master and its referenced audio/video playlists so Cast
     /// receives segment formats that match this stream instead of guesses.
-    func inspectHLS(_ url: URL, completion: @escaping (HLSFormats?) -> Void) {
-        fetchPlaylistText(url) { [weak self] masterText, finalURL in
+    func inspectHLS(_ url: URL, usingBrowserSession: Bool = true, completion: @escaping (HLSFormats?) -> Void) {
+        fetchPlaylistText(url, usingBrowserSession: usingBrowserSession) { [weak self] masterText, finalURL in
             guard let self, let masterText, let finalURL else { completion(nil); return }
             let lines = masterText.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             let audioLine = lines.first { $0.hasPrefix("#EXT-X-MEDIA:") && $0.localizedCaseInsensitiveContains("TYPE=AUDIO") }
@@ -108,7 +122,7 @@ final class PhoneStreamProxy {
             var videoFormat: Int?
             if let audioURL {
                 group.enter()
-                self.fetchPlaylistText(audioURL) { text, _ in
+                self.fetchPlaylistText(audioURL, usingBrowserSession: usingBrowserSession) { text, _ in
                     self.queue.async {
                         if let text { audioFormat = self.audioFormat(in: text) }
                         group.leave()
@@ -117,7 +131,7 @@ final class PhoneStreamProxy {
             }
             if let videoURL {
                 group.enter()
-                self.fetchPlaylistText(videoURL) { text, _ in
+                self.fetchPlaylistText(videoURL, usingBrowserSession: usingBrowserSession) { text, _ in
                     self.queue.async {
                         if let text { videoFormat = self.videoFormat(in: text) }
                         group.leave()
@@ -155,19 +169,22 @@ final class PhoneStreamProxy {
         }
     }
 
-    private func fetchPlaylistText(_ url: URL, completion: @escaping (String?, URL?) -> Void) {
+    private func fetchPlaylistText(_ url: URL, usingBrowserSession: Bool, completion: @escaping (String?, URL?) -> Void) {
         var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 25)
-        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("*/*", forHTTPHeaderField: "Accept")
-        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        let pageReferer = referer.isEmpty ? url.absoluteString : referer
-        request.setValue(pageReferer, forHTTPHeaderField: "Referer")
-        if let page = URL(string: pageReferer), let scheme = page.scheme, let host = page.host {
-            request.setValue("\(scheme)://\(host)" + (page.port.map { ":\($0)" } ?? ""), forHTTPHeaderField: "Origin")
+        request.httpShouldHandleCookies = false
+        if usingBrowserSession {
+            request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("*/*", forHTTPHeaderField: "Accept")
+            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+            let pageReferer = referer.isEmpty ? url.absoluteString : referer
+            request.setValue(pageReferer, forHTTPHeaderField: "Referer")
+            if let page = URL(string: pageReferer), let scheme = page.scheme, let host = page.host {
+                request.setValue("\(scheme)://\(host)" + (page.port.map { ":\($0)" } ?? ""), forHTTPHeaderField: "Origin")
+            }
+            let cookie = cookieHeader(for: url)
+            if !cookie.isEmpty { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
+            applyCapturedHeaders(to: &request, for: url)
         }
-        let cookie = cookieHeader(for: url)
-        if !cookie.isEmpty { request.setValue(cookie, forHTTPHeaderField: "Cookie") }
-        applyCapturedHeaders(to: &request, for: url)
         URLSession.shared.dataTask(with: request) { data, response, error in
             guard error == nil, let response = response as? HTTPURLResponse,
                   (200...299).contains(response.statusCode), let data,

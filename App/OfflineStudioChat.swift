@@ -6,10 +6,23 @@ import SwiftUI
 import UIKit
 
 extension OfflineStudio {
-    var studioChatPage: some View {
+    @ViewBuilder var studioChatPage: some View {
+        let composer = AnyView(privateComposer)
+        if privateSession {
+            VStack(spacing: 0) {
+                studioChatTranscript
+                composer
+            }
+        } else {
+            studioChatTranscript.safeAreaInset(edge: .bottom) { composer }
+        }
+    }
+
+    private var studioChatTranscript: some View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 14) {
+                    if privateSession { studioOperationStatus }
                     if !privateSession { privateHeader }
                     if currentBotTurns.isEmpty {
                         FadedEmptyState(icon: "bubble.left", title: "Klar til en samtale",
@@ -24,7 +37,6 @@ extension OfflineStudio {
             .scrollDismissesKeyboard(.interactively)
             .onScrollPhaseChange { _, phase in if phase == .interacting { resetIdleTimer() } }
             .defaultScrollAnchor(.bottom)
-            .safeAreaInset(edge: .bottom) { privateComposer }
             .onChange(of: currentBotTurns.last?.id) { scrollPrivate(proxy) }
             .onChange(of: privateBotID) { scrollPrivate(proxy) }
             .onChange(of: answer) { scrollPrivate(proxy) }
@@ -180,7 +192,7 @@ extension OfflineStudio {
             }
             if let problem = dictation.problem, !dictation.active {
                 Text(problem).font(.footnote).foregroundStyle(palette.secondary)
-            } else if !textReady || privateModelDownload != nil {
+            } else if (!textReady || privateModelDownload != nil) && !promptFocused {
                 privateTextModelSetup
             } else if hasPrompt && !messageFitsContext {
                 Text("Beskeden er for lang til den valgte model.").font(.footnote).foregroundStyle(palette.secondary)
@@ -191,14 +203,19 @@ extension OfflineStudio {
             HStack(alignment: .bottom, spacing: 4) {
                 sessionPlusMenu
                 TextField("Skriv til din private bot…", text: $prompt, axis: .vertical)
-                        .lineLimit(1...5).frame(minHeight: 44).focused($promptFocused)
-                Button(action: toggleSessionDictation) {
-                    Image(systemName: dictation.active ? "stop.fill" : "mic")
-                        .frame(width: 44, height: 44).contentShape(Rectangle())
+                    .lineLimit(1...(promptFocused ? 3 : 5)).frame(minHeight: 44).focused($promptFocused)
+                if promptFocused {
+                    Button("Skjul tastatur", systemImage: "keyboard.chevron.compact.down") { promptFocused = false }
+                        .labelStyle(.iconOnly).frame(width: 44, height: 44)
+                } else {
+                    Button(action: toggleSessionDictation) {
+                        Image(systemName: dictation.active ? "stop.fill" : "mic")
+                            .frame(width: 44, height: 44).contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain).foregroundStyle(palette.text)
+                    .accessibilityLabel(dictation.active ? "Stop diktering" : "Diktér på telefonen")
+                    .disabled(task != nil)
                 }
-                .buttonStyle(.plain).foregroundStyle(palette.text)
-                .accessibilityLabel(dictation.active ? "Stop diktering" : "Diktér på telefonen")
-                .disabled(task != nil)
                 Button(action: sendPrivateMessage) {
                     Image(systemName: "arrow.up").foregroundStyle(FadedColors.deep)
                         .frame(width: 40, height: 40).background(palette.lime, in: Circle())

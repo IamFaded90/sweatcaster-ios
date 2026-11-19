@@ -3,6 +3,34 @@ import Foundation
 import XCTest
 @testable import SweatCaster
 
+final class VideoQualityReceiptTests: XCTestCase {
+    private func read(_ state: String, _ checks: [String: String]) throws -> VideoQualityReceipt {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "state": state, "checks": checks.map { ["id": $0.key, "state": $0.value] }
+        ])
+        return try JSONDecoder().decode(VideoQualityReceipt.self, from: data)
+    }
+
+    func testVerifiedFileCanHaveIntentionallySilentAudio() throws {
+        let silent = try read("verified", ["video": "passed", "duration": "passed", "audio": "unchecked"])
+        XCTAssertEqual(silent.outcome, .passed)
+        XCTAssertEqual(silent.checks.first { $0.id == "audio" }?.result, "Ikke kontrolleret")
+        let voiced = try read("verified", ["video": "passed", "duration": "passed", "audio": "passed"])
+        XCTAssertEqual(voiced.outcome, .passed)
+    }
+
+    func testMissingFailureAndUnknownEvidenceNeverClaimSuccess() throws {
+        XCTAssertEqual(try read("unavailable", [:]).outcome, .unavailable)
+        XCTAssertEqual(try read("partial", ["video": "passed"]).outcome, .partial)
+        XCTAssertEqual(try read("verified", [:]).outcome, .partial)
+        XCTAssertEqual(try read("verified", ["audio": "passed", "video": "passed"]).outcome, .partial)
+        XCTAssertEqual(try read("verified", ["audio": "new-kind", "video": "passed", "duration": "passed"]).outcome, .partial)
+        XCTAssertEqual(try read("verified", ["audio": "failed", "video": "passed", "duration": "passed"]).outcome, .failed)
+        XCTAssertEqual(try read("failed", [:]).outcome, .failed)
+    }
+
+}
+
 final class ModelSubmitTests: XCTestCase {
     @MainActor func testCancellationBeforePostDoesNotRequireReview() async throws {
         let fixture = try await makeModel(host: "192.168.10.41")

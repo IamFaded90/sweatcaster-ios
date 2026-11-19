@@ -67,8 +67,25 @@ enum PhoneModels {
     }
 
     static func hasDownloadSpace(bytes: Int64) -> Bool {
-        let values = try? URL.documentsDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        return (values?.volumeAvailableCapacityForImportantUsage ?? 0) >= bytes
+        let values = try? URL.documentsDirectory.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
+        let capacity = values?.volumeAvailableCapacityForImportantUsage ?? values?.volumeAvailableCapacity.map { Int64($0) }
+        return (capacity ?? 0) >= bytes
+    }
+
+    static func modelFoldersOnDisk() -> [String: URL] {
+        var folders: [String: URL] = [:]
+        let root = downloadedRoot.resolvingSymlinksInPath().standardizedFileURL
+        for entry in catalog {
+            guard let model = entry.model else { continue }
+            let folder = root.appendingPathComponent(model.folderName, isDirectory: true)
+            guard folder.path == folder.resolvingSymlinksInPath().path,
+                  let flags = try? folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  flags.isDirectory == true, flags.isSymbolicLink != true else { continue }
+            folders[entry.id] = folder
+        }
+        if FileManager.default.fileExists(atPath: importedFolder.path) { folders["imported"] = importedFolder }
+        for model in GGUFPhoneModel.installed { folders[model.id] = model.url.deletingLastPathComponent() }
+        return folders
     }
 
     static var catalog: [Entry] {
@@ -344,16 +361,34 @@ enum PhoneModels {
     private(set) var directModelID: String?
     private(set) var directProgress = 0.0
 
+    static func failureMessage(for error: Error) -> String {
+        if let failure = error as? URLError {
+            if failure.code == .cancelled { return "Hentningen blev stoppet." }
+            if [.notConnectedToInternet, .networkConnectionLost, .timedOut].contains(failure.code) {
+                return "Forbindelsen blev afbrudt. Tjek nettet, og tryk Hent og vælg igen."
+            }
+        }
+        if let failure = error as? CocoaError, failure.code == .fileWriteOutOfSpace {
+            return "Der er for lidt ledig lagerplads til at gemme modellen på telefonen."
+        }
+        if case PhoneModelError.downloadBusy = error {
+            return "En anden tekstmodel hentes. Vent, eller stop den øverst i listen."
+        }
+        if case PhoneModelError.invalidBundle = error {
+            return "Der mangler gyldige modelfiler. Tryk på modellen for at prøve at hente dem igen."
+        }
+        return "Modellen kunne ikke hentes. Tjek nettet og den ledige plads, og prøv igen."
+    }
+
     func activate() {
         let downloader = ModelDownloader.shared
         if !observing {
             observing = true
             observeChanges()
         }
-        if downloader.isPaused,
-           let pending = UserDefaults.standard.string(forKey: key), pending == downloader.downloadingModelId {
-            if PhoneModels.supportsLocalInference(pending) { downloader.resumeDownload() }
-            else { cancel() }
+        if downloader.isPaused, let restored = downloader.downloadingModelId {
+            if !PhoneModels.supportsLocalInference(restored) { cancel() }
+            else if restored == UserDefaults.standard.string(forKey: key) { downloader.resumeDownload() }
         }
         Task { await finishPendingDownload() }
     }

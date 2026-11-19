@@ -171,7 +171,35 @@ import Observation
     }
 
     func saveRegularStudioTurns(_ turns: [PrivateChatTurn]) throws {
-        try persist(JSONEncoder().encode(turns.suffix(100)), for: .turns)
+        let retained = turns.suffix(100)
+        try persist(JSONEncoder().encode(retained), for: .turns)
+        pruneInstagramPhotos(keeping: Set(retained.filter { $0.agentAction?.instagramDraft?.hasPhoto == true }.map(\.id)))
+    }
+
+    private var instagramPhotos: LocalModelStore {
+        LocalModelStore(root: store.root.appending(path: "InstagramDraftPhotos", directoryHint: .isDirectory),
+                        maximumBytes: 4_194_304)
+    }
+
+    func instagramPhoto(_ id: UUID) throws -> Data? {
+        try instagramPhotos.loadBytes(forKey: id.uuidString)
+    }
+
+    func saveInstagramPhoto(_ data: Data, id: UUID) throws {
+        try instagramPhotos.saveBytes(data, forKey: id.uuidString)
+    }
+
+    func removeInstagramPhoto(_ id: UUID) throws {
+        try instagramPhotos.delete(forKey: id.uuidString)
+    }
+
+    private func pruneInstagramPhotos(keeping ids: Set<UUID>) {
+        let photos = instagramPhotos
+        guard let files = try? FileManager.default.contentsOfDirectory(at: photos.root, includingPropertiesForKeys: nil) else { return }
+        for file in files where file.pathExtension == "json" {
+            guard let id = UUID(uuidString: file.deletingPathExtension().lastPathComponent), !ids.contains(id) else { continue }
+            do { try photos.delete(forKey: id.uuidString) } catch { AppDiagnostics.record(error) }
+        }
     }
 
     func saveRegularStudioDraft(_ text: String) throws {
@@ -191,6 +219,7 @@ import Observation
         defaults.removeObject(forKey: Field.turns.defaultsKey)
         try store.delete(forKey: ChatField.promptHistory.fileKey)
         defaults.removeObject(forKey: ChatField.promptHistory.defaultsKey)
+        pruneInstagramPhotos(keeping: [])
     }
 
     func chatArchive() -> [SavedAgentSession] {

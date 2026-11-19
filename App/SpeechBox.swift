@@ -34,6 +34,7 @@ final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
 
     @MainActor func play(_ utterance: AVSpeechUtterance, as playback: Playback, agentID: UUID? = nil) {
         stop()
+        MusicPlayer.shared.pause()
         motionOwner = VillageSpeechMotion.shared.begin(agentID: agentID) { [weak self] in self?.stop() }
         currentUtterance = utterance
         self.playback = playback

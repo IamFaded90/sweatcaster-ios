@@ -109,6 +109,9 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
     private let onPhoneCastWake: (Bool) -> Void
     private let pcRelayID: String?
     private let pcRelay: CastPCRelay?
+    private let pcRelayWithContext: CastPCRelayWithContext?
+    private let filmAnalysis: CastFilmAnalysis?
+    private let filmSpeech: CastFilmSpeech?
     private let content: () -> Content
     @Environment(\.scenePhase) private var phase
     @State private var model: CastAppModel?
@@ -117,6 +120,9 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
     public init(isSelected: Bool, background: AnyView, showsPlaybackControls: Bool = true,
                 onOpen: @escaping () -> Void, onPhoneCastWake: @escaping (Bool) -> Void = { _ in },
                 pcRelayID: String? = nil, pcRelay: CastPCRelay? = nil,
+                pcRelayWithContext: CastPCRelayWithContext? = nil,
+                filmAnalysis: CastFilmAnalysis? = nil,
+                filmSpeech: CastFilmSpeech? = nil,
                 @ViewBuilder content: @escaping () -> Content) {
         self.isSelected = isSelected
         self.background = background
@@ -125,6 +131,9 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
         self.onPhoneCastWake = onPhoneCastWake
         self.pcRelayID = pcRelayID
         self.pcRelay = pcRelay
+        self.pcRelayWithContext = pcRelayWithContext
+        self.filmAnalysis = filmAnalysis
+        self.filmSpeech = filmSpeech
         self.content = content
     }
 
@@ -153,10 +162,18 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
             if isSelected && model == nil {
                 let controller = CastAppModel()
                 controller.pcRelay = pcRelay
+                controller.pcRelayWithContext = pcRelayWithContext
+                controller.filmAnalysis = filmAnalysis
+                controller.filmSpeech = filmSpeech
                 model = controller
             }
         }
-        .onChange(of: pcRelayID) { _, _ in model?.pcRelay = pcRelay }
+        .onChange(of: pcRelayID) { _, _ in
+            model?.pcRelay = pcRelay
+            model?.pcRelayWithContext = pcRelayWithContext
+            model?.filmAnalysis = filmAnalysis
+            model?.filmSpeech = filmSpeech
+        }
         .task(id: model != nil && phase == .active) {
             guard phase == .active, let webView = model?.browser.webView else { return }
             while !Task.isCancelled {
@@ -290,6 +307,7 @@ struct RecentCast: Identifiable, Codable {
     var id: String { video.pageURL + "|" + video.title }
     let video: VideoCandidate
     let castAt: Date
+    var receiverAttempt: UUID?
 }
 
 struct BrowserLink: Identifiable, Codable, Equatable {

@@ -121,6 +121,15 @@ def collection_answer(settings, message: str) -> str | None:
 
 def register_modules(app: FastAPI, settings, authorize) -> None:
     from sweatcaster.cast_relay import register_cast_relay
+    from sweatcaster.window_help import register_window_help
+    from sweatcaster.phone_screen import register_phone_screen
+    from sweatcaster.film_companion import register_film_companion
+    from sweatcaster.agent_tool_builder import register_agent_tools
+    from sweatcaster.sales_service import register_sales
+    from sweatcaster.village_surprises import register_village_surprises
+    from sweatcaster.agent_rooms import register_agent_rooms
+    from sweatcaster.agent_repair import register_agent_repair
+    from sweatcaster.agent_cases import register_agent_cases
     from sweatcaster.bot_computer_routes import register_bot_computers
     from sweatcaster.lumi_companion import register_lumi
     from sweatcaster.bot_computers import BotComputerError, BotComputerWorker, ollama_reports, wire_uuid
@@ -135,23 +144,41 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
     from sweatcaster.composio_library import register_composio
     from sweatcaster.grok_templates import register_grok_templates
     from sweatcaster.mail_appointments import register_mail_appointments
+    from sweatcaster.mail_reschedule import register_mail_reschedule
+    from sweatcaster.gmail_cleanup import register_gmail_cleanup
+    from sweatcaster.pc_repair import register_pc_repair
     from sweatcaster.microsoft_voice import register_christel
-    from sweatcaster.pc_metrics import desktop_setup, gmail_setup, image_setup, read_metrics, web_setup
+    from sweatcaster.pc_metrics import desktop_setup, gmail_setup, image_engine_status, image_setup, read_metrics, web_setup
     from sweatcaster.store import Store
     from sweatcaster.studio_video import register_studio_video
     from sweatcaster.studio_meshes import register_studio_meshes
+    from sweatcaster.tradera_watch import register_tradera
     from sweatcaster.video_review import register_video_review
 
     register_lumi(app, settings, authorize)
     studio_videos = register_studio_video(app, settings, authorize)
     register_studio_meshes(app, settings, authorize)
     register_cast_relay(app, settings, authorize)
+    register_window_help(app, settings, authorize)
+    register_phone_screen(app, settings, authorize)
+    register_film_companion(app, settings, authorize)
+    register_agent_tools(app, settings, authorize)
+    surprises = register_village_surprises(app, settings, authorize, ollama_reports(settings, add_on=True),
+                                           is_idle=lambda: computers.active_jobs() == 0)
+    rooms = register_agent_rooms(app, settings, authorize, is_idle=lambda: computers.active_jobs() == 0)
+    register_agent_repair(app, settings, authorize, batch=batch)
     library = register_composio(app, settings, authorize)
+    cases = register_agent_cases(app, settings, authorize, library)
+    register_mail_reschedule(app, settings, authorize, library)
+    register_gmail_cleanup(app, settings, authorize, library)
+    register_pc_repair(app, settings, authorize, is_idle=lambda: computers.active_jobs() == 0)
+    sales = register_sales(app, settings, authorize, library)
+    price_watches = register_tradera(app, settings, authorize, library)
     appointments = register_mail_appointments(app, settings, authorize, library,
                                               ollama_reports(settings, mail_appointments=True))
     register_grok_templates(app, settings, authorize)
     register_christel(app, settings, authorize)
-    register_agentmail(app, settings, authorize)
+    register_agentmail(app, settings, authorize, library)
     register_addons(app, settings, authorize, ollama_reports(settings, add_on=True))
     waiting_for_video_review = register_video_review(app, settings, authorize)
 
@@ -169,6 +196,12 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             ]}
         return {"code": [job for job in batch.list() if job["status"] == "review"],
                 "video": waiting_for_video_review(), "mail": mail}
+
+    @app.get("/api/modules/v1/pc-image-engine", include_in_schema=False)
+    def pc_image_engine(request: Request, response: Response):
+        authorize(request, settings)
+        response.headers["Cache-Control"] = "no-store"
+        return {"state": image_engine_status()}
 
     @app.get("/api/modules/v1/pc-metrics", include_in_schema=False)
     def pc_metrics(request: Request, response: Response):
@@ -280,6 +313,18 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             stack.callback(computers_worker.stop)
             appointments.start()
             stack.callback(appointments.stop)
+            price_watches.start()
+            stack.callback(price_watches.stop)
+            sales.start()
+            stack.callback(sales.stop)
+            surprises.start()
+            stack.callback(surprises.stop)
+            rooms.start()
+            stack.callback(rooms.stop)
+            cases.start()
+            stack.callback(cases.stop)
+            application.state.instagram_schedule.start()
+            stack.callback(application.state.instagram_schedule.stop)
             yield
 
     app.router.lifespan_context = lifespan
@@ -391,6 +436,20 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             raise ApiError(422, "INVALID_INPUT", exc.message) from exc
         response.headers["Cache-Control"] = "no-store"
         return computers.activity(ids)
+
+    @app.get("/api/modules/v1/video-quality", include_in_schema=False)
+    def video_quality_support(request: Request, response: Response):
+        authorize(request, settings)
+        response.headers["Cache-Control"] = "no-store"
+        from sweatcaster.pipeline import Pipeline
+        return {"available": getattr(Pipeline, "checks_export", False)}
+
+    @app.get("/api/modules/v1/video-jobs/{job_id}/quality", include_in_schema=False)
+    def video_job_quality(job_id: str, request: Request, response: Response):
+        authorize(request, settings)
+        response.headers["Cache-Control"] = "no-store"
+        from sweatcaster.video_quality import job_receipt
+        return job_receipt(settings, app.state.store, job_id)
 
     @app.delete("/api/modules/v1/video-jobs/{job_id}/record", include_in_schema=False)
     def delete_unavailable_video_job(job_id: str, request: Request, payload: dict = Body(...)):

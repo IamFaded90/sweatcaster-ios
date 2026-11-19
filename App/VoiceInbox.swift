@@ -220,8 +220,13 @@ struct AssistantCaptureStrip: View {
                         continue
                     }
                     let title = row.kind == .shopping && !value.lowercased().hasPrefix("køb ") ? "Køb " + value : value
-                    try await PhoneActions.saveReminder(title: title, due: due, jobID: row.id, store: store,
-                                                       preferredLists: row.kind == .shopping ? ["Indkøb", "Indkøbsliste"] : [])
+                    let check = try await PhoneActions.saveReminder(title: title, due: due, jobID: row.id, store: store,
+                                                                   preferredLists: row.kind == .shopping ? ["Indkøb", "Indkøbsliste"] : [])
+                    if check != .matched {
+                        failed += 1
+                        problem = check.summary(for: .reminder)
+                        continue
+                    }
                 }
                 items[index].saved = true
                 transcript = remainingText

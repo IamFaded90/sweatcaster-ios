@@ -18,6 +18,7 @@ from sweatcaster.dto import ApiError
 ENDPOINT = "https://connect.composio.dev/mcp"
 MESSAGES = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 PROFILE = "https://gmail.googleapis.com/gmail/v1/users/me/profile"
+THREADS = "https://gmail.googleapis.com/gmail/v1/users/me/threads"
 MESSAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 PROTOCOL = "2025-03-26"
 CAP = 2_000_000
@@ -197,15 +198,34 @@ class ConsumerGmail:
             for row in rows[:40]:
                 if isinstance(row, dict) and isinstance(identifier := row.get("messageId") or row.get("id"), str):
                     if MESSAGE_ID.fullmatch(identifier):
-                        messages.append({"id": identifier})
+                        item = {"id": identifier}
+                        thread = row.get("threadId")
+                        if isinstance(thread, str) and MESSAGE_ID.fullmatch(thread):
+                            item["threadId"] = thread
+                        messages.append(item)
             return {"messages": messages, "nextPageToken": data.get("nextPageToken")}
         if endpoint.startswith(MESSAGES + "/") and MESSAGE_ID.fullmatch(identifier := endpoint.removeprefix(MESSAGES + "/")):
+            message_format = "metadata" if query.get("format") == "metadata" else "full"
             data = self._execute("GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",
-                                 {"user_id": "me", "message_id": identifier, "format": "full"})
+                                 {"user_id": "me", "message_id": identifier, "format": message_format})
             return {"id": data.get("messageId") or data.get("id"), "threadId": data.get("threadId"),
                     "internalDate": data.get("internalDate") or _timestamp(data.get("messageTimestamp")),
                     "snippet": data.get("messageText") or data.get("snippet"),
+                    "to": data.get("to") or data.get("recipientEmail"), "cc": data.get("cc"),
                     "payload": data.get("payload"), "sender": data.get("sender"), "subject": data.get("subject")}
+        if endpoint.startswith(THREADS + "/") and MESSAGE_ID.fullmatch(identifier := endpoint.removeprefix(THREADS + "/")):
+            data = self._execute("GMAIL_FETCH_MESSAGE_BY_THREAD_ID", {"user_id": "me", "thread_id": identifier})
+            rows = data.get("messages")
+            if not isinstance(rows, list) or data.get("nextPageToken") or len(rows) > 50:
+                raise ApiError(502, "NOT_READY", "Hele Gmail-tråden kunne ikke kontrolleres.")
+            messages = []
+            for row in rows:
+                if not isinstance(row, dict) or row.get("threadId", identifier) != identifier:
+                    raise ApiError(502, "NOT_READY", "Gmail-tråden kunne ikke bekræftes.")
+                stamp = row.get("internalDate") or row.get("messageTimestamp")
+                messages.append({**row, "id": row.get("messageId") or row.get("id"), "threadId": identifier,
+                                 "internalDate": _timestamp(str(stamp) if type(stamp) is int else stamp)})
+            return {"id": identifier, "messages": messages}
         raise ApiError(422, "INVALID_INPUT", "Gmail-opslaget understøttes ikke.")
 
     def recent(self, query):

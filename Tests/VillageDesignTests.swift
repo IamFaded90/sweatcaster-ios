@@ -188,6 +188,59 @@ final class VillageDesignTests: XCTestCase {
         XCTAssertEqual(malformed.villageFigure, "eva")
     }
 
+    func testLumiGetsHerOwnWalkingFigureAndMigratesHerOldDefault() throws {
+        let lumi = VillageBot.lumi()
+        XCTAssertEqual(lumi.villageFigure, "lumi")
+        XCTAssertEqual(VillageBot.founderEva().villageFigure, "eva")
+        XCTAssertFalse(VillageCharacterCatalog.all.contains { $0.id == lumi.villageFigure })
+
+        var previous = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(lumi)) as? [String: Any])
+        previous["villageFigure"] = "eva"
+        let migrated = try JSONDecoder().decode(VillageBot.self, from: JSONSerialization.data(withJSONObject: previous))
+        XCTAssertEqual(migrated.villageFigure, "lumi")
+
+        let suite = "village.lumi.figure.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        VillageCharacterCatalog.index([migrated], defaults: defaults)
+        XCTAssertEqual(VillageCharacterCatalog.resolved(name: "Lumi", id: lumi.id.uuidString, defaults: defaults), "lumi")
+
+        var customized = lumi
+        customized.chooseVillageFigure("eva")
+        let reopened = try JSONDecoder().decode(VillageBot.self, from: JSONEncoder().encode(customized))
+        XCTAssertEqual(reopened.villageFigure, "eva")
+
+        let distinct = try XCTUnwrap(VillageProductionArt.frame(character: "lumi", direction: 0, step: 0)?.pngData())
+        for character in ["eva", "saga"] {
+            let existing = try XCTUnwrap(VillageProductionArt.frame(character: character, direction: 0, step: 0)?.pngData())
+            XCTAssertNotEqual(distinct, existing)
+        }
+        for direction in 0..<16 {
+            let still = try XCTUnwrap(VillageProductionArt.frame(character: "lumi", direction: direction, step: 0))
+            let walking = try XCTUnwrap(VillageProductionArt.frame(character: "lumi", direction: direction, step: 3))
+            XCTAssertNotEqual(still.pngData(), walking.pngData())
+        }
+    }
+
+    func testFreshAgentsGetUnusedFiguresUntilTheCatalogIsFull() {
+        let preferred = VillageBot(name: "Eva")
+        var saved = [VillageBot.lumi()]
+        for _ in VillageCharacterCatalog.all {
+            var draft = preferred
+            draft.id = UUID()
+            draft.useAvailableVillageFigure(among: saved)
+            saved.append(draft)
+        }
+        XCTAssertEqual(Set(saved.map(\.villageFigure)).count, 11)
+        XCTAssertEqual(saved[1].villageFigure, "eva")
+        XCTAssertEqual(saved[2].villageFigure, "luna")
+
+        var manuallyPicked = VillageBot()
+        manuallyPicked.chooseVillageFigure("luna")
+        manuallyPicked.useAvailableVillageFigure(among: saved)
+        XCTAssertEqual(manuallyPicked.villageFigure, "luna")
+    }
+
     @MainActor func testTemplateKeepsFigureWithoutKeepingPersonalPhoto() {
         let bot = VillageBot(name: "Test", sprite: Data([1]), villageFigure: "iris")
         let template = VillageBotTemplate(bot: bot)

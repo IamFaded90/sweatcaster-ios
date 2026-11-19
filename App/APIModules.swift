@@ -53,9 +53,22 @@ extension LiveAPI {
         return (result.flux2, result.flux2Adult ?? false, result.pony ?? false)
     }
 
-    func lumiStartVideo(prompt: String) async throws -> LumiVideoJob {
-        let body = try JSONSerialization.data(withJSONObject: ["prompt": prompt])
-        return try await lumiRequest("video", body: body, timeout: 30)
+    func lumiStartVideo(prompt: String, reference: Data? = nil, privateSession: Bool = false) async throws -> LumiVideoJob {
+        var input = ["prompt": prompt]
+        if let reference {
+            guard (1...1_000_000).contains(reference.count) else { throw APIError.input }
+            input["reference"] = reference.base64EncodedString()
+        }
+        let body = try JSONEncoder().encode(input)
+        let action = privateSession ? "private-video" : (reference == nil ? "video" : "video-from-image")
+        return try await lumiRequest(action, body: body, timeout: 30)
+    }
+
+    func lumiRemoveVideo(id: UUID) async throws {
+        struct Receipt: Decodable { let ok: Bool }
+        let route = "lumi/\(VillageBot.lumiID.uuidString.lowercased())/video/\(id.uuidString.lowercased())/remove"
+        let receipt: Receipt = try await moduleJSON(route, upload: Data("{}".utf8), timeout: 20)
+        guard receipt.ok else { throw APIError.malformed }
     }
 
     func lumiVideoStatus(id: UUID) async throws -> LumiVideoJob {
@@ -87,7 +100,8 @@ extension LiveAPI {
 
     private func lumiData(_ action: String, body: Data,
                           timeout: TimeInterval) async throws -> (Data, URLResponse) {
-        guard ["chat", "scene-chat", "image", "private-image", "private-image-models", "video"].contains(action) else { throw APIError.input }
+        guard ["chat", "scene-chat", "image", "private-image", "private-image-models", "video", "video-from-image", "private-video"]
+            .contains(action) else { throw APIError.input }
         let url = try lumiURL(action)
         var endpoint = request(url, method: "POST")
         endpoint.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -131,20 +145,19 @@ extension LiveAPI {
 
     func moduleManifest() async throws -> ModuleManifest { try await moduleJSON("manifest") }
 
-    func castRelayURL(source: URL, page: URL?) async throws -> URL {
-        struct Input: Encodable { let url: String; let origin: String? }
+    func castRelayURL(source: URL, page: URL?, userAgent: String? = nil) async throws -> URL {
+        struct Input: Encodable { let url: String; let origin: String?; let userAgent: String? }
         struct Relay: Decodable { let path: String }
         guard server.profile == .home else { throw APIError.offline }
         let origin = page.flatMap { address -> String? in
             guard var parts = URLComponents(url: address, resolvingAgainstBaseURL: false),
                   ["http", "https"].contains(parts.scheme ?? ""), parts.host != nil,
                   parts.user == nil, parts.password == nil else { return nil }
-            parts.path = ""
             parts.query = nil
             parts.fragment = nil
             return parts.string
         }
-        let data = try JSONEncoder().encode(Input(url: source.absoluteString, origin: origin))
+        let data = try JSONEncoder().encode(Input(url: source.absoluteString, origin: origin, userAgent: userAgent))
         let result: Relay = try await moduleJSON("cast-relay", upload: data, timeout: 8, maximumBytes: 1024)
         let path = #"^/api/modules/v1/cast-relay/play/[A-Za-z0-9_-]{32}/[A-Za-z0-9_-]{24}$"#
         guard result.path.range(of: path, options: .regularExpression) != nil,

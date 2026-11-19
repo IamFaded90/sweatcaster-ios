@@ -38,7 +38,26 @@ def install(root: Path):
     if 'preview=bool(job.get("faded_preview")),' not in engine:
         engine = replace_once(engine, '            crop_mode_used=analysis.crop_mode_used,\n            cancel=cancel,',
                               '            crop_mode_used=analysis.crop_mode_used,\n            cancel=cancel,\n            preview=bool(job.get("faded_preview")),')
-    for path, text in [(render, renderer), (pipeline, engine)]:
+    worker = package / "jobs.py"
+    jobs = worker.read_text(encoding="utf-8")
+    if 'job["export_quality"] = check_export' not in engine:
+        engine = replace_once(engine, "        return warnings, timed",
+                              "        from sweatcaster.video_quality import check_export\n"
+                              '        job["export_quality"] = check_export(output, analysis.probe, bundle, cancel)\n'
+                              "        return warnings, timed")
+    if "    checks_export = True" not in engine:
+        engine = replace_once(engine, "class Pipeline:\n", "class Pipeline:\n    checks_export = True\n\n")
+    if 'current["export_quality"] = job.get("export_quality")' not in jobs:
+        jobs = replace_once(jobs, '                current["warnings"] = warnings[:12]',
+                            '                current["export_quality"] = job.get("export_quality")\n'
+                            '                current["warnings"] = warnings[:12]')
+        jobs = replace_once(jobs, '            code, message = phone_error(exc, self.settings.token)',
+                            '            from sweatcaster.video_quality import ExportQualityError\n'
+                            '            if isinstance(exc, ExportQualityError):\n'
+                            '                current["export_quality"] = exc.quality\n'
+                            '            code, message = phone_error(exc, self.settings.token)')
+    files = [(render, renderer), (pipeline, engine), (worker, jobs)]
+    for path, text in files:
         compile(text, str(path), "exec")
-    for path, text in [(render, renderer), (pipeline, engine)]:
+    for path, text in files:
         path.write_text(text, encoding="utf-8")

@@ -129,6 +129,8 @@ import UniformTypeIdentifiers
                 if let restored = try? JSONDecoder().decode(VillageBot.self, from: savedEditorDraft), !fixedProfile || restored.id == draft.id {
                     draft = restored
                 }
+                let saved = bots
+                if !saved.contains(where: { $0.id == draft.id }) { draft.useAvailableVillageFigure(among: saved) }
                 draftLoaded = true
             }
             .onChange(of: draft) { _, value in updateDraftCache(value) }
@@ -159,7 +161,11 @@ import UniformTypeIdentifiers
             ), axis: .vertical).lineLimit(2...4)
             Text("Profilbilledet vises ved botten. Landsbyfiguren bruger sit eget pixelbillede.").font(.footnote).foregroundStyle(.secondary)
             NavigationLink {
-                VillageFigurePicker(selection: $draft.villageFigure)
+                VillageFigurePicker(
+                    selection: Binding(get: { draft.villageFigure }, set: { draft.chooseVillageFigure($0) }),
+                    occupied: Set(bots.filter { $0.id != draft.id }.map(\.villageFigure)),
+                    includeLumi: draft.id == VillageBot.lumiID
+                )
             } label: {
                 Label("Vælg landsbyfigur · " + draft.villageFigure.capitalized, systemImage: "person.crop.square")
             }
@@ -326,6 +332,8 @@ import UniformTypeIdentifiers
     private func selectDraft(_ bot: VillageBot) {
         stopPreview()
         draft = bot
+        let saved = bots
+        if !saved.contains(where: { $0.id == bot.id }) { draft.useAvailableVillageFigure(among: saved) }
         page = .profile
         testReply = ""
     }
@@ -335,22 +343,25 @@ import UniformTypeIdentifiers
         if let onBack { onBack() } else { dismiss() }
     }
 
-    private func save(_ bot: VillageBot) -> Bool {
+    private func save(_ profile: VillageBot) -> Bool {
+        var bot = profile
         guard !bot.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             notice = "Skriv et navn til botten, før du gemmer."
             page = .profile
             return false
         }
         var updated = bots
-        let isNew = !updated.contains(where: { $0.id == bot.id })
-        if let index = updated.firstIndex(where: { $0.id == bot.id }) { updated[index] = bot }
+        let existing = updated.firstIndex { $0.id == bot.id }
+        if let existing { updated[existing] = bot }
         else {
             guard updated.count < 10 else { notice = "Du kan gemme op til 10 bots."; return false }
+            bot.useAvailableVillageFigure(among: updated)
             updated.append(bot)
         }
         guard persist(updated) else { return false }
+        if draft.id == bot.id { draft = bot }
         UserDefaults.standard.set(bot.voice, forKey: PhoneModels.agentVoiceKey(bot.id))
-        if isNew { VillageHistory.shared.created(bot) }
+        if existing == nil { VillageHistory.shared.created(bot) }
         savedEditorDraft = Data()
         return true
     }
@@ -362,7 +373,7 @@ import UniformTypeIdentifiers
             return
         }
         if !fixedProfile && bots.contains(where: { $0.id == bot.id }) { return }
-        if bot.name.isEmpty && bot.prompt.isEmpty && bot.sprite == nil && bot.villageFigure == VillageCharacterCatalog.initial(name: "", id: bot.id.uuidString) && !fixedProfile {
+        if bot.name.isEmpty && bot.prompt.isEmpty && bot.sprite == nil && !bot.villageFigureWasPicked && !fixedProfile {
             savedEditorDraft = Data()
         } else if let data = try? JSONEncoder().encode(bot) {
             savedEditorDraft = data
@@ -397,6 +408,7 @@ import UniformTypeIdentifiers
                 bot.sprite = sprite
             }
             bot.id = UUID()
+            bot.chooseVillageFigure(bot.villageFigure)
             if save(bot) {
                 if let template {
                     let options = PhoneModels.textOptions

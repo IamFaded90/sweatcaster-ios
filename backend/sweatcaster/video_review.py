@@ -12,6 +12,7 @@ from fastapi import APIRouter, Body, Depends, Request, Response
 from fastapi.responses import FileResponse
 
 from sweatcaster.dto import ApiError, parse_create_body
+from sweatcaster.video_quality import ExportQualityError
 
 
 @dataclass
@@ -27,6 +28,7 @@ class Review:
     touched: float = field(default_factory=monotonic)
     cancel: Event = field(default_factory=Event)
     reviewed_lines: tuple = ()
+    quality: dict | None = None
 
     @property
     def busy(self):
@@ -36,6 +38,7 @@ class Review:
         return {"id": self.id, "state": self.state, "message": self.message,
                 "lines": [{"start": line.t_start, "text": line.text} for line in self.plan.lines] if self.plan else [],
                 "previewReady": self.scratch is not None and self.state in {"ready", "finished"},
+                "quality": self.quality,
                 "previewLines": list(self.reviewed_lines) if self.scratch is not None else None}
 
 
@@ -105,6 +108,7 @@ def register_video_review(app, settings, authorize):
                 source=source, output=rendered, workdir=folder, analysis=review.analysis,
                 plan=approved, bundle=bundle, job=options, cancel=review.cancel,
             )
+            quality = options.get("export_quality")
             if sha256_file(source) != digest:
                 raise UserFacingError("Originalklippet har ændret sig. Opret en ny prøve.")
             with lock:
@@ -113,6 +117,7 @@ def register_video_review(app, settings, authorize):
                 if preview:
                     clean(review)
                     review.scratch, work = work, None
+                    review.quality = quality["receipt"] if quality else None
                     review.reviewed_lines = texts
                     review.state = "ready"
                 else:
@@ -120,12 +125,13 @@ def register_video_review(app, settings, authorize):
                     jobs._write_report(before=digest, after=digest, output=rendered, analysis=review.analysis,
                                        plan=timed, narration_source=bundle.source, warnings=warnings)
                     jobs.store.save_job({key: value for key, value in review.job.items() if key != "clip_ids"} | {
-                        "id": review.id, "status": "completed", "progress": 1.0,
+                        "id": review.id, "status": "completed", "progress": 1.0, "export_quality": quality,
                         "message": "Godkendt video er klar.", "warnings": [
                             safe for warning in warnings[:12] if (safe := _warning(warning, settings.token)) is not None
                         ], "error": None,
                         "created_at": now, "updated_at": now, "output_ready": True, "output_name": "output.mp4",
                     })
+                    review.quality = quality["receipt"] if quality else None
                     review.state = "finished"
                 complete = True
         except Exception as exc:
@@ -133,6 +139,11 @@ def register_video_review(app, settings, authorize):
             with lock:
                 review.state = "failed" if review.plan is None else "ready"
                 review.message = message
+                if isinstance(exc, ExportQualityError):
+                    review.quality = exc.quality["receipt"]
+                    if preview:
+                        clean(review)
+                        review.reviewed_lines = ()
         finally:
             if work is not None:
                 work.cleanup()
@@ -201,6 +212,7 @@ def register_video_review(app, settings, authorize):
                 raise ApiError(409, "NOT_READY", "Lav en prøve med de seneste rettelser først.")
             available()
             review.message = None
+            review.quality = None
             review.state = "previewing" if preview else "rendering"
             pool.submit(run, review, lines, preview)
             return review.receipt()
@@ -225,6 +237,7 @@ def register_video_review(app, settings, authorize):
             except OSError as exc:
                 raise ApiError(409, "NOT_READY", "Videoprøven er i brug. Prøv igen.") from exc
             review.reviewed_lines = ()
+            review.quality = None
             return review.receipt()
 
     app.include_router(router)

@@ -7,7 +7,10 @@ import UniformTypeIdentifiers
 
 struct PhoneModelsView: View {
     let allowsImageDownloads: Bool
-    init(allowsImageDownloads: Bool = true) { self.allowsImageDownloads = allowsImageDownloads }
+    init(allowsImageDownloads: Bool = true, initialImages: Bool = false) {
+        self.allowsImageDownloads = allowsImageDownloads
+        _page = State(initialValue: allowsImageDownloads && initialImages ? .images : .models)
+    }
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
     @AppStorage(AppStorageKeys.phoneModel) private var selected = "apple"
@@ -51,12 +54,18 @@ struct PhoneModelsView: View {
         let name: String
     }
     private var downloader: ModelDownloader { .shared }
+    private var textDownloadBusy: Bool {
+        working || benchmarkRunning || requestedDownloadID != nil || downloader.isDownloading || PhoneModelDownloads.shared.preparingModelID != nil
+    }
     private var mutationBusy: Bool {
-        working || benchmarkRunning || StudioImageDownloads.shared.activeModel != nil || requestedDownloadID != nil || downloader.isDownloading || PhoneModelDownloads.shared.preparingModelID != nil
+        textDownloadBusy || StudioImageDownloads.shared.activeModel != nil
     }
     private var favorites: Set<String> { Set(favoriteModels.split(separator: "|").map(String.init)) }
     private var orderedCatalog: [PhoneModels.Entry] {
-        PhoneModels.catalog.filter { favorites.contains($0.id) } + PhoneModels.catalog.filter { !favorites.contains($0.id) }
+        let active = requestedDownloadID ?? PhoneModelDownloads.shared.preparingModelID ?? (downloader.isDownloading ? downloader.downloadingModelId : nil)
+        let catalog = PhoneModels.catalog
+        let others = catalog.filter { $0.id != active }
+        return catalog.filter { $0.id == active } + others.filter { favorites.contains($0.id) } + others.filter { !favorites.contains($0.id) }
     }
     var body: some View {
         NavigationStack { modelDialogs }
@@ -67,8 +76,8 @@ struct PhoneModelsView: View {
             LazyVStack(alignment: .leading, spacing: FadedSpacing.section) {
                 if typeSize.isAccessibilitySize { pagePicker.pickerStyle(.menu) }
                 else { pagePicker.pickerStyle(.segmented) }
-                modelPage
                 if let notice { FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently) }
+                modelPage
             }
             .padding(16).frame(maxWidth: 640).frame(maxWidth: .infinity)
         }
@@ -131,6 +140,9 @@ struct PhoneModelsView: View {
     @ViewBuilder private var modelPage: some View {
         switch page {
         case .models:
+            if allowsImageDownloads, let image = StudioImageDownloads.shared.activeModel {
+                FadedSecondaryButton("Vis billedhentning · \(image.title)", icon: "photo") { page = .images }
+            }
             catalogSection
             extraModelsLink
             NavigationLink("Del iPhone-modellen på Wi-Fi") { PhoneModelServerScreen() }
@@ -138,7 +150,7 @@ struct PhoneModelsView: View {
             favoriteSection
             importSection
         case .images:
-            StudioImageDownloadsView(canStart: !mutationBusy)
+            StudioImageDownloadsView(canStart: !working && !benchmarkRunning && StudioImageDownloads.shared.activeModel == nil)
         case .storage:
             storageSection
             extraModelsLink
@@ -161,7 +173,7 @@ struct PhoneModelsView: View {
                 .frame(maxWidth: .infinity)
         }
         .buttonStyle(FadedButtonStyle(kind: .secondary))
-        .disabled(mutationBusy)
+        .disabled(working)
     }
     private var pagePicker: some View {
         Picker("Sektion", selection: $page) {
@@ -275,7 +287,7 @@ struct PhoneModelsView: View {
                     FadedSecondaryButton(onDisk == nil ? "Hent og vælg" : "Reparér og vælg", icon: "arrow.down.circle") {
                         if entry.recommendsPC { downloadConfirmation = entry }
                         else { download(entry) }
-                    }.disabled(mutationBusy)
+                    }.disabled(textDownloadBusy)
                 }
                 if let bytes = onDisk {
                     storageActions(entry.name, id: entry.id, bytes: bytes)
@@ -305,6 +317,9 @@ struct PhoneModelsView: View {
                 .font(.caption.monospacedDigit()).foregroundStyle(palette.secondary)
             Text(direct ? "Hold appen åben. Færdige filer genbruges, hvis du afbryder." : "Download fortsætter normalt i baggrunden, når iOS tillader det.")
                 .font(.caption).foregroundStyle(palette.secondary)
+            if !direct && downloader.isPaused {
+                FadedSecondaryButton("Fortsæt download", icon: "play.fill") { downloader.resumeDownload() }
+            }
             FadedSecondaryButton("Annuller download", icon: "xmark", role: .destructive) {
                 PhoneModelDownloads.shared.cancel()
                 storageRevision += 1
@@ -482,7 +497,7 @@ struct PhoneModelsView: View {
     }
 
     private func download(_ entry: PhoneModels.Entry) {
-        guard let model = entry.model, PhoneModels.supportsLocalInference(model.id), !mutationBusy else { return }
+        guard let model = entry.model, PhoneModels.supportsLocalInference(model.id), !textDownloadBusy else { return }
         if PhoneModels.isReady(model.id) { select(model.id); return }
         guard PhoneModels.hasDownloadSpace(bytes: entry.minimumFreeBytes) else {
             notice = "Modellen kræver mindst \(ModelDiskStorage.gigabytes(entry.minimumFreeBytes)) fri lagerplads under installation. Frigør plads, og prøv igen."
@@ -497,7 +512,7 @@ struct PhoneModelsView: View {
                 try await PhoneModelDownloads.shared.download(model)
                 downloadSuccess = "\(entry.name) er hentet og klar."
             } catch is CancellationError { AppDiagnostics.record(CancellationError()); notice = "Download annulleret." }
-            catch { AppDiagnostics.record(error); notice = "Modellen kunne ikke hentes. Tjek internet og ledig plads, og prøv igen." }
+            catch { AppDiagnostics.record(error); notice = PhoneModelDownloads.failureMessage(for: error) }
         }
     }
 
@@ -523,19 +538,7 @@ struct PhoneModelsView: View {
     }
 
     private func refreshStorage() async {
-        var textFolders: [String: URL] = [:]
-        let root = ModelDiskStorage.textRoot.resolvingSymlinksInPath().standardizedFileURL
-        for entry in PhoneModels.catalog {
-            guard let model = entry.model else { continue }
-            let folder = root.appendingPathComponent(model.folderName, isDirectory: true)
-            guard folder.path == folder.resolvingSymlinksInPath().path,
-                  let flags = try? folder.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
-                  flags.isDirectory == true, flags.isSymbolicLink != true else { continue }
-            textFolders[entry.id] = folder
-        }
-        if FileManager.default.fileExists(atPath: PhoneModels.importedFolder.path) { textFolders["imported"] = PhoneModels.importedFolder }
-        for model in GGUFPhoneModel.installed { textFolders[model.id] = model.url.deletingLastPathComponent() }
-        let folders = textFolders
+        let folders = PhoneModels.modelFoldersOnDisk()
         let roots = ModelDiskStorage.allowedImageRoots(MediaGenerationEnvironment.default.externalUrls)
         let snapshot = await Task.detached(priority: .utility) { ModelDiskStorage.scan(textFolders: folders, imageRoots: roots) }.value
         if !Task.isCancelled { storage = snapshot }

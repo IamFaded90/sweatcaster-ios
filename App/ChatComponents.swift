@@ -105,7 +105,8 @@ struct ChatTranscriptView: View {
 
     func clearReview() { hasTranscript = false }
 
-    func start(language: String = "da-DK", contextualStrings: [String] = [], update: @escaping (String) -> Void) async {
+    func start(language: String = "da-DK", contextualStrings: [String] = [], conversation: Bool = false,
+               update: @escaping (String) -> Void) async {
         guard !active else { return }
         let id = UUID()
         runID = id
@@ -130,8 +131,11 @@ struct ChatTranscriptView: View {
             return
         }
         do {
+            MusicPlayer.shared.pause()
             let audio = AVAudioSession.sharedInstance()
-            try audio.setCategory(.record, mode: .measurement)
+            if conversation {
+                try audio.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+            } else { try audio.setCategory(.record, mode: .measurement) }
             try audio.setActive(true)
             sessionActive = true
             let request = SFSpeechAudioBufferRecognitionRequest()

@@ -78,7 +78,9 @@ enum StudioImageModel: String, CaseIterable, Identifiable, Sendable {
         case .fluxKlein: "FLUX.2 Klein 4B"
         }
     }
-    var minimumFreeBytes: Int64 { self == .fluxKlein ? 8_000_000_000 : 4_000_000_000 }
+    var minimumFreeBytes: Int64 {
+        downloadFiles.filter { !$0.isPresent }.reduce(1_000_000_000) { $0 + $1.bytes }
+    }
     var renderSize: Int { self == .fluxKlein ? 1024 : 512 }
     var renderSteps: Int { self == .fluxKlein ? 4 : 16 }
     var minimumWorkingMemoryMiB: UInt64 { self == .fluxKlein ? 4_096 : 2_048 }
@@ -86,20 +88,18 @@ enum StudioImageModel: String, CaseIterable, Identifiable, Sendable {
         // Match the model filenames and hashes from the pinned Draw Things ModelZoo catalog.
         switch self {
         case .stableDiffusion:
-            [StudioImageDownloadFile(name: id, sha256: "bf867591702e4c5d86cb126a3601d7e494180cce956b8dfaf90e5093d2e7c0f6"),
-             StudioImageDownloadFile(name: "clip_vit_l14_f16.ckpt", sha256: "809bfd12c8d4b3d79c14e850b99130a70854f6fd8dedcacdf429417c02fa3007"),
-             StudioImageDownloadFile(name: "vae_ft_mse_840000_f16.ckpt", sha256: "3b35514e11dd2b913e0579089babc1dfbd36589a77044c2e9b8065187e2f4154")]
+            [StudioImageDownloadFile(name: id, bytes: 1_721_266_176, sha256: "bf867591702e4c5d86cb126a3601d7e494180cce956b8dfaf90e5093d2e7c0f6"),
+             StudioImageDownloadFile(name: "clip_vit_l14_f16.ckpt", bytes: 246_517_760, sha256: "809bfd12c8d4b3d79c14e850b99130a70854f6fd8dedcacdf429417c02fa3007"),
+             StudioImageDownloadFile(name: "vae_ft_mse_840000_f16.ckpt", bytes: 167_538_688, sha256: "3b35514e11dd2b913e0579089babc1dfbd36589a77044c2e9b8065187e2f4154")]
         case .fluxKlein:
-            [StudioImageDownloadFile(name: id, sha256: "430ba0f94ee0851a7f95c1383527f931afa6219898a51c5aa8e37979e9e4c86a"),
-             StudioImageDownloadFile(name: "qwen_3_4b_q8p.ckpt", sha256: "a24e3f832917aafe7f6186e6dfb96ab19a4a0729cdf60a875b5da20024333350"),
-             StudioImageDownloadFile(name: "flux_2_vae_f16.ckpt", sha256: nil)]
+            [StudioImageDownloadFile(name: id, bytes: 4_039_196_672, sha256: "430ba0f94ee0851a7f95c1383527f931afa6219898a51c5aa8e37979e9e4c86a"),
+             StudioImageDownloadFile(name: "qwen_3_4b_q8p.ckpt", bytes: 4_535_328_768, sha256: "a24e3f832917aafe7f6186e6dfb96ab19a4a0729cdf60a875b5da20024333350"),
+             StudioImageDownloadFile(name: "flux_2_vae_f16.ckpt", bytes: 168_534_016, sha256: nil)]
         }
     }
 
     var isInstalled: Bool {
-        let environment = MediaGenerationEnvironment.default
-        // Offline inspection checks the renderer's catalog; verify the dependency files as well.
-        guard let resolved = try? environment.inspectModel(id, offline: true), resolved.isDownloaded else { return false }
+        // Status is used while scrolling and restoring a transfer. Open the pipeline on a render request.
         return downloadFiles.allSatisfy(\.isPresent)
     }
 }
@@ -107,17 +107,21 @@ enum StudioImageModel: String, CaseIterable, Identifiable, Sendable {
 struct StudioImageDownloadsView: View {
     let canStart: Bool
     private var downloads: StudioImageDownloads { .shared }
+    private var orderedModels: [StudioImageModel] {
+        guard let active = downloads.activeModel else { return StudioImageModel.allCases }
+        return [active] + StudioImageModel.allCases.filter { $0 != active }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.section) {
             FadedSectionHeader("Billedmodeller", detail: "Hent modellen én gang. Download fortsætter i baggrunden.")
-            ForEach(StudioImageModel.allCases) { model in
+            ForEach(orderedModels) { model in
                 FadedCard {
                     VStack(alignment: .leading, spacing: 10) {
                         Label(model.title, systemImage: "photo").font(.headline)
                         FadedDetailText(model == .stableDiffusion
-                                        ? "Start her. Kræver mindst 4 GB ledig plads før download."
-                                        : "Tungere model. Kræver mindst 8 GB ledig plads før download.")
+                                        ? "Ca. 2,1 GB at hente. Afsæt 3,2 GB, første gang du henter den."
+                                        : "Ca. 8,7 GB at hente. Afsæt 9,8 GB, første gang du henter den. Generering kræver også ledig arbejdshukommelse.")
                         if downloads.activeModel == model {
                             StudioImageDownloadProgress()
                         } else if downloads.isInstalled(model) {
@@ -130,7 +134,9 @@ struct StudioImageDownloadsView: View {
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            if let notice = downloads.notice { FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently) }
+            if !downloads.isInterrupted, let notice = downloads.notice {
+                FadedDetailText(notice).accessibilityAddTraits(.updatesFrequently)
+            }
         }
     }
 }
@@ -159,10 +165,11 @@ struct StudioImageDownloadProgress: View {
     var body: some View {
         let downloads = StudioImageDownloads.shared
         if downloads.isInterrupted {
+            if let notice = downloads.notice { FadedDetailText(notice) }
             FadedSecondaryButton(downloads.isWaitingForModelCheck ? "Fortsæt modelkontrol" : "Fortsæt download",
                                  icon: "arrow.down.circle") { downloads.resume() }
         } else if let progress = downloads.progress, progress < 1 {
-            ProgressView(value: progress) { Text(progress.formatted(.percent)) }
+            ProgressView(value: progress) { Text("Henter · \(Int(progress * 100)) %") }
         } else {
             ProgressView(progressLabel(downloads.progress))
         }
@@ -196,20 +203,6 @@ enum StudioImageRoute: String, CaseIterable, Identifiable {
         case .automatic: "Auto"
         case .phone: "Telefon"
         case .pc: "PC"
-        }
-    }
-}
-
-enum StudioPCImageModel: String, CaseIterable, Identifiable {
-    case realvis, pony, flux2, flux2Adult = "flux2-adult"
-    var id: Self { self }
-    var isFlux: Bool { self == .flux2 || self == .flux2Adult }
-    var title: String {
-        switch self {
-        case .realvis: "RealVisXL"
-        case .pony: "CyberRealistic Pony · voksen"
-        case .flux2: "FLUX 2 · redigering"
-        case .flux2Adult: "FLUX 2 · voksen"
         }
     }
 }
@@ -418,14 +411,16 @@ func studioImageSource(_ file: URL, privateImages: [URL: Data]) -> CGImageSource
 }
 
 struct StudioImageComparisonSource {
-    let result: URL
+    var results: Set<URL>
     let bytes: Data
+    let mask: StudioReferenceMask?
 
-    init?(result: URL, bytes: Data?) {
+    init?(result: URL, bytes: Data?, mask: StudioReferenceMask? = nil) {
         // The generation input has already been downsampled by StudioPhotoInput.
         guard let bytes, (1...2_000_000).contains(bytes.count) else { return nil }
-        self.result = result
+        results = [result]
         self.bytes = bytes
+        self.mask = mask
     }
 }
 
@@ -435,10 +430,10 @@ struct StudioImageComparison: View {
     @State private var expanded = false
 
     var body: some View {
-        DisclosureGroup("Sammenlign med basebilledet", isExpanded: $expanded) {
+        DisclosureGroup("Før og efter", isExpanded: $expanded) {
             if expanded {
                 if let base = UIImage(data: source.bytes) {
-                    StudioImageComparisonCanvas(base: base, result: result)
+                    StudioImageComparisonCanvas(base: base, result: result, mask: source.mask)
                         .padding(.top, FadedSpacing.s)
                 } else {
                     FadedDetailText("Basebilledet kunne ikke vises.")
@@ -452,8 +447,10 @@ struct StudioImageComparison: View {
 private struct StudioImageComparisonCanvas: View {
     let base: UIImage
     let result: UIImage
+    let mask: StudioReferenceMask?
     @Environment(\.fadedPalette) private var palette
     @State private var reveal = 0.5
+    @State private var showsMask = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.s) {
@@ -462,7 +459,7 @@ private struct StudioImageComparisonCanvas: View {
                 ZStack {
                     palette.background
                     fittedImage(result, in: geometry.size)
-                    fittedImage(base, in: geometry.size)
+                    fittedImage(base, in: geometry.size, mask: showsMask ? mask : nil)
                         .background(palette.background)
                         .mask(alignment: .leading) { Rectangle().frame(width: edge) }
                     if reveal > 0, reveal < 1 {
@@ -475,7 +472,7 @@ private struct StudioImageComparisonCanvas: View {
             .clipShape(.rect(cornerRadius: FadedRadius.small))
             .accessibilityHidden(true)
             HStack {
-                FadedDetailText("Basebillede")
+                FadedDetailText("Original")
                 Spacer()
                 FadedDetailText("Resultat")
             }
@@ -483,11 +480,18 @@ private struct StudioImageComparisonCanvas: View {
                 .frame(minHeight: 44)
                 .accessibilityLabel("Vis mere af basebilledet eller resultatet")
                 .accessibilityValue("\(reveal.formatted(.percent.precision(.fractionLength(0)))) resultat")
+            if mask != nil {
+                Toggle("Vis markering på originalen", isOn: $showsMask).frame(minHeight: 44)
+            }
         }
     }
 
-    private func fittedImage(_ image: UIImage, in size: CGSize) -> some View {
-        Image(uiImage: image).resizable().scaledToFit().frame(width: size.width, height: size.height)
+    private func fittedImage(_ image: UIImage, in size: CGSize, mask: StudioReferenceMask? = nil) -> some View {
+        let scale = min(size.width / max(1, image.size.width), size.height / max(1, image.size.height))
+        return Image(uiImage: image).resizable()
+            .frame(width: image.size.width * scale, height: image.size.height * scale)
+            .overlay { if let mask { StudioReferenceMaskOverlay(mask: mask) } }
+            .frame(width: size.width, height: size.height)
     }
 }
 

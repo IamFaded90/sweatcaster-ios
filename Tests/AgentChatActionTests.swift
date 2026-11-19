@@ -5,6 +5,225 @@ import XCTest
 @testable import SweatCaster
 
 final class AgentChatActionTests: XCTestCase {
+    @MainActor func testAgentMilestonesSelectAnActionInsteadOfAnOrdinaryReply() {
+        guard case .milestone(.repair)? = AgentChatIntent.match("Find og ret en appfejl i FadedAI") else {
+            return XCTFail("Projektfejl skal åbne appreparation")
+        }
+        guard case .milestone(.room)? = AgentChatIntent.match("Byg et rum fra en skitse") else {
+            return XCTFail("Et rum skal åbne rumbyggeren")
+        }
+        guard case .milestone(.casework)? = AgentChatIntent.match("Tag dig af en sag") else {
+            return XCTFail("Sagen skal åbne sagsforløbet")
+        }
+        if case .milestone? = AgentChatIntent.match("Du skal ikke reparere appen nu") { XCTFail("Ingen opgave") }
+    }
+
+    @MainActor func testNewWorkflowsRouteBeforeChatAndKeepPCsSeparate() {
+        guard case .appointmentChange? = AgentChatIntent.match("Tandlægen har flyttet min tid — få styr på det.") else {
+            return XCTFail("Flyttet aftale skal åbne Gmail og iPhone-gennemgang")
+        }
+        guard case .gmailCleanup? = AgentChatIntent.match("Ryd op i min e-mail") else { return XCTFail("Mailoprydning") }
+        guard case .pcRepair? = AgentChatIntent.match("Fix billedmotoren på min PC") else { return XCTFail("PC-reparation") }
+        guard case .agentComputer(let task)? = AgentChatIntent.match("Brug din egen PC til at samle filerne") else {
+            return XCTFail("Agentens computer")
+        }
+        XCTAssertEqual(task, "at samle filerne")
+        guard case .windowHelp? = AgentChatIntent.match("Tag over på min PC") else { return XCTFail("Min PC") }
+        XCTAssertNil(AgentChatIntent.match("Tandlægen har flyttet min tid."))
+    }
+
+    @MainActor func testWindowHelpOpensOnAnInvitation() {
+        for prompt in ["Se mit PC-vindue", "Tag over på min PC"] {
+            guard case .windowHelp? = AgentChatIntent.match(prompt) else { return XCTFail(prompt) }
+        }
+        for prompt in ["Adam, se lige min skærm.", "Åbn skærmhjælp",
+                       "Adam, se lige min skærm, jeg kan ikke åbne filen", "Del min iPhone skærm"] {
+            guard case .phoneScreen? = AgentChatIntent.match(prompt) else { return XCTFail(prompt) }
+        }
+        for prompt in ["Se ikke min skærm", "Du må ikke se min skærm", "Min skærm er mørk", "Hvad koster et nyt vindue?"] {
+            if case .windowHelp? = AgentChatIntent.match(prompt) { XCTFail(prompt) }
+            if case .phoneScreen? = AgentChatIntent.match(prompt) { XCTFail(prompt) }
+        }
+    }
+
+    @MainActor func testTasteCommandUsesNamedAgentAndLeavesOrdinaryRequestsInChat() throws {
+        let adam = VillageBot(name: "Adam"), eva = VillageBot(name: "Eva")
+        guard case .taste(let request)? = AgentChatIntent.match("Find en dansk stemme til Eva.") else {
+            return XCTFail("Stemmeprøven skal kunne åbnes direkte fra chatten")
+        }
+        XCTAssertEqual(request.target(in: [adam, eva], current: adam)?.id, eva.id)
+        XCTAssertNil(request.target(in: [adam], current: adam))
+        XCTAssertNil(request.target(in: [eva, VillageBot(name: "Eva")], current: adam))
+        let local = try XCTUnwrap(AgentTasteRequest.parse("Sammenlign to landsbyfigurer"))
+        XCTAssertEqual(local.target(in: [], current: adam)?.id, adam.id)
+        XCTAssertNil(AgentTasteRequest.parse("Lav et billede i en anden billedstil"))
+        XCTAssertNil(AgentTasteRequest.parse("Find en stemme til min podcast"))
+    }
+
+    func testAgentCalendarReadbackChecksTheApprovedDetails() {
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let end = start.addingTimeInterval(1800)
+        func check(_ savedEnd: Date, locationMatches: Bool = true, allDay: Bool = false) -> PhoneActionVerification {
+            .event(titleMatches: true, locationMatches: locationMatches, start: start, end: savedEnd,
+                   expectedStart: start, expectedEnd: end, allDay: allDay)
+        }
+        XCTAssertEqual(check(end), .matched)
+        XCTAssertEqual(check(end.addingTimeInterval(60)), .different)
+        XCTAssertEqual(check(end, locationMatches: false), .different)
+        XCTAssertEqual(check(end, allDay: true), .different)
+        XCTAssertNotEqual(PhoneActionVerification.writeOnly.summary(for: .calendar),
+                          PhoneActionVerification.matched.summary(for: .calendar))
+    }
+
+    func testAgentReminderChecksThatTheAlertExists() {
+        let due = Date(timeIntervalSince1970: 1_800_000_000)
+        func check(actual: Date?, alerts: [Date], completed: Bool = false) -> PhoneActionVerification {
+            .reminder(fieldsMatch: true, isCompleted: completed, due: actual, expectedDue: due, alerts: alerts)
+        }
+        XCTAssertEqual(check(actual: due, alerts: [due]), .matched)
+        XCTAssertEqual(check(actual: due, alerts: []), .different)
+        XCTAssertEqual(check(actual: nil, alerts: [due]), .different)
+        XCTAssertEqual(check(actual: due, alerts: [due], completed: true), .different)
+        XCTAssertEqual(PhoneActionVerification.reminder(fieldsMatch: true, isCompleted: false,
+                                                        due: nil, expectedDue: nil, alerts: []), .matched)
+        XCTAssertFalse(PhoneActionVerification.sameTime(due.addingTimeInterval(60), due))
+    }
+
+    @MainActor func testInstagramScheduleAndFollowUpInDanish() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Europe/Copenhagen"))
+        func date(_ day: Int, _ hour: Int, _ minute: Int = 0) throws -> Date {
+            try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour, minute: minute)))
+        }
+        let now = try date(19, 11)
+        let message = "Post den fredag kl. 18, og fortæl mig søndag, hvordan den klarede sig."
+        let plan = try XCTUnwrap(AgentInstagramTiming.requested(in: message, now: now, calendar: calendar))
+        XCTAssertEqual(plan.publish, try date(20, 18))
+        XCTAssertEqual(plan.followUp, try date(22, 9))
+        XCTAssertFalse(plan.notifyEmail)
+        let mailed = try XCTUnwrap(AgentInstagramTiming.requested(in: "Post den fredag kl. 18, og send mig en mail søndag",
+                                                                 now: now, calendar: calendar))
+        XCTAssertEqual(mailed.followUp, try date(22, 9))
+        XCTAssertTrue(mailed.notifyEmail)
+        let weekend = try XCTUnwrap(AgentInstagramTiming.requested(in: "Udgiv den lørdag klokken 17.15 og følg op mandag kl. 12",
+                                                                  now: now, calendar: calendar))
+        XCTAssertEqual(weekend.publish, try date(21, 17, 15))
+        XCTAssertEqual(weekend.followUp, try date(23, 12))
+        XCTAssertNil(AgentInstagramTiming.requested(in: "Post på Instagram med teksten Fest på fredag!", now: now, calendar: calendar))
+        guard case .scheduleInstagram? = AgentChatIntent.match(message) else { return XCTFail(message) }
+        guard case .action(.instagramPlans)? = AgentChatIntent.match("Vis mine planlagte Instagram-opslag") else {
+            return XCTFail("Planlisten skal kunne åbnes fra chatten")
+        }
+        guard case .action(.instagramPost)? = AgentChatIntent.match("Planlæg et Instagram-opslag fredag") else {
+            return XCTFail("Et nyt opslag skal kunne planlægges fra chatten")
+        }
+        if case .scheduleInstagram? = AgentChatIntent.match("Læg det i min kalender fredag") { XCTFail("Kalenderen er en anden opgave") }
+    }
+
+    func testScheduledPublicationWaitsForActualMetricsAndEmail() throws {
+        let id = UUID()
+        func receipt(_ report: String, _ emailState: String) throws -> AgentInstagramJob {
+            let json = """
+            {"id":"\(id.uuidString)","state":"published","followUpAt":4,"publishedAt":2,"report":\(report),"emailState":"\(emailState)"}
+            """
+            return try JSONDecoder().decode(AgentInstagramJob.self, from: Data(json.utf8))
+        }
+        let waiting = try receipt(#"{"state":"pending"}"#, "off")
+        XCTAssertFalse(waiting.completed)
+        XCTAssertNil(waiting.reportText)
+        let ready = #"{"state":"ready","checkedAt":6,"metrics":{"likes":0,"reach":34}}"#
+        XCTAssertFalse(try receipt(ready, "pending").completed)
+        let delivered = try receipt(ready, "sent")
+        XCTAssertTrue(delivered.completed)
+        XCTAssertTrue(delivered.summary.contains("Likes: 0"))
+        XCTAssertTrue(delivered.summary.contains("Nåede konti: 34"))
+        XCTAssertFalse(delivered.summary.contains("Delinger"))
+        XCTAssertTrue(try receipt(#"{"state":"unavailable","note":"Ingen adgang til tal."}"#, "off").completed)
+    }
+
+    @MainActor func testInstagramChatSeparatesSignupDraftAndAdvice() {
+        for question in ["Lav et Instagram-opslag om min kaffe", "Kan du poste et foto på Instagram?",
+                         "Skriv en billedtekst til min kone"] {
+            let intent = AgentChatIntent.match(question)
+            if question.hasSuffix("kone") { XCTAssertNil(intent); continue }
+            guard case .action(.instagramPost)? = intent else { return XCTFail(question) }
+        }
+        for prompt in ["Opret din egen Instagram-konto", "Kan du lave en konto på Instagram?",
+                       "Tilmeld dig på https://instagram.com/accounts/emailsignup/"] {
+            guard case .action(.instagramAccount)? = AgentChatIntent.match(prompt) else { return XCTFail(prompt) }
+        }
+        for prompt in ["Hvordan poster man på Instagram?", "Du skal ikke poste på Instagram",
+                       "Lav en opskrift på instagramvenlige kager"] {
+            XCTAssertNil(AgentChatIntent.match(prompt), prompt)
+        }
+        XCTAssertEqual(AgentInstagramIntent.draft(from: "Lav et opslag på Instagram med teksten Godmorgen, Århus!").caption,
+                       "Godmorgen, Århus!")
+        XCTAssertEqual(AgentInstagramIntent.draft(from: "Lav et Instagram-opslag om en tur i skoven").subject,
+                       "en tur i skoven")
+        XCTAssertNil(AgentInstagramIntent.mediaURL("http://example.org/opslag.jpg"))
+        XCTAssertNil(AgentInstagramIntent.mediaURL("https://pc.local/opslag.jpg"))
+        XCTAssertNotNil(AgentInstagramIntent.mediaURL("https://example.org/opslag.jpg"))
+    }
+
+    @MainActor func testInstagramRecoveredPublicationDoesNotRequireMediaID() throws {
+        let data = Data(#"{"published":true,"mediaID":null,"state":"published"}"#.utf8)
+        XCTAssertTrue(try JSONDecoder().decode(AgentInstagramPost.Receipt.self, from: data).confirmed)
+        let pending = Data(#"{"published":false,"state":"publishing"}"#.utf8)
+        XCTAssertFalse(try JSONDecoder().decode(AgentInstagramPost.Receipt.self, from: pending).confirmed)
+    }
+
+    @MainActor func testInstagramPhotoCropAndDraftCleanup() throws {
+        XCTAssertEqual(AgentInstagramPhoto.cropRect(CGSize(width: 100, height: 200)),
+                       CGRect(x: 0, y: 37, width: 100, height: 125))
+        XCTAssertEqual(AgentInstagramPhoto.cropRect(CGSize(width: 300, height: 100)),
+                       CGRect(x: 54, y: 0, width: 191, height: 100))
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let suite = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let storage = MigratedAppData(defaults: defaults, store: LocalModelStore(root: folder))
+        let oldTurn = try JSONDecoder().decode(AgentChatAction.self, from: Data(#"{"kind":{"today":{}}}"#.utf8))
+        XCTAssertNil(oldTurn.instagramDraft)
+        var turn = PrivateChatTurn(prompt: "Lav et Instagram-opslag", reply: "")
+        turn.agentAction = AgentChatAction(kind: .instagramPost, instagramDraft: .init(hasPhoto: true))
+        let bytes = Data([1, 2, 3])
+        try storage.saveInstagramPhoto(bytes, id: turn.id)
+        try storage.saveRegularStudioTurns([turn])
+        XCTAssertEqual(try storage.instagramPhoto(turn.id), bytes)
+        try storage.saveRegularStudioTurns([])
+        XCTAssertNil(try storage.instagramPhoto(turn.id))
+    }
+
+    @MainActor func testAgentAddressAndSignupUseTheAgentsOwnMail() {
+        for prompt in ["Opret din egen e-mail", "Kan du lave en mailadresse til dig selv?"] {
+            guard case .action(.agentEmail(.address))? = AgentChatIntent.match(prompt) else {
+                return XCTFail(prompt)
+            }
+        }
+        guard case .action(.agentEmail(.mailbox))? = AgentChatIntent.match("Opret din egen postkasse") else {
+            return XCTFail("Agenten skal kunne oprette en selvstændig postkasse")
+        }
+        guard case .action(.agentEmail(.signup))? = AgentChatIntent.match("Tilmeld dig på https://eksempel.dk/nyt") else {
+            return XCTFail("Tilmelding skal åbne agentens formular")
+        }
+        for prompt in ["Opret din egen postkasse", "Kan du lave en selvstændig postkasse?", "Create your own mailbox"] {
+            guard case .action(.agentEmail(.mailbox))? = AgentChatIntent.match(prompt) else {
+                return XCTFail(prompt)
+            }
+        }
+        guard case .action(.agentEmail(.inbox))? = AgentChatIntent.match("Tjek din egen indbakke") else {
+            return XCTFail("Agentens post skal kunne læses i chatten")
+        }
+        for prompt in ["Tjek min mail", "Du skal ikke tilmelde dig", "Hvordan opretter jeg en konto?"] {
+            XCTAssertNil(AgentEmailRequest.match(AgentChatIntent.normalize(prompt)))
+        }
+        XCTAssertEqual(AgentSignupPage.siteURL("eksempel.dk/nyt")?.absoluteString, "https://eksempel.dk/nyt")
+        XCTAssertNil(AgentSignupPage.siteURL("http://eksempel.dk"))
+        XCTAssertNil(AgentSignupPage.siteURL("https://eva@eksempel.dk"))
+        XCTAssertNil(AgentSignupPage.link(in: "Tilmeld dig på https://a.dk eller https://b.dk"))
+    }
+
     @MainActor func testNaturalTodayOverviewRequestsAndUnrelatedQuestions() {
         let requests = ["Kan du give mig et overblik over min dag?", "Hvad skal jeg huske i dag?",
                         "Hvilke planer har jeg i dag?", "Har jeg noget jeg skal i dag?",

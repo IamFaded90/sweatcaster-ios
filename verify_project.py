@@ -33,8 +33,8 @@ for ref in scheme.findall(".//BuildableReference"):
     assert ref.attrib["ReferencedContainer"] == "container:SweatCaster.xcodeproj"
 assert len(scheme.findall(".//TestableReference")) == 1
 extension_targets = [row for row in rows.values() if 'productType = "com.apple.product-type.app-extension"' in row]
-assert len(extension_targets) == 2
-assert {row.split("name = ", 1)[1].split(";", 1)[0] for row in extension_targets} == {"FadedAIWidgets", "FadedAIShare"}
+assert len(extension_targets) == 3
+assert {row.split("name = ", 1)[1].split(";", 1)[0] for row in extension_targets} == {"FadedAIWidgets", "FadedAIShare", "FadedAIBroadcast"}
 extension_source = (root / "Widgets/FadedAIWidgets.swift").read_text(encoding="utf-8")
 assert extension_source.count("ActivityConfiguration(") == 1
 assert "StaticConfiguration(" not in extension_source and "AppIntentConfiguration(" not in extension_source
@@ -47,7 +47,7 @@ village_ref, = [key for key, row in rows.items() if "lastKnownFileType = folder;
 village_build, = [key for key, row in rows.items() if f"fileRef = {village_ref};" in row]
 assert village_build in resource_phase
 extension_phase, = [row for row in app_phases if 'name = "Embed App Extensions"' in row]
-for product in ("FadedAIWidgets", "FadedAIShare"):
+for product in ("FadedAIWidgets", "FadedAIShare", "FadedAIBroadcast"):
     product_ref, = [key for key, row in rows.items() if f"path = {product}.appex;" in row]
     product_build, = [key for key, row in rows.items() if f"fileRef = {product_ref};" in row]
     assert product_build in extension_phase
@@ -57,10 +57,13 @@ assert sharing_info["NSExtensionPointIdentifier"] == "com.apple.share-services"
 assert sharing_info["NSExtensionPrincipalClass"] == "$(PRODUCT_MODULE_NAME).FadedShareViewController"
 rule = sharing_info["NSExtensionAttributes"]["NSExtensionActivationRule"]
 assert all(kind in rule for kind in ("public.url", "public.image", "public.plain-text", "com.adobe.pdf"))
-for path in ("App/FadedAI.entitlements", "ShareExtension/ShareExtension.entitlements"):
+for path in ("App/FadedAI.entitlements", "ShareExtension/ShareExtension.entitlements", "BroadcastExtension/BroadcastExtension.entitlements"):
     entitlements = plistlib.loads((root / path).read_bytes())
     assert entitlements["com.apple.security.application-groups"] == ["group.dk.sweatcaster.ios.share"]
     assert sum(f"CODE_SIGN_ENTITLEMENTS = {path};" in row for row in rows.values()) == 2
+capture_info = plistlib.loads((root / "BroadcastExtension/Info.plist").read_bytes())["NSExtension"]
+assert capture_info["NSExtensionPointIdentifier"] == "com.apple.broadcast-services-upload"
+assert capture_info["RPBroadcastProcessMode"] == "RPBroadcastProcessModeSampleBuffer"
 share_source, = [key for key, row in rows.items() if "path = FadedShareViewController.swift;" in row]
 share_source_build, = [key for key, row in rows.items() if f"fileRef = {share_source};" in row]
 share_sources, = [row for row in rows.values() if "isa = PBXSourcesBuildPhase" in row and share_source_build in row]

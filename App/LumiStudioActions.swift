@@ -207,8 +207,8 @@ extension LumiStudio {
         }
     }
 
-    func isValidPrompt(_ prompt: String) -> Bool {
-        (1...4_000).contains(prompt.unicodeScalars.count)
+    func isValidPrompt(_ prompt: String, for mode: Int) -> Bool {
+        (1...(mode == 0 ? 4_000 : 1_000)).contains(prompt.unicodeScalars.count)
     }
 
     func send(opening: Bool = false) {
@@ -219,9 +219,21 @@ extension LumiStudio {
         let selectedDraft = promptDraft(for: selectedMode)
         let input = opening ? (language == "da-DK" ? "Tag føringen" : "Take the lead")
             : selectedDraft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard isValidPrompt(input) else { return }
+        guard isValidPrompt(input, for: selectedMode) else { return }
+        let imageInput = selectedMode == 1 && useImageTaste
+            ? AgentImageTasteStyle.selected(for: VillageBot.lumiID)?.applying(to: input) ?? input : input
+        if selectedMode == 1 && !isValidPrompt(imageInput, for: 1) {
+            notice = "Forkort beskrivelsen, eller slå billedstilen fra."
+            return
+        }
+        let selectedImageModel = pcImageModel
+        if selectedMode == 1 {
+            guard !loadingReference, pcImageCatalog.allows(selectedImageModel) else { return }
+        }
+        if selectedMode == 2 && loadingVideoReference { return }
         composerFocused = false
         let reference = selectedMode == 1 ? imageReference : nil
+        let selectedVideoReference = selectedMode == 2 ? videoReference : nil
         let replyLanguage = language
         let selectedScene = sceneCard
         let selectedSceneRevision = sceneRevision
@@ -245,14 +257,36 @@ extension LumiStudio {
                     messages.append(LumiSceneMessage(role: .assistant, text: String(reply.unicodeScalars.prefix(4_000)),
                                                      language: replyLanguage))
                 } else if selectedMode == 1 {
-                    let data = try await api.lumiImage(prompt: input, reference: reference)
+                    let data: Data
+                    if selectedImageModel == .realvis {
+                        data = try await api.lumiImage(prompt: imageInput, reference: reference)
+                    } else {
+                        data = try await api.privateStudioImage(prompt: imageInput, negative: "", reference: reference,
+                                                                mask: nil, strength: nil,
+                                                                seed: UInt32.random(in: 1...UInt32.max),
+                                                                engine: selectedImageModel.rawValue)
+                    }
                     guard studioRevision == selectedStudioRevision else { return }
                     let file = try writeStudioMedia(data, filename: "Lumi.png")
                     picture = data
                     pictureFile = file
+                    pictureReference = reference
                 } else {
-                    let receipt = try await api.lumiStartVideo(prompt: input)
+                    let receipt: LumiVideoJob
+                    do {
+                        receipt = try await api.lumiStartVideo(prompt: input, reference: selectedVideoReference,
+                                                               privateSession: videoOnly)
+                    } catch let failure as APIError {
+                        if (videoOnly || selectedVideoReference != nil), case .http(404, _) = failure {
+                            throw LumiJobFailure(message: "Opdatér FadedAI på PC’en for at bruge denne videofunktion.")
+                        }
+                        throw failure
+                    }
                     guard let id = UUID(uuidString: receipt.id) else { throw APIError.malformed }
+                    if videoOnly && studioRevision != selectedStudioRevision {
+                        try await api.lumiRemoveVideo(id: id)
+                        return
+                    }
                     pendingVideoJobID = id.uuidString
                     try await finishVideo(id: id, api: api, revision: selectedStudioRevision)
                 }
@@ -355,6 +389,7 @@ extension LumiStudio {
             } else {
                 picture = nil
                 pictureFile = nil
+                pictureReference = nil
             }
             notice = isVideo ? "Videoen er slettet fra iPhone." : "Billedet er slettet fra iPhone."
         } catch {
@@ -370,10 +405,7 @@ extension LumiStudio {
         Task {
             defer { busy = false }
             do {
-                struct Receipt: Decodable { let ok: Bool }
-                let route = "lumi/\(VillageBot.lumiID.uuidString.lowercased())/video/\(id.uuidString.lowercased())/remove"
-                let receipt: Receipt = try await api.moduleJSON(route, upload: Data("{}".utf8), timeout: 20)
-                guard receipt.ok else { throw APIError.malformed }
+                try await api.lumiRemoveVideo(id: id)
                 guard studioRevision == revision else { return }
                 videoResultID = nil
                 if let videoFile {
@@ -395,6 +427,16 @@ extension LumiStudio {
 
     func discardStudioSession() {
         studioRevision = UUID()
+        if videoOnly {
+            let id = UUID(uuidString: pendingVideoJobID) ?? videoResultID
+            pendingVideoJobID = ""
+            if let api, let id {
+                Task {
+                    do { try await api.lumiRemoveVideo(id: id) }
+                    catch { AppDiagnostics.record(error) }
+                }
+            }
+        }
         stopAudio()
         videoPlayer?.pause()
         videoPlayer = nil
@@ -402,6 +444,9 @@ extension LumiStudio {
         videoResultID = nil
         picture = nil
         pictureFile = nil
+        pictureReference = nil
+        imageReference = nil
+        videoReference = nil
         let directory = scratchDirectory
         do { try FileManager.default.removeItem(at: directory) }
         catch let error where LocalFileStore.isMissing(error) {}

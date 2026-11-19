@@ -1,4 +1,4 @@
-"""Fixed ComfyUI graphs for public Creative Studio jobs."""
+"""Fixed ComfyUI graphs for Creative Studio and Lumi."""
 
 from dataclasses import dataclass
 
@@ -147,3 +147,32 @@ def workflow(mode, prompt, photos, job_id, seed):
     _node(graph, "save", "SaveVideo", video=video, filename_prefix=f"FadedAI_Studio/{job_id}",
           **{"format": "mp4", "format.codec": "h264"})
     return graph
+
+
+def lumi_reference_workflow(prompt, reference_name, output_prefix, seed):
+    mode = WAN_FALLBACKS["wan-image"]
+    graph = workflow(mode, prompt, [reference_name + " [temp]"], "lumi", seed)
+    del graph["video"], graph["save"]
+    _node(graph, "10", "SaveWEBM", images=["decode", 0], filename_prefix=output_prefix,
+          codec="vp9", fps=12, crf=32)
+    return graph, mode.models
+
+
+def lumi_text_workflow(prompt, output_prefix, seed, model, clip, vae):
+    models = (("UNETLoader", "unet_name", model), ("CLIPLoader", "clip_name", clip),
+              ("VAELoader", "vae_name", vae))
+    graph = {}
+    unet = _node(graph, "1", "UNETLoader", unet_name=model, weight_dtype="default")
+    shifted = _node(graph, "2", "ModelSamplingSD3", model=unet, shift=8)
+    text = _node(graph, "3", "CLIPLoader", clip_name=clip, type="wan", device="default")
+    positive = _node(graph, "4", "CLIPTextEncode", text=prompt, clip=text)
+    negative = _node(graph, "5", "CLIPTextEncode", text="low quality, blurry, static, watermark", clip=text)
+    decode = _node(graph, "6", "VAELoader", vae_name=vae)
+    latent = _node(graph, "7", "EmptyHunyuanLatentVideo", width=512, height=288, length=17, batch_size=1)
+    sample = _node(graph, "8", "KSampler", seed=seed, steps=20, cfg=6, sampler_name="uni_pc",
+                   scheduler="simple", denoise=1, model=shifted, positive=positive, negative=negative,
+                   latent_image=latent)
+    frames = _node(graph, "9", "VAEDecodeTiled", samples=sample, vae=decode, tile_size=192,
+                   overlap=32, temporal_size=8, temporal_overlap=4)
+    _node(graph, "10", "SaveWEBM", images=frames, filename_prefix=output_prefix, codec="vp9", fps=12, crf=32)
+    return graph, models

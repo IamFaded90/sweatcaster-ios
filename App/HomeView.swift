@@ -70,6 +70,7 @@ struct Home: View {
         enum Entry { case profile, chat(VillageBot), harperSetup }
         let id: UUID
         var entry = Entry.profile
+        var opensAction: UUID? = nil
     }
     struct DashboardApproval: Identifiable {
         let id: String
@@ -186,6 +187,8 @@ struct Home: View {
     @AppStorage(AppStorageKeys.appTextScale) var textScale = 0.0
     @Environment(\.dynamicTypeSize) var videoTypeSize
     @State var videoPage: VideoPage = .clips
+    @State var videoQualityTarget: String?
+    @State var videoQualityNotice: String?
     @State var clipGame = ""
     @State var shortClips = false
     @State var recentJobsFirst = false
@@ -251,6 +254,7 @@ struct Home: View {
                               background: AnyView(homeBackground),
                               showsPlaybackControls: !privateStudioPresented,
                               api: model.isDemo ? nil : model.api as? LiveAPI,
+                              savedHomeAddress: model.savedAddresses[.home],
                               onOpen: { selectTab(.entertainment) }) {
                 homeTabs
             }

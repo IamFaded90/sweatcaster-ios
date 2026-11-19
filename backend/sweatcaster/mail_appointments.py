@@ -11,6 +11,7 @@ import re
 import sqlite3
 from threading import Event, Thread
 from time import time
+from urllib.parse import urlsplit
 from uuid import UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -18,6 +19,7 @@ from fastapi import APIRouter, Body, Depends, Request, Response
 
 from sweatcaster.bot_computers import BotComputerError, ModelBusy, wire_uuid
 from sweatcaster.dto import ApiError
+from sweatcaster.mail_evidence import check_proposal
 
 GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 MAIL_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
@@ -40,10 +42,12 @@ HIDDEN_HTML = {"blockquote", "script", "style"}
 
 
 class MailHTML(HTMLParser):
-    def __init__(self, text):
+    def __init__(self, text, *, include_links=False):
         super().__init__(convert_charrefs=True)
         self.parts = []
         self.hidden = 0
+        self.include_links = include_links
+        self.link = None
         self.feed(text)
 
     def handle_starttag(self, tag, attrs):
@@ -51,8 +55,21 @@ class MailHTML(HTMLParser):
             self.hidden += 1
         if not self.hidden and tag in {"br", "p", "tr", "li", "div"}:
             self.parts.append("\n")
+        if self.include_links and not self.hidden and tag == "a":
+            self.link = None
+            href = dict(attrs).get("href")
+            if isinstance(href, str) and len(href) <= 2048 and href.isprintable():
+                try:
+                    parsed = urlsplit(href)
+                    if parsed.scheme == "https" and parsed.hostname and not parsed.username and not parsed.password:
+                        self.link = href
+                except ValueError:
+                    pass
 
     def handle_endtag(self, tag):
+        if tag == "a" and self.link:
+            self.parts.append(" (" + self.link + ")")
+            self.link = None
         if tag in HIDDEN_HTML:
             self.hidden = max(0, self.hidden - 1)
 
@@ -61,7 +78,7 @@ class MailHTML(HTMLParser):
             self.parts.append(text)
 
 
-def mail_text(message):
+def mail_text(message, *, include_links=False, allow_snippet=True):
     root = message.get("payload") or {}
     if not isinstance(root, dict):
         return ""
@@ -81,7 +98,7 @@ def mail_text(message):
                 try:
                     data = base64.b64decode(encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True)
                     text = data[:72_000].decode("utf-8", errors="replace")
-                    texts[mime].append(text if mime == "text/plain" else "".join(MailHTML(text).parts))
+                    texts[mime].append(text if mime == "text/plain" else "".join(MailHTML(text, include_links=include_links).parts))
                 except (binascii.Error, ValueError):
                     pass
         if isinstance(part.get("parts"), list):
@@ -96,7 +113,7 @@ def mail_text(message):
         if not line.lstrip().startswith(">"):
             lines.append(line)
     body = "\n".join(lines)
-    if not body.strip():
+    if not body.strip() and allow_snippet:
         body = str(message.get("snippet") or "")
     return (str(subject)[:350] + "\n" + body).replace("\0", "").strip()[:8_000]
 
@@ -222,10 +239,38 @@ class MailAppointments:
             enabled = bool(selected and selected[0] == bot)
             rows = db.execute("SELECT id, details, revision_status FROM appointment WHERE account = ? AND hidden = 0 AND starts > ? "
                               "ORDER BY starts LIMIT 30", (selected[3], time())).fetchall() if enabled else []
+        appointments = []
+        for identifier, details, revision in rows:
+            row = json.loads(details)
+            proof = row.pop("proof", None)
+            appointments.append(dict(row, id=identifier, revisionStatus=revision, hasSource=bool(proof)))
         return {"enabled": enabled, "otherBot": bool(selected and not enabled), "hasProject": bool(self.library.key()),
                 "checked": selected[1] if enabled else None, "notice": selected[2] if enabled else None,
-                "appointments": [dict(json.loads(details), id=identifier, revisionStatus=revision)
-                                 for identifier, details, revision in rows]}
+                "appointments": appointments}
+
+    def source(self, bot, identifier):
+        def snapshot():
+            with closing(self.db()) as db:
+                return db.execute("SELECT a.account, json_extract(a.details,'$.proof') FROM appointment a "
+                                  "JOIN setup s ON s.account=a.account WHERE s.bot=? AND a.id=? AND a.hidden=0",
+                                  (bot, identifier)).fetchone()
+        row = snapshot()
+        if not row or not row[1]:
+            raise ApiError(404, "NOT_FOUND", "Dette forslag har ingen gemt henvisning til en kildemail.")
+        account, raw = row
+        proof = json.loads(raw)
+        identifier_in_gmail = proof["message"]
+        if not MAIL_ID.fullmatch(identifier_in_gmail) or self.library.connection("gmail") != account:
+            raise ApiError(409, "NOT_READY", "Åbn den Gmail-konto, som agenten fandt aftalen i.")
+        message = self.library.read("gmail", f"{GMAIL}/{identifier_in_gmail}", {"format": "full"}, account=account)
+        if not isinstance(message, dict) or message.get("id") != identifier_in_gmail or snapshot() != row:
+            raise ApiError(409, "NOT_READY", "Kilden har ændret sig. Opdatér aftalen.")
+        text = mail_text(message, allow_snippet=False)
+        if hashlib.sha256(text.encode()).hexdigest() != proof["digest"]:
+            raise ApiError(409, "NOT_READY", "Mailteksten har ændret sig. Agenten kan ikke bekræfte citatet.")
+        lo, hi = proof.get("range", (0, 0))
+        return {"before": text[:lo], "quote": text[lo:hi], "after": text[hi:],
+                "messageID": identifier_in_gmail, "threadID": message.get("threadId")}
 
     def configure(self, bot, enabled, zone):
         if type(enabled) is not bool:
@@ -324,6 +369,7 @@ class MailAppointments:
             text = mail_text(mail)
             summary = None
             kind = "unrelated"
+            proof = None
             if text:
                 raw = self.propose(text, {"now": now.astimezone(zone).isoformat(),
                                          "received": received.isoformat(), "zone": selection[1]})
@@ -331,9 +377,11 @@ class MailAppointments:
                     kind, proposal = decode_proposal(raw)
                     if kind in {"confirmed", "rescheduled"}:
                         summary = appointment_details(proposal, zone, now, text)
+                    visible = mail_text(mail, allow_snippet=False)
+                    kind, summary, proof = check_proposal(kind, summary, visible, received, zone, message_id)
                 except (ValueError, RecursionError):
-                    pass
-            self.record(selection, account, hashed, mail.get("threadId"), received_ms, kind, summary)
+                    kind, summary, proof = "unrelated", None, None
+            self.record(selection, account, hashed, mail.get("threadId"), received_ms, kind, summary, proof)
         return False
 
     def candidate_ids(self, selection, account):
@@ -355,7 +403,7 @@ class MailAppointments:
             seen_pages.add(token)
             query = {**query, "pageToken": token}
 
-    def record(self, selection, account, hashed, thread_id, received, kind, summary):
+    def record(self, selection, account, hashed, thread_id, received, kind, summary, proof=None):
         with closing(self.db()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             if db.execute("SELECT bot, zone, due, account FROM setup").fetchone() != selection:
@@ -371,18 +419,18 @@ class MailAppointments:
             db.execute("INSERT INTO mail_revision VALUES(?,?,?,?) ON CONFLICT(account, thread) DO UPDATE "
                        "SET received = excluded.received, status = excluded.status", (account, thread, received, kind))
             if kind == "cancelled":
-                db.execute("UPDATE appointment SET revision_status = 'cancelled' "
-                           "WHERE account = ? AND thread = ? AND revision_status = 'active'", (account, thread))
+                db.execute("UPDATE appointment SET revision_status='cancelled', details=json_set(details,'$.proof',json(?)) "
+                           "WHERE account=? AND thread=? AND revision_status='active'", (json.dumps(proof), account, thread))
                 return
-            self.store_suggestion(db, account, thread, thread_id, kind, summary)
+            self.store_suggestion(db, account, thread, thread_id, kind, dict(summary, proof=proof))
 
     def store_suggestion(self, db, account, thread, thread_id, kind, summary):
         identity = str(uuid5(APPOINTMENT_NAMESPACE, f"{account}:{thread}:{summary['start']}"))
         dated = summary["start"] is not None
         if kind == "rescheduled":
-            db.execute("UPDATE appointment SET revision_status = 'superseded' "
+            db.execute("UPDATE appointment SET revision_status='superseded', details=json_set(details,'$.proof',json(?)) "
                        "WHERE account = ? AND thread = ? AND id != ? AND revision_status = 'active'",
-                       (account, thread, identity))
+                       (json.dumps(summary["proof"]), account, thread, identity))
         if dated:
             incomplete = str(uuid5(APPOINTMENT_NAMESPACE, f"{account}:{thread}:None"))
             db.execute("UPDATE appointment SET hidden = 1 WHERE id = ? AND revision_status = 'active'", (incomplete,))
@@ -415,6 +463,10 @@ def register_mail_appointments(app, settings, authorize, library, propose):
     @router.get("/{bot_id}")
     def status(bot_id: str):
         return service.status(wire(bot_id))
+
+    @router.get("/{bot_id}/{identifier}/source")
+    def source(bot_id: str, identifier: str):
+        return service.source(wire(bot_id), wire(identifier))
 
     @router.put("/{bot_id}")
     def configure(bot_id: str, body: dict = Body(...)):

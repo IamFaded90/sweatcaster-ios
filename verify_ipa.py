@@ -99,7 +99,8 @@ def verify(archive):
     executable = root + info["CFBundleExecutable"]
     pending = [(executable, root.rstrip("/"), [])]
     for product, extension_point in (("FadedAIWidgets", "com.apple.widgetkit-extension"),
-                                     ("FadedAIShare", "com.apple.share-services")):
+                                     ("FadedAIShare", "com.apple.share-services"),
+                                     ("FadedAIBroadcast", "com.apple.broadcast-services-upload")):
         extension_root = root + f"PlugIns/{product}.appex/"
         extension = plistlib.loads(archive.read(extension_root + "Info.plist"))
         extension_executable = extension_root + extension["CFBundleExecutable"]

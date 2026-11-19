@@ -25,7 +25,7 @@ import SwiftUI
         let query, draft: String
         var booking = false
 
-        static func parse(_ prompt: String) -> Self? {
+        static func parse(_ prompt: String, botID: UUID? = nil) -> Self? {
             let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
             let reply = #"(?i)^(?:(?:kan|vil)\s+du\s+)?svar(?:e)?\s+(?:på\s+(?:mail(?:en)?|e-mail(?:en)?)\s+fra\s+|til\s+)?([^,\n]{1,100}?)(?:\s*,\s*|\s+)(?:at\s+)([\s\S]+)$"#
             if let (contact, body) = capture(reply, in: text) {
@@ -45,7 +45,7 @@ import SwiftUI
                 let suffix = when.isEmpty ? "" : " \(when)"
                 let specifiedTime = #"(?i)\b(?:kl|klokken|formiddag|middag|eftermiddag|aften)\b|\b\d{1,2}:\d{2}\b|\b(?:før|efter|omkring|ved)\s+\d{1,2}\b"#
                 let preference = when.range(of: specifiedTime, options: .regularExpression) == nil
-                    ? AgentChatPreferences.preferredStartHour.map { " Helst efter kl. \($0)." } ?? "" : ""
+                    ? AgentChatPreferences.preferredStartHour(for: botID).map { " Helst efter kl. \($0)." } ?? "" : ""
                 return .init(query: query(contact),
                              draft: "Hej,\n\nJeg vil gerne bestille en tid til min bil\(suffix).\(preference) Har I en ledig tid?\n\nVenlig hilsen",
                              booking: true)
@@ -104,14 +104,14 @@ import SwiftUI
     @State private var reconnecting = false
     @FocusState private var editing: Bool
 
-    init(api: LiveAPI, prompt: String, requestID: UUID, storedDraft: StoredDraft? = nil,
+    init(api: LiveAPI, prompt: String, requestID: UUID, botID: UUID? = nil, storedDraft: StoredDraft? = nil,
          onDraftChanged: @escaping (StoredDraft?) -> Void = { _ in }, onSent: @escaping (String) -> Void) {
         self.api = api
         self.requestID = requestID
         self.onSent = onSent
         self.storedDraft = storedDraft
         self.onDraftChanged = onDraftChanged
-        let intent = Intent.parse(prompt)
+        let intent = Intent.parse(prompt, botID: botID)
         suggestedDraft = intent?.draft ?? ""
         _query = State(initialValue: intent?.query ?? "")
         _draft = State(initialValue: intent?.draft ?? "")

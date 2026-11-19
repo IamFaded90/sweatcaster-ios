@@ -84,6 +84,42 @@ struct Job: Codable, Identifiable, Sendable {
     var error: Problem?
 }
 
+struct VideoQualityReceipt: Decodable, Sendable {
+    struct Check: Decodable, Sendable {
+        let id, state: String
+        var label: String? {
+            switch id {
+            case "video": "Billede"
+            case "audio": "Lydspor"
+            case "duration": "Varighed"
+            default: nil
+            }
+        }
+        var result: String {
+            switch state {
+            case "passed": "Kontrolleret"
+            case "failed": "Fejl fundet"
+            default: "Ikke kontrolleret"
+            }
+        }
+    }
+    enum Outcome { case passed, failed, partial, unavailable }
+    let state: String
+    let checks: [Check]
+    let message: String?
+
+    var outcome: Outcome {
+        if state == "failed" || checks.contains(where: { $0.state == "failed" }) { return .failed }
+        if state == "unavailable" { return .unavailable }
+        guard state == "verified", checks.count == 3,
+              checks.contains(where: { $0.id == "video" && $0.state == "passed" }),
+              checks.contains(where: { $0.id == "duration" && $0.state == "passed" }),
+              checks.contains(where: { $0.id == "audio" && ["passed", "unchecked"].contains($0.state) })
+        else { return .partial }
+        return .passed
+    }
+}
+
 struct ROI: Codable, Sendable {
     var x = 0.15, y = 0.62, width = 0.70, height = 0.30
     var valid: Bool {

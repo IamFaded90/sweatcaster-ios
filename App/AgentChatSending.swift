@@ -24,7 +24,9 @@ extension AgentPhoneChat {
             "Tidligere samtale:\n" + history.map { "Dig: \($0.prompt)\n\(bot.name): \($0.reply)" }.joined(separator: "\n") +
                 "\n\nSeneste besked: " + message
         } else { message }
-        let baseInstructions = OfflineStudio.companionInstructions(for: bot) + (keepHistory ? AgentChatPreferences.instructions : "")
+        let wishes = keepHistory ? AgentChatPreferences.instructions(for: bot.id, question: message) : ""
+        let verification = keepHistory ? "Meld kun en handling som udført, hvis værktøjet har bekræftet resultatet af netop den opgave. Mangler der en bekræftelse, så sig kort, hvad der faktisk er sket.\n" : ""
+        let baseInstructions = verification + OfflineStudio.companionInstructions(for: bot) + wishes
         let behavior = asCard
             ? " Svar udelukkende med JSON {\"title\":\"kort titel\",\"items\":[\"punkt 1\",\"punkt 2\"]}."
             : AgentLocalTool.instructions

@@ -166,6 +166,7 @@ private struct PCSetupOverview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: FadedSpacing.s) {
             FadedSectionHeader("Tjek opsætning", detail: "Se, hvilke tjenester der er klar, og hvad du kan gøre, hvis noget mangler.")
+            PCImageEngineStatusRow(api: api, refreshCount: refreshCount)
             if let status {
                 FadedCard(size: .compact) {
                     VStack(alignment: .leading, spacing: FadedSpacing.m) {
@@ -240,6 +241,88 @@ private struct PCSetupOverview: View {
         } catch {
             guard !Task.isCancelled else { return }
             notice = "PC’en kunne ikke tjekke opsætningen. Tjek forbindelsen, og prøv igen."
+        }
+    }
+}
+
+private enum PCImageEngineState: String, Decodable {
+    case checking, ready, starting, offline, gpuError, unresponsive, needsUpdate, pcUnavailable
+
+    var title: String {
+        switch self {
+        case .checking: "Tjekker billedmotor"
+        case .ready: "Billedmotor klar"
+        case .starting: "Billedmotor starter"
+        case .offline: "Billedmotor kører ikke"
+        case .gpuError: "Grafikkortfejl i billedmotoren"
+        case .unresponsive: "Billedmotor svarer ikke"
+        case .needsUpdate: "Billedstatus kræver opdatering"
+        case .pcUnavailable: "Billedstatus utilgængelig"
+        }
+    }
+
+    var detail: String? {
+        switch self {
+        case .checking, .ready: nil
+        case .starting: "Vent et øjeblik. Status opdateres automatisk."
+        case .offline: "Åbn FadedAI med genvejen på PC’en, og tjek igen."
+        case .gpuError: "Luk tunge grafikopgaver, og genstart ComfyUI på PC’en, når billedkøen er tom."
+        case .unresponsive: "Vent på igangværende opgaver, og tjek igen. Se ComfyUI på PC’en, hvis det fortsætter."
+        case .needsUpdate: "Opdatér FadedAI på PC’en for at se billedmotorens status."
+        case .pcUnavailable: "Tjek, at FadedAI kører på din parrede PC."
+        }
+    }
+
+    var tone: FadedStatusTone {
+        switch self {
+        case .ready: .success
+        case .checking, .starting, .needsUpdate: .info
+        case .gpuError: .error
+        case .offline, .unresponsive, .pcUnavailable: .warning
+        }
+    }
+}
+
+struct PCImageEngineStatusRow: View {
+    let api: LiveAPI
+    var refreshCount = 0
+    @Environment(\.scenePhase) private var phase
+    @State private var status = PCImageEngineState.checking
+    @State private var retries = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+            FadedBadge(status.title, tone: status.tone)
+                .accessibilityAddTraits(.updatesFrequently)
+            if let detail = status.detail { FadedDetailText(detail) }
+            if status != .checking {
+                Button("Tjek billedmotor igen", systemImage: "arrow.clockwise") { retries += 1 }
+                    .frame(minHeight: 44)
+            }
+        }
+        .task(id: "\(api.queueTargetID):\(phase == .active):\(refreshCount):\(retries)") {
+            guard phase == .active else { return }
+            await checkEngine()
+        }
+    }
+
+    @MainActor private func checkEngine() async {
+        struct Sample: Decodable { let state: PCImageEngineState }
+        status = .checking
+        for attempt in 0...12 {
+            do {
+                let sample: Sample = try await api.moduleJSON("pc-image-engine", timeout: 6, maximumBytes: 512)
+                try Task.checkCancellation()
+                status = sample.state
+                guard status == .starting, attempt < 12 else { return }
+                try await Task.sleep(for: .seconds(5))
+            } catch let APIError.http(code, _) where code == 404 {
+                if !Task.isCancelled { status = .needsUpdate }
+                return
+            } catch {
+                if !Task.isCancelled { status = .pcUnavailable }
+                return
+            }
         }
     }
 }

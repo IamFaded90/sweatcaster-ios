@@ -98,6 +98,7 @@ struct VillageMemorial: Codable, Identifiable, Equatable {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 creatorCard
+                AgentRoomShortcut(bots: bots, openProfile: onOpenProfile)
                 NavigationLink {
                     VillageHexOffice(bots: bots, openProfile: onOpenProfile,
                                      openComputer: onOpenComputer, openCemetery: onOpenCemetery)
@@ -478,6 +479,7 @@ private struct VillageCreationScene: View {
                     }
                 }
                 ForEach(residents) { bot in residentRow(bot, status: bot.poseLabel) }
+                VillageRoomActivities(residents: residents)
                 if !incoming.isEmpty {
                     Text("På vej hertil").font(.headline)
                     ForEach(incoming) { bot in residentRow(bot, status: "På vej") }
@@ -496,11 +498,13 @@ private struct VillageCreationScene: View {
     private func residentRow(_ bot: VillageLifeBot, status: String) -> some View {
         Button { onOpenProfile(bot) } label: {
             FadedCard {
-                HStack {
-                    VillageBotSprite(bot: bot, size: 36)
-                    Text(bot.displayName).font(.headline)
-                    Spacer()
-                    Text(status).font(.caption).foregroundStyle(palette.secondary)
+                HStack(spacing: 12) {
+                    VillageBotSprite(bot: bot, size: 52)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(bot.displayName).font(.headline)
+                        Text(status).font(.caption).foregroundStyle(palette.secondary)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     Image(systemName: "chevron.right")
                 }
                 .frame(minHeight: 44)

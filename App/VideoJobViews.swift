@@ -236,8 +236,11 @@ extension Home {
     }
 
     var jobSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        LazyVStack(alignment: .leading, spacing: 12) {
             FadedSectionLabel("Dine videojobs").accessibilityFocused($jobsFocus)
+            if let videoQualityNotice, model.jobs.contains(where: { $0.status == .completed || $0.status == .failed }) {
+                FadedDetailText(videoQualityNotice)
+            }
             if videoTypeSize.isAccessibilitySize { videoJobFilter.pickerStyle(.menu).frame(minHeight: 44) }
             else { videoJobFilter.pickerStyle(.segmented) }
             let archived = archivedVideoJobIDs
@@ -339,6 +342,9 @@ extension Home {
                                    isCurrent: model.connected || model.isDemo, accent: accent,
                                    updatedAt: job.updated_at,
                                    outputAvailable: outputAvailable, failureDetail: failure?.detail)
+                if let source = qualitySource(for: job) {
+                    VideoQualityResultView(source: source)
+                }
                 videoJobPrimaryAction(job, outputAvailable: outputAvailable, recoveryPage: failure?.page)
                 if showJobDetails || !job.warnings.isEmpty || job.error != nil ||
                     job.status == .failed || (job.status == .completed && outputAvailable) {
@@ -363,6 +369,13 @@ extension Home {
 
     private func videoOutputAvailable(_ job: Job) -> Bool {
         job.output_url != nil && !model.unavailableVideoIDs.contains(job.id)
+    }
+
+    private func qualitySource(for job: Job) -> VideoQualitySource? {
+        guard model.connected,
+              job.status == .completed || job.status == .failed,
+              let api = model.api as? LiveAPI, videoQualityTarget == api.queueTargetID, validWireID(job.id) else { return nil }
+        return VideoQualitySource(api: api, jobID: job.id)
     }
 
     private func videoJobAccent(_ status: Stage) -> Color {
@@ -414,7 +427,8 @@ extension Home {
             FadedSecondaryButton(model.isDemo ? "Se testvideo" : "Se video", icon: "play") {
                 Task {
                     let demo = model.isDemo
-                    if let url = await model.video(job) { media = Media(url: url, demo: demo) }
+                    let source = qualitySource(for: job)
+                    if let url = await model.video(job) { media = Media(url: url, demo: demo, quality: source) }
                 }
             }.disabled(model.mediaLoading)
         } else if job.status == .completed, !model.isDemo, let api = model.api as? LiveAPI {

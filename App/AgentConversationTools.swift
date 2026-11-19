@@ -51,6 +51,7 @@ extension AgentPhoneChat {
         private(set) var state: MailAppointmentState?
         private(set) var latestMail: BotMailMessages.Message?
         private(set) var latestContent: String?
+        private(set) var latestThread: String?
         private(set) var messages: [BotMailMessages.Message] = []
         var isLatest: Bool { AgentGmailCheck.matchesLatest(prompt) }
         var isUnreadList: Bool { AgentGmailCheck.isUnreadList(prompt) }
@@ -124,6 +125,9 @@ extension AgentPhoneChat {
         func open(_ mail: BotMailMessages.Message, api: LiveAPI?) async {
             guard let api, !isChecking else { return }
             isChecking = true
+            latestMail = nil
+            latestContent = nil
+            latestThread = nil
             defer { isChecking = false }
             do { try await load(mail, api: api) }
             catch {
@@ -136,6 +140,8 @@ extension AgentPhoneChat {
             let content: BotMailContent = try await api.moduleJSON(
                 "composio/gmail/message/\(Server.segment(mail.id))", timeout: 75
             )
+            if let id = content.messageID, id != mail.id { throw APIError.malformed }
+            latestThread = content.messageID == mail.id ? content.threadID : nil
             latestMail = mail
             latestContent = content.text.isEmpty ? "Mailen indeholder ingen læsbar tekst." : content.text
             status = isUnreadList ? "Her er den valgte mail:" : "Her er din seneste mail:"
@@ -201,6 +207,9 @@ extension AgentPhoneChat {
                                  format: .dateTime.day().month(.abbreviated).hour().minute()).font(.caption)
                         }
                         Text(content).textSelection(.enabled)
+                        if let link = AgentMailEvidenceLink.gmail(request.latestThread) {
+                            Link("Åbn samtalen i Gmail", destination: link).frame(minHeight: 44)
+                        }
                     }
                 }
                 if let state = request.state, state.notice == nil {
@@ -208,10 +217,16 @@ extension AgentPhoneChat {
                         VStack(alignment: .leading, spacing: 4) {
                             Text(appointment.title).font(.headline)
                             if let date = appointment.date {
+                                if !appointment.canApply { Text("Tidligere tidspunkt").font(.caption) }
                                 Text(date.formatted(date: .abbreviated, time: .shortened)).font(.subheadline)
                             }
                             if !appointment.canApply {
                                 Text(appointment.revisionStatus == "cancelled" ? "Aflyst" : "Flyttet").font(.caption)
+                            } else if appointment.date == nil {
+                                Text("Tidspunktet skal tjekkes i mailen.").font(.caption)
+                            }
+                            if let api {
+                                AgentMailEvidenceLink(api: api, botID: bot.id, appointment: appointment)
                             }
                         }
                         .textSelection(.enabled)
@@ -226,6 +241,95 @@ extension AgentPhoneChat {
         .privacySensitive()
         .sheet(isPresented: $showReview) {
             if let api { AgentGmailReview(api: api, bot: bot) }
+        }
+    }
+}
+
+@MainActor struct AgentMailEvidenceLink: View {
+    struct Source: Decodable {
+        let before, quote, after, messageID: String
+        let threadID: String?
+    }
+
+    let api: LiveAPI
+    let botID: UUID
+    let appointment: MailAppointmentState.Appointment
+    @State private var open = false
+    @State private var source: Source?
+    @State private var notice: String?
+
+    nonisolated static func gmail(_ thread: String?) -> URL? {
+        guard let thread, (1...128).contains(thread.utf8.count),
+              thread.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) ||
+                  (48...57).contains($0) || $0 == 45 || $0 == 95 }) else { return nil }
+        return URL(string: "https://mail.google.com/mail/u/0/#all/" + thread)
+    }
+
+    @ViewBuilder var body: some View {
+        if appointment.hasSource == true {
+            Button("Vis kildemail", systemImage: "text.quote") {
+                source = nil
+                notice = nil
+                open = true
+            }.frame(minHeight: 44)
+                .sheet(isPresented: $open, onDismiss: { source = nil; notice = nil }) {
+                    NavigationStack {
+                        Group {
+                            if let source {
+                                message(source)
+                            } else if let notice {
+                                Text(notice).padding()
+                            } else {
+                                ProgressView("Åbner kildemailen…")
+                            }
+                        }
+                        .navigationTitle("Kildemail")
+                        .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Luk") { open = false } } }
+                    }.task {
+                        do {
+                            let result: Source = try await api.moduleJSON("mail-appointments/\(botID.uuidString)/\(appointment.id.uuidString)/source", timeout: 75)
+                            try Task.checkCancellation()
+                            source = result
+                        } catch {
+                            if Task.isCancelled { return }
+                            if case APIError.http(_, let problem) = error, let detail = problem?.message { notice = detail }
+                            else { notice = "Kildemailen kunne ikke hentes. Tjek forbindelsen til PC’en og Gmail." }
+                        }
+                    }.privacySensitive()
+                }
+        } else {
+            Text("Dette forslag mangler en kontrolleret kildelinje.").font(.caption)
+            if let link = Self.gmail(appointment.gmailThread) {
+                Link("Åbn samtalen i Gmail", destination: link).frame(minHeight: 44)
+            }
+        }
+    }
+
+    private func message(_ source: Source) -> some View {
+        ScrollViewReader { reader in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    if source.quote.isEmpty {
+                        Text("Agenten kunne ikke bekræfte tidspunktet i en bestemt linje.").font(.callout)
+                    }
+                    if !source.before.isEmpty { Text(verbatim: source.before) }
+                    if !source.quote.isEmpty {
+                        Text(verbatim: source.quote)
+                            .fontWeight(.semibold)
+                            .padding(10)
+                            .background(Color.accentColor.opacity(0.17), in: RoundedRectangle(cornerRadius: 10))
+                            .accessibilityLabel("Kildested. " + source.quote)
+                            .id("evidence")
+                    }
+                    if !source.after.isEmpty { Text(verbatim: source.after) }
+                    if let url = Self.gmail(source.threadID) {
+                        Link("Åbn samtalen i Gmail", destination: url).frame(minHeight: 44)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+                .padding()
+            }.onAppear { if !source.quote.isEmpty { reader.scrollTo("evidence", anchor: .center) } }
         }
     }
 }
@@ -360,13 +464,17 @@ struct AgentWebSources: Decodable, Sendable {
 
 @MainActor struct AgentPCToolsView: View {
     let api: LiveAPI
+    let botID: UUID
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
             List {
                 NavigationLink {
-                    AgentPCImageView(api: api)
+                    AgentBuiltTools(api: api)
+                } label: { Label("Byg og brug værktøjer", systemImage: "hammer") }
+                NavigationLink {
+                    AgentPCImageView(api: api, botID: botID)
                 } label: { Label("Lav billede", systemImage: "photo") }
                 NavigationLink {
                     PCVideoGenerationView(api: api, initialPrompt: "")
@@ -384,11 +492,15 @@ struct AgentWebSources: Decodable, Sendable {
 
 @MainActor private struct AgentPCImageView: View {
     let api: LiveAPI
+    let botID: UUID
+    @State private var useStyle = true
     @State private var prompt = ""
     @State private var image: UIImage?
     @State private var running: Task<Void, Never>?
     @State private var notice: String?
     private var description: String { prompt.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var style: AgentImageTasteStyle? { AgentImageTasteStyle.selected(for: botID) }
+    private var generatedPrompt: String { useStyle ? style?.applying(to: description) ?? description : description }
 
     var body: some View {
         ScrollView {
@@ -397,8 +509,14 @@ struct AgentWebSources: Decodable, Sendable {
                 TextField("Beskriv billedet", text: $prompt, axis: .vertical)
                     .lineLimit(3...6)
                     .disabled(running != nil)
+                if let style {
+                    Toggle("Brug min billedstil · " + style.title, isOn: $useStyle).disabled(running != nil)
+                    if useStyle && generatedPrompt.unicodeScalars.count > 1_000 {
+                        FadedDetailText("Forkort beskrivelsen, eller slå billedstilen fra.")
+                    }
+                }
                 FadedPrimaryButton("Lav billede", icon: "wand.and.stars", action: generate)
-                    .disabled(running != nil || !(1...1_000).contains(description.count))
+                    .disabled(running != nil || !(1...1_000).contains(generatedPrompt.unicodeScalars.count))
                 if running != nil { ProgressView("PC’en genererer billedet…") }
                 if let notice { FadedDetailText(notice) }
                 if let image {
@@ -423,8 +541,8 @@ struct AgentWebSources: Decodable, Sendable {
     }
 
     private func generate() {
-        let input = description
-        guard running == nil, (1...1_000).contains(input.count) else { return }
+        let input = generatedPrompt
+        guard running == nil, (1...1_000).contains(input.unicodeScalars.count) else { return }
         notice = nil
         running = Task {
             defer { running = nil }

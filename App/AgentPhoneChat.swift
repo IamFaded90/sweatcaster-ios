@@ -44,6 +44,8 @@ import UIKit
     @State var pendingPrompt: String?
     @State var showModels = false
     @State var showEverydayTools = false
+    @State var interactiveTool: AgentInteractiveTool?
+    @State var showTasteChoices = false
     @State private var showPCTools = false
     @State var showDocuments = false
     @State var nextDocument: AgentDocument?
@@ -53,6 +55,7 @@ import UIKit
     @State var gmailCheck: AgentGmailCheck.Request?
     @State var openAgentAction: UUID?
     @State var agentActionRefresh = UUID()
+    @State var instagramPlanRequest: AgentInstagramPlanChange?
     @State var modelBeforeSettings = ""
     @State var loaded = false
     @State var web = false
@@ -173,6 +176,9 @@ import UIKit
                     Button("Hverdagsværktøjer", systemImage: "wrench.and.screwdriver") { showEverydayTools = true }
                         .disabled(running != nil)
                 }
+                if keepHistory {
+                    ToolbarItem(placement: .topBarTrailing) { agentActionShortcuts.labelStyle(.iconOnly) }
+                }
                 if api != nil && keepHistory {
                     ToolbarItem(placement: .topBarTrailing) {
                         Button("Agentens PC-værktøjer", systemImage: "desktopcomputer") { showPCTools = true }
@@ -181,7 +187,56 @@ import UIKit
                 }
             }
             .sheet(isPresented: $showPCTools) {
-                if let api { AgentPCToolsView(api: api) }
+                if let api { AgentPCToolsView(api: api, botID: bot.id) }
+            }
+            .sheet(item: $interactiveTool) { tool in
+                switch tool {
+                case .milestone(let kind, let prompt):
+                    milestoneSheet(kind, prompt: prompt)
+                case .appointmentChange(let prompt):
+                    AgentAppointmentChange(api: api, prompt: prompt) { receipt, link in
+                        addAgentAction(prompt, kind: .workflow("Flyttet aftale"), receipt: receipt, link: link)
+                    }
+                case .gmailCleanup(let prompt):
+                    AgentGmailCleanup(api: api, bot: bot, prompt: prompt) { receipt in
+                        addAgentAction(prompt, kind: .workflow("Mailoprydning"), receipt: receipt, source: "PC")
+                    }
+                case .pcRepair(let prompt):
+                    AgentPCRepair(api: api, initialPrompt: prompt) { receipt in
+                        addAgentAction(prompt, kind: .workflow("Billedmotor på PC"), receipt: receipt, source: "PC")
+                    }
+                case .agentComputer(let goal):
+                    NavigationStack {
+                        let roster = (try? MigratedAppData.shared.loadBots().get()) ?? []
+                        BotComputerView(bot: bot, roster: roster, api: api, initialPrompt: goal)
+                            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { interactiveTool = nil } } }
+                    }
+                case .phoneScreen(let prompt):
+                    AgentScreenShareView(api: api, bot: bot, prompt: prompt)
+                case .sales(let prompt):
+                    AgentSalesView(api: api, bot: bot, prompt: prompt)
+                case .surprise(let prompt):
+                    VillageSurprisesView(api: api, bot: bot, prompt: prompt)
+                case .builtTools(let prompt):
+                    if let api {
+                        NavigationStack {
+                            AgentBuiltTools(api: api, initialBrief: prompt, buildsOnOpen: !prompt.isEmpty)
+                                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { interactiveTool = nil } } }
+                        }
+                    }
+                    else { ContentUnavailableView("Forbind PC’en", systemImage: "desktopcomputer") }
+                case .window(let prompt):
+                    AgentWindowHelp(api: api, botName: bot.name, prompt: prompt) { receipt in
+                        addAgentAction(prompt, kind: .workflow("PC-opgave"), receipt: receipt, source: "PC")
+                    }
+                case .taste(let target, let kind):
+                    AgentTasteTest(bot: target, api: api, kind: kind)
+                }
+            }
+            .confirmationDialog("Hvad skal vi finde til " + bot.name + "?", isPresented: $showTasteChoices,
+                                titleVisibility: .visible) {
+                tasteChoices
+                Button("Annuller", role: .cancel) {}
             }
             .sheet(isPresented: $showEverydayTools) {
                 NavigationStack {
@@ -226,6 +281,7 @@ import UIKit
                 await loadPCModels()
                 await selectRequestedAdamVoiceIfAvailable()
             }
+            .task(id: instagramPollingID) { await monitorInstagramReports() }
             .task(id: gmailCheck?.id) { await gmailCheck?.run(bot: bot, api: api) }
             .onChange(of: running != nil, initial: true) {
                 ChatScreenWake.hold(wakeID, whileReplying: running != nil && phase == .active)

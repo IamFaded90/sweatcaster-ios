@@ -9,9 +9,18 @@ def collect_modules(source: Path) -> dict[str, str]:
     for name in (source.name, "lumi_companion.py", "lumi_flux.py", "code_batch.py", "crew_proposals.py", "repository_library.py", "agent_workflows.py",
                  "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py", "bot_task_models.py",
                  "emby_library.py", "emby_settings.py", "composio_library.py", "composio_settings.py", "composio_gmail.py",
-                 "agentmail_inboxes.py", "addons.py", "github_addons.py", "grok_templates.py", "mail_appointments.py",
-                 "microsoft_voice.py", "roest_worker.py", "kokoro_voice.py", "pc_metrics.py", "video_review.py",
+                 "composio_routes.py", "instagram_publishing.py", "instagram_photo.py", "instagram_scheduling.py",
+                 "tradera_watch.py", "tradera_api.py", "tradera_mail.py", "agent_owner_notice.py",
+                 "agentmail_inboxes.py", "agent_email.py", "addons.py", "github_addons.py", "grok_templates.py", "mail_appointments.py", "mail_evidence.py",
+                 "mail_reschedule.py", "gmail_cleanup.py", "gmail_cleanup_provider.py", "pc_repair.py", "pc_image_engine.py", "pc_repair_images.py",
+                 "microsoft_voice.py", "roest_worker.py", "kokoro_voice.py", "pc_metrics.py", "video_review.py", "video_quality.py",
                  "studio_video.py", "studio_video_workflows.py", "studio_meshes.py", "cast_relay.py",
+                 "lumi_video_files.py", "window_capture.py", "window_help.py", "window_automation.py", "window_operator.py",
+                 "phone_screen.py", "film_companion.py", "film_media.py", "film_reasoning.py", "film_speech_install.py", "agent_tool_builder.py", "agent_tool_runtime.py",
+                 "sales_models.py", "sales_provider.py", "sales_service.py", "sales_mail.py", "sales_draft.py", "village_surprises.py",
+                 "agent_rooms.py", "agent_room_scene.py", "agent_room_art.py",
+                 "agent_repair.py", "agent_repair_store.py", "agent_repair_runner.py", "agent_repair_evidence.py",
+                 "agent_cases.py", "agent_case_gmail.py", "agent_case_models.py",
                  "searxng_search.py", "web_research.py", "google_desktop.py", "youtube_connection.py", "google_drive.py"):
         path = source.parent / name
         module = path.read_text(encoding="utf-8")

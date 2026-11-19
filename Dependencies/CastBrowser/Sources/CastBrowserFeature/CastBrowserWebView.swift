@@ -250,6 +250,51 @@ final class BrowserController: NSObject, ObservableObject, WKNavigationDelegate,
         return (result as? Bool) == true
     }
 
+    @MainActor func pastFilmCues(source: URL, through position: TimeInterval) async -> [FilmCue] {
+        let script = """
+        const video = [...document.querySelectorAll('video')].find(v =>
+          !v.mediaKeys && [v.currentSrc, v.src, ...[...v.querySelectorAll('source')].map(s => s.src)].includes(source));
+        if (!video) return [];
+        const tracks = [...video.textTracks].filter(t => ['subtitles','captions'].includes(t.kind));
+        tracks.sort((a,b) => Number(b.mode === 'showing') - Number(a.mode === 'showing') ||
+          Number(b.language.startsWith('en')) - Number(a.language.startsWith('en')));
+        for (const track of tracks.slice(0,3)) {
+          const wasDisabled = track.mode === 'disabled';
+          if (wasDisabled) track.mode = 'hidden';
+          try {
+            if (!track.cues?.length && wasDisabled) await new Promise(resolve => setTimeout(resolve,350));
+            const result = [];
+            for (const cue of track.cues || []) {
+              if (Number.isFinite(cue.endTime) && cue.startTime >= 0 &&
+                  cue.startTime < cue.endTime && cue.endTime <= until && typeof cue.text === 'string') {
+                result.push({start:cue.startTime,end:cue.endTime,text:cue.text.replace(/<[^>]*>/g,'').slice(0,320)});
+              }
+            }
+            if (result.length) return result.slice(-1600);
+          } finally {
+            if (wasDisabled && track.mode === 'hidden') track.mode = 'disabled';
+          }
+        }
+        return [];
+        """
+        var frames: [WKFrameInfo?] = []
+        if let frame = playingVideoFrame { frames.append(frame) }
+        frames.append(nil)
+        for frame in frames {
+            let payload = try? await webView.callAsyncJavaScript(script, arguments: ["source": source.absoluteString, "until": position],
+                                                                 in: frame, contentWorld: .defaultClient)
+            let rows = payload as? [[String: Any]] ?? []
+            let cues = rows.compactMap { row -> FilmCue? in
+                guard let a = row["start"] as? Double, let b = row["end"] as? Double,
+                      a.isFinite, b.isFinite, a >= 0, a < b, b <= position,
+                      let line = row["text"] as? String, !line.isEmpty else { return nil }
+                return FilmCue(start: a, end: b, text: String(line.prefix(320)))
+            }
+            if !cues.isEmpty { return cues.sorted { $0.start < $1.start } }
+        }
+        return []
+    }
+
     func captureBrowserSession(completion: @escaping ([HTTPCookie], String?, [String: [String: String]]) -> Void) {
         webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { [weak self] cookies in
             guard let self else { completion(cookies, nil, [:]); return }
@@ -263,6 +308,14 @@ final class BrowserController: NSObject, ObservableObject, WKNavigationDelegate,
         capturedHeadersLock.lock()
         defer { capturedHeadersLock.unlock() }
         return capturedMediaHeaders
+    }
+
+    @MainActor func relayPageContext(for source: URL, page: URL?) async -> (page: URL?, userAgent: String?) {
+        let headers = snapshotCapturedMediaHeaders()[source.absoluteString] ?? [:]
+        let captured = headers.first { $0.key.caseInsensitiveCompare("Referer") == .orderedSame }?.value
+        let referer = captured.flatMap { URL(string: $0) } ?? page
+        let ua = try? await webView.evaluateJavaScript("navigator.userAgent") as? String
+        return (CastMediaRoute.referringPage(referer), ua)
     }
 
     func load(_ raw: String) {

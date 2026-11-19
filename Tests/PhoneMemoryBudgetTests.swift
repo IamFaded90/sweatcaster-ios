@@ -2,6 +2,23 @@ import XCTest
 @testable import SweatCaster
 
 final class PhoneMemoryBudgetTests: XCTestCase {
+    func testFluxDownloadBudgetsForAllThreeFilesAndInstallationSpace() {
+        let flux = StudioImageModel.fluxKlein
+        XCTAssertEqual(flux.downloadFiles.reduce(Int64.zero) { $0 + $1.bytes }, 8_743_059_456)
+        let missingBytes = flux.downloadFiles.filter { !$0.isPresent }.reduce(Int64.zero) { $0 + $1.bytes }
+        XCTAssertEqual(flux.minimumFreeBytes, missingBytes + 1_000_000_000)
+    }
+
+    func testTruncatedImageDependencyIsNotReady() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let file = StudioImageDownloadFile(name: "test.ckpt", bytes: 64, sha256: nil)
+        try Data(repeating: 0, count: 63).write(to: url)
+        XCTAssertFalse(file.matchesSize(at: url))
+        try Data(repeating: 0, count: 64).write(to: url)
+        XCTAssertTrue(file.matchesSize(at: url))
+    }
+
     func testOtherAppsCanReduceBudgetEvenOnLargePhone() {
         let result = PhoneMemoryBudget.assess(required: 3_000_000_000, physical: 12_000_000_000, available: 2_000_000_000)
         XCTAssertEqual(result.fit, .unavailable)

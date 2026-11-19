@@ -232,6 +232,7 @@ struct AgentVoiceSilence {
         guard revision == id, !Task.isCancelled else { throw CancellationError() }
         guard permitted else { throw APIError.input }
         let file = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString + ".wav")
+        MusicPlayer.shared.pause()
         let audio = AVAudioSession.sharedInstance()
         try audio.setCategory(.record, mode: .measurement)
         try audio.setActive(true)

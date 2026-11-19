@@ -7,10 +7,29 @@ import SwiftUI
 import UIKit
 
 extension OfflineStudio {
-    var studioImagesPage: some View {
+    @ViewBuilder var studioImagesPage: some View {
+        let composer = AnyView(studioImageComposer)
+        if privateSession {
+            VStack(spacing: 0) {
+                studioImageScroll
+                composer
+            }
+        } else {
+            studioImageScroll.safeAreaInset(edge: .bottom, spacing: 0) { composer }
+        }
+    }
+
+    private var studioImageScroll: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
+                if privateSession {
+                    studioOperationStatus
+                    privateImageControls
+                }
                 imageThermalWarning
+                if let style = agentImageStyle {
+                    Toggle("Brug min billedstil · " + style.title, isOn: $useAgentImageStyle).disabled(task != nil)
+                }
                 if generatingImages { imageShimmer }
                 if idleAsleep {
                     FadedSecondaryButton("Vis resultat igen", icon: "photo") { resetIdleTimer() }
@@ -32,77 +51,53 @@ extension OfflineStudio {
         }
         .scrollDismissesKeyboard(.interactively)
         .onScrollPhaseChange { _, phase in if phase == .interacting { resetIdleTimer() } }
-        .safeAreaInset(edge: .bottom) { AnyView(studioImageComposer) }
     }
 
     private var studioImageComposer: some View {
         let request = studioImageRequest
         let blocker = imageBlocker(for: request)
         return VStack(alignment: .leading, spacing: 8) {
-            if privateSession {
-                privateImageModelMenu(current: request.model)
-                if request.route == .pc {
-                    privatePCModelPicker
-                    FadedDetailText("Din beskrivelse og dit valgte foto sendes til din parrede PC.")
-                    if request.pcModel.isFlux {
-                        FadedDetailText("FLUX 2 følger din beskrivelse. Beskriv gerne resultatet på engelsk.")
-                    }
-                    if request.pcModel == .pony && baseImage != nil { FadedDetailText("Til ændringer af et foto kan FLUX 2 · voksen være bedre.") }
-                }
-            } else {
+            if !privateSession {
                 Picker("Lav billedet på", selection: $studioImageRoute) {
                     ForEach(StudioImageRoute.allCases) { route in Text(route.title).tag(route) }
                 }.pickerStyle(.segmented)
                 FadedDetailText(imageRouteDetail(for: request))
             }
-            if imagePromptFocused && (!privateSession || baseImage == nil) {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 8) {
-                        ForEach(["masterpiece", "cinematic", "blødt lys", "detaljeret"], id: \.self) { suggestion in
-                            Button(suggestion) {
-                                let current = imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
-                                let combined = current.isEmpty ? suggestion : current + ", " + suggestion
-                                if combined.count <= 2_000 { imagePrompt = combined }
-                            }.buttonStyle(.bordered).frame(minHeight: 44)
-                                .accessibilityLabel("Tilføj \(suggestion) til prompt")
-                        }
-                    }
-                }.scrollIndicators(.hidden)
-            }
+            if imagePromptFocused && !privateSession { imagePromptSuggestions }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(privateSession && baseImage != nil ? "Hvad vil du ændre?" : "Beskriv dit billede…", text: $imagePrompt, axis: .vertical)
-                    .lineLimit(1...5).frame(minHeight: 44).focused($imagePromptFocused)
+                    .lineLimit(1...(privateSession && imagePromptFocused ? 3 : 5))
+                    .frame(minHeight: 44).focused($imagePromptFocused)
                     .dropDestination(for: StudioPhotoInput.self) { items, _ in
                         guard request.isPrivate || request.route != .pc else { return false }
                         return acceptStudioImageDrop(items.map(\.data))
                     }
-                studioEditorButton(forImage: true)
-            }
-            if privateSession {
-                imageReferencePicker
-                if baseImage != nil { privateReferenceOptions }
+                if privateSession && imagePromptFocused {
+                    Button("Skjul tastatur", systemImage: "keyboard.chevron.compact.down") { imagePromptFocused = false }
+                        .labelStyle(.iconOnly).frame(width: 44, height: 44)
+                } else {
+                    studioEditorButton(forImage: true)
+                }
             }
             imageGenerationButton(request, blocked: blocker != nil)
-            if let blocker { FadedDetailText(blocker).accessibilityAddTraits(.updatesFrequently) }
-            if task != nil {
+            if !privateSession, let blocker { FadedDetailText(blocker).accessibilityAddTraits(.updatesFrequently) }
+            if !privateSession && task != nil {
                 FadedSecondaryButton("Stop billedkø", icon: "stop.fill") { stopStudioImageQueue() }
             }
         }
         .padding(12).background(palette.card, in: RoundedRectangle(cornerRadius: 22))
-        .overlay { RoundedRectangle(cornerRadius: 22).strokeBorder(privateSession ? palette.purple : palette.border) }
+        .overlay { RoundedRectangle(cornerRadius: 22).strokeBorder(privateSession ? palette.purple : palette.border).allowsHitTesting(false) }
         .padding(.horizontal, 12).padding(.vertical, 6)
     }
 
-    private func imageBlocker(for request: StudioImageRequest) -> String? {
+    func imageBlocker(for request: StudioImageRequest) -> String? {
         let modelReady = isImageModelReady(request.model)
         if request.isPrivate && request.route == .pc {
             if privateImagePC == nil { return "Forbind PC’en, eller vælg en iPhone-model." }
-            if request.pcModel == .flux2 && pcFluxAvailable != true { return "FLUX 2 er ikke fundet på PC’en. Kontrollér forbindelsen, eller vælg RealVisXL." }
-            if request.pcModel == .flux2Adult && pcFluxAdultAvailable != true { return "FLUX 2 · voksen er ikke fundet på PC’en. Kontrollér forbindelsen, eller vælg en anden model." }
-            if request.pcModel == .pony && pcPonyAvailable != true { return "CyberRealistic Pony er ikke fundet på PC’en. Kontrollér forbindelsen, eller vælg en anden model." }
+            if let blocker = pcImageCatalog.blocker(for: request.pcModel) { return blocker }
             if request.prompt.count > 1_000 { return "Forkort billedbeskrivelsen til højst 1.000 tegn." }
         } else if request.isPrivate {
-            if !modelReady { return "Billedmodellen mangler. Hent den under Hjem → ⋯ → Lokale modeller → Billeder, og åbn Privat Studio igen." }
+            if !modelReady { return "Hent en billedmodel i modelmenuen, og vælg den, når den er klar." }
         } else if request.route == .pc {
             if api == nil { return "Forbind til PC’en, eller vælg Telefon." }
             if request.prompt.count > 1_000 { return "PC’en tager højst 1.000 tegn. Forkort teksten, eller vælg Telefon." }
@@ -327,7 +322,7 @@ extension OfflineStudio {
         }
     }
 
-    private var imageReferencePicker: some View {
+    var imageReferencePicker: some View {
         HStack(spacing: 8) {
             if let baseImage, let preview = UIImage(data: baseImage) {
                 Image(uiImage: preview).resizable().scaledToFill()
@@ -437,8 +432,12 @@ extension OfflineStudio {
             Button { imageViewer = StudioImageSheet(url: imageURL) } label: {
                 Image(uiImage: thumbnail).resizable().scaledToFit().accessibilityLabel("Valgt billede")
             }.buttonStyle(.plain)
-            if !privateSession, !generatingImages, let comparison = imageComparisonSource, comparison.result == imageURL {
+            if !generatingImages, let comparison = imageComparisonSource, comparison.results.contains(imageURL) {
                 StudioImageComparison(source: comparison, result: thumbnail).id(imageURL)
+            }
+            if privateSession, privateImagePC != nil {
+                FadedSecondaryButton("Lav video af billedet", icon: "film") { openPrivateVideo(from: imageURL) }
+                    .disabled(task != nil)
             }
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) { resultImageActions(imageURL) }
@@ -471,7 +470,8 @@ extension OfflineStudio {
             guard basePhoto == item else { return }
             guard let photo else { throw CocoaError(.fileReadCorruptFile) }
             setReferenceImage(photo.data)
-            status = "Basebillede valgt. Det bliver på telefonen."
+            basePhoto = nil; loadingBaseImage = false
+            status = ""
         } catch is CancellationError {
             return
         } catch {
@@ -503,7 +503,7 @@ extension OfflineStudio {
         batchTurnID = nil
         imageURL = file
     }
-    private var studioImageRequest: StudioImageRequest {
+    var studioImageRequest: StudioImageRequest {
         let route = privateSession ? sessionPreferences.imageRoute : studioImageRoute
         let usesPhoneOptions = route != .pc
         let model = usesPhoneOptions && !imageReady
@@ -513,7 +513,7 @@ extension OfflineStudio {
         let negative = usesNegative ? negativeImagePrompt.trimmingCharacters(in: .whitespacesAndNewlines) : ""
         let lora = usesPhoneOptions && (privateSession || useLoRA) ? installedLoRA ?? "" : ""
         return StudioImageRequest(
-            model: model, route: route, pcModel: sessionPreferences.pcImageModel, prompt: imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines),
+            model: model, route: route, pcModel: sessionPreferences.pcImageModel, prompt: agentImagePrompt,
             negative: negative, lora: lora, count: usesPhoneOptions && makeFourImages ? 4 : 1,
             seed: usesPhoneOptions || privateSession ? studioSeed : nil, sourceImage: usesPhoneOptions || privateSession ? baseImage : nil,
             referenceMode: privateSession && baseImage != nil ? sessionPreferences.referenceMode : nil, referenceMask: privateSession ? referenceMask : nil,
@@ -529,6 +529,7 @@ extension OfflineStudio {
             status = blocker
             return
         }
+        if privateSession { imagePromptFocused = false }
         pendingImages.append(request)
         guard !generatingImages else { return }
         generatingImages = true

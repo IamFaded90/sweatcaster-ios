@@ -91,9 +91,8 @@ import UIKit
             if let api { AgentTodayMail(api: api, item: item) }
         }
         .sheet(item: $reminderProposal) { proposal in
-            BotPhoneActionReview(action: proposal.action, jobID: proposal.id, botName: botName) {
+            BotPhoneActionReview(action: proposal.action, jobID: proposal.id, botName: botName, onSaved: { receipt = $0 }) {
                 remindedEvents.insert(proposal.eventID)
-                receipt = "Påmindelsen er oprettet på din iPhone."
                 Task { await readReminders() }
             }
         }
@@ -317,7 +316,12 @@ import UIKit
         do {
             reminder.isCompleted = true
             try store.save(reminder, commit: true)
-            receipt = "Påmindelsen er markeret som færdig."
+            let reader = EKEventStore()
+            if let saved = reader.calendarItem(withIdentifier: item.id) as? EKReminder, saved.isCompleted {
+                receipt = "Tjekket i Påmindelser: Den er markeret som færdig."
+            } else {
+                receipt = "iPhone modtog ændringen. Jeg kunne ikke bekræfte, at påmindelsen er markeret som færdig."
+            }
         } catch {
             store.reset()
             receipt = "Påmindelsen kunne ikke markeres som færdig."

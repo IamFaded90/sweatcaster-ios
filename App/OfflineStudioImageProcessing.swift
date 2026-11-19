@@ -116,28 +116,14 @@ enum StudioImageFiles {
 
 extension OfflineStudio {
     var privatePCModelPicker: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Picker("Billedmodel på PC", selection: $sessionPreferences.pcImageModel) {
-                Text(StudioPCImageModel.realvis.title).tag(StudioPCImageModel.realvis)
-                Text(StudioPCImageModel.pony.title + (pcPonyAvailable == true ? "" : " · ikke klar"))
-                    .tag(StudioPCImageModel.pony).disabled(pcPonyAvailable != true)
-                Text(StudioPCImageModel.flux2.title + (pcFluxAvailable == true ? "" : " · ikke klar"))
-                    .tag(StudioPCImageModel.flux2).disabled(pcFluxAvailable != true)
-                Text(StudioPCImageModel.flux2Adult.title + (pcFluxAdultAvailable == true ? "" : " · ikke klar"))
-                    .tag(StudioPCImageModel.flux2Adult).disabled(pcFluxAdultAvailable != true)
-            }
-            if pcFluxAvailable != true {
-                FadedDetailText(pcFluxAvailable == nil ? "Kontrollerer FLUX 2 på PC’en…" : "FLUX 2 kunne ikke findes. Opdatér PC-programmet, og kontrollér igen.")
-                Button("Kontrollér PC igen") { pcFluxRefresh += 1 }.frame(minHeight: 44)
-            }
+        StudioPCImageModelPicker(selection: $sessionPreferences.pcImageModel, catalog: pcImageCatalog) {
+            pcImageRefresh += 1
         }
-        .task(id: "\(privateImagePC?.queueTargetID ?? ""):\(pcFluxRefresh)") {
-            pcFluxAvailable = nil
-            pcFluxAdultAvailable = nil
-            pcPonyAvailable = nil
-            guard let api = privateImagePC else { pcFluxAvailable = false; pcFluxAdultAvailable = false; pcPonyAvailable = false; return }
-            do { let models = try await api.privateStudioFluxAvailable(); pcFluxAvailable = models.0; pcFluxAdultAvailable = models.1; pcPonyAvailable = models.2 }
-            catch { if !Task.isCancelled { pcFluxAvailable = false; pcFluxAdultAvailable = false; pcPonyAvailable = false } }
+        .task(id: "\(privateImagePC?.queueTargetID ?? ""):\(pcImageRefresh)") {
+            guard let api = privateImagePC else { return }
+            pcImageCatalog = .checking
+            let catalog = await StudioPCImageCatalog.inspect(api)
+            if !Task.isCancelled { pcImageCatalog = catalog }
         }
     }
 
@@ -287,9 +273,10 @@ extension OfflineStudio {
                     turns.append(turn)
                 }
                 imageURL = destination
-                if !request.isPrivate {
-                    imageComparisonSource = StudioImageComparisonSource(result: destination, bytes: request.sourceImage)
-                }
+                imageComparisonSource = StudioImageComparisonSource(result: destination, bytes: request.sourceImage,
+                                                                   mask: request.referenceMask)
+            } else {
+                imageComparisonSource?.results.insert(destination)
             }
             batchImageURLs = created
             savePrivateConversation()

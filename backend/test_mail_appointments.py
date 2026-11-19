@@ -10,6 +10,9 @@ from sweatcaster.api import create_app
 from sweatcaster.composio_library import ComposioLibrary, GMAIL_CONFIG_NAME, GMAIL_READ_SCOPE
 from sweatcaster.composio_gmail import ConsumerGmail, MESSAGES
 from sweatcaster.mail_appointments import GMAIL, MailAppointments, decode_appointment, decode_proposal, mail_text
+from sweatcaster.mail_evidence import check_proposal
+from sweatcaster.dto import ApiError
+import pytest
 from tests.conftest import make_settings
 
 
@@ -232,3 +235,89 @@ def test_mail_search_checks_additional_pages_without_repeating_the_same_cursor(t
     app.configure(str(uuid4()), True, "Europe/Copenhagen")
     assert list(app.candidate_ids(app.settings(), "account")) == ["latest", "older"]
     assert [query.get("pageToken") for query in library.queries] == [None, "next"]
+
+
+def test_self_check_dates_quotes_and_unverified_changes():
+    zone = ZoneInfo("Europe/Copenhagen")
+    received = datetime(2030, 4, 24, 8, tzinfo=zone)
+    start = datetime(2030, 4, 25, 11, tzinfo=zone).timestamp()
+    proposed = {"title": "Klinik", "location": "Testvej 8", "start": start, "end": start + 3600}
+    for text in ("Din tid er flyttet til 25.04.2030 kl. 11.00.", "Din tid er flyttet til i morgen kl. 11.00.",
+                 "Din tid er flyttet til 25. april 2030 kl. 11:00.", "Din tid er flyttet til i morgen kl. 11.",
+                 "Your booking is rescheduled to 2030-04-25 at 11:00."):
+        original = "Besked fra klinikken\n" + text + "\nMed venlig hilsen"
+        kind, details, proof = check_proposal("rescheduled", proposed.copy(), original, received, zone, "msg")
+        assert kind == "rescheduled" and details["start"] == start and details["end"] is None
+        assert details["location"] == ""
+        lo, hi = proof["range"]
+        assert original[lo:hi] == text and text not in repr(proof)
+    for ambiguous in ("Din tid er flyttet. Ring til os.", "Din tid er flyttet til 24.04.2030 kl. 11.00.",
+                      "Din tid er flyttet til 25.04.2030 kl. 12.00.",
+                      "Din tid er flyttet.\nSvarfrist 25.04.2030 kl. 11.00.",
+                      "Din tid er flyttet til 25.04.2030 kl. 11.00 eller 25.04.2030 kl. 12.00."):
+        _, details, _ = check_proposal("rescheduled", proposed.copy(), ambiguous, received, zone, "msg")
+        assert details["start"] is None and details["end"] is None
+    for sample in ("Hvis din tid er aflyst, kan du ringe.", "Er din tid aflyst?", "Din tid er ikke aflyst."):
+        assert check_proposal("cancelled", None, sample, received, zone, "msg2") == ("unrelated", None, None)
+    assert check_proposal("cancelled", None, "Din tid er aflyst.", received, zone, "msg2")[0] == "cancelled"
+
+
+def test_current_revision_opens_exact_source_without_saved_mail(tmp_path):
+    zone = ZoneInfo("Europe/Copenhagen")
+    now = datetime.now(zone)
+    slot = (now + timedelta(days=4)).replace(hour=10, minute=30, second=0, microsecond=0)
+    first = "Din aftale er booket den " + slot.strftime("%d.%m.%Y kl. %H.%M") + "."
+    latest = "Din aftale er aflyst."
+    bodies = {"firstTest": first, "cancelTest": latest}
+
+    class Gmail:
+        account = "firstAccount"
+        ids = ["firstTest"]
+        def key(self): return "project"
+        def connection(self, provider): return self.account
+        def read(self, provider, url, query, *, account):
+            assert account == self.account
+            if url == GMAIL: return {"messages": [{"id": id_} for id_ in self.ids]}
+            identifier = url.split("/")[-1]
+            when = now + timedelta(seconds=2 if identifier == "cancelTest" else 0)
+            return {"id": identifier, "internalDate": str(int(when.timestamp() * 1000)), "threadId": "sharedThread",
+                    "payload": {"mimeType": "text/plain", "body": {
+                        "data": base64.urlsafe_b64encode(("Test privat kilde\n" + bodies[identifier]).encode()).decode()}}}
+
+    def propose(text, _source):
+        kind = "cancelled" if latest in text else "confirmed"
+        return json.dumps({"status": kind, "title": "Aftale", "start": slot.strftime("%Y-%m-%dT%H:%M"),
+                           "end": None, "location": None})
+
+    gmail = Gmail()
+    path = tmp_path / "evidence.sqlite"
+    app = MailAppointments(path, gmail, propose)
+    app.prepare()
+    owner = str(uuid4())
+    app.configure(owner, True, zone.key)
+    app.check_due()
+    found, = app.status(owner)["appointments"]
+    assert found["hasSource"] and found["start"] == slot.timestamp() and "proof" not in found
+    source = app.source(owner, found["id"])
+    assert source["quote"] == first and source["messageID"] == "firstTest"
+    assert source["before"] + source["quote"] + source["after"] == "Test privat kilde\n" + first
+    gmail.ids.append("cancelTest")
+    app.queue(owner)
+    app.check_due()
+    updated, = app.status(owner)["appointments"]
+    assert updated["revisionStatus"] == "cancelled"
+    assert app.source(owner, found["id"])["quote"] == latest
+    assert app.source(owner, found["id"])["messageID"] == "cancelTest"
+    assert b"Test privat kilde" not in path.read_bytes() and latest.encode() not in path.read_bytes()
+    bodies["cancelTest"] += " Ændret."
+    with pytest.raises(ApiError): app.source(owner, found["id"])
+    with pytest.raises(ApiError): app.source(str(uuid4()), found["id"])
+    gmail.account = "otherAccount"
+    with pytest.raises(ApiError): app.source(owner, found["id"])
+
+
+def test_message_read_returns_only_provider_confirmed_ids(monkeypatch, tmp_path):
+    reader = ComposioLibrary(tmp_path)
+    monkeypatch.setattr(reader, "read", lambda *_: {"id": "msg123", "threadId": "thread321", "snippet": "Hej"})
+    assert reader.gmail_message("msg123") == {"text": "Hej", "messageID": "msg123", "threadID": "thread321"}
+    with pytest.raises(ApiError): reader.gmail_message("wrong")

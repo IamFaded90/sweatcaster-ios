@@ -476,6 +476,12 @@ extension Home {
         case "video": openVideoClips()
         case "video-jobs": openVideoJobs()
         case "code": selectSpace(.library)
+        case let value where value.hasPrefix("tradera/"):
+            let ids = value.split(separator: "/")
+            guard !privateStudioPresented, ids.count == 3, let botID = UUID(uuidString: String(ids[1])),
+                  let actionID = UUID(uuidString: String(ids[2])), case .success(let bots) = MigratedAppData.shared.loadBots(),
+                  let bot = bots.first(where: { $0.id == botID && $0.id != VillageBot.lumiID }) else { return }
+            searchBot = SearchBot(id: UUID(), entry: .chat(bot), opensAction: actionID)
         case OpenFadedAIHarperChat.destination: openHarperChat()
         case OpenFadedAICamera.destination:
             guard !privateStudioPresented else { return }
@@ -504,7 +510,7 @@ extension Home {
                     .toolbar { Button("Luk") { searchBot = nil } }
             }
         case .chat(let bot):
-            AgentPhoneChat(bot: bot, api: studioAPI, startsOnPhone: true)
+            AgentPhoneChat(bot: bot, api: studioAPI, startsOnPhone: true, opensAction: selection.opensAction)
         case .harperSetup:
             HarperShortcutSetup(api: studioAPI)
         }

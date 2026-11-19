@@ -37,16 +37,27 @@ extension CastAppModel {
         let viaPhone = mediaRoute == .phone
         browser.captureBrowserSession { [weak self] cookies, userAgent, capturedHeaders in
             guard let self, self.attemptID == id else { return }
+            let isHLS = video.isHLSMaster == true || video.mime.localizedCaseInsensitiveContains("mpegurl") || mediaURL.pathExtension.lowercased() == "m3u8"
+            if !viaPhone {
+                PhoneStreamProxy.shared.inspectDirect(mediaURL, isHLS: isHLS, cookies: cookies, userAgent: userAgent,
+                                                      referer: video.pageURL, headers: capturedHeaders) { formats in
+                    DispatchQueue.main.async {
+                        guard self.attemptID == id else { return }
+                        self.load(video, from: mediaURL, on: session, hlsFormats: formats, initialPosition: initialPosition)
+                    }
+                }
+                return
+            }
             PhoneStreamProxy.shared.prepare(cookies: cookies, userAgent: userAgent, referer: video.pageURL, capturedHeadersByURL: capturedHeaders) { result in
                 DispatchQueue.main.async {
                     guard self.attemptID == id else { return }
                     switch result {
                     case .success:
-                        guard let localURL = viaPhone ? PhoneStreamProxy.shared.proxiedURL(for: mediaURL) : mediaURL else {
+                        guard let localURL = PhoneStreamProxy.shared.proxiedURL(for: mediaURL) else {
                             self.status = "Kunne ikke oprette telefonens lokale stream-adresse."
+                            self.recoverCast(id)
                             return
                         }
-                        let isHLS = video.isHLSMaster == true || video.mime.localizedCaseInsensitiveContains("mpegurl") || mediaURL.pathExtension.lowercased() == "m3u8"
                         guard !isHLS else {
                             self.status = "Kontrollerer lyd- og videoformatet i HLS-listen…"
                             PhoneStreamProxy.shared.inspectHLS(mediaURL) { formats in
@@ -68,8 +79,7 @@ extension CastAppModel {
                         self.load(video, from: localURL, on: session, hlsFormats: nil, initialPosition: initialPosition)
                     case .failure(let error):
                         self.addDiagnostic("Stream-proxy kunne ikke starte: \(error.localizedDescription)")
-                        if viaPhone { self.recoverCast(id) }
-                        else { self.load(video, from: mediaURL, on: session, hlsFormats: nil, initialPosition: initialPosition) }
+                        self.recoverCast(id)
                     }
                 }
             }
@@ -78,15 +88,25 @@ extension CastAppModel {
     }
 
     private func startPCRelay(_ video: VideoCandidate, url: URL, id: UUID, position: Double) {
-        guard let pcRelay else { recoverCast(id); return }
         Task { @MainActor in
             do {
-                let relayURL = try await pcRelay(url, URL(string: video.pageURL))
+                let page = URL(string: video.pageURL)
+                let relayURL: URL
+                if let pcRelayWithContext {
+                    let context = await browser.relayPageContext(for: url, page: page)
+                    guard attemptID == id else { return }
+                    relayURL = try await pcRelayWithContext(url, context.page, context.userAgent)
+                } else if let pcRelay {
+                    relayURL = try await pcRelay(url, page)
+                } else {
+                    recoverCast(id)
+                    return
+                }
                 guard attemptID == id, let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession else { return }
                 let isHLS = video.isHLSMaster == true || video.mime.localizedCaseInsensitiveContains("mpegurl")
                     || url.pathExtension.lowercased() == "m3u8"
                 if isHLS {
-                    PhoneStreamProxy.shared.inspectHLS(relayURL) { [weak self] formats in
+                    PhoneStreamProxy.shared.inspectHLS(relayURL, usingBrowserSession: false) { [weak self] formats in
                         DispatchQueue.main.async {
                             guard let self, self.attemptID == id else { return }
                             self.load(video, from: relayURL, on: session, hlsFormats: formats, initialPosition: position)

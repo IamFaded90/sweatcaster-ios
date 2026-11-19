@@ -14,7 +14,6 @@ from urllib.parse import quote, urlsplit
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import requests
-from fastapi import APIRouter, Body, Depends, Request, Response
 
 from sweatcaster.composio_settings import load
 from sweatcaster.composio_gmail import ConsumerGmail, MESSAGES, MESSAGE_ID, PROFILE
@@ -23,7 +22,7 @@ from sweatcaster.dto import ApiError
 BASE = "https://backend.composio.dev/api/"
 SERVICES = {
     "googledrive": "Google Drive", "github": "GitHub", "gmail": "Gmail",
-    "googlesheets": "Google Sheets", "notion": "Notion",
+    "googlesheets": "Google Sheets", "notion": "Notion", "instagram": "Instagram",
 }
 REPO = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 DRIVE_ID = re.compile(r"[A-Za-z0-9_-]{1,160}")
@@ -180,13 +179,18 @@ class ComposioLibrary:
                 return self.inventory_cache[1]
             consumer = self.gmail()
             with ThreadPoolExecutor(max_workers=8) as pool:
-                inventory = pool.submit(consumer.connection_statuses, FOR_YOU_APPS) if consumer else None
+                shared_apps = {key: title for key, title in FOR_YOU_APPS.items() if key != "instagram"}
+                inventory = pool.submit(consumer.connection_statuses, shared_apps) if consumer else None
                 probes = {provider: pool.submit(self.integration_readable, provider, consumer)
                           for provider in (*LIBRARIES, *FOR_YOU_READERS)}
                 consumer_status = inventory.result() if inventory else {}
                 checked = {provider: probe.result() for provider, probe in probes.items()}
             rows = []
             for provider, title in FOR_YOU_APPS.items():
+                if provider == "instagram":
+                    rows.append({"id": provider, "title": title, "availability": "per_agent", "connected": False,
+                                 "configured": bool(self.key())})
+                    continue
                 readable = checked.get(provider) == "ready"
                 status = ("ready" if readable else "composio" if consumer_status.get(provider) is True
                           else checked.get(provider) or ("disconnected" if provider in consumer_status else "unknown"))
@@ -427,7 +431,8 @@ class ComposioLibrary:
     def gmail_message(self, identifier):
         from sweatcaster.mail_appointments import mail_text
 
-        return {"text": mail_text(self.read_gmail_message(identifier))[:8_000]}
+        message = self.read_gmail_message(identifier)
+        return {"text": mail_text(message)[:8_000], "messageID": message["id"], "threadID": message.get("threadId")}
 
     def gmail_reply_target(self, identifier, consumer=None):
         message = self.read_gmail_message(identifier, consumer or self.require_gmail())
@@ -556,102 +561,6 @@ class ComposioLibrary:
 
 def register_composio(app, settings, authorize):
     library = ComposioLibrary(settings.output_root)
-
-    def paired(request: Request, response: Response):
-        authorize(request, settings)
-        response.headers["Cache-Control"] = "no-store"
-
-    router = APIRouter(prefix="/api/modules/v1/composio", dependencies=[Depends(paired)], include_in_schema=False)
-
-    @router.get("")
-    def states():
-        return library.states(LIBRARIES)
-
-    @router.get("/integrations")
-    def integrations(refresh: bool = False):
-        return library.integrations(refresh=refresh)
-
-    @router.put("/phone-connection")
-    def phone_connection(response: Response):
-        key = load().get("gmail_consumer_key", "")
-        if not isinstance(key, str) or not re.fullmatch(r"ck_[A-Za-z0-9_-]{8,1021}", key):
-            raise ApiError(409, "NOT_READY", "Gem Composio For You-forbindelsen på denne PC først.")
-        response.headers["Cache-Control"] = "no-store"
-        return {"key": key}
-
-    @router.put("/nvidia-phone-connection")
-    def nvidia_phone_connection(response: Response):
-        from pathlib import Path
-        from sweatcaster.emby_settings import _protect
-        path = Path(os.environ["LOCALAPPDATA"]) / "FadedAI" / "nvidia.dpapi"
-        try:
-            encrypted = path.read_bytes()
-            if len(encrypted) > 4096:
-                raise ValueError("Invalid credential size")
-            key = _protect(encrypted, decrypt=True).decode("utf-8")
-            if not re.fullmatch(r"nvapi-[A-Za-z0-9_-]{20,1000}", key):
-                raise ValueError("Invalid credential")
-        except (OSError, ValueError, UnicodeError):
-            raise ApiError(409, "NOT_READY", "Forbind NVIDIA på denne PC først.")
-        response.headers["Cache-Control"] = "no-store"
-        return {"key": key}
-    @router.put("/openrouter-phone-connection")
-    def openrouter_phone_connection(response: Response):
-        from pathlib import Path
-        from sweatcaster.emby_settings import _protect
-        path = Path(os.environ["LOCALAPPDATA"]) / "FadedAI" / "openrouter.dpapi"
-        try:
-            encrypted = path.read_bytes()
-            if len(encrypted) > 4096:
-                raise ValueError("Invalid credential size")
-            key = _protect(encrypted, decrypt=True).decode("utf-8")
-            if not re.fullmatch(r"sk-or-v1-[A-Za-z0-9_-]{20,1000}", key):
-                raise ValueError("Invalid credential")
-        except (OSError, ValueError, UnicodeError):
-            raise ApiError(409, "NOT_READY", "Forbind OpenRouter på denne PC først.")
-        response.headers["Cache-Control"] = "no-store"
-        return {"key": key}
-    router.add_api_route("/{provider}/items", library.items, methods=["GET"])
-
-    @router.put("/{provider}/link")
-    def link(provider: str):
-        return library.link(provider)
-
-    @router.put("/{provider}/context")
-    def context(provider: str, body: dict = Body(...)):
-        return library.context(provider, body.get("item"))
-
-    @router.get("/gmail/status")
-    def gmail_status():
-        return {"connected": bool(library.connection("gmail")), "canSend": library.gmail() is not None}
-
-    @router.get("/gmail/message/{identifier}")
-    def gmail_message(identifier: str):
-        return library.gmail_message(identifier)
-
-    @router.get("/gmail/messages")
-    def gmail_messages(q: str = ""):
-        return {"messages": library.gmail_messages(q)}
-
-    @router.put("/gmail/send")
-    def gmail_send(body: dict = Body(...)):
-        return library.send_gmail(body)
-
-    @router.get("/gmail/reply/{identifier}")
-    def gmail_reply_target(identifier: str):
-        return library.gmail_reply_target(identifier)
-
-    @router.put("/gmail/reply")
-    def gmail_reply(body: dict = Body(...)):
-        return library.reply_gmail(body)
-
-    @router.get("/gmail/reply/receipts/{identifier}")
-    def gmail_reply_receipt(identifier: str):
-        return library.gmail_reply_receipt(identifier)
-
-    @router.get("/gmail/reply/followup/{identifier}")
-    def gmail_followup(identifier: str):
-        return library.gmail_followup(identifier)
-
-    app.include_router(router)
+    from sweatcaster.composio_routes import register_routes
+    register_routes(app, settings, authorize, library, load)
     return library

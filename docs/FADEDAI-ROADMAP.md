@@ -1,5 +1,36 @@
 # FadedAI · Hvad mangler vi?
 
+## Tre nye agentforløb · 20. november
+
+- **Find og ret en appfejl.** Agenten arbejder på en kopi. Den gemmer fejlen og resultatet af samme test efter rettelsen. Lokale Python-prøver kører isoleret. En iOS-rettelse kan gøres klar som en særskilt gren med bygge- og testtrin til en Mac. Indtil Apple-testen er kørt, vises den som afventende.
+- **Byg et rum fra en skitse.** PC’en bruger skitsen til baggrunden, mens figurer og deres placeringer ligger i rumdata. I agentchat kan man sammenligne versioner og vælge den, der vises under **Mine agentrum** i Landsbyen. Første IPA indeholder afspilleren. Senere rum og versioner hentes som billeder og data. PC-prøven brugte den lokale billedmodel og bevarede baggrunden og Eva ved en ændring af Adams størrelse.
+- **Tag dig af en sag.** En reklamation kan genåbnes under samme agent. Den valgte Gmail-kvittering og fotos bruges til en kladde, som brugeren ser inden afsendelse. Afsendelsen kontrolleres i Gmail, og den bundne tråd følges for svar. Forsvinder svar på en afsendelse, kan agenten kontrollere Gmail igen med samme besked-id. Prøverne bruger testpost og sender ingen rigtig mail.
+
+## Agenternes næste samlede version
+
+- **Flyttet aftale.** Agentchat og Holdchat finder den nyeste relevante Gmail-besked. Når mailen har én entydig ny tid, kan brugeren gennemgå den eksisterende iPhone-aftale og dens påmindelse. Appen genlæser mailen før ændringen og kontrollerer begge nye tider bagefter. Lokal Swift-prøve med simuleret EventKit er bestået. Fysisk iPhone og synkronisering med Kalender/Påmindelser afventer.
+- **Gmail-oprydning.** Input som “Ryd op i min e-mail” åbner en gennemgang af mails. Arkivering kan fortrydes, og beskyttede mails springes over. Den faktiske Composio-forbindelse og Gmail-værktøjet er bekræftet ved læsning. Første brugerbekræftede skrivning afventer.
+- **Holdchat.** Holdet fordeler kildearbejde, svar og kontrol og viser ét gennemgået svar. Gmail, kalender, mailoprydning og billedreparation bruger de respektive handlinger og kvitteringer. Rigtig lokal Qwen gennemførte en prøverunde. Visningen på iPhone afventer.
+- **Billedmotor på PC.** Diagnosen tjekker motor, kø, modeller og hukommelse. Den kan starte den kendte motor, frigive ledig modelhukommelse og genprøve understøttede standardbilleder med de oprindelige indstillinger. Private billeder med reference og brugerdefinerede arbejdsgange genprøves fra deres eget studie. Diagnosen meldte klar på den faktiske PC. Reparationsprøverne brugte en simuleret motor.
+- **Arbejd på den rigtige computer.** “Brug din egen PC til …” åbner agentens arbejdsområde med opgaven udfyldt. “Tag over på min PC” åbner valg af et Windows-vindue. Telefonhandlingerne er fortsat tilgængelige fra chatten.
+
+Den samlede PC-del er installeret og kontrolleret efter genstart. Koden til iPhone ligger lokalt og afventer én samlet IPA og fysisk afprøvning.
+
+## Nyeste arbejde · 19. november · ikke udgivet
+
+Dette afsnit har forrang over de historiske musik- og Cast-beskrivelser nedenfor. Arbejdet ligger lokalt på `codex/spotube-musik-next-20261117`. Der er ikke pushet eller startet en IPA i denne omgang.
+
+- **Salg for dig.** Agentchat åbner et salgsforløb med fotos, annonceforslag, minimumspris og køberhenvendelser. Tradera API og PC-browser er understøttet. Rigtige annoncer og køberbeskeder er ikke sendt i testen.
+- **Noget nyt i landsbyen.** En agent kan bygge og afprøve en aktivitet med dine godkendte figurer. Den vises i agentens rum og kan beholdes, ændres eller slettes. En rigtig lokal model har bygget en brugbar prøveaktivitet.
+- **Tag over på PC.** Agenten arbejder i det valgte vindue med klik, tekst, tastatur og kontrol af resultatet. Du kan følge med og stoppe. Den lokale model skrev dansk tekst og satte det rigtige flueben i et prøveprogram.
+- **Byg det manglende værktøj.** Code Bot kan bygge, teste og bruge små værktøjer til billeder, filnavne, CSV, tekst og ZIP. En rigtig prøve gennemførte billedskalering, omdøbning og pakning med kontrollerede resultater.
+- **Se min iPhone-skærm.** ReplayKit-udvidelse, delingsknap og PC-billedforståelse er koblet til agentchat. En syntetisk telefonskærm blev forstået af de rigtige lokale modeller. Selve iPhone-skærmdelingen og samtidig samtale mangler fysisk prøve.
+- **Filmven på engelsk.** PC’en kan læse engelsk tale uden synlige undertekster og svare på dansk med originale replikker og tidspunkter. Engelsk lyd fra en mediefil og HLS samt tidsafgrænsede billeder bestod med rigtige modeller. Spol tilbage og filmskift rydder tidligere materiale.
+- **Musik inde i appen.** Den aktive Musik-side bruger nu Swift/AVPlayer med Spotube-adapteret kø, favoritter, playlister, downloads, sletning og sovetimer. YouTubeKit finder lydkilden. Faktisk katalogsøgning og lagring er prøvet. Afspilning, lydudtræk og låst skærm på iPhone mangler Apple-build og fysisk prøve. Den ældre Kotlin-bro er ikke appens aktive afspiller.
+- **Cinejoy og Chromecast.** Brugeren bekræftede, at den nuværende app starter filmen på TV, men stopper ved appskift. Den nye kode prøver PC-relay først til Cinejoy, dernæst direkte TV, til sidst iPhone. PC-ruten bevarer afspillerens sidesti og browseridentitet. En separat receiver hentede hele HLS-kæden i lokal test uden telefonens server eller token. Genkomst til appen må ikke genindlæse en allerede afspillende film. Den gemte hjemmepairing kan bruges, selv om chat bruger Tailscale. PC’en skal være tændt på PC-ruten. Den nye kode er endnu ikke prøvet på brugerens TV.
+
+**Før udgivelse:** PC-installeren er kontrolleret på en isoleret kopi, ikke genstartet under brugerens film. Installér den samlede PC-opdatering, kør Xcode/ContractTests og pakkecheck, og prøv ny iPhone-version med skærmdeling, musik og Cast ved låst skærm. Ældre åbne punkter nedenfor er fortsat åbne, medmindre de udtrykkeligt er løst her. Matrix-Game og Oasis er udskudt; TripoSG er udeladt.
+
 ## Aktuel status efter iPhone-testen
 
 Brugerens seneste ønsker har forrang over ældre beskrivelser nedenfor. IPA 72 er den version, der testes; ændringerne nedenfor ligger på sidegrenen og kræver et nyt build og en opdatering af PC-delen, hvor det er angivet.
@@ -10,7 +41,7 @@ Brugerens seneste ønsker har forrang over ældre beskrivelser nedenfor. IPA 72 
 - **Dagens overblik.** Agentchat genkender flere naturlige danske formuleringer; ti eksempler er prøvet lokalt. Den samlede visning med kalender, påmindelser og mail skal stadig prøves på iPhone.
 - **Veo.** Appen prøver den fulde modelliste, når den første ikke finder noget. På brugerens Composio-forbindelse returnerede Google 64 modeller men ingen Veo-model; direkte opslag af Veo 3.0 og 3.1 gav 404. Årsagen til den manglende adgang er ikke fastslået, og rigtig generering mangler.
 - **Landsby og tjenester.** Figurerne i rum er gjort større, kortteksten har fået ny skrifttype uden tekstskygge, Livshaven er fjernet, og de ønskede tomme tjenestelister er fjernet. Ændringerne skal prøves i næste iPhone-version.
-- **Musik og Cast.** Spotube-broen er lokalt afprøvet, og den separate iOS-prototype er koblet til den, men XCFramework, appintegration og iPhone-afspilning er åbne. Cast har fået lokal rettelse af genoptagelse og forbedret PC-relay; fortsat afspilning ved appskift og låst skærm skal stadig prøves på TV, især kilder med cookies.
+- **Musik og Cast.** Se nyeste status ovenfor og [MUSIC-AND-CAST.md](MUSIC-AND-CAST.md). Den native Musik-side er nu koblet til appen. Fysisk iPhone-afspilning og Cast ved appskift mangler stadig prøve i den nye build.
 - **Før næste IPA.** Saml ændringerne, kontroller Swift, ContractTests og signeret pakke på Mac, og prøv relevante funktioner på iPhone. Den nuværende testversion ændres ikke under arbejdet.
 
 Arbejdslisten følger forsøgsgrenen `codex/fadedai-repo-pilot`. Brug den før et nyt build, og sæt først flueben ved en test, når den er kørt. **I koden** betyder, at ændringen findes på grenen. **I gang** betyder, at der arbejdes på den. **Åben** betyder, at den stadig skal bygges eller afklares.

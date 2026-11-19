@@ -19,11 +19,17 @@ extension OfflineStudio {
                     Label("iPhone · " + model.title, systemImage: !onPC && current == model.id ? "checkmark" : "iphone")
                 }
             }
-            Button { sessionPreferences.imageRoute = .pc } label: {
-                Label("PC · " + sessionPreferences.pcImageModel.title, systemImage: onPC ? "checkmark" : "desktopcomputer")
-            }.disabled(privateImagePC == nil)
+            if privateImagePC != nil {
+                Button { sessionPreferences.imageRoute = .pc } label: {
+                    Label("Brug PC", systemImage: onPC ? "checkmark" : "desktopcomputer")
+                }
+            }
+            Button("Hent billedmodeller til iPhone", systemImage: "arrow.down.circle") {
+                imagePromptFocused = false
+                showImageDownloads = true
+            }
         } label: {
-            Label(onPC ? "PC · " + sessionPreferences.pcImageModel.title : "iPhone · " + (StudioImageModel(rawValue: current)?.title ?? "Vælg model"),
+            Label(onPC ? "PC" : "iPhone · " + (StudioImageModel(rawValue: current)?.title ?? "Vælg model"),
                   systemImage: "chevron.down")
                 .font(.caption.weight(.semibold)).frame(minHeight: 44)
         }.disabled(task != nil)
@@ -87,11 +93,11 @@ extension OfflineStudio {
     }
 
     func clearStudioContent(includingModels: Bool) {
-        guard !imageOnly else { return }
         if !includingModels {
             wipeExpiredPrivateSession()
             return
         }
+        guard !imageOnly else { return }
         guard task == nil, !LocalCompute.isRunning, !DolphinPhoneRuntime.isInstalling else {
             status = "Vent til den lokale opgave er færdig, før du rydder studiet."
             return
@@ -202,6 +208,8 @@ extension OfflineStudio {
         }
         let wasPrivate = privateSession && loaded
         if privateSession {
+            showPrivateVideo = false
+            privateVideoSource = nil
             privateModelDownload?.cancel()
             privateModelProblem = nil
             removeTemporaryStudioImages()

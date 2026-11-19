@@ -9,18 +9,19 @@ import json
 import os
 from pathlib import Path
 import re
-import stat
 import time
 import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from threading import Lock
+from threading import Lock, Timer
 from uuid import UUID, uuid4
 
 import requests
 from fastapi import APIRouter, Body, Depends, FastAPI, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 from sweatcaster.dto import ApiError
+from sweatcaster.lumi_video_files import discard_render, remove_video as remove_video_files, video_filename
 
 LUMI_ID = "ecba4ff7-69b2-5a9c-a028-d93ef6ec7983"
 TEXT_MODEL = "hf.co/bartowski/Lumimaid-v0.2-12B-GGUF:Q4_K_M"
@@ -32,6 +33,7 @@ VIDEO_VAE = "wan_2.1_vae.safetensors"
 OLLAMA = "http://127.0.0.1:11434"
 COMFY = "http://127.0.0.1:8188"
 MAX_REFERENCE = 1_000_000
+MAX_VIDEO_UPLOAD = 1_360_000
 VIDEO_OUTPUT_FOLDER = "FadedAI_Lumi"
 _video_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lumi-video")
 _video_lock = Lock()
@@ -356,41 +358,39 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
 
 
 def video(prompt: str, *, client: requests.Session | None = None, timeout: float = 1200,
-          output_id: str | None = None) -> bytes:
+          output_id: str | None = None, reference: bytes | None = None, private: bool = False) -> bytes:
     """Render a short Wan 2.1 clip, then convert ComfyUI's WebM for iPhone playback."""
+    from sweatcaster.studio_video_workflows import lumi_reference_workflow, lumi_text_workflow
+
     prompt = _message(prompt, limit=1000)
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise ApiError(503, "NOT_READY", "PC'en mangler FFmpeg til iPhone-video.")
     owned = client is None
     client = client or _client()
+    reference_name = None if reference is None else f"fadedai-private-{uuid4().hex}.png"
+    discard = private or reference is not None
+    if discard and output_id is None:
+        output_id = str(uuid4())
+    prompt_id = None
+    finished = False
     try:
-        for node, field, filename in (("UNETLoader", "unet_name", VIDEO_MODEL),
-                                      ("CLIPLoader", "clip_name", VIDEO_CLIP),
-                                      ("VAELoader", "vae_name", VIDEO_VAE)):
+        seed = time.time_ns() % (2**53)
+        if reference_name is not None:
+            graph, models = lumi_reference_workflow(prompt, reference_name, f"{VIDEO_OUTPUT_FOLDER}/{output_id}", seed)
+        else:
+            prefix = f"{VIDEO_OUTPUT_FOLDER}/{output_id}" if output_id else VIDEO_OUTPUT_FOLDER
+            graph, models = lumi_text_workflow(prompt, prefix, seed, VIDEO_MODEL, VIDEO_CLIP, VIDEO_VAE)
+        for node, field, filename in models:
             info = client.get(COMFY + "/object_info/" + node, timeout=(3, 15), allow_redirects=False)
             info.raise_for_status()
             choices = info.json()[node]["input"]["required"][field][0]
             if filename not in choices:
-                raise ApiError(503, "NOT_READY", "Lumis videomodel mangler i ComfyUI på PC'en.")
-        graph = {
-            "1": {"class_type": "UNETLoader", "inputs": {"unet_name": VIDEO_MODEL, "weight_dtype": "default"}},
-            "2": {"class_type": "ModelSamplingSD3", "inputs": {"model": ["1", 0], "shift": 8}},
-            "3": {"class_type": "CLIPLoader", "inputs": {"clip_name": VIDEO_CLIP, "type": "wan", "device": "default"}},
-            "4": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["3", 0]}},
-            "5": {"class_type": "CLIPTextEncode", "inputs": {"text": "low quality, blurry, static, watermark", "clip": ["3", 0]}},
-            "6": {"class_type": "VAELoader", "inputs": {"vae_name": VIDEO_VAE}},
-            "7": {"class_type": "EmptyHunyuanLatentVideo", "inputs": {"width": 512, "height": 288,
-                                                                "length": 17, "batch_size": 1}},
-            "8": {"class_type": "KSampler", "inputs": {"seed": int(time.time_ns() % (2**53)),
-                  "steps": 20, "cfg": 6, "sampler_name": "uni_pc", "scheduler": "simple", "denoise": 1,
-                  "model": ["2", 0], "positive": ["4", 0], "negative": ["5", 0], "latent_image": ["7", 0]}},
-            "9": {"class_type": "VAEDecodeTiled", "inputs": {"samples": ["8", 0], "vae": ["6", 0],
-                  "tile_size": 192, "overlap": 32, "temporal_size": 8, "temporal_overlap": 4}},
-            "10": {"class_type": "SaveWEBM", "inputs": {"images": ["9", 0],
-                   "filename_prefix": VIDEO_OUTPUT_FOLDER if output_id is None else f"{VIDEO_OUTPUT_FOLDER}/{output_id}",
-                   "codec": "vp9", "fps": 12, "crf": 32}},
-        }
+                message = ("Wan VACE 1,3B eller en af dens modelfiler mangler på PC’en."
+                           if reference_name else "Lumis videomodel mangler i ComfyUI på PC'en.")
+                raise ApiError(503, "NOT_READY", message)
+        if reference_name is not None:
+            _temp_upload(client, reference_name, reference)
         queued = client.post(COMFY + "/prompt", json={"prompt": graph}, timeout=(3, 20), allow_redirects=False)
         queued.raise_for_status()
         prompt_id = str(queued.json()["prompt_id"])
@@ -400,14 +400,16 @@ def video(prompt: str, *, client: requests.Session | None = None, timeout: float
             result.raise_for_status()
             entry = result.json().get(prompt_id)
             if entry:
-                if entry.get("status", {}).get("status_str") == "error":
+                state = entry.get("status", {}).get("status_str")
+                finished = state in {"success", "error"}
+                if state == "error":
                     raise ApiError(502, "NOT_READY", "ComfyUI kunne ikke lave videoen.")
                 output = entry.get("outputs", {}).get("10", {})
                 files = output.get("images", []) or output.get("gifs", []) or output.get("videos", [])
                 if files:
                     item = files[0]
                     if output_id and (item.get("type") != "output" or item.get("subfolder") != VIDEO_OUTPUT_FOLDER
-                                      or not _video_filename(output_id).fullmatch(item.get("filename", ""))):
+                                      or not video_filename(output_id).fullmatch(item.get("filename", ""))):
                         raise ApiError(502, "NOT_READY", "Videomotoren sendte en uventet fil.")
                     rendered = client.get(COMFY + "/view", params={"filename": item["filename"],
                         "subfolder": item.get("subfolder", ""), "type": item.get("type", "output")},
@@ -419,7 +421,7 @@ def video(prompt: str, *, client: requests.Session | None = None, timeout: float
                         "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-movflags",
                         "frag_keyframe+empty_moov", "-f", "mp4", "pipe:1"], input=rendered.content,
                         capture_output=True, timeout=120, check=True)
-                    if not converted.stdout.startswith(b"\x00\x00") or len(converted.stdout) > 40_000_000:
+                    if converted.stdout[4:8] != b"ftyp" or len(converted.stdout) > 40_000_000:
                         raise ApiError(502, "NOT_READY", "PC'en kunne ikke gøre videoen klar til iPhone.")
                     return converted.stdout
             time.sleep(3)
@@ -427,6 +429,10 @@ def video(prompt: str, *, client: requests.Session | None = None, timeout: float
     except (requests.RequestException, KeyError, TypeError, ValueError, subprocess.SubprocessError) as exc:
         raise ApiError(503, "NOT_READY", "Lumis videomotor svarer ikke på PC'en.") from exc
     finally:
+        if reference_name is not None:
+            _remove_private_image_files([reference_name])
+        if discard:
+            discard_render(client, _client, COMFY, VIDEO_OUTPUT_FOLDER, output_id, prompt_id, finished)
         try:
             client.post(COMFY + "/free", json={"unload_models": True, "free_memory": True},
                         timeout=(2, 3), allow_redirects=False)
@@ -436,36 +442,57 @@ def video(prompt: str, *, client: requests.Session | None = None, timeout: float
             client.close()
 
 
-def _video_filename(job_id: str):
-    return re.compile(re.escape(job_id) + r"_[0-9]{5}_[.]webm")
-
-
 def _remove_owned_video(job_id: str) -> None:
-    output = Path(os.environ.get("FADEDAI_COMFY_OUTPUT_DIR", "F:/FadedAI/ComfyUI/output"))
-    try:
-        if not output.is_absolute() or not output.is_dir():
-            raise OSError("Missing output folder")
-        directory = output.resolve(strict=True) / VIDEO_OUTPUT_FOLDER
-        if directory.resolve() != directory:
-            raise OSError("Unexpected output folder")
-        pattern = _video_filename(job_id)
-        files = [file for file in directory.iterdir() if pattern.fullmatch(file.name)] if directory.exists() else []
-        if any(file.resolve() != file or not stat.S_ISREG(file.lstat().st_mode) for file in files):
-            raise OSError("Unexpected file type")
-        for file in files:
-            file.unlink(missing_ok=True)
-    except OSError as exc:
-        raise ApiError(503, "NOT_READY", "Lumis videofil kunne ikke slettes på PC’en.") from exc
+    remove_video_files(VIDEO_OUTPUT_FOLDER, job_id)
 
 
-def _render_video(job_id: str, prompt: str) -> None:
+def _expire_private_video(job_id: str) -> None:
+    with _video_lock:
+        _video_jobs.pop(job_id, None)
+
+
+def _render_video(job_id: str, prompt: str, reference: bytes | None = None, private: bool = False) -> None:
     try:
-        payload = video(prompt, output_id=job_id)
+        options = {"reference": reference, "private": private} if reference is not None or private else {}
+        payload = video(prompt, output_id=job_id, **options)
         result = {"status": "ready", "data": payload, "removable": True}
     except Exception as exc:
-        result = {"status": "failed", "message": getattr(exc, "message", "Videoen fejlede på PC'en.")}
+        message = str(exc) if isinstance(exc, ApiError) else "Videoen fejlede på PC'en."
+        result = {"status": "failed", "message": message}
     with _video_lock:
-        _video_jobs[job_id] = result
+        if _video_jobs.get(job_id, {}).get("discard"):
+            _video_jobs.pop(job_id, None)
+            return
+        _video_jobs[job_id] = result | {"private": private}
+    if private:
+        expiry = Timer(300, _expire_private_video, args=(job_id,))
+        expiry.daemon = True
+        expiry.start()
+
+
+def _start_video(prompt: str, reference: bytes | None = None, *, private: bool = False):
+    with _video_lock:
+        if any(job["status"] == "working" for job in _video_jobs.values()):
+            raise ApiError(409, "CONFLICT", "Lumi laver allerede en video.")
+        for previous_id, job in tuple(_video_jobs.items()):
+            if job.get("private", False) == private:
+                del _video_jobs[previous_id]
+        job_id = str(uuid4())
+        _video_jobs[job_id] = {"status": "working", "private": private}
+    _video_executor.submit(_render_video, job_id, prompt, reference, private)
+    return {"id": job_id, "status": "working"}
+
+
+def _start_reference_video(raw, private):
+    try:
+        body = json.loads(raw)
+    except (ValueError, RecursionError):
+        body = None
+    if not isinstance(body, dict):
+        raise ApiError(422, "INVALID_INPUT", "Videoopgaven kunne ikke læses.")
+    prompt = _message(body.get("prompt"), limit=1000)
+    reference = normalize_reference(body.get("reference")) if not private or "reference" in body else None
+    return _start_video(prompt, reference, private=private)
 
 
 def register_lumi(app: FastAPI, settings, authorize) -> None:
@@ -515,24 +542,27 @@ def register_lumi(app: FastAPI, settings, authorize) -> None:
     @router.post("/video")
     def video_route(bot_id: str, body: dict = Body(...)):
         _bot(bot_id)
-        prompt = _message(body.get("prompt"), limit=1000)
-        with _video_lock:
-            if sum(job["status"] == "working" for job in _video_jobs.values()) >= 1:
-                raise ApiError(409, "CONFLICT", "Lumi laver allerede en video.")
-            _video_jobs.clear()
-            job_id = str(uuid4())
-            _video_jobs[job_id] = {"status": "working"}
-        _video_executor.submit(_render_video, job_id, prompt)
-        return {"id": job_id, "status": "working"}
+        return _start_video(_message(body.get("prompt"), limit=1000))
+
+    @router.post("/video-from-image")
+    @router.post("/private-video")
+    async def reference_video_route(bot_id: str, request: Request):
+        _bot(bot_id)
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > MAX_VIDEO_UPLOAD:
+                raise ApiError(413, "INVALID_INPUT", "Vælg et referencebillede på højst 1 MB.")
+            raw.extend(chunk)
+        return await run_in_threadpool(_start_reference_video, raw, request.url.path.endswith("/private-video"))
 
     @router.get("/video/{job_id}")
     def video_status(bot_id: str, job_id: str):
         _bot(bot_id)
         with _video_lock:
             job = _video_jobs.get(job_id)
-            if job is None:
+            if job is None or job.get("discard"):
                 raise ApiError(404, "NOT_FOUND", "Videojobbet findes ikke.")
-            return {key: value for key, value in job.items() if key != "data"} | {"id": job_id}
+            return {key: value for key, value in job.items() if key not in {"data", "private"}} | {"id": job_id}
 
     @router.get("/video/{job_id}/file")
     def video_file(bot_id: str, job_id: str):
@@ -556,6 +586,9 @@ def register_lumi(app: FastAPI, settings, authorize) -> None:
         with _video_lock:
             job = _video_jobs.get(job_id)
             if job is not None and job["status"] == "working":
+                if job.get("private"):
+                    job["discard"] = True
+                    return {"ok": True}
                 raise ApiError(409, "NOT_READY", "Vent til videojobbet er afsluttet.")
             _remove_owned_video(job_id)
             _video_jobs.pop(job_id, None)

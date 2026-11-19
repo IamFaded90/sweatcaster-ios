@@ -70,7 +70,17 @@ def connect_public(destination, timeout, source_address=None):
     raise OSError("Media host unreachable")
 
 
-def open_media(url, method, byte_range, referer):
+def browser_user_agent(value):
+    if value is None or value == "":
+        return "Mozilla/5.0"
+    if (not isinstance(value, str) or len(value) > 512 or not value.isascii()
+            or any(ord(char) < 32 or ord(char) > 126 for char in value)):
+        raise ValueError("Invalid browser identity")
+    return value
+
+
+def open_media(url, method, byte_range, referer, user_agent="Mozilla/5.0"):
+    user_agent = browser_user_agent(user_agent)
     for _ in range(5):
         parsed = source_url(url)
         secure = parsed.scheme == "https"
@@ -82,7 +92,7 @@ def open_media(url, method, byte_range, referer):
         # Media hosts commonly validate browser headers even when Chromecast is
         # fetching the stream from the paired PC. Do not forward phone cookies or
         # credentials; this relay serves public sources only.
-        headers = {"Accept": "*/*", "Accept-Encoding": "identity", "User-Agent": "Mozilla/5.0"}
+        headers = {"Accept": "*/*", "Accept-Encoding": "identity", "User-Agent": user_agent}
         if byte_range:
             headers["Range"] = byte_range
         if referer:
@@ -120,6 +130,7 @@ class RelaySession:
     routes: dict = field(default_factory=dict)
     resources: dict = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    user_agent: str = "Mozilla/5.0"
 
     def route(self, url):
         source_url(url)
@@ -175,9 +186,11 @@ def register_cast_relay(app, settings, authorize):
             url = body.get("url")
             source_url(url)
             referer = source_url(body["origin"]) if body.get("origin") else None
+            user_agent = browser_user_agent(body.get("userAgent"))
         except (ValueError, TypeError):
             raise ApiError(422, "INVALID_INPUT", "PC’en kunne ikke bruge filmens adresse.") from None
-        session = RelaySession(f"{referer.scheme}://{referer.netloc}/" if referer else "")
+        page = referer._replace(path=referer.path or "/", query="", fragment="").geturl() if referer else ""
+        session = RelaySession(page, user_agent=user_agent)
         route = session.route(url)
         receiver_token = secrets.token_urlsafe(24)
         with sessions_lock:
@@ -219,7 +232,8 @@ def register_cast_relay(app, settings, authorize):
         connection = None
         keep_open = False
         try:
-            connection, upstream, final_url = open_media(url, request.method, byte_range, session.referer)
+            connection, upstream, final_url = open_media(url, request.method, byte_range,
+                                                        session.referer, session.user_agent)
             kind = identifying_type(upstream, final_url)
             if upstream.status == 416:
                 headers = dict(CORS)

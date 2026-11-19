@@ -5,6 +5,7 @@ from threading import Thread
 from unittest.mock import patch
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from sweatcaster import cast_relay
@@ -12,7 +13,25 @@ from sweatcaster import cast_relay
 
 class Fixture(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/stream.m3u8":
+        if self.path.startswith("/protected/"):
+            if (self.headers.get("Origin") != "https://cinema.invalid" or
+                    self.headers.get("Referer") != "https://cinema.invalid/watch/movie/123" or
+                    self.headers.get("User-Agent") != "Mozilla/5.0 FadedBrowser/1.0"):
+                self.send_response(403)
+                body = b""
+            elif self.path == "/protected/master.m3u8":
+                body = b'#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=450000\nstream.m3u8\n'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+            elif self.path == "/protected/stream.m3u8":
+                body = b'#EXTM3U\n#EXTINF:5,\nsegment.mp4\n#EXT-X-ENDLIST\n'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+            else:
+                body = b"video-data"
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp4")
+        elif self.path == "/stream.m3u8":
             body = b'#EXTM3U\n#EXT-X-MAP:URI="init.mp4"\n#EXTINF:5,\nsegment.mp4\n#EXT-X-ENDLIST\n'
             self.send_response(200)
             self.send_header("Content-Type", "application/vnd.apple.mpegurl")
@@ -76,6 +95,10 @@ class CastRelayTests(unittest.TestCase):
         self.enterContext(patch.object(cast_relay, "connect_public", fixture_connection))
         app = FastAPI()
 
+        @app.exception_handler(cast_relay.ApiError)
+        async def error_response(_, error):
+            return JSONResponse(status_code=error.status_code, content={"error": error.code})
+
         def authorize(request, settings):
             if request.headers.get("Authorization") != "Bearer fixture":
                 raise HTTPException(status_code=401)
@@ -115,10 +138,35 @@ class CastRelayTests(unittest.TestCase):
 
     def test_pc_relay_includes_public_browser_origin_for_media_host(self):
         response = self.client.put(cast_relay.PREFIX,
-            json={"url": "http://fixture.invalid/browser-video.mp4", "origin": "https://cinema.invalid/watch"},
+            json={"url": "http://fixture.invalid/browser-video.mp4", "origin": "https://cinema.invalid/"},
             headers={"Authorization": "Bearer fixture"})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.client.get(response.json()["path"]).content, b"video-data")
+
+    def test_receiver_uses_browser_page_and_identity_for_entire_hls_chain(self):
+        response = self.client.put(cast_relay.PREFIX, json={
+            "url": "http://fixture.invalid/protected/master.m3u8",
+            "origin": "https://cinema.invalid/watch/movie/123?private=discard",
+            "userAgent": "Mozilla/5.0 FadedBrowser/1.0",
+        }, headers={"Authorization": "Bearer fixture"})
+        self.assertEqual(response.status_code, 200)
+        # The receiver needs only its URL. It never relies on a phone-side server
+        # or the phone's pairing token for later variants and media segments.
+        with TestClient(self.app, client=("192.168.1.39", 50001)) as receiver:
+            master = receiver.get(response.json()["path"])
+            self.assertEqual(master.status_code, 200)
+            variant = receiver.get(master.text.splitlines()[2])
+            self.assertEqual(variant.status_code, 200)
+            segment = receiver.get(variant.text.splitlines()[2])
+            self.assertEqual(segment.status_code, 200)
+            self.assertEqual(segment.content, b"video-data")
+
+    def test_browser_identity_rejects_header_injection_and_invalid_types(self):
+        for identity in ("browser\r\nCookie: secret", "browser\x7f", "browseræ", "x" * 513, ["browser"], 9):
+            response = self.client.put(cast_relay.PREFIX, json={
+                "url": "http://fixture.invalid/browser-video.mp4", "userAgent": identity,
+            }, headers={"Authorization": "Bearer fixture"})
+            self.assertEqual(response.status_code, 422)
 
     def test_recognizes_a_mislabeled_variant_without_serving_a_jpeg(self):
         master = self.client.get(self.create("http://fixture.invalid/master.m3u8"))

@@ -5,13 +5,17 @@ import Observation
 
 struct StudioImageDownloadFile: Sendable {
     let name: String
+    let bytes: Int64
     let sha256: String?
 
     var isPresent: Bool {
         MediaGenerationEnvironment.default.externalUrls.contains { root in
-            let file = root.appendingPathComponent(name)
-            return ((try? LocalFileStore.checkedFileSize(file, maximumBytes: Int.max)) ?? 0) > 0
+            matchesSize(at: root.appendingPathComponent(name))
         }
+    }
+
+    func matchesSize(at url: URL) -> Bool {
+        (try? LocalFileStore.checkedFileSize(url, maximumBytes: Int.max)) == Int(bytes)
     }
 }
 
@@ -117,7 +121,7 @@ private struct StudioImageTransferFile: Sendable {
     func start(_ model: StudioImageModel) {
         guard transfer == nil, !model.isInstalled else { return }
         guard PhoneModels.hasDownloadSpace(bytes: model.minimumFreeBytes) else {
-            notice = "Der er for lidt ledig plads. Frigør plads, og prøv igen."
+            notice = "Du skal have ca. \(ModelDiskStorage.gigabytes(model.minimumFreeBytes)) fri til de resterende filer og installationen."
             return
         }
         let missing = model.downloadFiles.filter { !$0.isPresent }
@@ -272,37 +276,28 @@ private struct StudioImageTransferFile: Sendable {
     }
 
     private func updateProgress(for transfer: StudioImageTransfer) {
-        progress = fractions.isEmpty ? nil : fractions.values.reduce(0, +) / Double(transfer.model.downloadFiles.count)
+        let files = transfer.model.downloadFiles
+        let received = files.reduce(0.0) { $0 + Double($1.bytes) * (fractions[$1.name] ?? 0) }
+        progress = fractions.isEmpty ? nil : received / Double(files.reduce(0) { $0 + $1.bytes })
     }
 
     private func reconcile() {
         guard isForeground, let transfer, validation == nil else { return }
         let files = transfer.model.downloadFiles
-        for file in files where file.isPresent {
-            verifiedFiles.insert(file.name)
-            fractions[file.name] = 1
-        }
+        verifiedFiles = Set(files.filter(\.isPresent).map(\.name))
+        for name in verifiedFiles { fractions[name] = 1 }
         updateProgress(for: transfer)
-        let allFilesPresent = verifiedFiles.count == files.count
+        if verifiedFiles.count == files.count { finish(transfer); return }
         let staged = files.filter { file in
             !verifiedFiles.contains(file.name) && !blockedFiles.contains(file.name)
                 && delegate.isStaged(.init(transfer: transfer, file: file))
         }
         // Give the user a chance to stop an unfinished FLUX install after reopening the app.
         // The background session can still finish downloading files while validation waits.
-        if restoredValidation == .paused || (restoredValidation == .requiresConfirmation
-                                              && (allFilesPresent || !staged.isEmpty)) {
+        if restoredValidation == .paused || (restoredValidation == .requiresConfirmation && !staged.isEmpty) {
             restoredValidation = .paused
             isInterrupted = true
             notice = "FLUX blev afbrudt sidst. Fortsæt modelkontrollen, eller stop download."
-            return
-        }
-        if allFilesPresent {
-            if transfer.model.isInstalled {
-                finish(transfer)
-            } else {
-                clear(transfer, notice: "Telefonen kunne ikke åbne billedmodellen. Genåbn FadedAI, og prøv igen.")
-            }
             return
         }
         if !staged.isEmpty {
@@ -414,9 +409,10 @@ private final class StudioImageDownloadDelegate: NSObject, URLSessionDownloadDel
     var deliver: (@Sendable (Event) -> Void)?
     private let lock = NSLock()
     private var active: StudioImageTransfer?
+    private var reportedPercent: [String: Int] = [:]
 
     func track(_ transfer: StudioImageTransfer) {
-        lock.withLock { active = transfer }
+        lock.withLock { active = transfer; reportedPercent.removeAll() }
     }
 
     func clear(_ transfer: StudioImageTransfer) {
@@ -457,9 +453,14 @@ private final class StudioImageDownloadDelegate: NSObject, URLSessionDownloadDel
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
-        guard totalBytesExpectedToWrite > 0, let file = StudioImageTransferFile(downloadTask) else { return }
-        let fraction = min(1, Double(totalBytesWritten) / Double(totalBytesExpectedToWrite))
-        deliver?(.progress(file, floor(fraction * 100) / 100))
+        guard let file = StudioImageTransferFile(downloadTask) else { return }
+        let percent = Int(min(100, max(0, Double(totalBytesWritten) / Double(file.file.bytes) * 100)))
+        let changed = lock.withLock {
+            guard active == file.transfer, reportedPercent[file.file.name] != percent else { return false }
+            reportedPercent[file.file.name] = percent
+            return true
+        }
+        if changed { deliver?(.progress(file, Double(percent) / 100)) }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
@@ -519,13 +520,12 @@ private final class StudioImageDownloadDelegate: NSObject, URLSessionDownloadDel
 
     private func stage(_ file: StudioImageTransferFile, from source: URL, response: HTTPURLResponse) throws {
         let size = try LocalFileStore.checkedFileSize(source, maximumBytes: Int.max)
-        guard size > 0 else { throw URLError(.zeroByteResource) }
+        guard Int64(size) == file.file.bytes else { throw URLError(.cannotDecodeContentData) }
         let contentType = response.mimeType?.lowercased() ?? ""
         let expectedSize = response.statusCode == 200 ? response.expectedContentLength :
             response.value(forHTTPHeaderField: "Content-Range")?.split(separator: "/").last.flatMap { Int64($0) } ?? -1
-        // Catalog files with no hash must at least have a complete binary response and a known length.
         guard !contentType.hasPrefix("text/"), contentType != "application/json", !contentType.hasSuffix("+json"),
-              expectedSize > 0 ? Int64(size) == expectedSize : file.file.sha256 != nil else {
+              expectedSize <= 0 || Int64(size) == expectedSize else {
             throw URLError(.cannotDecodeContentData)
         }
         try lock.withLock {
@@ -551,13 +551,23 @@ private final class StudioImageDownloadDelegate: NSObject, URLSessionDownloadDel
         let source = stagedURL(for: transferFile)
         let file = transferFile.file
         try Task.checkCancellation()
+        let size = try LocalFileStore.checkedFileSize(source, maximumBytes: Int.max)
+        guard size == Int(file.bytes) else {
+            throw MediaGenerationKitError.hashMismatch(file.name)
+        }
         if let expected = file.sha256 {
             let handle = try FileHandle(forReadingFrom: source)
             defer { try? handle.close() }
             var hash = SHA256()
-            while let data = try handle.read(upToCount: 1_048_576), !data.isEmpty {
+            // Drain Foundation's temporary buffers per chunk, including on multi-GB checkpoints.
+            while true {
                 try Task.checkCancellation()
-                hash.update(data: data)
+                let finished = try autoreleasepool {
+                    guard let chunk = try handle.read(upToCount: 1_048_576), !chunk.isEmpty else { return true }
+                    hash.update(data: chunk)
+                    return false
+                }
+                if finished { break }
             }
             let actual = hash.finalize().map { String(format: "%02x", $0) }.joined()
             guard actual == expected else { throw MediaGenerationKitError.hashMismatch(file.name) }

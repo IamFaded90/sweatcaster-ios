@@ -41,4 +41,4 @@ Lokale ændringer på `codex/fadedai-repo-pilot`. Ingen IPA er startet for denne
 
 ## Musik og cast — opdateret
 
-Se [MUSIC-AND-CAST.md](MUSIC-AND-CAST.md) for den nye Musik-fane og direkte cast med fallback til iPhone. Begge er lokale ændringer og ikke udgivet. Musik er ændret til en enkel Eevee/Spotify-genvej; separat Eevee-installation og åbning på iPhone er ikke bekræftet. Cast mangler en fysisk TV-test. PC-proxy til video er ikke implementeret. Ingen ny IPA er startet.
+Se [MUSIC-AND-CAST.md](MUSIC-AND-CAST.md) for den aktive native Musik-side og Cinejoy-ruten via PC, direkte TV og iPhone-fallback. Eevee/ByTune er historiske valg. PC-relay er implementeret og lokalt testet. Musik på iPhone og Cast ved appskift og låst skærm mangler fysisk prøve med den nye build. Ingen ny IPA er startet i denne omgang.

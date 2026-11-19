@@ -2,14 +2,179 @@
 
 import base64
 from io import BytesIO
+from types import SimpleNamespace
 from uuid import uuid4
 
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from PIL import Image
+import pytest
 
 from sweatcaster.api import create_app
 from sweatcaster import lumi_companion
+from sweatcaster.dto import ApiError
 from tests.conftest import make_settings
+
+
+def _paired_lumi_client():
+    app = FastAPI()
+
+    @app.exception_handler(ApiError)
+    async def api_error(_request, exc):
+        return JSONResponse({"message": str(exc)}, status_code=exc.status_code)
+
+    def authorize(request, _settings):
+        if request.headers.get("Authorization") != "Bearer test-token":
+            raise ApiError(401, "UNAUTHORIZED", "Pairing required")
+
+    lumi_companion.register_lumi(app, None, authorize)
+    return TestClient(app), f"/api/modules/v1/lumi/{lumi_companion.LUMI_ID}", {"Authorization": "Bearer test-token"}
+
+
+@pytest.mark.parametrize("render_fails", [False, True])
+def test_paired_private_video_from_image_uses_vace_and_removes_inputs(tmp_path, monkeypatch, render_fails):
+    temp = tmp_path / "temp"
+    temp.mkdir()
+    output = tmp_path / "output" / lumi_companion.VIDEO_OUTPUT_FOLDER
+    output.mkdir(parents=True)
+    other = output / f"{uuid4()}_00001_.webm"
+    other.write_bytes(b"existing job")
+    monkeypatch.setenv("FADEDAI_COMFY_TEMP_DIR", str(temp))
+    monkeypatch.setenv("FADEDAI_COMFY_OUTPUT_DIR", str(output.parent))
+    monkeypatch.setattr(lumi_companion, "_video_jobs", {})
+    monkeypatch.setattr(lumi_companion.shutil, "which", lambda name: name)
+    mp4 = b"\x00\x00\x00\x20ftyp" + b"video"
+    webm = b"\x1a\x45\xdf\xa3" + b"video"
+    monkeypatch.setattr(lumi_companion.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=mp4))
+
+    class Immediate:
+        @staticmethod
+        def submit(operation, *args):
+            operation(*args)
+
+    class FakeComfy:
+        def __init__(self):
+            self.graph = {}
+            self.cleared = []
+            self.provider_id = str(uuid4())
+
+        def post(self, url, *, json=None, files=None, **options):
+            if url.endswith("/upload/image"):
+                assert options["data"] == {"type": "temp"}
+                name, photo, _ = files["image"]
+                (temp / name).write_bytes(photo)
+                body = {"name": name, "type": "temp"}
+            elif url.endswith("/prompt"):
+                self.graph = json["prompt"]
+                source = self.graph["photo-0"]["inputs"]["image"]
+                assert source.endswith(" [temp]") and (temp / source.removesuffix(" [temp]")).is_file()
+                filename = self.graph["10"]["inputs"]["filename_prefix"].split("/")[-1] + "_00001_.webm"
+                (output / filename).write_bytes(webm)
+                self.filename = filename
+                body = {"prompt_id": self.provider_id}
+            else:
+                if url.endswith("/history"):
+                    self.cleared.extend(json["delete"])
+                body = {}
+            return self.response(body)
+
+        def get(self, url, **options):
+            if "/object_info/" in url:
+                from sweatcaster.studio_video_workflows import WAN_FALLBACKS
+                node = url.rsplit("/", 1)[-1]
+                fields = {field: [[filename]] for kind, field, filename in WAN_FALLBACKS["wan-image"].models
+                          if kind == node}
+                return self.response({node: {"input": {"required": fields}}})
+            if "/history/" in url:
+                return self.response({self.provider_id: {
+                    "status": {"status_str": "error" if render_fails else "success"},
+                    "outputs": {"10": {"images": [{"filename": self.filename, "type": "output",
+                                                   "subfolder": lumi_companion.VIDEO_OUTPUT_FOLDER}]}},
+                }})
+            assert url.endswith("/view")
+            assert options["params"]["filename"] == self.filename
+            return self.response({}, webm)
+
+        @staticmethod
+        def response(body, content=b""):
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: body, content=content)
+
+        def close(self):
+            pass
+
+    comfy = FakeComfy()
+    monkeypatch.setattr(lumi_companion, "_client", lambda: comfy)
+    monkeypatch.setattr(lumi_companion, "_video_executor", Immediate())
+    client, prefix, headers = _paired_lumi_client()
+    route = prefix + "/video-from-image"
+    synthetic = BytesIO()
+    Image.new("RGB", (48, 48), "blue").save(synthetic, "PNG")
+    body = {"prompt": "Et blåt felt", "reference": base64.b64encode(synthetic.getvalue()).decode()}
+    assert client.post(route, json=body).status_code == 401
+    assert client.post(route.replace(lumi_companion.LUMI_ID, str(uuid4())), headers=headers, json=body).status_code == 404
+    assert client.post(route, headers=headers, json={"prompt": body["prompt"]}).status_code == 422
+    assert client.post(route, headers=headers, content=b"x" * (lumi_companion.MAX_VIDEO_UPLOAD + 1)).status_code == 413
+    assert not comfy.graph
+
+    receipt = client.post(route, headers=headers, json=body)
+    assert receipt.status_code == 200
+    assert receipt.headers["Cache-Control"] == "no-store"
+    job = prefix + "/video/" + receipt.json()["id"]
+    assert comfy.graph["reference"]["class_type"] == "WanVaceToVideo"
+    assert comfy.graph["reference"]["inputs"]["control_video"] == ["control-frames", 0]
+    assert comfy.cleared == [comfy.provider_id]
+    assert not list(temp.iterdir()) and list(output.iterdir()) == [other]
+    if render_fails:
+        assert client.get(job, headers=headers).json()["status"] == "failed"
+        assert client.get(job + "/file", headers=headers).status_code == 404
+    else:
+        assert client.get(job, headers=headers).json()["status"] == "ready"
+        assert client.get(job + "/file", headers=headers).content == mp4
+        assert client.put(job + "/remove", headers=headers).status_code == 200
+        assert client.get(job + "/file", headers=headers).status_code == 404
+        assert other.read_bytes() == b"existing job"
+
+
+@pytest.mark.parametrize("discard_while_working", [False, True])
+def test_private_video_does_not_reappear_after_discard_or_expiry(monkeypatch, discard_while_working):
+    jobs = []
+    timers = []
+    ordinary_id = str(uuid4())
+    monkeypatch.setattr(lumi_companion, "_video_jobs", {ordinary_id: {"status": "ready", "data": b"existing"}})
+    monkeypatch.setattr(lumi_companion, "_video_executor", SimpleNamespace(
+        submit=lambda operation, *args: jobs.append(lambda: operation(*args))))
+
+    def timer(interval, callback, args):
+        assert interval == 300
+        return SimpleNamespace(start=lambda: timers.append(lambda: callback(*args)))
+
+    def render(prompt, *, reference, private, output_id):
+        assert prompt == "Havets bølger" and private is True and reference is None and output_id
+        return b"\x00\x00\x00\x20ftyp" + b"video"
+
+    monkeypatch.setattr(lumi_companion, "video", render)
+    monkeypatch.setattr(lumi_companion, "Timer", timer)
+    client, prefix, headers = _paired_lumi_client()
+    route = prefix + "/private-video"
+    assert client.post(route, json={"prompt": "Havets bølger"}).status_code == 401
+    receipt = client.post(route, headers=headers, json={"prompt": "Havets bølger"}).json()
+    job = prefix + "/video/" + receipt["id"]
+    assert client.get(job, headers=headers).json()["status"] == "working"
+    if discard_while_working:
+        assert client.put(job + "/remove", headers=headers).json() == {"ok": True}
+        assert client.get(job, headers=headers).status_code == 404
+        assert client.post(route, headers=headers, json={"prompt": "Havets bølger"}).status_code == 409
+        jobs.pop()()
+        assert not timers
+    else:
+        jobs.pop()()
+        assert client.get(job, headers=headers).json()["status"] == "ready"
+        timers.pop()()
+    assert client.get(job, headers=headers).status_code == 404
+    assert client.get(job + "/file", headers=headers).status_code == 404
+    ordinary = prefix + "/video/" + ordinary_id
+    assert client.get(ordinary + "/file", headers=headers).content == b"existing"
 
 
 def test_removing_lumi_video_only_deletes_its_owned_webm(tmp_path, monkeypatch):

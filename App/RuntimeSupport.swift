@@ -238,7 +238,8 @@ final class JobNotifications: NSObject, UNUserNotificationCenterDelegate, @unche
         let code = UNNotificationAction(identifier: "code", title: "Se kode", options: .foreground)
         center.setNotificationCategories([
             UNNotificationCategory(identifier: Self.videoCategory, actions: [video, dismiss], intentIdentifiers: [], options: []),
-            UNNotificationCategory(identifier: Self.codeCategory, actions: [code, dismiss], intentIdentifiers: [], options: [])
+            UNNotificationCategory(identifier: Self.codeCategory, actions: [code, dismiss], intentIdentifiers: [], options: []),
+            UNNotificationCategory(identifier: "fadedai.tradera", actions: [], intentIdentifiers: [], options: [])
         ])
         if await center.notificationSettings().authorizationStatus == .notDetermined {
             _ = try? await center.requestAuthorization(options: [.alert, .sound])
@@ -270,6 +271,7 @@ final class JobNotifications: NSObject, UNUserNotificationCenterDelegate, @unche
         switch kind {
         case "video", "video-failed": content.categoryIdentifier = Self.videoCategory
         case "code": content.categoryIdentifier = Self.codeCategory
+        case "tradera": content.categoryIdentifier = "fadedai.tradera"; content.userInfo = ["watch": id]
         default: break
         }
         do { try await add(UNNotificationRequest(identifier: identifier, content: content, trigger: nil)) }
@@ -299,6 +301,9 @@ final class JobNotifications: NSObject, UNUserNotificationCenterDelegate, @unche
             switch response.notification.request.content.categoryIdentifier {
             case Self.videoCategory: destination = "video-jobs"
             case Self.codeCategory: destination = "code"
+            case "fadedai.tradera":
+                guard let key = response.notification.request.content.userInfo["watch"] as? String else { return }
+                destination = "tradera/" + key
             default: return
             }
         default: return
@@ -312,12 +317,14 @@ struct JobNotificationSettings: View {
     @AppStorage(AppStorageKeys.notificationsEnabledVideoFailed) private var videoFailure = true
     @AppStorage(AppStorageKeys.notificationsEnabledCode) private var code = true
     @AppStorage(AppStorageKeys.notificationsEnabledImageModel) private var imageModel = true
+    @AppStorage(AppStorageKeys.notificationsEnabled("tradera")) private var tradera = true
 
     var body: some View {
         Toggle("Video færdig", isOn: $video)
         Toggle("Video fejlede", isOn: $videoFailure)
         Toggle("Kodeforslag klar", isOn: $code)
         Toggle("Billedmodel hentet", isOn: $imageModel)
+        Toggle("Tradera-pris under din grænse", isOn: $tradera)
     }
 }
 

@@ -200,11 +200,11 @@ private struct AppleScheduleView: View {
         busy = true
         defer { busy = false }
         do {
-            try await PhoneActions.saveReminder(title: title, due: reminderHasDate ? reminderDate : nil, store: store)
+            let check = try await PhoneActions.saveReminder(title: title, due: reminderHasDate ? reminderDate : nil, store: store)
             reminderTitle = ""
             reminderHasDate = false
             entries = []
-            status = "Påmindelsen er gemt."
+            status = check.summary(for: .reminder)
         } catch {
             status = (error as? PhoneActions.Failure)?.message ?? "Påmindelsen kunne ikke gemmes."
         }
@@ -349,8 +349,8 @@ private struct AppleComposer: UIViewControllerRepresentable {
         }
     }
 
-    static func saveEvent(title: String, start: Date, end: Date, location: String,
-                          jobID: UUID, store: EKEventStore, requiresAvailableTime: Bool = false) async throws {
+    @discardableResult static func saveEvent(title: String, start: Date, end: Date, location: String,
+                          jobID: UUID, store: EKEventStore, requiresAvailableTime: Bool = false) async throws -> PhoneActionVerification {
         if requiresAvailableTime {
             guard try await store.requestFullAccessToEvents() else { throw Failure.calendarReadPermission }
         } else if EKEventStore.authorizationStatus(for: .event) != .fullAccess {
@@ -359,10 +359,14 @@ private struct AppleComposer: UIViewControllerRepresentable {
         guard start > .now, end > start else { throw Failure.expired }
         guard let calendar = store.defaultCalendarForNewEvents else { throw Failure.calendarMissing }
         let marker = URL(string: "fadedai://bot-action/\(jobID.uuidString.lowercased())")
+        func check(_ saved: EKEvent) -> PhoneActionVerification {
+            .event(titleMatches: saved.title == title, locationMatches: (saved.location ?? "") == location,
+                   start: saved.startDate, end: saved.endDate, expectedStart: start, expectedEnd: end, allDay: saved.isAllDay)
+        }
         if EKEventStore.authorizationStatus(for: .event) == .fullAccess, let marker {
             let predicate = store.predicateForEvents(withStart: start.addingTimeInterval(-86400),
                                                      end: end.addingTimeInterval(86400), calendars: nil)
-            if store.events(matching: predicate).contains(where: { $0.url == marker }) { return }
+            if let previous = store.events(matching: predicate).first(where: { $0.url == marker }) { return check(previous) }
         }
         if requiresAvailableTime,
            !AgentCalendarAvailability.blockingEvents(in: DateInterval(start: start, end: end), store: store).isEmpty {
@@ -376,24 +380,41 @@ private struct AppleComposer: UIViewControllerRepresentable {
         event.url = marker
         event.calendar = calendar
         try store.save(event, span: .thisEvent)
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else { return .writeOnly }
+        let reader = EKEventStore()
+        guard let id = event.eventIdentifier, let saved = reader.event(withIdentifier: id) else { return .unavailable }
+        return check(saved)
     }
 
-    static func saveReminder(title: String, due: Date?, jobID: UUID? = nil, store: EKEventStore,
-                             notes: String? = nil, preferredLists: [String] = []) async throws {
+    @discardableResult static func saveReminder(title: String, due: Date?, jobID: UUID? = nil, store: EKEventStore,
+                             notes: String? = nil, preferredLists: [String] = []) async throws -> PhoneActionVerification {
         guard try await store.requestFullAccessToReminders() else { throw Failure.reminderPermission }
         let preferred = preferredLists.isEmpty ? nil : store.calendars(for: .reminder).first { list in
             list.allowsContentModifications && preferredLists.contains { list.title.localizedCaseInsensitiveCompare($0) == .orderedSame }
         }
         guard let calendar = preferred ?? store.defaultCalendarForNewReminders() else { throw Failure.reminderList }
         let reminder = EKReminder(eventStore: store)
+        let wantedNotes = notes.map { String($0.prefix(2_000)) }
+        func check(_ id: String) -> PhoneActionVerification {
+            let reader = EKEventStore()
+            guard let saved = reader.calendarItem(withIdentifier: id) as? EKReminder else { return .unavailable }
+            let storedDate = saved.dueDateComponents.flatMap { $0.date ?? Calendar.current.date(from: $0) }
+            let alerts = (saved.alarms ?? []).compactMap { alarm in
+                alarm.absoluteDate ?? storedDate?.addingTimeInterval(alarm.relativeOffset)
+            }
+            let fieldsMatch = saved.title == title && (wantedNotes == nil || saved.notes == wantedNotes)
+                && (preferred == nil || saved.calendar.calendarIdentifier == preferred?.calendarIdentifier)
+            return .reminder(fieldsMatch: fieldsMatch, isCompleted: saved.isCompleted,
+                             due: storedDate, expectedDue: due, alerts: alerts)
+        }
         if let jobID, let marker = URL(string: "fadedai://bot-action/\(jobID.uuidString.lowercased())") {
-            let alreadySaved = await withCheckedContinuation { continuation in
+            let previous: String? = await withCheckedContinuation { continuation in
                 let predicate = store.predicateForReminders(in: nil)
                 store.fetchReminders(matching: predicate) { reminders in
-                    continuation.resume(returning: reminders?.contains { $0.url == marker } == true)
+                    continuation.resume(returning: reminders?.first { $0.url == marker }?.calendarItemIdentifier)
                 }
             }
-            if alreadySaved { return }
+            if let previous { return check(previous) }
             reminder.url = marker
         }
         if let due {
@@ -407,8 +428,9 @@ private struct AppleComposer: UIViewControllerRepresentable {
         }
         reminder.calendar = calendar
         reminder.title = title
-        reminder.notes = notes.map { String($0.prefix(2_000)) }
+        reminder.notes = wantedNotes
         try store.save(reminder, commit: true)
+        return check(reminder.calendarItemIdentifier)
     }
 
     #if canImport(AlarmKit)
@@ -416,16 +438,22 @@ private struct AppleComposer: UIViewControllerRepresentable {
     private struct Metadata: AlarmMetadata {}
 
     @available(iOS 26.0, *)
-    static func scheduleAlarm(title: String, date: Date, id: UUID) async throws {
+    @discardableResult static func scheduleAlarm(title: String, date: Date, id: UUID) async throws -> PhoneActionVerification {
         let manager = AlarmManager.shared
         guard try await manager.requestAuthorization() == .authorized else { throw Failure.alarmPermission }
-        if try manager.alarms.contains(where: { $0.id == id }) { return }
+        func check(_ alarm: Alarm) -> PhoneActionVerification {
+            guard case .fixed(let actual)? = alarm.schedule else { return .different }
+            return PhoneActionVerification.sameTime(actual, date) ? .matched : .different
+        }
+        if let previous = try manager.alarms.first(where: { $0.id == id }) { return check(previous) }
         guard date > .now else { throw Failure.expired }
         let stop = AlarmButton(text: "Stop", textColor: .white, systemImageName: "stop.fill")
         let presentation = AlarmPresentation(alert: AlarmPresentation.Alert(title: LocalizedStringResource(stringLiteral: title),
                                                                              stopButton: stop))
         let attributes = AlarmAttributes(presentation: presentation, metadata: Metadata(), tintColor: .mint)
         _ = try await manager.schedule(id: id, configuration: .alarm(schedule: .fixed(date), attributes: attributes))
+        guard let alarms = try? manager.alarms, let actual = alarms.first(where: { $0.id == id }) else { return .unavailable }
+        return check(actual)
     }
     #endif
 }
@@ -483,8 +511,8 @@ private struct FadedAlarmView: View {
         busy = true
         defer { busy = false }
         do {
-            try await PhoneActions.scheduleAlarm(title: "FadedAI-alarm", date: selected, id: UUID())
-            status = "Alarmen er sat."
+            let check = try await PhoneActions.scheduleAlarm(title: "FadedAI-alarm", date: selected, id: UUID())
+            status = check.summary(for: .alarm)
             reload()
         } catch {
             status = (error as? PhoneActions.Failure)?.message ?? "Alarmen kunne ikke sættes."

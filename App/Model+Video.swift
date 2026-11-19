@@ -288,7 +288,7 @@ extension Model {
     private func observeVideos() {
         jobsObservationWindow = hasActive ? Int(Date.now.timeIntervalSinceReferenceDate / 15) : 0
         observeCompletions(kind: "video", active: jobs.filter { $0.status.active }.map(\.id),
-                           finished: jobs.filter { $0.status == .completed }.map(\.id), title: "Din video er klar!")
+                           finished: jobs.filter { $0.status == .completed }.map(\.id), title: "Se resultatet i Video Studio")
         observeCompletions(kind: "video-failed", active: jobs.filter { $0.status.active }.map(\.id),
                            finished: jobs.filter { $0.status == .failed }.map(\.id), title: "Videoen blev ikke færdig")
     }

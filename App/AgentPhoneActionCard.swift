@@ -18,6 +18,7 @@ struct BotPhoneActionReview: View {
     @State private var usesDate: Bool
     @State private var busy = false
     @State private var issue: String?
+    @State private var wroteAction = false
 
     init(action: BotPhoneAction, jobID: UUID, botName: String, requiresAvailableTime: Bool = false,
          suggestedDay: Date? = nil, reminderNotes: String? = nil, onSaved: ((String) -> Void)? = nil,
@@ -76,7 +77,7 @@ struct BotPhoneActionReview: View {
                     Section("Noter i påmindelsen") { Text(verbatim: reminderNotes).textSelection(.enabled) }
                 }
                 Button("Godkend og opret", systemImage: "checkmark") { Task { await apply() } }
-                    .disabled(busy || cleanTitle.isEmpty || cleanTitle.count > 120 || !validEnd || (dated && date <= .now))
+                    .disabled(busy || wroteAction || cleanTitle.isEmpty || cleanTitle.count > 120 || !validEnd || (dated && date <= .now))
                 if busy { ProgressView() }
                 if let issue { Text(issue).foregroundStyle(.secondary) }
             }
@@ -94,7 +95,7 @@ struct BotPhoneActionReview: View {
     @MainActor private func apply() async {
         let requestedTitle = cleanTitle
         let requestedDate = dated ? date : nil
-        guard !busy, !requestedTitle.isEmpty, requestedTitle.count <= 120, validEnd else { return }
+        guard !busy, !wroteAction, !requestedTitle.isEmpty, requestedTitle.count <= 120, validEnd else { return }
         if let requestedDate, requestedDate <= .now {
             issue = "Vælg et tidspunkt frem i tiden."
             return
@@ -103,19 +104,20 @@ struct BotPhoneActionReview: View {
         issue = nil
         defer { busy = false }
         do {
+            let check: PhoneActionVerification
             switch action.kind {
             case .calendar:
                 guard let requestedDate else { throw PhoneActions.Failure.expired }
-                try await PhoneActions.saveEvent(title: requestedTitle, start: requestedDate, end: endDate,
+                check = try await PhoneActions.saveEvent(title: requestedTitle, start: requestedDate, end: endDate,
                                                 location: String(location.prefix(240)), jobID: jobID, store: EKEventStore(),
                                                 requiresAvailableTime: requiresAvailableTime)
             case .reminder:
-                try await PhoneActions.saveReminder(title: requestedTitle, due: requestedDate, jobID: jobID,
+                check = try await PhoneActions.saveReminder(title: requestedTitle, due: requestedDate, jobID: jobID,
                                                     store: EKEventStore(), notes: reminderNotes)
             case .alarm:
                 #if canImport(AlarmKit)
                 if #available(iOS 26.0, *), let requestedDate {
-                    try await PhoneActions.scheduleAlarm(title: requestedTitle, date: requestedDate, id: jobID)
+                    check = try await PhoneActions.scheduleAlarm(title: requestedTitle, date: requestedDate, id: jobID)
                 } else {
                     throw PhoneActions.Failure.unsupportedAlarm
                 }
@@ -123,13 +125,24 @@ struct BotPhoneActionReview: View {
                 throw PhoneActions.Failure.unsupportedAlarm
                 #endif
             }
+            wroteAction = true
+            let summary = check.summary(for: action.kind)
+            if check == .different || check == .unavailable {
+                if let onSaved { onSaved(summary); dismiss() }
+                else { issue = summary }
+                return
+            }
             if let onSaved {
                 let start = requestedDate?.formatted(date: .abbreviated, time: .shortened)
                 let end = action.kind == .calendar ? endDate.formatted(date: .abbreviated, time: .shortened) : nil
-                onSaved(["\(action.kind.title) oprettet", requestedTitle, [start, end].compactMap { $0 }.joined(separator: " – ")]
+                onSaved([summary, requestedTitle, [start, end].compactMap { $0 }.joined(separator: " – ")]
                     .filter { !$0.isEmpty }.joined(separator: "\n"))
             }
             onApplied()
+            if check == .writeOnly && onSaved == nil {
+                issue = summary
+                return
+            }
             dismiss()
         } catch {
             issue = (error as? PhoneActions.Failure)?.message ?? "Kunne ikke oprette \(action.kind.title.lowercased()). Prøv igen."
@@ -176,6 +189,7 @@ struct BotPhoneActionReview: View {
 
     let request: Request
     let botName: String
+    let botID: UUID?
     let onApplied: (String) -> Void
     @State private var store = EKEventStore()
     @State private var day: Date
@@ -187,9 +201,10 @@ struct BotPhoneActionReview: View {
     @State private var receipt: String?
     @State private var refresh = UUID()
 
-    init(request: Request, botName: String, onApplied: @escaping (String) -> Void) {
+    init(request: Request, botName: String, botID: UUID? = nil, onApplied: @escaping (String) -> Void) {
         self.request = request
         self.botName = botName
+        self.botID = botID
         self.onApplied = onApplied
         let calendar = AgentCalendarAvailability.clock
         let requestedDay = AgentPhoneLanguage.day(in: request.prompt, now: request.created, calendar: calendar)
@@ -199,7 +214,7 @@ struct BotPhoneActionReview: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let receipt {
-                Label(receipt, systemImage: "checkmark.circle.fill")
+                Text(receipt).textSelection(.enabled)
             } else if let kind = request.kind {
                 actionPlan(kind)
             } else {
@@ -274,7 +289,7 @@ struct BotPhoneActionReview: View {
         do {
             guard try await store.requestFullAccessToEvents() else { throw PhoneActions.Failure.calendarReadPermission }
             try Task.checkCancellation()
-            slots = AgentCalendarAvailability.slots(for: key.day, prompt: request.prompt, store: store)
+            slots = AgentCalendarAvailability.slots(for: key.day, prompt: request.prompt, store: store, botID: botID)
         } catch is CancellationError {
             return
         } catch {
@@ -318,9 +333,9 @@ struct BotPhoneActionReview: View {
         }
     }
 
-    static func slots(for day: Date, prompt: String, store: EKEventStore) -> [DateInterval] {
+    static func slots(for day: Date, prompt: String, store: EKEventStore, botID: UUID? = nil) -> [DateInterval] {
         let calendar = clock
-        let preferred = AgentChatPreferences.preferredStartHour ?? 8
+        let preferred = AgentChatPreferences.preferredStartHour(for: botID) ?? 8
         let after = AgentPhoneLanguage.time(in: prompt, marker: #"\befter\s+(?:klokken|kl\.?)?"#)
         let before = AgentPhoneLanguage.time(in: prompt, marker: #"\bfør\s+(?:klokken|kl\.?)?"#)
         let startTime = after ?? (before.map { $0.0 <= preferred ? max(0, $0.0 - 4) : preferred } ?? preferred, 0)

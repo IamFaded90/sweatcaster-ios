@@ -163,6 +163,60 @@ def test_pc_temperature_uses_actual_package_and_keeps_gpu_with_missing_sensors()
                         "usedMiB": None, "totalMiB": 4096, "temperatureC": None}
 
 
+def test_pc_image_engine_status_requires_pairing_and_omits_local_logs(tmp_path, monkeypatch):
+    settings = make_settings(tmp_path)
+    probes = []
+
+    def check_engine():
+        probes.append(True)
+        return "gpuError"
+
+    monkeypatch.setattr(pc_metrics, "image_engine_status", check_engine)
+    endpoint = module_endpoint(settings, "/api/modules/v1/pc-image-engine")
+    with pytest.raises(ApiError) as rejected:
+        endpoint(module_request(settings, authorized=False), Response())
+    assert rejected.value.status_code == 401
+    assert not probes
+    response = Response()
+    assert endpoint(module_request(settings), response) == {"state": "gpuError"}
+    assert probes == [True]
+    assert response.headers["Cache-Control"] == "no-store"
+
+
+@pytest.mark.parametrize(("status", "body", "log", "age", "expected"), [
+    (200, b'{"system":{"comfyui_version":"0.44.2"}}', b"torch.AcceleratorError: CUDA error: unknown error", 0, "ready"),
+    (500, b"", b"torch.AcceleratorError: CUDA error: unknown error", 0, "gpuError"),
+    (500, b"", b"[INFO] Using pytorch attention", 0, "unresponsive"),
+    (200, b"not ComfyUI", b"", 0, "unresponsive"),
+    (None, b"", b"[INFO] Using pytorch attention", 0, "starting"),
+    (None, b"", b"[INFO] Using pytorch attention\n[INFO] Starting server", 0, "offline"),
+    (None, b"", b"torch.AcceleratorError: CUDA error: unknown error", 121, "offline"),
+])
+def test_pc_image_engine_diagnoses_only_current_evidence(tmp_path, monkeypatch, status, body, log, age, expected):
+    file = tmp_path / "engine.log"
+    file.write_bytes(log)
+    monkeypatch.setenv("FADEDAI_COMFY_ENGINE_LOG", str(file))
+    observed = file.stat().st_mtime
+    monkeypatch.setattr(pc_metrics.time, "time", lambda: observed + age)
+
+    class Connection(io.BytesIO):
+        def __init__(self, host, port, timeout):
+            super().__init__(body)
+            assert (host, port, timeout) == ("127.0.0.1", 8188, 3)
+            self.status = status
+
+        def request(self, method, path):
+            assert (method, path) == ("GET", "/system_stats")
+            if self.status is None:
+                raise ConnectionRefusedError()
+
+        def getresponse(self):
+            return self
+
+    monkeypatch.setattr(pc_metrics.http.client, "HTTPConnection", Connection)
+    assert pc_metrics.image_engine_status() == expected
+
+
 def test_code_addon_install_lists_opens_and_releases_slots_after_delete(tmp_path):
     settings = make_settings(tmp_path)
     headers = {"Authorization": "Bearer " + settings.token}

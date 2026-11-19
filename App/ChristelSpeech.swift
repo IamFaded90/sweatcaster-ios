@@ -172,6 +172,7 @@ enum ChristelSpeech {
                 try Task.checkCancellation()
                 guard current == run else { return }
                 let audioPlayer = try AVAudioPlayer(data: bytes)
+                MusicPlayer.shared.pause()
                 motionOwner = VillageSpeechMotion.shared.begin(agentID: agentID) { [weak self] in self?.stop() }
                 let session = AVAudioSession.sharedInstance()
                 try session.setCategory(.playback, mode: .spokenAudio)
@@ -217,7 +218,9 @@ enum ChristelSpeech {
         player = nil
         if sessionActive {
             sessionActive = false
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            if !MusicPlayer.shared.playing && !MusicPlayer.shared.loading {
+                try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            }
         }
     }
 

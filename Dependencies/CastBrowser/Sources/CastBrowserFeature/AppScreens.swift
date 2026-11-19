@@ -293,6 +293,7 @@ struct VideoCard: View {
 
 struct RemoteScreen: View {
     @ObservedObject var model: CastAppModel
+    @State private var showsFilmCompanion = false
 
     var body: some View {
         NavigationStack {
@@ -315,6 +316,10 @@ struct RemoteScreen: View {
                     }
                     RemoteArtworkCard(model: model)
                     RemoteTransport(model: model)
+                    Button { showsFilmCompanion = true } label: {
+                        Label("Spørg filmvennen", systemImage: "bubble.left.and.text.bubble.right")
+                            .frame(maxWidth: .infinity).padding(.vertical, Style.small)
+                    }.buttonStyle(.bordered).controlSize(.large)
                     RemoteVolume(model: model)
                     Text(model.screenOffMessage)
                         .font(Style.meta).foregroundStyle(Style.muted)
@@ -340,6 +345,7 @@ struct RemoteScreen: View {
                 }.padding(Style.space)
             }
             .background(Style.canvas).navigationTitle("Fjernbetjening")
+            .sheet(isPresented: $showsFilmCompanion) { FilmCompanionView(model: model) }
         }
     }
 }

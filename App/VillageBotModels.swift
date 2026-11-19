@@ -30,6 +30,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
     var voice: String
     var sprite: Data?
     var villageFigure: String
+    private(set) var villageFigureWasPicked: Bool
     var personality: String?
     var notifications: Bool?
     var voiceRate: Double?
@@ -51,7 +52,9 @@ struct VillageBot: Codable, Identifiable, Equatable {
         self.prompt = prompt
         self.voice = voice
         self.sprite = sprite
-        self.villageFigure = VillageCharacterCatalog.valid(villageFigure) ?? VillageCharacterCatalog.initial(name: name, id: id.uuidString)
+        let validFigure = VillageCharacterCatalog.valid(villageFigure, for: id)
+        self.villageFigure = validFigure ?? VillageCharacterCatalog.initial(name: name, id: id.uuidString)
+        self.villageFigureWasPicked = validFigure != nil
         self.personality = personality
         self.notifications = notifications
         self.voiceRate = voiceRate
@@ -61,6 +64,17 @@ struct VillageBot: Codable, Identifiable, Equatable {
         self.traits = traits
         self.bestFriendID = bestFriendID
         self.dailyMemory = dailyMemory
+    }
+
+    mutating func chooseVillageFigure(_ figure: String) {
+        guard let figure = VillageCharacterCatalog.valid(figure, for: id) else { return }
+        villageFigure = figure
+        villageFigureWasPicked = true
+    }
+
+    mutating func useAvailableVillageFigure(among profiles: [VillageBot]) {
+        guard id != Self.lumiID, !villageFigureWasPicked else { return }
+        villageFigure = VillageCharacterCatalog.availableDefault(preferred: villageFigure, among: profiles)
     }
 
     static func founderAdam() -> VillageBot {
@@ -132,7 +146,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
 
     private enum CodingKeys: String, CodingKey {
         case id, name, color, prompt, voice, sprite, personality, notifications, voiceRate, language
-        case specialty, responsibility, traits, bestFriendID, dailyMemory, villageFigure
+        case specialty, responsibility, traits, bestFriendID, dailyMemory, villageFigure, villageFigureWasPicked
     }
 
     init(from decoder: Decoder) throws {
@@ -143,8 +157,12 @@ struct VillageBot: Codable, Identifiable, Equatable {
         prompt = try container.decode(String.self, forKey: .prompt)
         voice = try container.decode(String.self, forKey: .voice)
         sprite = try container.decodeIfPresent(Data.self, forKey: .sprite)
-        villageFigure = VillageCharacterCatalog.valid(try? container.decode(String.self, forKey: .villageFigure))
-            ?? VillageCharacterCatalog.initial(name: name, id: id.uuidString)
+        let savedFigure = VillageCharacterCatalog.valid(try? container.decode(String.self, forKey: .villageFigure), for: id)
+        let wasPicked = savedFigure != nil && ((try? container.decode(Bool.self, forKey: .villageFigureWasPicked)) ?? false)
+        villageFigureWasPicked = wasPicked
+        // Lumi's original default resolved to Eva. Older saves recorded only the figure ID.
+        let legacyLumi = id == Self.lumiID && savedFigure == "eva" && !wasPicked
+        villageFigure = (legacyLumi ? nil : savedFigure) ?? VillageCharacterCatalog.initial(name: name, id: id.uuidString)
         personality = try container.decodeIfPresent(String.self, forKey: .personality)
         notifications = try container.decodeIfPresent(Bool.self, forKey: .notifications)
         voiceRate = try container.decodeIfPresent(Double.self, forKey: .voiceRate)
@@ -165,6 +183,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
         try container.encode(voice, forKey: .voice)
         try container.encodeIfPresent(sprite, forKey: .sprite)
         try container.encode(villageFigure, forKey: .villageFigure)
+        if villageFigureWasPicked { try container.encode(true, forKey: .villageFigureWasPicked) }
         try container.encodeIfPresent(personality, forKey: .personality)
         try container.encodeIfPresent(notifications, forKey: .notifications)
         try container.encodeIfPresent(voiceRate, forKey: .voiceRate)
@@ -186,6 +205,9 @@ struct VillageBotTemplate: Codable {
     @MainActor init(bot: VillageBot) {
         var copy = bot
         copy.id = UUID()
+        if copy.villageFigure == VillageCharacterCatalog.lumi.id {
+            copy.villageFigure = VillageCharacterCatalog.initial(name: copy.name, id: copy.id.uuidString)
+        }
         copy.dailyMemory = []
         copy.bestFriendID = nil
         copy.sprite = nil

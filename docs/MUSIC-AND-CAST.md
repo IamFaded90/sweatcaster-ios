@@ -1,35 +1,42 @@
-# Musik og cast — lokalt arbejde, endnu ikke frigivet
+# Musik og Cast · 19. november 2026
 
-## Musik: Eevee-valget erstatter Spotify/Composio
+Ændringerne ligger lokalt på `codex/spotube-musik-next-20261117`. Ingen push eller IPA er startet i denne omgang. Denne status erstatter de ældre Eevee- og ByTune-beskrivelser.
 
-Brugeren har afvist den tidligere Spotify Web API/Composio-musikside på grund af opsætningen og valgt EeveeSpotifyReincarnated. Den nye Musik-fane er en enkel genvej via `spotify:` til den installerede Spotify-kompatible app. Den kræver ingen PC, Premium-kontrol eller udviklernøgle i FadedAI. Login og musikafspilning sker i den separate app.
+## Musik inde i FadedAI
 
-Det er ikke indlejret Eevee eller en ny musikmotor. Ingen Eevee-kode eller IPA er hentet/installeret. Hvis både Spotify og Eevee registrerer samme URL-skema, bestemmer iOS, hvilken app der åbner. Hvis åbning afvises, viser FadedAI en forklaring og et link til det valgte projekt. Der er ingen automatisk browser-fallback eller falsk melding om vellykket afspilning.
+`App/MusicView.swift` er nu en intern afspiller. Spotubes kø- og mediesessionsadfærd er adapteret til Swift med AVPlayer; hele Spotube-appen er ikke indlejret. YouTubeKit 0.4.10 leverer lydudtræk, og den offentlige YouTube-søgning leverer kataloget. Ingen Spotify-login, udviklernøgle eller PC kræves af musikklienten. Spotify-indhold sendes ikke til AI.
 
-`MusicAPI.swift`, PC-musiktjenesten, dens installations-/lifecyclekoblinger og de tilhørende mock-tests er fjernet. De tidligere otte musiktests er derfor ikke validering af den nye genvej. Andre Composio-forbindelser er uændrede. API-filopdelingen er beholdt med uændrede metodekroppe og højst 600 linjer pr. berørt Swift-fil.
+Der er søgning, favoritter, playlister, kø, blanding, gentagelse, sovetimer, hentning, annullering og sletning af hentet musik. Afspilleren lever på tværs af faner. Låseskærmens betjening og iOS-baggrundslyd er koblet til AVAudioSession og MPRemoteCommandCenter.
 
-Eevees README beskriver et tweak til Spotify; deres IPA-workflow kræver en separat Spotify-IPA som input. Der foreligger ingen sådan inputfil i denne opgave, og installation på iPhone er ikke bekræftet. Der er ikke startet builds eller signering. Almindeligt login inde i en installeret Eevee er noget andet end automatisk installation eller indbygning i FadedAI. Projektet angiver også, at Spotify Connect stadig har kontoens serverbegrænsninger.
+Faktisk katalogsøgning gav 20 resultater gennem den rigtige Swift-parser. Vedvarende favoritter, playlister, genåbning og fjernelse er prøvet lokalt. Udtræk af en aktuel lydadresse, faktisk lyd, låst skærm, afbrydelse ved opkald og hentning på iPhone er **ikke** verificeret. Kildeændringer og utilgængelige numre kan give fejl, som vises i appen med genforsøg.
 
-## Gemt til senere
+Kilder og licenser ligger i `Dependencies/Spotube/NOTICE.md` og `LICENSE`. Den ældre Kotlin/NewPipe-prototype er gemt, men den aktive Musik-side bruger Swift-klienten.
 
-[ByTune](https://github.com/rishiteja21/ByTune) er gemt som et muligt udgangspunkt for kø, miniafspiller og sovetimer. Brugeren prøver Eevee på sin iPhone først. Musik-fanen bruger den eksisterende genvej, og ByTune er ude af denne samlepakke.
+## Cinejoy og Chromecast
 
-## Cast
+Brugeren ser engelske film fra [Cinejoy](https://cinejoy.pk/) og bekræftede fysisk, at den nuværende app starter filmen på Chromecast. Filmen stopper, når appen forlades. Hurtig genkomst kan få den til at fortsætte. Dette er en reproduktion af fejlen i den gamle build.
 
-Normal cast prøver nu originalkilden direkte på TV’et. HLS-format inspiceres som før, men video og eksterne undertekster får direkte adresser ved direkte cast. Hvis direkte indlæsning fejler eller ikke starter, bruges eksisterende cookie-/headerbevidste iPhone-proxy med de tidligere begrænsede genforsøg. Hvert LOAD har sit eget forsøgs-id og sin egen delegate, så gamle svar ikke afslutter et nyt forsøg.
+Den nye kode vælger disse ruter for Cinejoy:
 
-Fjernbetjeningen viser **Direkte på TV**, når receiveren bekræfter aktiv direkte afspilning. Denne rute behøver ikke iPhone-streamen. **Via iPhone** forklarer, at app og skærm fortsat skal være åbne. Cast SDK er sat til ikke automatisk at stoppe receiveren, når sender-sessionen afsluttes; Stop-knappen stopper stadig filmen. Den lokale kø starter ikke automatisk næste film, når iPhone er lukket.
+1. **PC til TV.** Den parrede PC leverer mediefilen eller de omskrevne HLS-lister og filmstykker til Chromecast. Afspillerens Referer-sti og faktiske browseridentitet bevares. PC’en skal være tændt og kunne nås fra TV’et.
+2. **Direkte på TV.** Hvis PC-ruten fejler, prøver Chromecast selv kilden. Denne rute opretter ikke en iPhone-streamserver.
+3. **Via iPhone.** Sidste mulighed for kilder med særlige krav. Appen forklarer, at denne rute kræver telefonen vågen. Den er ikke en garanti for baggrundsafspilning.
 
-Der er **ingen PC-videoproxy** i denne ændring. Derfor kan vi ikke love slukket skærm for alle websites. DRM, cookies, kildens IP-/headerkrav og TV’ets codec-understøttelse gælder fortsat. Direkte cast, genforbindelse, undertekster og fallback er **ikke prøvet på fysisk TV/iPhone** her.
+Underholdning kan bruge en gemt lokal hjemmepairing, selv om chat er forbundet gennem Tailscale. Tailscale-adresser sendes ikke som lokale TV-adresser. Genkomst til appen kontrollerer receiverens aktuelle film før et eventuelt genforsøg, så en film i gang ikke genindlæses.
 
-## Kilder og kontrol
+En lokal HTTP-test lod en særskilt receiver hente hovedliste, underliste og filmstykke med den krævede Referer-sti og browseridentitet, uden telefonens server eller pairing-token. Range, underressourcer, fejlsvar og redirects er kontrolleret. Der er ikke sendt LOAD, pause eller stop til brugerens TV under testen. Den nye rute er **ikke** fysisk testet mod Cinejoy på brugerens Chromecast.
 
-- [EeveeSpotifyReincarnated](https://github.com/SideloadLabs/EeveeSpotifyReincarnated) og `.github/workflows/build-and-release-yourself.yml`: undersøgt; ikke installeret eller indlejret.
-- [ClickAppz](https://github.com/ClickAppz/Spotify-Premium-IPA): træet indeholder kun README og LICENSE. Ingen genbrugelig afspillerkode. README modsiger sig selv om downloads; påstandene er ikke afprøvet.
-- [Square](https://github.com/Lelonio/Square): Android-projektet er ikke længere valgt til musikdelen.
-- [Google Cast iOS](https://developers.google.com/cast/docs/ios_sender/integrate): eksisterende CastBrowser og SDK genbruges.
-- Streaming-topiclinks undersøgt: ingen ny filmapp installeret.
+## Filmven uden synlige undertekster
 
-Xcode-filreferencer kontrolleret: 342 objekter. Swift-syntaks kontrolleres med tree-sitter, ikke Xcode. Før frigivelse mangler Mac-kompilering/ContractTests samt iPhone-test: Musik åbner den ønskede Eevee-installation; login, skift tilbage til FadedAI, låst skærm, ingen installeret handler og både Spotify/Eevee installeret. Cast mangler fortsat fysisk TV-test af direkte MP4/HLS, fallback, undertekster, genforbindelse og Stop.
+Underholdning → TV → Spørg filmvennen. Skjulte engelske tekstspor bruges, hvor de findes. Ellers kan PC’en hente et afgrænset stykke engelsk lyd og transskribere med lokal Whisper. Tidligere billeder kan beskrives med en installeret lokal visionsmodel. Ingen dialog eller billeder efter TV’ets tidspunkt må bruges.
 
-Ingen push, merge eller IPA startet.
+Filmvennen kan forklare scenen på dansk og vise eller læse den originale engelske replik. Faktisk engelsk lyd fra både mediefil og HLS gav “We met at school.”; den lokale Qwen svarede “De mødte hinanden på skolen.” med den rigtige kilde. Tidsafgrænsede billeder blev også læst korrekt af den installerede Gemma-model. Danskkvaliteten afhænger af den valgte lokale model. Spoling og filmskift rydder svar og stopper igangværende oplæsning.
+
+## Før frigivelse
+
+- [ ] Installér den samlede PC-opdatering, når den ikke afbryder en film eller et job. Installeren er prøvet på en kopi.
+- [ ] Kør Xcode-kompilering, ContractTests og kontrol af den samlede IPA. Windows-testene erstatter ikke dette.
+- [ ] Start Cinejoy på iPhone, cast, skift til Landsbyen, åbn en anden app, og lås skærmen i mindst to minutter. Kontrollér ruten i TV-siden.
+- [ ] Åbn appen igen uden, at filmen starter forfra. Prøv pause, søgning og Stop.
+- [ ] Spørg filmvennen om en engelsk replik og scenen. Spol tilbage og skift film; tidligere svar må ikke hænge ved.
+- [ ] Søg og afspil musik, skift fane, lås skærmen, skift sang og prøv sovetimer. Hent én sang og slet den igen.

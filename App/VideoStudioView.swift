@@ -8,6 +8,7 @@ struct Media: Identifiable {
     let id = UUID()
     let url: URL
     let demo: Bool
+    var quality: VideoQualitySource? = nil
 
     func discardTemporaryCopy() throws {
         let name = url.deletingPathExtension().lastPathComponent
@@ -78,7 +79,8 @@ extension Home {
                         jobSection
                     }.id("video-jobs-top")
                 }
-                .refreshable { await model.refresh() }
+                .refreshable { await model.refresh(); await refreshQualitySupport() }
+                .task(id: model.connected ? (model.api as? LiveAPI)?.queueTargetID : nil) { await refreshQualitySupport() }
                 .task(id: showJobs) { await revealVideoJob(scroll) }
             }
         }
@@ -145,6 +147,27 @@ extension Home {
     private func openVideoRecipe() {
         selectedGameFolder = nil
         videoPage = .recipe
+    }
+
+    private func refreshQualitySupport() async {
+        guard model.connected, let api = model.api as? LiveAPI else {
+            videoQualityTarget = nil
+            videoQualityNotice = nil
+            return
+        }
+        struct Service: Decodable { let available: Bool }
+        do {
+            let service: Service = try await api.moduleJSON("video-quality", timeout: 8)
+            try Task.checkCancellation()
+            guard (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
+            videoQualityTarget = service.available ? api.queueTargetID : nil
+            videoQualityNotice = service.available ? nil : "PC’en tilbyder endnu ingen filkontrol."
+        } catch {
+            guard !Task.isCancelled, (model.api as? LiveAPI)?.queueTargetID == api.queueTargetID else { return }
+            videoQualityTarget = nil
+            if case APIError.http(404, _) = error { videoQualityNotice = "Opdatér FadedAI på PC’en for at se filkontrol." }
+            else { videoQualityNotice = "Filkontrollen kunne ikke hentes. Træk ned for at prøve igen." }
+        }
     }
 
     private func revealVideoJob(_ scroll: ScrollViewProxy) async {

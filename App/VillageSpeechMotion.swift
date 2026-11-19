@@ -11,6 +11,12 @@ import SwiftUI
     private var owner: UUID?
     private var interrupt: (() -> Void)?
 
+    func stopSpeaking() {
+        let previous = interrupt
+        if let owner { end(owner: owner) }
+        previous?()
+    }
+
     func begin(agentID: UUID?, interrupt: @escaping () -> Void) -> UUID {
         let previous = self.interrupt
         let token = UUID()

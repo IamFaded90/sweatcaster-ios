@@ -40,6 +40,17 @@ extension LiveAPI {
 }
 
 enum AgentVoiceSelection {
+    enum SaveFailure: Error { case unknownBot }
+
+    @MainActor static func save(_ identifier: String, for botID: UUID, store: MigratedAppData,
+                                defaults: UserDefaults = .standard) throws {
+        var bots = try JSONDecoder().decode([VillageBot].self, from: store.villageBots)
+        guard let index = bots.firstIndex(where: { $0.id == botID }) else { throw SaveFailure.unknownBot }
+        bots[index].voice = identifier
+        try store.saveVillageBots(JSONEncoder().encode(bots))
+        defaults.set(identifier, forKey: PhoneModels.agentVoiceKey(botID))
+    }
+
     static func identifier(for bot: VillageBot) -> String {
         let override = UserDefaults.standard.string(forKey: PhoneModels.agentVoiceKey(bot.id)) ?? ""
         return override.isEmpty ? bot.voice : override
@@ -298,15 +309,11 @@ struct AgentVoicePicker: View {
     private func choose(_ identifier: String) {
         stopPreview()
         do {
-            var bots = try VillageBot.listRecovering(from: MigratedAppData.shared.villageBots)
-            guard let index = bots.firstIndex(where: { $0.id == botID }) else {
-                saveNotice = "Agenten findes ikke længere. Åbn profilen igen."
-                return
-            }
-            bots[index].voice = identifier
-            try MigratedAppData.shared.saveVillageBots(JSONEncoder().encode(bots))
+            try AgentVoiceSelection.save(identifier, for: botID, store: .shared)
             selection = identifier
             saveNotice = nil
+        } catch AgentVoiceSelection.SaveFailure.unknownBot {
+            saveNotice = "Agenten findes ikke længere. Åbn profilen igen."
         } catch {
             saveNotice = "Stemmen kunne ikke gemmes. Dit tidligere valg er bevaret."
         }
@@ -345,6 +352,7 @@ struct AgentVoiceProfileCard: View {
     @AppStorage private var voice: String
     @State private var language = "da-DK"
     @State private var showPicker = false
+    @State private var showTasteTest = false
 
     init(bot: VillageBot, api: LiveAPI?) {
         self.bot = bot
@@ -361,11 +369,13 @@ struct AgentVoiceProfileCard: View {
                 Text(AgentPCVoice(rawValue: identifier)?.label
                      ?? selected.map(LocalSpeechVoice.label) ?? AgentVoiceSelection.unavailable).font(.subheadline)
                 FadedSecondaryButton("Vælg og hør stemmer", icon: "person.wave.2") { showPicker = true }
+                FadedSecondaryButton("Sammenlign to danske stemmer", icon: "headphones") { showTasteTest = true }
             }.frame(maxWidth: .infinity, alignment: .leading)
         }
         .sheet(isPresented: $showPicker) {
             AgentVoicePicker(botID: bot.id, name: bot.name, inheritedVoice: bot.voice, rate: bot.voiceRate ?? 1,
                              api: api, selection: $voice, language: $language)
         }
+        .sheet(isPresented: $showTasteTest) { AgentTasteTest(bot: bot, api: api, kind: .voice) }
     }
 }

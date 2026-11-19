@@ -15,6 +15,8 @@ struct OfflineStudio: View {
     let onPrivateSessionEnded: () -> Void
     let ephemeralOnly: Bool
     let imageOnly: Bool
+    let openingImageAgent: UUID?
+    @State var useAgentImageStyle = true
     @State var studioPage: Page
     @State var imagePrompt: String
     @State var studioImageRoute: StudioImageRoute
@@ -27,10 +29,11 @@ struct OfflineStudio: View {
     @State var importChatText = false
     @State var privateDeadline: ContinuousClock.Instant?
     @State var sessionPreferences = StudioSessionPreferences()
-    @State var pcFluxAvailable: Bool?
-    @State var pcFluxAdultAvailable: Bool?
-    @State var pcPonyAvailable: Bool?
-    @State var pcFluxRefresh = 0
+    @State var pcImageCatalog = StudioPCImageCatalog.checking
+    @State var pcImageRefresh = 0
+    @State var showImageDownloads = false
+    @State var showPrivateVideo = false
+    @State var privateVideoSource: URL?
     @State var privateModelDownload: Task<Void, Never>?
     @State var privateModelProgress = 0.0
     @State var privateModelProblem: String?
@@ -144,8 +147,9 @@ struct OfflineStudio: View {
         _regularStudioUnlocked = sessionUnlocked
         self.onPrivateSessionEnded = onPrivateSessionEnded
         self.ephemeralOnly = ephemeralOnly
-        let presentsOnlyImages = imageOnly && !ephemeralOnly
+        let presentsOnlyImages = imageOnly
         self.imageOnly = presentsOnlyImages
+        self.openingImageAgent = initialBotID
         _studioPage = State(initialValue: presentsOnlyImages ? .images : initialPage ?? .chat)
         _studioImageRoute = State(initialValue: presentsOnlyImages && api != nil ? .pc : .automatic)
         _imagePrompt = State(initialValue: String(initialImagePrompt.prefix(2_000)))
@@ -153,6 +157,15 @@ struct OfflineStudio: View {
     }
 
     var privateSession: Bool { ephemeralOnly }
+    var agentImageStyle: AgentImageTasteStyle? {
+        guard let openingImageAgent else { return nil }
+        let owner = selectedPrivateBot?.id ?? openingImageAgent
+        return AgentImageTasteStyle.selected(for: owner)
+    }
+    var agentImagePrompt: String {
+        let text = imagePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return useAgentImageStyle ? agentImageStyle?.applying(to: text) ?? text : text
+    }
     var sessionUnlocked: Bool {
         get { privateSession ? privateSessionOpen : imageOnly || regularStudioUnlocked }
         nonmutating set {
@@ -221,7 +234,9 @@ struct OfflineStudio: View {
         // full nested type here exhausted the Swift runtime stack on iPhone.
         AnyView(studioContent)
             .background { FadedBackground(variant: privateSession ? .privateChat : .standard) }
-            .navigationTitle(ephemeralOnly ? "NSFW" : (sessionUnlocked ? studioPage.rawValue : "Privat område"))
+            .navigationTitle(ephemeralOnly ? (imageOnly ? "Lumi · iPhone" : "NSFW") : (sessionUnlocked ? studioPage.rawValue : "Privat område"))
+            .toolbarBackground(palette.background, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .overlay(alignment: .top) {
                 if reloadNotice && sessionUnlocked {
                     Text("Lokal model genindlæst for at spare hukommelse")
@@ -273,6 +288,21 @@ struct OfflineStudio: View {
             .sheet(isPresented: $showModels, onDismiss: {
                 textContextLimit = contextWindow(for: effectiveTextModel)
             }) { PhoneModelsView(allowsImageDownloads: !privateSession) }
+            .sheet(isPresented: $showImageDownloads) {
+                PhoneModelsView(initialImages: true)
+            }
+            .sheet(isPresented: $showPrivateVideo, onDismiss: {
+                privateVideoSource = nil
+                resetIdleTimer()
+            }) {
+                LumiStudio(api: privateImagePC, videoOnly: true,
+                           initialVideoReference: privateVideoSource.flatMap { privateImages[$0] },
+                           onVideoActivity: { resetIdleTimer() })
+                    .accessibilityHidden(!canShowStudio)
+                    .overlay {
+                        if !canShowStudio { palette.background.ignoresSafeArea() }
+                    }
+            }
             .sheet(isPresented: $showBotBuilder) {
                 VillageBotBuilder(api: privateSession ? nil : api, bot: selectedPrivateBot,
                                   onBack: { showBotBuilder = false })
@@ -400,7 +430,8 @@ struct OfflineStudio: View {
                 privateBatteryLevel = UIDevice.current.batteryLevel
             }
             .onDisappear {
-                guard !showModels, !showBotBuilder, !showPromptEditor, !showSessionNote, !showReferenceMaskEditor, imageViewer == nil,
+                guard !showModels, !showImageDownloads, !showPrivateVideo, !showBotBuilder, !showPromptEditor, !showSessionNote,
+                      !showReferenceMaskEditor, imageViewer == nil,
                       imageDetailsSheet == nil, studioShareSheet == nil else { return }
                 stopStudioImageQueue()
                 closeChatSession()
@@ -424,9 +455,10 @@ struct OfflineStudio: View {
                     else { studioPicker.pickerStyle(.segmented) }
                 }
                 .padding(.horizontal, 16).padding(.vertical, 8)
-                studioOperationStatus
+                if !privateSession || studioPage == .gallery { studioOperationStatus }
                 studioPageContent
             }
+            .padding(.top, privateSession ? 4 : 0)
             .simultaneousGesture(TapGesture().onEnded { _ in resetIdleTimer() })
         } else if privateSession {
             VStack(spacing: 18) {
@@ -484,107 +516,17 @@ struct OfflineStudio: View {
         }
     }
 
-    @ViewBuilder private var studioOperationStatus: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if loadingModel && task != nil {
-                ProgressView("Indlæser model i hukommelsen…")
-                    .progressViewStyle(.linear).tint(palette.cyan)
-            }
-            if !status.isEmpty { Text(status).font(.callout).foregroundStyle(palette.secondary) }
-        }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, FadedSpacing.edge)
-    }
-}
-
-@MainActor private struct StudioReferenceMaskEditor: View {
-    let photo: UIImage
-    let onActivity: () -> Void
-    let onApply: (StudioReferenceMask?) -> Void
-    @Environment(\.dismiss) private var dismiss
-    @State private var draft: StudioReferenceMask
-    @State private var dragging = false
-
-    init(photo: UIImage, mask: StudioReferenceMask?, onActivity: @escaping () -> Void,
-         onApply: @escaping (StudioReferenceMask?) -> Void) {
-        self.photo = photo
-        self.onActivity = onActivity
-        self.onApply = onApply
-        _draft = State(initialValue: mask ?? StudioReferenceMask())
-    }
-
-    var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 12) {
-                FadedDetailText("Mal hen over det, du vil ændre. Lad resten af billedet være umarkeret.")
-                GeometryReader { proxy in
-                    let width = min(proxy.size.width, proxy.size.height * photo.size.width / photo.size.height)
-                    let size = CGSize(width: width, height: width * photo.size.height / photo.size.width)
-                    Image(uiImage: photo).resizable().frame(width: size.width, height: size.height)
-                        .overlay { brushPreview.allowsHitTesting(false) }
-                        .contentShape(Rectangle())
-                        .gesture(DragGesture(minimumDistance: 0).onChanged { value in
-                            addPoint(value.location, in: size)
-                        }.onEnded { _ in dragging = false })
-                        .clipShape(.rect(cornerRadius: 12))
-                        .position(x: proxy.size.width / 2, y: proxy.size.height / 2)
-                        .accessibilityLabel("Tegn på referencebilledet")
+    @ViewBuilder var studioOperationStatus: some View {
+        if (loadingModel && task != nil) || !status.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                if loadingModel && task != nil {
+                    ProgressView("Indlæser model i hukommelsen…")
+                        .progressViewStyle(.linear).tint(palette.cyan)
                 }
-                HStack {
-                    Button("Fortryd streg", systemImage: "arrow.uturn.backward") {
-                        if !draft.isEmpty { draft.strokes.removeLast() }
-                    }
-                    Spacer()
-                    Button("Ryd", role: .destructive) { draft.strokes.removeAll() }
-                }
-                .disabled(draft.isEmpty)
-                .buttonStyle(.bordered)
+                if !status.isEmpty { Text(status).font(.callout).foregroundStyle(palette.secondary) }
             }
-            .padding(FadedSpacing.edge)
-            .navigationTitle("Markér området")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Annullér") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(draft.isEmpty ? "Uden markering" : "Brug markering") {
-                        onApply(draft.isEmpty ? nil : draft)
-                        dismiss()
-                    }
-                }
-            }
-        }
-    }
-
-    private var brushPreview: some View {
-        Canvas { context, size in
-            let brush = StudioReferenceMask.brushWidth * min(size.width, size.height)
-            for stroke in draft.strokes {
-                let points = stroke.map { CGPoint(x: $0.x * size.width, y: $0.y * size.height) }
-                guard let first = points.first else { continue }
-                let color = Color.mint.opacity(0.65)
-                if points.count == 1 {
-                    let dot = CGRect(x: first.x - brush / 2, y: first.y - brush / 2, width: brush, height: brush)
-                    context.fill(Path(ellipseIn: dot), with: .color(color))
-                } else {
-                    var path = Path()
-                    path.addLines(points)
-                    context.stroke(path, with: .color(color),
-                                   style: StrokeStyle(lineWidth: brush, lineCap: .round, lineJoin: .round))
-                }
-            }
-        }
-    }
-
-    private func addPoint(_ point: CGPoint, in size: CGSize) {
-        guard size.width > 0, size.height > 0 else { return }
-        let p = CGPoint(x: min(1, max(0, point.x / size.width)), y: min(1, max(0, point.y / size.height)))
-        if !dragging {
-            guard draft.strokes.count < 128 else { return }
-            onActivity()
-            draft.strokes.append([p])
-            dragging = true
-        } else if let index = draft.strokes.indices.last, draft.strokes[index].count < 512 {
-            if let last = draft.strokes[index].last, hypot(last.x - p.x, last.y - p.y) >= 0.005 {
-                draft.strokes[index].append(p)
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, privateSession ? 0 : FadedSpacing.edge)
         }
     }
 }

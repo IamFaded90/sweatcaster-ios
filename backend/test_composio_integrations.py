@@ -9,6 +9,7 @@ from sweatcaster.composio_library import ComposioLibrary
 
 class Consumer:
     def connection_statuses(self, services):
+        assert "instagram" not in services
         return {"gmail": True, "youtube": True, "grok": True, "googlecalendar": True}
 
     def read(self, endpoint):
@@ -32,6 +33,8 @@ def test_inventory_requires_read_success_before_enabling_a_library(tmp_path, mon
     assert rows["grok"]["availability"] == "composio"
     assert not rows["grok"]["connected"]
     assert rows["googledrive"]["availability"] == "disconnected"
+    assert rows["instagram"]["availability"] == "per_agent"
+    assert not rows["instagram"]["connected"]
 
 
 def test_explicit_refresh_bypasses_the_inventory_cache(tmp_path, monkeypatch):
