@@ -315,7 +315,7 @@ def test_every_route_requires_pairing(repairs, tmp_path):
     register_agent_repair(app, SimpleNamespace(output_root=tmp_path / "api"), authorize, batch=original.batch)
     client = TestClient(app)
     raw = str(uuid4())
-    for method, suffix in (("GET", ""), ("PUT", "/jobs"), ("GET", f"/jobs/{raw}"), ("PUT", f"/jobs/{raw}/approve"),
+    for method, suffix in (("GET", ""), ("PUT", "/jobs"), ("GET", f"/jobs/{raw}"), ("PUT", f"/jobs/{raw}/approve"), ("PUT", f"/jobs/{raw}/resume"),
                            ("GET", f"/jobs/{raw}/handoff"), ("GET", f"/jobs/{raw}/bundle"), ("PUT", f"/jobs/{raw}/mac-report"), ("PUT", f"/jobs/{raw}/remove")):
         assert client.request(method, "/api/modules/v1/agent-repair" + suffix, json={}).status_code == 401
 

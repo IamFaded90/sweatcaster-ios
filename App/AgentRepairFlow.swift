@@ -182,7 +182,7 @@ import UniformTypeIdentifiers
             if project.isEmpty { project = result.projects.first?.id ?? "" }
             if let current = job { job = result.jobs.first(where: { $0.id == current.id }) }
             else { job = result.jobs.first }
-            if let job, job.active { try await watch(job.id) }
+            if let job { try await watch(job.id) }
         }
     }
 

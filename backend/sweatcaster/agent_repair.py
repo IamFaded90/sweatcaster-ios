@@ -29,8 +29,18 @@ class AgentRepairs:
 
     def catalog(self):
         self.store.recover()
+        jobs = []
+        for job in self.store.jobs():
+            row = self.store.public(job)
+            row["diff"] = ""
+            row["evidence"]["report"] = row["evidence"]["report"][:1500]
+            row["steps"] = [step[:500] for step in row["steps"][-8:]]
+            for key in ("before", "after"):
+                if row.get(key):
+                    row[key]["log"] = row[key]["log"][:1500]
+            jobs.append(row)
         return {"runner": self.runner.available(), "projects": self.store.projects(),
-                "jobs": [self.store.public(job) for job in self.store.jobs()],
+                "jobs": jobs,
                 "detail": "Python: samme test før og efter i en isoleret kopi. iPhone/SwiftUI: konkret loganalyse og en opgave til Mac, uden påstået lokal Apple-test."}
 
     def update(self, job, state, summary, step=None):
