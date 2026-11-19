@@ -147,6 +147,7 @@ extension OfflineStudio {
 
     private func configureSessionPreferences() {
         var preferences = StudioSessionPreferences()
+        preferences.imageRoute = privateImagePC == nil ? .phone : .pc
         preferences.imageModel = if StudioImageModel(rawValue: savedImageModel)?.isInstalled == true {
             savedImageModel
         } else {

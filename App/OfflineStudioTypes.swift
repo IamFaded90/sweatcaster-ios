@@ -333,7 +333,7 @@ struct StudioImageRequest {
 
 struct StudioSessionPreferences {
     var imageRoute = StudioImageRoute.phone
-    var pcImageModel = StudioPCImageModel.realvis
+    var pcImageModel = StudioPCImageModel.flux2Adult
     var imageModel = "sd_v1.5_f16.ckpt"
     var referenceMode = StudioReferenceMode.preserve
     var lora = ""
