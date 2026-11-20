@@ -483,6 +483,10 @@ import UIKit
     }
 }
 
+private struct AgentCasePhotoResponse: Decodable {
+    let data: Data
+}
+
 @MainActor private struct AgentCasePhotoRow<Controls: View>: View {
     let api: LiveAPI
     let record: AgentCaseRecord
@@ -506,8 +510,7 @@ import UIKit
                 controls().labelStyle(.iconOnly).frame(minHeight: 44)
             }
         }.task(id: photo.id) {
-            struct Photo: Decodable { let data: Data }
-            let result: Photo? = try? await api.moduleJSON("agent-cases/\(record.id.uuidString)/photos/\(photo.id.uuidString)",
+            let result: AgentCasePhotoResponse? = try? await api.moduleJSON("agent-cases/\(record.id.uuidString)/photos/\(photo.id.uuidString)",
                 query: [.init(name: "bot_id", value: record.botID.uuidString)], maximumBytes: 400_000)
             if !Task.isCancelled { data = result?.data }
         }
