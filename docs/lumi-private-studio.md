@@ -1,5 +1,33 @@
 # Lumi private studio
 
+## Video repair, 20 November 2026
+
+The uploaded failing `Lumi.mp4` contained 17 frames at 12 fps (1.42 seconds).
+Its first frame resembled the reference, then the result collapsed into coloured
+noise. The revised pipeline emits 129 generated frames at 16 fps (8.06 seconds),
+keeps the reference aspect ratio at a maximum 512-pixel side, and uses the
+reference throughout Wan VACE conditioning. Unknown control frames are neutral
+grey, generation masks are separate, and the VACE reference prefix is removed
+before decoding. This follows the reference/trim connections in the
+[official ComfyUI VACE workflow](https://github.com/Comfy-Org/workflow_templates/blob/main/templates/video_wan_vace_14B_ref2v.json).
+
+A real, neutral workshop reference completed through `lumi_companion.video`,
+including MP4 conversion, in 522.8 seconds on the RTX 3070. The exported clip is
+512x384, 129 frames, 16 fps. Full FFmpeg decoding and start/middle/end playback
+checks passed, and sampled images preserved the workshop. This does not prove
+photorealistic human likeness or complex actions. No higher-capacity model was
+installed. The active PC server has the revised pipeline and frame-rate-aware
+export check. The focused backend suite passed 35 tests.
+
+A second, 33-frame neutral motion test used the clothed first frame of the
+uploaded video. It completed in 72.3 seconds, passed playback checks, and kept
+the original subject and clothes visible in the start/middle/end samples.
+Eight-second human motion and physical iPhone playback remain user checks.
+
+The companion iOS change keeps the private foreground session active while its
+video is rendering and explains the eight-second duration. That code requires
+an updated IPA. The existing background expiry remains unchanged.
+
 Lumi is an optional 18+ village bot with stable ID `ecba4ff7-69b2-5a9c-a028-d93ef6ec7983`.
 Her own iPhone screen has chat, image, and video tabs. No general model picker entry points
 at her text, image, or video model. All three PC routes require the existing pairing token

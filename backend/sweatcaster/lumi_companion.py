@@ -359,7 +359,7 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
 
 def video(prompt: str, *, client: requests.Session | None = None, timeout: float = 1200,
           output_id: str | None = None, reference: bytes | None = None, private: bool = False) -> bytes:
-    """Render a short Wan 2.1 clip, then convert ComfyUI's WebM for iPhone playback."""
+    """Render a Wan 2.1 clip, then convert ComfyUI's WebM for iPhone playback."""
     from sweatcaster.studio_video_workflows import lumi_reference_workflow, lumi_text_workflow
 
     prompt = _message(prompt, limit=1000)
@@ -377,7 +377,10 @@ def video(prompt: str, *, client: requests.Session | None = None, timeout: float
     try:
         seed = time.time_ns() % (2**53)
         if reference_name is not None:
-            graph, models = lumi_reference_workflow(prompt, reference_name, f"{VIDEO_OUTPUT_FOLDER}/{output_id}", seed)
+            from PIL import Image
+            with Image.open(BytesIO(reference)) as photo:
+                graph, models = lumi_reference_workflow(prompt, reference_name, f"{VIDEO_OUTPUT_FOLDER}/{output_id}", seed,
+                                                        reference_size=photo.size)
         else:
             prefix = f"{VIDEO_OUTPUT_FOLDER}/{output_id}" if output_id else VIDEO_OUTPUT_FOLDER
             graph, models = lumi_text_workflow(prompt, prefix, seed, VIDEO_MODEL, VIDEO_CLIP, VIDEO_VAE)

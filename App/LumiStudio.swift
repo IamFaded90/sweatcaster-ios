@@ -458,7 +458,7 @@ import UIKit
 
     private var videoReferenceControls: some View {
         VStack(alignment: .leading, spacing: 8) {
-            FadedDetailText("Lav et kort klip fra en beskrivelse. Tilføj et billede, hvis det skal være klippets første billede.")
+            FadedDetailText("PC’en laver cirka 8 sekunders video. Tilføj et billede for at bevare motiv og format, og beskriv bevægelsen. Det kan tage flere minutter.")
             mediaReferencePicker(selection: $videoReferenceSelection, reference: $videoReference,
                                  loading: $loadingVideoReference, forVideo: true)
             if let picture, videoReference == nil {

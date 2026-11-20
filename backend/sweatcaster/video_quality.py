@@ -1,5 +1,6 @@
 """Verify the encoded media and keep the result with its owning job."""
 
+from fractions import Fraction
 from math import isfinite
 from pathlib import Path
 import shutil
@@ -25,6 +26,18 @@ def seconds(raw):
     except (ValueError, TypeError):
         return None
     return value if isfinite(value) and value > 0 else None
+
+
+def frame_duration(video):
+    for field in ("avg_frame_rate", "r_frame_rate"):
+        try:
+            rate = Fraction(str(video.get(field)))
+            duration = seconds(float(1 / rate))
+            if duration:
+                return duration
+        except (ValueError, ZeroDivisionError, OverflowError):
+            pass
+    return 1 / 30
 
 
 def sample(path, at, kind, cancel):
@@ -74,12 +87,12 @@ def inspect_export(path: Path, expected_seconds: float, audio_expected: bool, ca
         expected = seconds(expected_seconds)
         if duration and expected:
             checks["duration"] = "passed" if abs(duration - expected) <= 0.125 else "failed"
-        # The renderer emits 30 fps. Stay one frame inside the last presentation interval.
+        # Generators can emit 8/16/24 fps. Seek inside the actual last frame's interval.
         timeline = duration or seconds((data.get("format") or {}).get("duration"))
         if not video:
             checks["video"] = "failed"
         elif timeline:
-            times = (0.0, timeline / 2, max(0, timeline - 1 / 30 - 0.001))
+            times = (0.0, timeline / 2, max(0, timeline - frame_duration(video) - 0.001))
             checks["video"] = sampled(path, times, "video", cancel)
         if audio_expected:
             if not any(s.get("codec_type") == "audio" for s in streams):

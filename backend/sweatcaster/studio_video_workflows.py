@@ -41,6 +41,14 @@ WAN_FALLBACKS = {
     "wan-frames": VideoMode("wan-frames", "Fra start til slutbillede · Wan 1,3B", 2, WAN_VACE, vace=True),
 }
 
+LUMI_VIDEO_FPS = 16
+LUMI_VIDEO_FRAMES = 129
+
+
+def reference_dimensions(width, height):
+    scale = 512 / max(width, height)
+    return tuple(max(64, round(side * scale / 16) * 16) for side in (width, height))
+
 
 def _node(graph, key, kind, **inputs):
     graph[key] = {"class_type": kind, "inputs": inputs}
@@ -61,16 +69,18 @@ def _wan_vace_control(graph, stills, size):
     held = _node(graph, "held", "EmptyImage", batch_size=1, color=0, **dimensions)
     free = _node(graph, "free", "EmptyImage", batch_size=size["length"] - len(anchors),
                  color=0xFFFFFF, **dimensions)
-    images = _node(graph, "control-frames", "ImageBatch", image1=anchors[0], image2=free)
+    unknown = _node(graph, "unknown", "EmptyImage", batch_size=size["length"] - len(anchors),
+                    color=0x808080, **dimensions)
+    images = _node(graph, "control-frames", "ImageBatch", image1=anchors[0], image2=unknown)
     mask_images = _node(graph, "control-coverage", "ImageBatch", image1=held, image2=free)
     if len(anchors) == 2:
         images = _node(graph, "control-end", "ImageBatch", image1=images, image2=anchors[1])
         mask_images = _node(graph, "control-end-mask", "ImageBatch", image1=mask_images, image2=held)
     masks = _node(graph, "control-mask", "ImageToMask", image=mask_images, channel="red")
-    return {"control_video": images, "control_masks": masks}
+    return {"control_video": images, "control_masks": masks, "reference_image": anchors[0]}
 
 
-def workflow(mode, prompt, photos, job_id, seed):
+def workflow(mode, prompt, photos, job_id, seed, *, frame_count=None, dimensions=None):
     graph = {}
     ltx = mode.id.startswith("ltx-")
     wan = mode.id.startswith("wan-")
@@ -107,7 +117,9 @@ def workflow(mode, prompt, photos, job_id, seed):
     elif wan:
         model = _node(graph, "shift", "ModelSamplingSD3", model=["UNETLoader", 0], shift=8.0)
         if mode.vace:
-            size = dict(width=512, height=288, length=17, batch_size=1)
+            width, height = dimensions or (512, 288)
+            size = dict(width=width, height=height, length=frame_count or 81, batch_size=1)
+            fps = 16.0
             _node(graph, "reference", "WanVaceToVideo", positive=positive, negative=negative,
                   vae=vae, strength=1.0, **size, **_wan_vace_control(graph, stills, size))
             positive, negative, latent = (["reference", index] for index in range(3))
@@ -126,7 +138,7 @@ def workflow(mode, prompt, photos, job_id, seed):
         else:
             latent = _node(graph, "latent", "EmptyHunyuanLatentVideo", **size)
         sample = _node(graph, "sample", "KSampler", model=model, positive=positive, negative=negative,
-                       latent_image=latent, seed=seed, steps=20 if mode.vace else 24, cfg=6.0, sampler_name="uni_pc",
+                       latent_image=latent, seed=seed, steps=30 if mode.vace else 24, cfg=6.0, sampler_name="uni_pc",
                        scheduler="simple", denoise=1.0)
     else:
         fps = 8.0
@@ -138,6 +150,8 @@ def workflow(mode, prompt, photos, job_id, seed):
                        positive=positive, negative=negative, latent_image=latent, seed=seed,
                        steps=20, cfg=6.0, sampler_name="euler", scheduler="normal", denoise=0.58)
     if wan:
+        if mode.vace and stills:
+            sample = _node(graph, "trim", "TrimVideoLatent", samples=sample, trim_amount=["reference", 3])
         # The untiled Wan decode exceeded the available VRAM on the Windows PC.
         frames = _node(graph, "decode", "VAEDecodeTiled", samples=sample, vae=vae,
                        tile_size=192, overlap=32, temporal_size=8, temporal_overlap=4)
@@ -149,12 +163,14 @@ def workflow(mode, prompt, photos, job_id, seed):
     return graph
 
 
-def lumi_reference_workflow(prompt, reference_name, output_prefix, seed):
+def lumi_reference_workflow(prompt, reference_name, output_prefix, seed, *, reference_size=None):
     mode = WAN_FALLBACKS["wan-image"]
-    graph = workflow(mode, prompt, [reference_name + " [temp]"], "lumi", seed)
+    dimensions = reference_dimensions(*reference_size) if reference_size else (512, 288)
+    graph = workflow(mode, prompt, [reference_name + " [temp]"], "lumi", seed,
+                     frame_count=LUMI_VIDEO_FRAMES, dimensions=dimensions)
     del graph["video"], graph["save"]
     _node(graph, "10", "SaveWEBM", images=["decode", 0], filename_prefix=output_prefix,
-          codec="vp9", fps=12, crf=32)
+          codec="vp9", fps=LUMI_VIDEO_FPS, crf=20)
     return graph, mode.models
 
 
@@ -168,11 +184,11 @@ def lumi_text_workflow(prompt, output_prefix, seed, model, clip, vae):
     positive = _node(graph, "4", "CLIPTextEncode", text=prompt, clip=text)
     negative = _node(graph, "5", "CLIPTextEncode", text="low quality, blurry, static, watermark", clip=text)
     decode = _node(graph, "6", "VAELoader", vae_name=vae)
-    latent = _node(graph, "7", "EmptyHunyuanLatentVideo", width=512, height=288, length=17, batch_size=1)
-    sample = _node(graph, "8", "KSampler", seed=seed, steps=20, cfg=6, sampler_name="uni_pc",
+    latent = _node(graph, "7", "EmptyHunyuanLatentVideo", width=512, height=288, length=LUMI_VIDEO_FRAMES, batch_size=1)
+    sample = _node(graph, "8", "KSampler", seed=seed, steps=30, cfg=6, sampler_name="uni_pc",
                    scheduler="simple", denoise=1, model=shifted, positive=positive, negative=negative,
                    latent_image=latent)
     frames = _node(graph, "9", "VAEDecodeTiled", samples=sample, vae=decode, tile_size=192,
                    overlap=32, temporal_size=8, temporal_overlap=4)
-    _node(graph, "10", "SaveWEBM", images=frames, filename_prefix=output_prefix, codec="vp9", fps=12, crf=32)
+    _node(graph, "10", "SaveWEBM", images=frames, filename_prefix=output_prefix, codec="vp9", fps=LUMI_VIDEO_FPS, crf=20)
     return graph, models

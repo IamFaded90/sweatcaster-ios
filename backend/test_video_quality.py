@@ -19,11 +19,13 @@ from tests.conftest import FastPipeline, make_settings
 
 @pytest.fixture
 def movie(tmp_path):
-    def generate(name, *, audio=False, length=1):
+    def generate(name, *, audio=False, length=1, fps=30, fragmented=False):
         out = tmp_path / name
-        args = ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=30"]
+        args = ["ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", f"testsrc2=s=160x90:r={fps}"]
         if audio:
             args += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono", "-c:a", "aac"]
+        if fragmented:
+            args += ["-movflags", "frag_keyframe+empty_moov"]
         subprocess.run([*args, "-t", str(length), "-c:v", "libx264", "-preset", "ultrafast", str(out)],
                        check=True, capture_output=True, timeout=20)
         return out
@@ -54,6 +56,14 @@ def test_container_duration_cannot_hide_a_short_video_track(tmp_path):
                    check=True, capture_output=True, timeout=20)
     result = qc.inspect_export(file, 2, True)
     assert states(result)["duration"] == "failed"
+
+
+@pytest.mark.parametrize("fps", [8, 12, 16, 24, "30000/1001"])
+@pytest.mark.parametrize("fragmented", [False, True])
+def test_generated_video_last_frame_uses_its_actual_frame_rate(movie, fps, fragmented):
+    file = movie("generated.mp4", fps=fps, fragmented=fragmented, length=1.25)
+    result = qc.inspect_export(file, 1.25, False)
+    assert result["receipt"]["state"] == "verified", result
 
 
 def test_decode_failure_unknown_tools_and_cancellation(movie, tmp_path, monkeypatch):

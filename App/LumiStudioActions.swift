@@ -347,6 +347,7 @@ extension LumiStudio {
         var status = try await api.lumiVideoStatus(id: id)
         while status.status == "working" {
             guard studioRevision == revision else { return }
+            if videoOnly && phase == .active { onVideoActivity() }
             try await Task.sleep(for: .seconds(12))
             guard studioRevision == revision else { return }
             status = try await api.lumiVideoStatus(id: id)

@@ -10,11 +10,14 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from PIL import Image
 from requests import ConnectionError
+import pytest
 
 from sweatcaster import studio_video
 from sweatcaster.dto import ApiError
 from sweatcaster.lumi_companion import VIDEO_MODEL
-from sweatcaster.studio_video_workflows import MODES, WAN_FALLBACKS, workflow
+from sweatcaster.studio_video_workflows import (
+    MODES, WAN_FALLBACKS, lumi_reference_workflow, lumi_text_workflow, workflow,
+)
 
 
 class Response:
@@ -210,6 +213,37 @@ def test_video_modes_use_only_their_supported_input():
         assert [node["inputs"]["image"] for node in graph.values() if node["class_type"] == "LoadImage"] == photos
         if mode.id == "wan-frames":
             assert graph["reference"]["inputs"]["end_image"] == ["photo-1", 0]
+
+
+@pytest.mark.parametrize("source,expected", [
+    ((960, 540), (512, 288)),
+    ((540, 960), (288, 512)),
+    ((768, 768), (512, 512)),
+])
+def test_lumi_reference_keeps_photo_format_and_generates_eight_seconds(source, expected):
+    graph, _ = lumi_reference_workflow("Et roligt værksted", "photo.png", "video/example", 7,
+                                        reference_size=source)
+    reference = graph["reference"]["inputs"]
+    assert (reference["width"], reference["height"]) == expected
+    assert 8 <= reference["length"] / graph["10"]["inputs"]["fps"] < 9
+    assert reference["reference_image"] == ["anchor-0", 0]
+    assert graph["trim"]["inputs"] == {"samples": ["sample", 0], "trim_amount": ["reference", 3]}
+    assert graph["decode"]["inputs"]["samples"] == ["trim", 0]
+    assert graph["10"]["inputs"]["images"] == ["decode", 0]
+
+
+def test_unknown_video_frames_use_neutral_images_and_separate_generation_masks():
+    graph, _ = lumi_reference_workflow("Et roligt værksted", "photo.png", "video/example", 7)
+    assert graph["control-frames"]["inputs"]["image2"] == ["unknown", 0]
+    assert graph["unknown"]["inputs"]["color"] == 0x808080
+    assert graph["free"]["inputs"]["color"] == 0xFFFFFF
+    assert graph["control-coverage"]["inputs"]["image2"] == ["free", 0]
+    assert graph["unknown"]["inputs"]["batch_size"] + 1 == graph["reference"]["inputs"]["length"]
+
+
+def test_lumi_text_video_has_the_same_eight_second_length():
+    graph, _ = lumi_text_workflow("Havets bølger", "video/example", 7, "model", "clip", "vae")
+    assert 8 <= graph["7"]["inputs"]["length"] / graph["10"]["inputs"]["fps"] < 9
 
 
 def test_wan_uses_lighter_fallback_when_the_preferred_model_is_missing(tmp_path, monkeypatch):
