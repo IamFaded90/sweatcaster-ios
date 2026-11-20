@@ -17,6 +17,7 @@ from sweatcaster.dto import ApiError
 from sweatcaster.emby_settings import _protect
 
 VOICE = "da-DK-ChristelNeural"
+ROEST_VOICES = {"roest-mic": "mic", "roest-nic": "nic", "roest-lumi": "lumi"}
 REGION = re.compile(r"[a-z0-9]{2,30}")
 KEY = re.compile(r"[!-~]{1,512}")
 MAX_AUDIO = 1_400_000
@@ -137,8 +138,11 @@ def register_christel(app, settings, authorize):
         authorize(request, settings)
         response.headers["Cache-Control"] = "no-store"
         voices = []
-        if roest_installation():
+        installation = roest_installation()
+        if installation:
             voices += ["roest-mic", "roest-nic"]
+            if roest_lumi_installed(installation[1]):
+                voices.append("roest-lumi")
         if kokoro_ready()[0]:
             voices += ["kokoro-heart", "kokoro-michael"]
         return {"voices": voices}
@@ -147,12 +151,13 @@ def register_christel(app, settings, authorize):
     def local_agent_speech(request: Request, response: Response, body: dict = Body(...)):
         authorize(request, settings)
         response.headers["Cache-Control"] = "no-store"
-        if body.get("voice") == "piper-da":
+        voice = body.get("voice")
+        if voice == "piper-da":
             return synthesize_danish(body.get("text"), settings)
-        if body.get("voice") in {"roest-mic", "roest-nic"}:
-            return synthesize_roest(body.get("text"), body["voice"])
+        if isinstance(voice, str) and voice in ROEST_VOICES:
+            return synthesize_roest(body.get("text"), voice)
         kokoro_voice = {"kokoro-heart": "af_heart", "kokoro-michael": "am_michael"}.get(
-            body.get("voice") if isinstance(body.get("voice"), str) else ""
+            voice if isinstance(voice, str) else ""
         )
         if kokoro_voice is None:
             raise ApiError(422, "INVALID_INPUT", "Vælg en dansk eller engelsk PC-stemme.")
@@ -180,6 +185,10 @@ def roest_installation():
     return python, model
 
 
+def roest_lumi_installed(model):
+    return (model / "audio_samples" / "00_lumi_00_reference.wav").is_file()
+
+
 def synthesize_roest(text, voice):
     if not isinstance(text, str) or not 1 <= len(text.strip()) <= 500:
         raise ApiError(422, "INVALID_INPUT", "Vælg op til 500 tegn dansk tekst.")
@@ -187,11 +196,13 @@ def synthesize_roest(text, voice):
     if not installation:
         raise ApiError(503, "NOT_READY", "Røst-stemmen mangler på PC’en.")
     python, model = installation
+    if voice == "roest-lumi" and not roest_lumi_installed(model):
+        raise ApiError(503, "NOT_READY", "Lumis stemmeoptagelse mangler på PC’en.")
     try:
         with TemporaryDirectory(prefix="fadedai-roest-") as directory:
             audio = Path(directory) / "reply.wav"
             result = subprocess.run([str(python), str(Path(__file__).with_name("roest_worker.py")),
-                                     str(model), str(audio), voice.removeprefix("roest-")],
+                                     str(model), str(audio), ROEST_VOICES[voice]],
                                     input=json.dumps({"text": text.strip()}, ensure_ascii=True).encode("utf-8"),
                                     capture_output=True, check=False, timeout=180,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

@@ -53,7 +53,7 @@ private struct FadedDashboardHero: View {
     @Environment(\.fadedPalette) private var palette
 
     var body: some View {
-        VStack(spacing: FadedSpacing.l) {
+        VStack(spacing: FadedSpacing.m) {
             FadedWorldArtwork()
             VStack(spacing: FadedSpacing.xs) {
                 Text("Store idéer.").foregroundStyle(palette.text)
@@ -62,10 +62,6 @@ private struct FadedDashboardHero: View {
             .font(.largeTitle.weight(.semibold))
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
-            Text("Et sted at tænke, skabe og bygge.\nMed et AI-hold, der er helt dit eget.")
-                .font(.subheadline)
-                .foregroundStyle(palette.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             FadedPrimaryButton("Assistent og opgaver", icon: "sparkle.magnifyingglass", action: openAssistant)
             FadedSecondaryButton("Åbn landsbyen", icon: "arrow.up.right", action: openVillage)
         }

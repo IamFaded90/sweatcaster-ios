@@ -169,7 +169,12 @@ import SwiftUI
                 try activateAudio()
                 let item = AVPlayerItem(url: source)
                 status = item.observe(\.status, options: [.new]) { [weak self] item, _ in
-                    if item.status == .failed {
+                    if item.status == .readyToPlay {
+                        Task { @MainActor in
+                            guard let self, self.player.currentItem === item else { return }
+                            MusicLibrary.shared.recordPlayback(track)
+                        }
+                    } else if item.status == .failed {
                         Task { @MainActor in
                             guard let self, self.player.currentItem === item else { return }
                             self.notice = "Sangen kunne ikke afspilles. Prøv en anden udgave eller en ny søgning."

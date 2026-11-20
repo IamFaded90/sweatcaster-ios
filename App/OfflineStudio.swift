@@ -454,6 +454,9 @@ struct OfflineStudio: View {
                     if studioTypeSize.isAccessibilitySize { studioPicker.pickerStyle(.menu) }
                     else { studioPicker.pickerStyle(.segmented) }
                 }
+                .frame(minHeight: 44)
+                .padding(.horizontal, 8)
+                .fadedGlassSurface(radius: FadedRadius.medium)
                 .padding(.horizontal, 16).padding(.vertical, 8)
                 if !privateSession || studioPage == .gallery { studioOperationStatus }
                 studioPageContent

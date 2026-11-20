@@ -125,8 +125,8 @@ struct ChatGlassSurface: View {
             } else {
                 shape.fill(palette.card)
             }
-            shape.fill(gradient).opacity(palette.isDark ? 0.13 : 0.08)
-            shape.strokeBorder(gradient).opacity(palette.isDark ? 0.36 : 0.22)
+            shape.fill(gradient).opacity(palette.isDark ? 0.10 : 0.06)
+            shape.strokeBorder(gradient).opacity(palette.isDark ? 0.48 : 0.35)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

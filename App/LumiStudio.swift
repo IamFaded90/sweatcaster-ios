@@ -178,7 +178,12 @@ import UIKit
                 Text("Du har nye beskeder eller ændringer i denne scene. Du kan blive her og gemme dem først.")
             }
             .task(id: "\(api?.queueTargetID ?? ""):\(phase == .active)") {
-                if !videoOnly && phase == .active { await refreshChristelPC() }
+                if !videoOnly && phase == .active {
+                    if let voices = try? await api?.agentPCVoices(for: VillageBot.lumiID), !Task.isCancelled {
+                        AgentVoiceSelection.adoptApprovedLumiVoiceIfAvailable(voices)
+                    }
+                    await refreshChristelPC()
+                }
             }
             .task {
                 if !videoOnly {

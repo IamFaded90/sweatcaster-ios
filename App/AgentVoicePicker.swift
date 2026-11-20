@@ -6,6 +6,7 @@ enum AgentPCVoice: String, Codable, CaseIterable, Identifiable {
     case danish = "piper-da"
     case roestMic = "roest-mic"
     case roestNic = "roest-nic"
+    case roestLumi = "roest-lumi"
     case heart = "kokoro-heart"
     case michael = "kokoro-michael"
 
@@ -15,19 +16,21 @@ enum AgentPCVoice: String, Codable, CaseIterable, Identifiable {
         case .danish: "Talesyntese"
         case .roestMic: "Mic"
         case .roestNic: "Nic"
+        case .roestLumi: "Lumi"
         case .heart: "Heart"
         case .michael: "Michael"
         }
     }
-    var language: String { [.danish, .roestMic, .roestNic].contains(self) ? "da-DK" : "en-US" }
+    var language: String { [.danish, .roestMic, .roestNic, .roestLumi].contains(self) ? "da-DK" : "en-US" }
     var label: String { name + " · " + (language == "da-DK" ? "Dansk PC-stemme" : "Engelsk PC-stemme") }
 }
 
 extension LiveAPI {
-    func agentPCVoices() async throws -> [AgentPCVoice] {
+    func agentPCVoices(for botID: UUID? = nil) async throws -> [AgentPCVoice] {
         struct Catalog: Decodable { let voices: [String] }
         let catalog: Catalog = try await moduleJSON("agent-local-voices", timeout: 8)
         return catalog.voices.compactMap(AgentPCVoice.init(rawValue:))
+            .filter { $0 != .roestLumi || botID == VillageBot.lumiID }
     }
 
     func agentPCVoiceAudio(_ text: String, voice: AgentPCVoice) async throws -> Data {
@@ -40,20 +43,42 @@ extension LiveAPI {
 }
 
 enum AgentVoiceSelection {
-    enum SaveFailure: Error { case unknownBot }
+    enum SaveFailure: Error { case unknownBot, voiceUnavailableForBot }
 
     @MainActor static func save(_ identifier: String, for botID: UUID, store: MigratedAppData,
                                 defaults: UserDefaults = .standard) throws {
-        var bots = try JSONDecoder().decode([VillageBot].self, from: store.villageBots)
-        guard let index = bots.firstIndex(where: { $0.id == botID }) else { throw SaveFailure.unknownBot }
-        bots[index].voice = identifier
-        try store.saveVillageBots(JSONEncoder().encode(bots))
+        guard identifier != AgentPCVoice.roestLumi.rawValue || botID == VillageBot.lumiID else {
+            throw SaveFailure.voiceUnavailableForBot
+        }
+        let data = store.villageBots
+        var bots = data.isEmpty && botID == VillageBot.lumiID ? [] : try JSONDecoder().decode([VillageBot].self, from: data)
+        if let index = bots.firstIndex(where: { $0.id == botID }) {
+            bots[index].voice = identifier
+            try store.saveVillageBots(JSONEncoder().encode(bots))
+        } else if botID != VillageBot.lumiID {
+            throw SaveFailure.unknownBot
+        }
+        // Lumi's private chat can also open without a saved village profile.
         defaults.set(identifier, forKey: PhoneModels.agentVoiceKey(botID))
     }
 
     static func identifier(for bot: VillageBot) -> String {
         let override = UserDefaults.standard.string(forKey: PhoneModels.agentVoiceKey(bot.id)) ?? ""
         return override.isEmpty ? bot.voice : override
+    }
+
+    static func lumiIdentifier(profile: String, override: String, pcVoiceAvailable: Bool) -> String {
+        if !override.isEmpty { return override }
+        if pcVoiceAvailable && profile == "da-DK" { return AgentPCVoice.roestLumi.rawValue }
+        return profile
+    }
+
+    @MainActor static func adoptApprovedLumiVoiceIfAvailable(_ voices: [AgentPCVoice],
+                                                            defaults: UserDefaults = .standard) {
+        let appliedKey = "fadedai.lumi.approvedReferenceVoice.v1"
+        guard voices.contains(.roestLumi), !defaults.bool(forKey: appliedKey) else { return }
+        defaults.set(AgentPCVoice.roestLumi.rawValue, forKey: PhoneModels.agentVoiceKey(VillageBot.lumiID))
+        defaults.set(true, forKey: appliedKey)
     }
 
     /// Explicit voices keep their identity; a missing voice never silently becomes another one.
@@ -90,7 +115,13 @@ struct AgentVoicePicker: View {
     @State private var previewID: String?
     @State private var saveNotice: String?
 
-    private var selectedID: String { selection.isEmpty ? inheritedVoice : selection }
+    private var selectedID: String {
+        if botID == VillageBot.lumiID {
+            return AgentVoiceSelection.lumiIdentifier(profile: inheritedVoice, override: selection,
+                                                      pcVoiceAvailable: pcVoices.contains(.roestLumi))
+        }
+        return selection.isEmpty ? inheritedVoice : selection
+    }
     private var selectedPCVoice: AgentPCVoice? { AgentPCVoice(rawValue: selectedID) }
     private var selectedVoice: AVSpeechSynthesisVoice? {
         AgentVoiceSelection.resolve(identifier: selectedID, language: language)
@@ -151,10 +182,13 @@ struct AgentVoicePicker: View {
                     return
                 }
                 do {
-                    let result = try await api.agentPCVoices()
+                    let result = try await api.agentPCVoices(for: botID)
                     if !Task.isCancelled {
                         pcVoices = result
                         pcVoiceConnectionFailed = false
+                        if botID == VillageBot.lumiID {
+                            AgentVoiceSelection.adoptApprovedLumiVoiceIfAvailable(result)
+                        }
                     }
                 } catch {
                     if !Task.isCancelled {
@@ -350,9 +384,11 @@ struct AgentVoiceProfileCard: View {
     let bot: VillageBot
     let api: LiveAPI?
     @AppStorage private var voice: String
+    @Environment(\.scenePhase) private var phase
     @State private var language = "da-DK"
     @State private var showPicker = false
     @State private var showTasteTest = false
+    @State private var lumiPCVoiceAvailable = false
 
     init(bot: VillageBot, api: LiveAPI?) {
         self.bot = bot
@@ -364,13 +400,23 @@ struct AgentVoiceProfileCard: View {
         FadedCard {
             VStack(alignment: .leading, spacing: 10) {
                 FadedSectionLabel("Stemme")
-                let identifier = voice.isEmpty ? bot.voice : voice
+                let identifier = bot.id == VillageBot.lumiID
+                    ? AgentVoiceSelection.lumiIdentifier(profile: bot.voice, override: voice, pcVoiceAvailable: lumiPCVoiceAvailable)
+                    : voice.isEmpty ? bot.voice : voice
                 let selected = AgentVoiceSelection.resolve(identifier: identifier, language: bot.language ?? "da-DK")
                 Text(AgentPCVoice(rawValue: identifier)?.label
                      ?? selected.map(LocalSpeechVoice.label) ?? AgentVoiceSelection.unavailable).font(.subheadline)
                 FadedSecondaryButton("Vælg og hør stemmer", icon: "person.wave.2") { showPicker = true }
                 FadedSecondaryButton("Sammenlign to danske stemmer", icon: "headphones") { showTasteTest = true }
             }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .task(id: "\(api?.queueTargetID ?? ""):\(phase == .active)") {
+            guard bot.id == VillageBot.lumiID, phase == .active else { return }
+            let voices = try? await api?.agentPCVoices(for: bot.id)
+            if !Task.isCancelled {
+                lumiPCVoiceAvailable = voices?.contains(.roestLumi) == true
+                AgentVoiceSelection.adoptApprovedLumiVoiceIfAvailable(voices ?? [])
+            }
         }
         .sheet(isPresented: $showPicker) {
             AgentVoicePicker(botID: bot.id, name: bot.name, inheritedVoice: bot.voice, rate: bot.voiceRate ?? 1,

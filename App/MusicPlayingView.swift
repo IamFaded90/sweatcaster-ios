@@ -1,9 +1,9 @@
 import AVKit
 import SwiftUI
-import Kingfisher
 
 @MainActor struct MusicPlayingView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.fadedPalette) private var palette
     @ObservedObject private var player = MusicPlayer.shared
     @State private var position = 0.0
     @State private var scrubbing = false
@@ -13,17 +13,20 @@ import Kingfisher
             ScrollView {
                 VStack(spacing: 20) {
                     if let track = player.current {
-                        KFImage(track.artwork)
-                            .placeholder { Image(systemName: "music.note").font(.system(size: 80)).frame(height: 220) }
-                            .resizable().scaledToFit()
-                            .clipShape(RoundedRectangle(cornerRadius: 22))
-                        Text(track.title).font(.title2.bold()).multilineTextAlignment(.center)
-                        Text(track.artist).foregroundStyle(.secondary)
+                        MusicCover(url: track.artwork)
+                            .aspectRatio(1, contentMode: .fit)
+                            .frame(maxWidth: 360)
+                            .clipShape(RoundedRectangle(cornerRadius: 24))
+                            .shadow(color: .black.opacity(0.3), radius: 18, y: 10)
+                        VStack(spacing: 4) {
+                            Text(track.title).font(.title2.bold()).multilineTextAlignment(.center)
+                            Text(track.artist).foregroundStyle(palette.secondary)
+                        }
                         Slider(value: Binding(get: { scrubbing ? position : player.position }, set: { position = $0 }),
                                in: 0...max(1, player.duration)) { editing in
                             scrubbing = editing
                             if !editing { player.seek(position) }
-                        }.accessibilityLabel("Hvor langt sangen er nået")
+                        }.tint(palette.lime).accessibilityLabel("Hvor langt sangen er nået")
                         HStack {
                             Text(time(player.position))
                             Spacer()
@@ -66,7 +69,7 @@ import Kingfisher
                             }.padding(10).fadedGlassSurface()
                         }
                     }
-                }.padding(FadedSpacing.edge)
+                }.frame(maxWidth: .infinity).padding(FadedSpacing.edge)
             }.background { FadedBackground() }
                 .navigationTitle("Spiller nu").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { dismiss() } } }

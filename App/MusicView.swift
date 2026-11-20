@@ -2,6 +2,10 @@ import SwiftUI
 import Kingfisher
 
 @MainActor struct MusicView: View {
+    private enum Section: String, CaseIterable {
+        case home = "Oversigt", search = "Søg", library = "Mit bibliotek"
+    }
+
     let onBack: () -> Void
     @Environment(\.fadedPalette) private var palette
     @ObservedObject private var player = MusicPlayer.shared
@@ -12,7 +16,9 @@ import Kingfisher
     @State private var searching = false
     @State private var search: Task<Void, Never>?
     @State private var notice: String?
-    @State private var section = 0
+    @State private var section = Section.home
+    @FocusState private var searchFocused: Bool
+    @ScaledMetric(relativeTo: .body) private var coverWidth: CGFloat = 144
     @State private var showPlayer = false
     @State private var showPlaylistName = false
     @State private var playlistName = ""
@@ -21,31 +27,14 @@ import Kingfisher
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    HStack {
-                        TextField("Søg efter sang eller kunstner", text: $query).submitLabel(.search)
-                            .onSubmit { performSearch() }
-                        Button("Søg", systemImage: "magnifyingglass") { performSearch() }
-                            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                            .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }.padding(.horizontal, 14).fadedGlassSurface()
                     Picker("Musik", selection: $section) {
-                        Text("Søg").tag(0)
-                        Text("Mit bibliotek").tag(1)
+                        ForEach(Section.allCases, id: \.self) { page in Text(page.rawValue).tag(page) }
                     }.pickerStyle(.segmented)
-                    if section == 0 {
-                        if searching { ProgressView("Finder musik…") }
-                        if let notice { Text(notice).foregroundStyle(palette.secondary) }
-                        if !searched {
-                            FadedCard {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    Label("Din musik", systemImage: "music.note").font(.title2.bold())
-                                    Text("Søg, tryk på en sang, og lyt. Musikken kan fortsætte, når du går videre i appen eller låser telefonen.")
-                                    Text("Musikkilde · YouTube").font(.caption).foregroundStyle(palette.secondary)
-                                }.frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                        ForEach(results) { track in trackRow(track) { player.play(results, at: results.firstIndex(of: track) ?? 0) } }
-                    } else { libraryContent }
+                    switch section {
+                    case .home: overview
+                    case .search: searchContent
+                    case .library: libraryContent
+                    }
                     if let notice = library.notice { Text(notice).foregroundStyle(palette.secondary) }
                     if let notice = player.notice { Text(notice).foregroundStyle(palette.secondary) }
                 }.padding(FadedSpacing.edge)
@@ -71,11 +60,141 @@ import Kingfisher
                 .safeAreaInset(edge: .bottom) { miniPlayer }
                 .alert("Ny playliste", isPresented: $showPlaylistName) {
                     TextField("Navn", text: $playlistName)
-                    Button("Opret") { library.createPlaylist(playlistName); playlistName = ""; section = 1 }
+                    Button("Opret") { library.createPlaylist(playlistName); playlistName = ""; section = .library }
                     Button("Annuller", role: .cancel) {}
                 }
                 .sheet(isPresented: $showPlayer) { MusicPlayingView() }
                 .onDisappear { search?.cancel(); searching = false }
+        }
+    }
+
+    private var overview: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            Button {
+                section = .search
+            } label: {
+                HStack(alignment: .bottom) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text("Find din næste sang").font(.largeTitle.weight(.heavy))
+                        Label("Søg i musik", systemImage: "magnifyingglass").font(.subheadline.weight(.semibold))
+                    }
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, minHeight: 145, alignment: .leading)
+                .padding(20)
+                .foregroundStyle(.white)
+                .background(alignment: .trailing) {
+                    Image(systemName: "waveform")
+                        .font(.system(size: 128, weight: .black))
+                        .foregroundStyle(.white.opacity(0.15))
+                        .rotationEffect(.degrees(-18))
+                        .offset(x: 14, y: 4)
+                        .accessibilityHidden(true)
+                }
+                .background(LinearGradient(colors: [Color(red: 0.16, green: 0.11, blue: 0.44),
+                                                     Color(red: 0.50, green: 0.22, blue: 0.48)],
+                                           startPoint: .topLeading, endPoint: .bottomTrailing))
+                .clipShape(RoundedRectangle(cornerRadius: 24))
+            }.buttonStyle(.plain)
+
+            if !library.recent.isEmpty { trackShelf("Sidst afspillet", tracks: library.recent) }
+            if !library.saved.favorites.isEmpty { trackShelf("Favoritter", tracks: library.saved.favorites) }
+            if !library.saved.playlists.isEmpty { playlistShelf }
+            if !library.saved.downloads.isEmpty { trackShelf("Hentet til offline", tracks: library.saved.downloads) }
+            exploreShelf
+        }
+    }
+
+    private var searchContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                TextField("Søg efter sang eller kunstner", text: $query).submitLabel(.search)
+                    .focused($searchFocused)
+                    .onSubmit { performSearch() }
+                Button("Søg", systemImage: "magnifyingglass") { performSearch() }
+                    .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                    .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }.padding(.horizontal, 14).fadedGlassSurface()
+            if searching { ProgressView("Finder musik…") }
+            if let notice { Text(notice).foregroundStyle(palette.secondary) }
+            if !searched { exploreShelf }
+            ForEach(results) { track in
+                trackRow(track) { player.play(results, at: results.firstIndex(of: track) ?? 0) }
+            }
+        }
+    }
+
+    private func trackShelf(_ title: String, tracks: [MusicTrack]) -> some View {
+        shelf(title) {
+            ForEach(Array(tracks.prefix(16).enumerated()), id: \.element.id) { index, track in
+                Button { player.play(tracks, at: index) } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        artwork(track, size: shelfWidth)
+                        Text(track.title).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text(track.artist).font(.caption).foregroundStyle(palette.secondary).lineLimit(1)
+                    }.frame(width: shelfWidth, alignment: .leading)
+                }.buttonStyle(.plain)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityHint("Afspiller sangen")
+            }
+        }
+    }
+
+    private var playlistShelf: some View {
+        shelf("Dine playlister") {
+            ForEach(library.saved.playlists) { list in
+                Button { player.play(list.tracks) } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        if let first = list.tracks.first { artwork(first, size: shelfWidth) }
+                        else {
+                            MusicCover(url: nil, symbol: "music.note.list")
+                                .frame(width: shelfWidth, height: shelfWidth)
+                                .clipShape(.rect(cornerRadius: 16))
+                        }
+                        Text(list.name).font(.subheadline.weight(.semibold)).lineLimit(1)
+                        Text("\(list.tracks.count) sange").font(.caption).foregroundStyle(palette.secondary)
+                    }.frame(width: shelfWidth, alignment: .leading)
+                }.buttonStyle(.plain)
+                    .disabled(list.tracks.isEmpty)
+                    .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    private var exploreShelf: some View {
+        shelf("Gå på opdagelse") {
+            genre("Dansk musik", icon: "sparkles", hue: 0.95)
+            genre("Hip-hop", icon: "mic.fill", hue: 0.66)
+            genre("Pop", icon: "bolt.fill", hue: 0.06)
+            genre("House", icon: "waveform", hue: 0.49)
+        }
+    }
+
+    private func genre(_ title: String, icon: String, hue: Double) -> some View {
+        Button {
+            query = title
+            performSearch()
+        } label: {
+            VStack(alignment: .leading, spacing: 12) {
+                Image(systemName: icon).font(.title2.bold()).accessibilityHidden(true)
+                Text(title).font(.headline).lineLimit(2)
+            }.frame(width: min(112, shelfWidth - 24), alignment: .leading)
+                .padding(14)
+                .foregroundStyle(.white)
+                .background(Color(hue: hue, saturation: 0.71, brightness: 0.42), in: .rect(cornerRadius: 16))
+        }.buttonStyle(.plain)
+            .accessibilityHint("Søger efter musik i kataloget")
+    }
+
+    private var shelfWidth: CGFloat { min(220, coverWidth) }
+
+    private func shelf<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(title).font(.title2.weight(.bold)).accessibilityAddTraits(.isHeader)
+            ScrollView(.horizontal) {
+                LazyHStack(alignment: .top, spacing: 12, content: content)
+                    .scrollTargetLayout()
+            }.scrollTargetBehavior(.viewAligned).scrollIndicators(.hidden)
         }
     }
 
@@ -87,7 +206,7 @@ import Kingfisher
                         artwork(track)
                         VStack(alignment: .leading) {
                             Text(track.title).lineLimit(1).font(.subheadline.bold())
-                            Text(track.artist).lineLimit(1).font(.caption)
+                            Text(track.artist).lineLimit(1).font(.caption).foregroundStyle(palette.secondary)
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
                 }.buttonStyle(.plain)
@@ -98,7 +217,27 @@ import Kingfisher
                 }
                 Button("Næste sang", systemImage: "forward.end.fill") { player.next() }
                     .labelStyle(.iconOnly).frame(width: 44, height: 44)
-            }.padding(12).fadedGlassSurface().padding(.horizontal, FadedSpacing.edge)
+            }.padding(10)
+                .foregroundStyle(palette.text)
+                .background {
+                    RoundedRectangle(cornerRadius: 18)
+                        .fill(.regularMaterial)
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 18)
+                                .fill(Color(red: 0.48, green: 0.32, blue: 0.81).opacity(0.16))
+                        }
+                }
+                .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(palette.secondary.opacity(0.25)) }
+                .overlay(alignment: .bottom) {
+                    if player.duration.isFinite, player.duration > 0, player.position.isFinite {
+                        ProgressView(value: max(0, min(player.position, player.duration)), total: player.duration)
+                            .tint(palette.lime)
+                            .padding(.horizontal, 14)
+                            .accessibilityHidden(true)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .padding(.horizontal, FadedSpacing.edge)
         }
     }
 
@@ -166,21 +305,22 @@ import Kingfisher
         }.padding(10).fadedGlassSurface()
     }
 
-    private func artwork(_ track: MusicTrack) -> some View {
-        KFImage(track.artwork)
-            .placeholder { Image(systemName: "music.note").frame(maxWidth: .infinity, maxHeight: .infinity) }
-            .resizable().scaledToFill()
-            .frame(width: 44, height: 44).clipped().clipShape(RoundedRectangle(cornerRadius: 8))
+    private func artwork(_ track: MusicTrack, size: CGFloat = 44) -> some View {
+        MusicCover(url: track.artwork)
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: size > 44 ? 16 : 8))
     }
 
     private func performSearch() {
+        let input = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { return }
         search?.cancel()
-        let input = query
+        searchFocused = false
         searching = true
         searched = true
         results = []
         notice = nil
-        section = 0
+        section = .search
         search = Task {
             defer { if !Task.isCancelled { searching = false } }
             do {
@@ -190,6 +330,31 @@ import Kingfisher
                 if tracks.isEmpty { notice = "Ingen sange fundet. Prøv kunstnerens navn eller en anden titel." }
             } catch is CancellationError { return }
             catch { if !Task.isCancelled { notice = error.localizedDescription } }
+        }
+    }
+}
+
+struct MusicCover: View {
+    let url: URL?
+    var symbol = "music.note"
+
+    var body: some View {
+        GeometryReader { geometry in
+            KFImage(url)
+                .placeholder { placeholder }
+                .resizable().scaledToFill()
+                .frame(width: geometry.size.width, height: geometry.size.height)
+                .background { placeholder }
+                .clipped()
+        }
+        .accessibilityHidden(true)
+    }
+
+    private var placeholder: some View {
+        ZStack {
+            LinearGradient(colors: [Color(red: 0.26, green: 0.18, blue: 0.52), Color(red: 0.51, green: 0.26, blue: 0.57)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            Image(systemName: symbol).font(.title3.weight(.semibold)).foregroundStyle(.white)
         }
     }
 }

@@ -257,9 +257,8 @@ import SwiftUI
             }
             .pickerStyle(.segmented)
             .frame(minHeight: 44)
-            if basicMode {
-                FadedDetailText("Vælg en agent for at se dens profil, chatte med den eller give den en opgave på PC’en.")
-            }
+            .padding(.horizontal, 8)
+            .fadedGlassSurface(radius: FadedRadius.medium)
         }
         .padding(.horizontal, FadedSpacing.edge)
         .padding(.vertical, FadedSpacing.s)

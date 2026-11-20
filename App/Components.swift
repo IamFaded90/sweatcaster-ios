@@ -78,8 +78,8 @@ struct FadedSectionLabel: View {
     init(_ title: String) { self.title = title }
 
     var body: some View {
-        Text(title.uppercased()).font(FadedTypography.section).tracking(0.8)
-            .foregroundStyle(palette.secondary).accessibilityAddTraits(.isHeader)
+        Text(title).font(FadedTypography.section)
+            .foregroundStyle(palette.text).accessibilityAddTraits(.isHeader)
     }
 }
 
@@ -255,7 +255,11 @@ struct FadedCard<Content: View>: View {
                 }
             }
             .overlay(alignment: .leading) {
-                if let accent { Rectangle().fill(accent).frame(width: FadedSpacing.xs).accessibilityHidden(true) }
+                if let accent {
+                    Capsule().fill(accent).frame(width: 3)
+                        .padding(.vertical, 11).padding(.leading, 3)
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                }
             }
             .clipShape(shape)
             .overlay { shape.strokeBorder(border, lineWidth: 1).allowsHitTesting(false) }

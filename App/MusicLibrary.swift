@@ -14,6 +14,7 @@ import SwiftUI
         var downloads: [MusicTrack] = []
     }
     @Published private(set) var saved = Saved()
+    @Published private(set) var recent: [MusicTrack] = []
     @Published var notice: String?
     @Published private(set) var downloading: Set<String> = []
     private let folder: URL
@@ -35,6 +36,11 @@ import SwiftUI
         self.folder = folder ?? URL.applicationSupportDirectory.appending(path: "FadedMusic", directoryHint: .isDirectory)
         do {
             try FileManager.default.createDirectory(at: self.folder, withIntermediateDirectories: true)
+            let history = self.folder.appending(path: "recent.json")
+            if let data = try? Data(contentsOf: history),
+               let tracks = try? JSONDecoder().decode([MusicTrack].self, from: data) {
+                recent = Array(tracks.prefix(16))
+            }
             let file = self.folder.appending(path: "library.json")
             if FileManager.default.fileExists(atPath: file.path) {
                 saved = try JSONDecoder().decode(Saved.self, from: Data(contentsOf: file))
@@ -57,6 +63,13 @@ import SwiftUI
         if saved.favorites.contains(where: { $0.id == track.id }) { saved.favorites.removeAll { $0.id == track.id } }
         else { saved.favorites.append(track) }
         persist()
+    }
+
+    func recordPlayback(_ track: MusicTrack) {
+        guard recent.first != track else { return }
+        recent.removeAll { $0.id == track.id }
+        recent = Array(([track] + recent).prefix(16))
+        try? JSONEncoder().encode(recent).write(to: folder.appending(path: "recent.json"), options: .atomic)
     }
 
     func createPlaylist(_ name: String) {

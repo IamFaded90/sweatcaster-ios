@@ -188,14 +188,23 @@ extension Home {
         if target == nil { jobsFocus = true }
     }
     private var videoStudioHeader: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            FadedSignature()
-            Label("Dine klip", systemImage: "film").font(FadedTypography.title)
-                .foregroundStyle(palette.text).accessibilityAddTraits(.isHeader)
-            FadedSecondaryButton(model.isDemo ? "Opdatér testklip" : "Opdatér spilmapper", icon: "arrow.clockwise") {
-                Task { await refreshVideoStudio() }
-            }.disabled(switchDisabled || catalogLoading != nil || pageLoading != nil)
+        FadedCard(accent: palette.cyan) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 12) { clipLibraryTitle; Spacer(minLength: 0); refreshClipLibrary }
+                VStack(alignment: .leading, spacing: 8) { clipLibraryTitle; refreshClipLibrary }
+            }
         }
+    }
+
+    private var clipLibraryTitle: some View {
+        Label("Dine klip", systemImage: "film").font(FadedTypography.title)
+            .foregroundStyle(palette.text).accessibilityAddTraits(.isHeader)
+    }
+
+    private var refreshClipLibrary: some View {
+        FadedSecondaryButton(model.isDemo ? "Opdatér testklip" : "Opdatér spilmapper", icon: "arrow.clockwise") {
+            Task { await refreshVideoStudio() }
+        }.disabled(switchDisabled || catalogLoading != nil || pageLoading != nil)
     }
 
     @ViewBuilder private var videoFeedback: some View {

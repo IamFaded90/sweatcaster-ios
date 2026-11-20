@@ -16,21 +16,18 @@ struct HomeScreen: View {
                 VStack(alignment: .leading, spacing: Style.space) {
                     HStack(alignment: .center, spacing: Style.space) {
                         VStack(alignment: .leading, spacing: Style.small) {
-                            Text("IamFaded")
-                                .font(Style.meta.weight(.bold))
-                                .tracking(2)
-                                .foregroundStyle(Style.accent)
-                            Text("Din skærm.\nStørre.")
+                            Text("Underholdning")
                                 .font(.system(.largeTitle, design: .rounded, weight: .bold))
                                 .fixedSize(horizontal: false, vertical: true)
-                            Text("Find en video. Se den på dit TV.")
+                                .accessibilityAddTraits(.isHeader)
+                            Text("Se film og serier på dit TV")
                                 .font(Style.body).foregroundStyle(Style.muted)
                         }
                         Spacer(minLength: 0)
                         Image("AppMascot", bundle: .module)
                             .resizable()
                             .scaledToFill()
-                            .frame(width: 82, height: 82)
+                            .frame(width: 66, height: 66)
                             .clipShape(RoundedRectangle(cornerRadius: 20))
                             .accessibilityHidden(true)
                     }

@@ -121,7 +121,7 @@ import UIKit
         var current: String?
         switch kind {
         case .voice:
-            let pcVoices = if let api { (try? await api.agentPCVoices()) ?? [] } else { [AgentPCVoice]() }
+            let pcVoices = if let api { (try? await api.agentPCVoices(for: bot.id)) ?? [] } else { [AgentPCVoice]() }
             guard !Task.isCancelled else { return }
             choices = pcVoices.filter { $0.language == "da-DK" }.map { ($0.id, $0.label) }
             var namesSeen = Set<String>()

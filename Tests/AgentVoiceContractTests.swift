@@ -3,6 +3,27 @@ import XCTest
 @testable import SweatCaster
 
 final class AgentVoiceContractTests: XCTestCase {
+    @MainActor func testApprovedLumiVoiceWaitsForPCAndPreservesLaterVoiceChoices() throws {
+        let suite = "LumiVoiceTests." + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let lumiKey = PhoneModels.agentVoiceKey(VillageBot.lumiID)
+        let otherKey = PhoneModels.agentVoiceKey(UUID())
+        defaults.set(AgentPCVoice.roestNic.rawValue, forKey: lumiKey)
+        defaults.set(AgentPCVoice.roestMic.rawValue, forKey: otherKey)
+
+        AgentVoiceSelection.adoptApprovedLumiVoiceIfAvailable([.roestMic, .roestNic], defaults: defaults)
+        XCTAssertEqual(defaults.string(forKey: lumiKey), AgentPCVoice.roestNic.rawValue)
+
+        AgentVoiceSelection.adoptApprovedLumiVoiceIfAvailable([.roestLumi], defaults: defaults)
+        XCTAssertEqual(defaults.string(forKey: lumiKey), AgentPCVoice.roestLumi.rawValue)
+        XCTAssertEqual(defaults.string(forKey: otherKey), AgentPCVoice.roestMic.rawValue)
+
+        defaults.set(AgentPCVoice.roestNic.rawValue, forKey: lumiKey)
+        AgentVoiceSelection.adoptApprovedLumiVoiceIfAvailable([.roestLumi], defaults: defaults)
+        XCTAssertEqual(defaults.string(forKey: lumiKey), AgentPCVoice.roestNic.rawValue)
+    }
+
     func testDanishDictationPrefersDedicatedModelAndKeepsInstalledFallbacks() {
         XCTAssertEqual(AgentWhisper.availableModels(for: "da-DK", installed: { _ in true }), [.danish, .small, .base])
         XCTAssertEqual(AgentWhisper.availableModels(for: "da-DK", installed: { $0 == .base }), [.base])
