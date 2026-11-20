@@ -5,7 +5,8 @@
         const { mocData, images } = window.portraitModel;
         const bytes = Uint8Array.from(atob(mocData), value => value.charCodeAt(0));
         let moc;
-        for (let attempt = 0; attempt < 80 && !moc; attempt++) {
+        const coreDeadline = Date.now() + 12000;
+        while (!moc && Date.now() < coreDeadline) {
             try { moc = Live2DCubismCore.Moc.fromArrayBuffer(bytes.buffer); } catch (_) {}
             if (!moc) await new Promise(resolve => setTimeout(resolve, 25));
         }
@@ -117,6 +118,7 @@
         canvas.addEventListener("webglcontextlost", () => notify("failed"));
         notify("ready");
     } catch (error) {
+        window.portraitStartupError = String(error);
         console.error(error);
         notify("failed");
     }

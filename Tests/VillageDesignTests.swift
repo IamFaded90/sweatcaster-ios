@@ -56,19 +56,33 @@ final class VillageDesignTests: XCTestCase {
     }
 
     @MainActor func testBundledCubismPortraitsRenderBlinkMouthAndBreathTogether() async throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let host = UIViewController()
+        let window = UIWindow(windowScene: scene)
+        window.rootViewController = host
+        window.isHidden = false
+        defer { window.isHidden = true }
+
         for name in ["harper", "lumi"] {
             let url = try XCTUnwrap(Bundle.main.url(forResource: name, withExtension: "html",
                                                    subdirectory: "Village/cubism"))
             let view = WKWebView(frame: CGRect(x: 0, y: 0, width: 256, height: 384))
+            host.view.addSubview(view)
+            defer { view.removeFromSuperview() }
             view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
             var loaded = false
-            for _ in 0..<100 {
+            let deadline = Date.now.addingTimeInterval(25)
+            while Date.now < deadline {
+                if let failure = try? await view.evaluateJavaScript("window.portraitStartupError ?? null") as? String {
+                    XCTFail("\(name) could not start Cubism: \(failure)")
+                    break
+                }
                 if let ready = try? await view.evaluateJavaScript("typeof window.renderPortrait === 'function'") as? Bool,
                    ready {
                     loaded = true
                     break
                 }
-                try await Task.sleep(for: .milliseconds(50))
+                try await Task.sleep(for: .milliseconds(150))
             }
             XCTAssertTrue(loaded, "\(name) failed to load the bundled Cubism player")
             guard loaded else { continue }
