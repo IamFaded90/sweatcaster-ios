@@ -74,11 +74,12 @@ struct LocalFileStore: FileStore {
     @discardableResult
     static func checkedFileSize(_ url: URL, maximumBytes: Int) throws -> Int {
         guard url.isFileURL, maximumBytes >= 0 else { throw Failure.invalidPath }
-        let info = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey])
-        guard info.isRegularFile == true, info.isSymbolicLink != true,
-              let size = info.fileSize, size >= 0 else { throw Failure.invalidFile }
-        guard size <= maximumBytes else { throw Failure.tooLarge }
-        return size
+        // A download can change the file while URL resource values still hold its previous size.
+        guard let info = try metadata(url) else { throw CocoaError(.fileReadNoSuchFile) }
+        guard (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG),
+              info.st_size >= 0 else { throw Failure.invalidFile }
+        guard info.st_size <= Int64(maximumBytes) else { throw Failure.tooLarge }
+        return Int(info.st_size)
     }
 
     private static func openRegularFile(_ url: URL, maximumBytes: Int) throws -> FileHandle {
