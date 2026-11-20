@@ -126,7 +126,7 @@ import WebKit
         guard let webView, let start, let activeURL = webView.url, canSubmit else { return }
         canSubmit = false
         webView.callAsyncJavaScript(Self.fillForm, arguments: ["address": email, "start": start.absoluteString,
-                                    "submitForm": submit], in: nil, contentWorld: .defaultClient) { [weak self] result in
+                                    "submitForm": submit], in: nil, in: .defaultClient) { [weak self] result in
             guard let self, webView.url == activeURL, !webView.isLoading else { return }
             switch result {
             case .success(let value):

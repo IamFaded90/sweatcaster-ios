@@ -171,7 +171,7 @@ import Observation
     }
 
     func saveRegularStudioTurns(_ turns: [PrivateChatTurn]) throws {
-        let retained = turns.suffix(100)
+        let retained = Array(turns.suffix(100))
         try persist(JSONEncoder().encode(retained), for: .turns)
         pruneInstagramPhotos(keeping: Set(retained.filter { $0.agentAction?.instagramDraft?.hasPhoto == true }.map(\.id)))
     }
