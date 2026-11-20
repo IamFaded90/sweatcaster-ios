@@ -101,13 +101,6 @@ enum AgentMailRevision {
     }
 }
 
-private extension String {
-    func cut(afterAny prefixes: [String]) -> String? {
-        guard let prefix = prefixes.first(where: hasPrefix) else { return nil }
-        return String(dropFirst(prefix.count))
-    }
-}
-
 extension AgentPhoneChat {
     func loadModels(preferSetting: Bool = false) {
         let available = PhoneModels.textOptions.filter { PhoneModels.isReady($0.id) }

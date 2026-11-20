@@ -162,94 +162,7 @@ import UIKit
 
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Det sælger du") {
-                    TextField("Hvad er det? Model og navn", text: $title)
-                    TextField("Stand, tilbehør og oplysninger til køberen", text: $details, axis: .vertical).lineLimit(4...8)
-                    FadedSecondaryButton("Lad agenten foreslå annonceteksten", icon: "sparkles") { suggestText() }
-                        .disabled(busy || loadingPhotos || (details.isEmpty && title.isEmpty && photos.isEmpty))
-                    ForEach(questions, id: \.self) { Text($0).font(.callout).foregroundStyle(.secondary) }
-                    if existing == nil {
-                        PhotosPicker(selection: $selectedPhotos, maxSelectionCount: 8, matching: .images) {
-                        Label("Vælg fotos · \(photos.count)/8", systemImage: "photo.on.rectangle")
-                        }
-                    } else {
-                        Text("\(existing?.photoCount ?? 0) fotos er gemt på PC’en.")
-                    }
-                    if loadingPhotos { ProgressView("Gør billederne klar…") }
-                    if !photos.isEmpty {
-                        ScrollView(.horizontal) {
-                            HStack {
-                                ForEach(photos.indices, id: \.self) { index in
-                                    if let image = UIImage(data: photos[index]) {
-                                        VStack {
-                                            Image(uiImage: image).resizable().scaledToFit().frame(width: 100, height: 100)
-                                            Button("Fjern foto \(index + 1)", systemImage: "trash", role: .destructive) {
-                                                photos.remove(at: index)
-                                            }.labelStyle(.iconOnly).frame(minHeight: 44)
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                Section("Dine rammer") {
-                    TextField("Mindstepris", text: $minimum).keyboardType(.decimalPad)
-                    TextField("Annoncepris", text: $asking).keyboardType(.decimalPad)
-                    Picker("Valuta", selection: $currency) {
-                        Text("Danske kroner").tag("DKK")
-                        Text("Svenske kroner").tag("SEK")
-                    }
-                    if catalog != nil {
-                        Button("Foreslå en pris fra lignende salg på Tradera") { suggestPrice() }
-                            .disabled(busy || categoryID == 0 || title.count < 3)
-                    }
-                    if let priceNote { Text(priceNote).font(.caption).foregroundStyle(.secondary) }
-                    TextField("Afhentning eller levering", text: $shipping, axis: .vertical)
-                    if existing == nil {
-                        Toggle("Følg Traderas køberbeskeder i min forbundne Gmail", isOn: $watchMail)
-                    }
-                    Text("Tradera udgiver i svenske kroner. Du får den omregnede pris at se før udgivelsen.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                if let catalog {
-                    Section("Tradera-annonce") {
-                        Button(categoryName) { selectingCategory = true }
-                        Picker("Hvem må købe?", selection: $bidderID) {
-                            Text("Vælg område").tag(0)
-                            ForEach(catalog.bidders) { Text($0.description ?? "Område").tag($0.id) }
-                        }
-                        Picker("Fragtfirma", selection: $providerID) {
-                            Text("Kun oplysningerne ovenfor").tag(0)
-                            ForEach(catalog.shipping) { Text($0.name).tag($0.id) }
-                        }
-                        if providerID != 0 {
-                            TextField("Fragtpris i svenske kroner", text: $shippingCost).keyboardType(.numberPad)
-                        }
-                        ForEach(attributes.filter { !($0.possibleTermValues ?? []).isEmpty }) { field in
-                            Picker((field.name ?? "Egenskab") + ((field.minNumberOfValues ?? 0) > 0 ? " *" : ""),
-                                   selection: Binding(get: { terms[field.id] ?? "" }, set: { terms[field.id] = $0 })) {
-                                Text("Vælg").tag("")
-                                ForEach(field.possibleTermValues ?? [], id: \.self) { Text($0).tag($0) }
-                            }
-                        }
-                    }
-                }
-                Section {
-                    Button("Gem salgskladde") { save() }.buttonStyle(FadedButtonStyle(kind: .primary))
-                        .disabled(busy || loadingPhotos || title.trimmingCharacters(in: .whitespaces).isEmpty ||
-                                  details.trimmingCharacters(in: .whitespaces).isEmpty || lowest <= 0 || price < lowest)
-                    if busy { ProgressView("Gemmer på PC’en…") }
-                    if let notice { Text(notice).foregroundStyle(.secondary) }
-                }
-            }
-            .scrollContentBackground(.hidden).background { FadedBackground() }
-            .navigationTitle("Nyt salg").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Luk") { dismiss() } } }
-            .sheet(isPresented: $selectingCategory) {
-                AgentSaleCategoryPicker(categories: catalog?.categories ?? [], selection: $categoryID)
-            }
+            presentedForm
             .task {
                 if title.isEmpty && prompt.lowercased().range(of: #"\bsælg(?:e)?\b"#, options: .regularExpression) != nil {
                     details = prompt
@@ -272,6 +185,117 @@ import UIKit
             }
             .onChange(of: categoryID) { _, _ in terms = [:] }
             .task(id: selectedPhotos) { await loadPhotos() }
+        }
+    }
+
+    private var saleForm: some View {
+        Form {
+            itemSection
+            priceSection
+            traderaSection
+            saveSection
+        }
+    }
+
+    private var presentedForm: some View {
+        saleForm
+            .scrollContentBackground(.hidden).background { FadedBackground() }
+            .navigationTitle("Nyt salg").navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Luk") { dismiss() } } }
+            .sheet(isPresented: $selectingCategory) {
+                AgentSaleCategoryPicker(categories: catalog?.categories ?? [], selection: $categoryID)
+            }
+    }
+
+    private var itemSection: some View {
+        Section("Det sælger du") {
+            TextField("Hvad er det? Model og navn", text: $title)
+            TextField("Stand, tilbehør og oplysninger til køberen", text: $details, axis: .vertical).lineLimit(4...8)
+            FadedSecondaryButton("Lad agenten foreslå annonceteksten", icon: "sparkles") { suggestText() }
+                .disabled(busy || loadingPhotos || (details.isEmpty && title.isEmpty && photos.isEmpty))
+            ForEach(questions, id: \.self) { Text($0).font(.callout).foregroundStyle(.secondary) }
+            if existing == nil {
+                PhotosPicker(selection: $selectedPhotos, maxSelectionCount: 8, matching: .images) {
+                Label("Vælg fotos · \(photos.count)/8", systemImage: "photo.on.rectangle")
+                }
+            } else {
+                Text("\(existing?.photoCount ?? 0) fotos er gemt på PC’en.")
+            }
+            if loadingPhotos { ProgressView("Gør billederne klar…") }
+            if !photos.isEmpty {
+                ScrollView(.horizontal) {
+                    HStack {
+                        ForEach(photos.indices, id: \.self) { index in
+                            if let image = UIImage(data: photos[index]) {
+                                VStack {
+                                    Image(uiImage: image).resizable().scaledToFit().frame(width: 100, height: 100)
+                                    Button("Fjern foto \(index + 1)", systemImage: "trash", role: .destructive) {
+                                        photos.remove(at: index)
+                                    }.labelStyle(.iconOnly).frame(minHeight: 44)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var priceSection: some View {
+        Section("Dine rammer") {
+            TextField("Mindstepris", text: $minimum).keyboardType(.decimalPad)
+            TextField("Annoncepris", text: $asking).keyboardType(.decimalPad)
+            Picker("Valuta", selection: $currency) {
+                Text("Danske kroner").tag("DKK")
+                Text("Svenske kroner").tag("SEK")
+            }
+            if catalog != nil {
+                Button("Foreslå en pris fra lignende salg på Tradera") { suggestPrice() }
+                    .disabled(busy || categoryID == 0 || title.count < 3)
+            }
+            if let priceNote { Text(priceNote).font(.caption).foregroundStyle(.secondary) }
+            TextField("Afhentning eller levering", text: $shipping, axis: .vertical)
+            if existing == nil {
+                Toggle("Følg Traderas køberbeskeder i min forbundne Gmail", isOn: $watchMail)
+            }
+            Text("Tradera udgiver i svenske kroner. Du får den omregnede pris at se før udgivelsen.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder private var traderaSection: some View {
+        if let catalog {
+            Section("Tradera-annonce") {
+                Button(categoryName) { selectingCategory = true }
+                Picker("Hvem må købe?", selection: $bidderID) {
+                    Text("Vælg område").tag(0)
+                    ForEach(catalog.bidders) { Text($0.description ?? "Område").tag($0.id) }
+                }
+                Picker("Fragtfirma", selection: $providerID) {
+                    Text("Kun oplysningerne ovenfor").tag(0)
+                    ForEach(catalog.shipping) { Text($0.name).tag($0.id) }
+                }
+                if providerID != 0 {
+                    TextField("Fragtpris i svenske kroner", text: $shippingCost).keyboardType(.numberPad)
+                }
+                ForEach(attributes.filter { !($0.possibleTermValues ?? []).isEmpty }) { field in
+                    Picker((field.name ?? "Egenskab") + ((field.minNumberOfValues ?? 0) > 0 ? " *" : ""),
+                           selection: Binding(get: { terms[field.id] ?? "" }, set: { terms[field.id] = $0 })) {
+                        Text("Vælg").tag("")
+                        ForEach(field.possibleTermValues ?? [], id: \.self) { Text($0).tag($0) }
+                    }
+                }
+            }
+        }
+    }
+
+    private var saveSection: some View {
+        Section {
+            Button("Gem salgskladde") { save() }.buttonStyle(FadedButtonStyle(kind: .primary))
+                .disabled(busy || loadingPhotos || title.trimmingCharacters(in: .whitespaces).isEmpty ||
+                          details.trimmingCharacters(in: .whitespaces).isEmpty || lowest <= 0 || price < lowest)
+            if busy { ProgressView("Gemmer på PC’en…") }
+            if let notice { Text(notice).foregroundStyle(.secondary) }
         }
     }
 

@@ -95,3 +95,10 @@ enum AgentChatIntent {
         })
     }
 }
+
+private extension String {
+    func cut(afterAny prefixes: [String]) -> String? {
+        guard let prefix = prefixes.first(where: hasPrefix) else { return nil }
+        return String(dropFirst(prefix.count))
+    }
+}

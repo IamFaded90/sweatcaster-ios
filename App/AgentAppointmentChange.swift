@@ -246,7 +246,7 @@ struct MailAppointmentChange: Decodable, Equatable, Identifiable {
     private func apply() {
         guard let api, let change = selected, let snapshot, let eventID, reminderChosen, !busy,
               let event = snapshot.events.first(where: { $0.id == eventID }) else { return }
-        let reminder = snapshot.reminders.first(where: { $0.id == reminderID })
+        let reminder = snapshot.reminders(for: event, change: change).first(where: { $0.id == reminderID })
         busy = true
         notice = nil
         Task {
