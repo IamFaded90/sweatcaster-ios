@@ -28,7 +28,7 @@ private final class FilmStatusCheck: NSObject, @preconcurrency GCKRequestDelegat
     private var success: Bool?
     func requestDidComplete(_ request: GCKRequest) { success = true }
     func request(_ request: GCKRequest, didFailWithError error: GCKError) { success = false }
-    func request(_ request: GCKRequest, didAbortWithReason reason: GCKRequestAbortReason) { success = false }
+    func request(_ request: GCKRequest, didAbortWith reason: GCKRequestAbortReason) { success = false }
 
     func verify(_ client: GCKRemoteMediaClient) async throws {
         try await waitFor(client.requestStatus())
