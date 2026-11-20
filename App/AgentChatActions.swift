@@ -387,72 +387,7 @@ extension AgentPhoneChat {
                             }
                         }
                     } else if openAgentAction == turn.id {
-                        switch action.kind {
-                        case .gmailReply, .bookingRequest:
-                            if let api {
-                                AgentGmailReply(api: api, prompt: turn.prompt, requestID: turn.id, botID: bot.id, storedDraft: action.mailDraft,
-                                               onDraftChanged: { updateAgentDraft(turn.id, draft: $0) }) { address in
-                                    guard let link = URL(string: address), link.scheme == "https", link.host == "mail.google.com" else {
-                                        notice = "Gmail-kvitteringen kunne ikke verificeres. Tjek Sendt før du prøver igen."
-                                        return
-                                    }
-                                    let receipt: String
-                                    if case .bookingRequest = action.kind { receipt = "Forespørgslen er sendt via Gmail." }
-                                    else { receipt = "Svar sendt via Gmail." }
-                                    finishAgentAction(turn.id, receipt: receipt, link: link)
-                                }
-                                .id(api.queueTargetID)
-                            } else {
-                                FadedDetailText("Opgaven er gemt. Forbind PC’en for at bruge Gmail.")
-                                if let draft = action.mailDraft { Text(draft.body).textSelection(.enabled) }
-                            }
-                        case .phone(let request):
-                            AgentPhoneActionCard(request: request, botName: bot.name, botID: bot.id) { receipt in
-                                finishAgentAction(turn.id, receipt: receipt)
-                            }
-                        case .today:
-                            AgentTodayOverview(api: api, botName: bot.name)
-                        case .appointmentCheck:
-                            AgentAvailabilityCheck(api: api, prompt: AgentChatIntent.normalize(turn.prompt))
-                        case .meetingPrep:
-                            AgentMeetingPrep(prompt: turn.prompt)
-                        case .mailReminder:
-                            AgentMailReminderCard(api: api, prompt: turn.prompt, requestID: turn.id, botName: bot.name) { receipt in
-                                finishAgentAction(turn.id, receipt: receipt)
-                            }
-                        case .followups:
-                            AgentFollowupList(api: api)
-                        case .instagramPost:
-                            AgentInstagramPost(api: api, bot: bot, id: turn.id, prompt: turn.prompt,
-                                               draft: action.instagramDraft, suggest: instagramCaption,
-                                               requestedPlan: instagramPlanRequest, planApplied: { instagramPlanRequest = nil },
-                                               save: { saveInstagramDraft(turn.id, draft: $0) },
-                                               published: { finishAgentAction(turn.id, receipt: $0) })
-                                .id(api?.queueTargetID ?? "offline")
-                        case .instagramPlans:
-                            AgentInstagramPlanner(api: api, bot: bot).id(api?.queueTargetID ?? "offline")
-                        case .traderaWatch:
-                            AgentTraderaWatch(api: api, bot: bot, id: turn.id, prompt: turn.prompt, listOnly: false)
-                                .id(api?.queueTargetID ?? "offline")
-                        case .traderaWatches:
-                            AgentTraderaWatch(api: api, bot: bot, id: turn.id, prompt: turn.prompt, listOnly: true)
-                                .id(api?.queueTargetID ?? "offline")
-                        case .instagramAccount:
-                            AgentInstagramAccount(api: api, bot: bot) {
-                                startAgentAction(.action(.instagramPost), prompt: "Lav et Instagram-opslag")
-                            }
-                        case .agentEmail(let request):
-                            if let api {
-                                AgentEmailCard(api: api, bot: bot, request: request, prompt: turn.prompt)
-                                    .id(api.queueTargetID)
-                            } else {
-                                FadedDetailText("Forbind til din PC for at bruge agentens e-mail.")
-                            }
-                        case .preference:
-                            AgentPreferenceList(bot: bot)
-                        case .workflow:
-                            FadedDetailText("Der er endnu ingen kvittering for opgaven.")
-                        }
+                        agentActionContent(turn, action: action)
                     } else {
                         Button("Åbn opgaven", systemImage: "arrow.turn.down.right") { openAgentAction = turn.id }
                             .frame(minHeight: 44)
@@ -460,6 +395,75 @@ extension AgentPhoneChat {
                 }
             }
             .privacySensitive()
+        }
+    }
+
+    @ViewBuilder private func agentActionContent(_ turn: PrivateChatTurn, action: AgentChatAction) -> some View {
+        switch action.kind {
+        case .gmailReply, .bookingRequest:
+            if let api {
+                AgentGmailReply(api: api, prompt: turn.prompt, requestID: turn.id, botID: bot.id, storedDraft: action.mailDraft,
+                               onDraftChanged: { updateAgentDraft(turn.id, draft: $0) }) { address in
+                    guard let link = URL(string: address), link.scheme == "https", link.host == "mail.google.com" else {
+                        notice = "Gmail-kvitteringen kunne ikke verificeres. Tjek Sendt før du prøver igen."
+                        return
+                    }
+                    let receipt: String
+                    if case .bookingRequest = action.kind { receipt = "Forespørgslen er sendt via Gmail." }
+                    else { receipt = "Svar sendt via Gmail." }
+                    finishAgentAction(turn.id, receipt: receipt, link: link)
+                }
+                .id(api.queueTargetID)
+            } else {
+                FadedDetailText("Opgaven er gemt. Forbind PC’en for at bruge Gmail.")
+                if let draft = action.mailDraft { Text(draft.body).textSelection(.enabled) }
+            }
+        case .phone(let request):
+            AgentPhoneActionCard(request: request, botName: bot.name, botID: bot.id) { receipt in
+                finishAgentAction(turn.id, receipt: receipt)
+            }
+        case .today:
+            AgentTodayOverview(api: api, botName: bot.name)
+        case .appointmentCheck:
+            AgentAvailabilityCheck(api: api, prompt: AgentChatIntent.normalize(turn.prompt))
+        case .meetingPrep:
+            AgentMeetingPrep(prompt: turn.prompt)
+        case .mailReminder:
+            AgentMailReminderCard(api: api, prompt: turn.prompt, requestID: turn.id, botName: bot.name) { receipt in
+                finishAgentAction(turn.id, receipt: receipt)
+            }
+        case .followups:
+            AgentFollowupList(api: api)
+        case .instagramPost:
+            AgentInstagramPost(api: api, bot: bot, id: turn.id, prompt: turn.prompt,
+                               draft: action.instagramDraft, suggest: instagramCaption,
+                               requestedPlan: instagramPlanRequest, planApplied: { instagramPlanRequest = nil },
+                               save: { saveInstagramDraft(turn.id, draft: $0) },
+                               published: { finishAgentAction(turn.id, receipt: $0) })
+                .id(api?.queueTargetID ?? "offline")
+        case .instagramPlans:
+            AgentInstagramPlanner(api: api, bot: bot).id(api?.queueTargetID ?? "offline")
+        case .traderaWatch:
+            AgentTraderaWatch(api: api, bot: bot, id: turn.id, prompt: turn.prompt, listOnly: false)
+                .id(api?.queueTargetID ?? "offline")
+        case .traderaWatches:
+            AgentTraderaWatch(api: api, bot: bot, id: turn.id, prompt: turn.prompt, listOnly: true)
+                .id(api?.queueTargetID ?? "offline")
+        case .instagramAccount:
+            AgentInstagramAccount(api: api, bot: bot) {
+                startAgentAction(.action(.instagramPost), prompt: "Lav et Instagram-opslag")
+            }
+        case .agentEmail(let request):
+            if let api {
+                AgentEmailCard(api: api, bot: bot, request: request, prompt: turn.prompt)
+                    .id(api.queueTargetID)
+            } else {
+                FadedDetailText("Forbind til din PC for at bruge agentens e-mail.")
+            }
+        case .preference:
+            AgentPreferenceList(bot: bot)
+        case .workflow:
+            FadedDetailText("Der er endnu ingen kvittering for opgaven.")
         }
     }
 

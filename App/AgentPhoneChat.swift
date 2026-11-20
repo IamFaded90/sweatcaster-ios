@@ -117,145 +117,100 @@ import UIKit
 
     var body: some View {
         NavigationStack {
-            ScrollViewReader { scroll in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 12) {
-                        AgentSpeakingStage(bot: bot, listening: appleDictation.active || whisper.active)
-                        DisclosureGroup {
-                            modelCard
-                        } label: {
-                            Label(source.rawValue + " · " + (sourceModels
-                                .first(where: { $0.id == currentModel })?.title ?? "Vælg model"),
-                                  systemImage: source == .composio ? "cloud" : source == .pc ? "desktopcomputer" : "iphone")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(source == .pc ? palette.cyan : palette.lime)
-                        }
-                        if turns.isEmpty && gmailCheck == nil {
-                            VStack(spacing: 12) {
-                                VillageBotAvatar(bot: bot, size: 64, radius: 32)
-                                Text("Tal med " + bot.name).font(.title2.bold())
-                                FadedDetailText("Din agent · din samtale. Skriv nedenfor for at begynde.")
-                                if keepHistory { agentActionShortcuts }
-                            }
-                            .frame(maxWidth: .infinity).padding(.vertical, 32)
-                        }
-                        if let gmailCheck, gmailCheck.afterTurn == nil { gmailCard(gmailCheck) }
-                        ForEach(turns) { turn in
-                            agentChatEntry(turn)
-                            if let gmailCheck, gmailCheck.afterTurn == turn.id { gmailCard(gmailCheck) }
-                        }
-                        Color.clear.frame(height: 1).id("end")
+            persistedConversation
+        }
+    }
+
+    private var conversationScroll: some View {
+        ScrollViewReader { scroll in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    AgentSpeakingStage(bot: bot, listening: appleDictation.active || whisper.active)
+                    DisclosureGroup {
+                        modelCard
+                    } label: {
+                        Label(source.rawValue + " · " + (sourceModels
+                            .first(where: { $0.id == currentModel })?.title ?? "Vælg model"),
+                              systemImage: source == .composio ? "cloud" : source == .pc ? "desktopcomputer" : "iphone")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(source == .pc ? palette.cyan : palette.lime)
                     }
-                    .padding(FadedSpacing.edge)
+                    if turns.isEmpty && gmailCheck == nil {
+                        VStack(spacing: 12) {
+                            VillageBotAvatar(bot: bot, size: 64, radius: 32)
+                            Text("Tal med " + bot.name).font(.title2.bold())
+                            FadedDetailText("Din agent · din samtale. Skriv nedenfor for at begynde.")
+                            if keepHistory { agentActionShortcuts }
+                        }
+                        .frame(maxWidth: .infinity).padding(.vertical, 32)
+                    }
+                    if let gmailCheck, gmailCheck.afterTurn == nil { gmailCard(gmailCheck) }
+                    ForEach(turns) { turn in
+                        agentChatEntry(turn)
+                        if let gmailCheck, gmailCheck.afterTurn == turn.id { gmailCard(gmailCheck) }
+                    }
+                    Color.clear.frame(height: 1).id("end")
                 }
-                .scrollDismissesKeyboard(.interactively)
-                .onChange(of: turns.count) { _, _ in
-                    if let openAgentAction { scroll.scrollTo(openAgentAction, anchor: .center) }
-                    else { scroll.scrollTo("end", anchor: .bottom) }
-                }
-                .onChange(of: gmailCheck?.id) { _, _ in scroll.scrollTo("end", anchor: .bottom) }
-                .onChange(of: openAgentAction) { _, id in if let id { scroll.scrollTo(id, anchor: .center) } }
-                .safeAreaInset(edge: .bottom) { composer }
+                .padding(FadedSpacing.edge)
             }
+            .scrollDismissesKeyboard(.interactively)
+            .onChange(of: turns.count) { _, _ in
+                if let openAgentAction { scroll.scrollTo(openAgentAction, anchor: .center) }
+                else { scroll.scrollTo("end", anchor: .bottom) }
+            }
+            .onChange(of: gmailCheck?.id) { _, _ in scroll.scrollTo("end", anchor: .bottom) }
+            .onChange(of: openAgentAction) { _, id in if let id { scroll.scrollTo(id, anchor: .center) } }
+            .safeAreaInset(edge: .bottom) { composer }
+        }
+    }
+
+    private var conversationScreen: some View {
+        conversationScroll
             .background { FadedBackground() }
             .foregroundStyle(palette.text)
             .navigationTitle(bot.name + " · Agent")
             .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Luk") { dismiss() } }
-                ToolbarItem(placement: .principal) {
-                    HStack(spacing: 8) {
-                        VillageBotAvatar(bot: bot, size: 30, radius: 15)
-                        VStack(alignment: .leading, spacing: 0) {
-                            Text(bot.name).font(.headline).lineLimit(1)
-                            Text("Agentchat").font(.caption).foregroundStyle(palette.secondary)
-                        }
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Hverdagsværktøjer", systemImage: "wrench.and.screwdriver") { showEverydayTools = true }
-                        .disabled(running != nil)
-                }
-                if keepHistory {
-                    ToolbarItem(placement: .topBarTrailing) { agentActionShortcuts.labelStyle(.iconOnly) }
-                }
-                if api != nil && keepHistory {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Agentens PC-værktøjer", systemImage: "desktopcomputer") { showPCTools = true }
-                            .disabled(running != nil)
-                    }
+            .toolbar { conversationToolbar }
+    }
+
+    @ToolbarContentBuilder private var conversationToolbar: some ToolbarContent {
+        ToolbarItem(placement: .cancellationAction) { Button("Luk") { dismiss() } }
+        ToolbarItem(placement: .principal) {
+            HStack(spacing: 8) {
+                VillageBotAvatar(bot: bot, size: 30, radius: 15)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(bot.name).font(.headline).lineLimit(1)
+                    Text("Agentchat").font(.caption).foregroundStyle(palette.secondary)
                 }
             }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button("Hverdagsværktøjer", systemImage: "wrench.and.screwdriver") { showEverydayTools = true }
+                .disabled(running != nil)
+        }
+        if keepHistory {
+            ToolbarItem(placement: .topBarTrailing) { agentActionShortcuts.labelStyle(.iconOnly) }
+        }
+        if api != nil && keepHistory {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button("Agentens PC-værktøjer", systemImage: "desktopcomputer") { showPCTools = true }
+                    .disabled(running != nil)
+            }
+        }
+    }
+
+    private var conversationTools: some View {
+        conversationScreen
             .sheet(isPresented: $showPCTools) {
                 if let api { AgentPCToolsView(api: api, botID: bot.id) }
             }
-            .sheet(item: $interactiveTool) { tool in
-                switch tool {
-                case .milestone(let kind, let prompt):
-                    milestoneSheet(kind, prompt: prompt)
-                case .appointmentChange(let prompt):
-                    AgentAppointmentChange(api: api, prompt: prompt) { receipt, link in
-                        addAgentAction(prompt, kind: .workflow("Flyttet aftale"), receipt: receipt, link: link)
-                    }
-                case .gmailCleanup(let prompt):
-                    AgentGmailCleanup(api: api, bot: bot, prompt: prompt) { receipt in
-                        addAgentAction(prompt, kind: .workflow("Mailoprydning"), receipt: receipt, source: "PC")
-                    }
-                case .pcRepair(let prompt):
-                    AgentPCRepair(api: api, initialPrompt: prompt) { receipt in
-                        addAgentAction(prompt, kind: .workflow("Billedmotor på PC"), receipt: receipt, source: "PC")
-                    }
-                case .agentComputer(let goal):
-                    NavigationStack {
-                        let roster = (try? MigratedAppData.shared.loadBots().get()) ?? []
-                        BotComputerView(bot: bot, roster: roster, api: api, initialPrompt: goal)
-                            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { interactiveTool = nil } } }
-                    }
-                case .phoneScreen(let prompt):
-                    AgentScreenShareView(api: api, bot: bot, prompt: prompt)
-                case .sales(let prompt):
-                    AgentSalesView(api: api, bot: bot, prompt: prompt)
-                case .surprise(let prompt):
-                    VillageSurprisesView(api: api, bot: bot, prompt: prompt)
-                case .builtTools(let prompt):
-                    if let api {
-                        NavigationStack {
-                            AgentBuiltTools(api: api, initialBrief: prompt, buildsOnOpen: !prompt.isEmpty)
-                                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { interactiveTool = nil } } }
-                        }
-                    }
-                    else { ContentUnavailableView("Forbind PC’en", systemImage: "desktopcomputer") }
-                case .window(let prompt):
-                    AgentWindowHelp(api: api, botName: bot.name, prompt: prompt) { receipt in
-                        addAgentAction(prompt, kind: .workflow("PC-opgave"), receipt: receipt, source: "PC")
-                    }
-                case .taste(let target, let kind):
-                    AgentTasteTest(bot: target, api: api, kind: kind)
-                }
-            }
+            .sheet(item: $interactiveTool) { tool in interactiveToolSheet(tool) }
             .confirmationDialog("Hvad skal vi finde til " + bot.name + "?", isPresented: $showTasteChoices,
                                 titleVisibility: .visible) {
                 tasteChoices
                 Button("Annuller", role: .cancel) {}
             }
-            .sheet(isPresented: $showEverydayTools) {
-                NavigationStack {
-                    EverydayToolsView(showAppleApps: keepHistory, draftTitle: "Brug i chat") { text in
-                        guard running == nil, let updated = EverydayDraft.appending(text, to: draft, limit: 1_200) else {
-                            return false
-                        }
-                        draft = updated
-                        showEverydayTools = false
-                        return true
-                    }
-                    .safeAreaInset(edge: .bottom) {
-                        if keepHistory { AssistantCaptureStrip().padding(FadedSpacing.edge) }
-                    }
-                    .toolbar {
-                        ToolbarItem(placement: .cancellationAction) { Button("Luk") { showEverydayTools = false } }
-                    }
-                }
-            }
+            .sheet(isPresented: $showEverydayTools) { everydayToolsSheet }
             .sheet(isPresented: $showModels, onDismiss: {
                 loadModels(preferSetting: preferredModel != modelBeforeSettings)
             }) { PhoneModelsView() }
@@ -267,6 +222,74 @@ import UIKit
                     if nextDocument?.id == id { nextDocument = nil }
                 }
             }
+    }
+
+    @ViewBuilder private func interactiveToolSheet(_ tool: AgentInteractiveTool) -> some View {
+        switch tool {
+        case .milestone(let kind, let prompt):
+            milestoneSheet(kind, prompt: prompt)
+        case .appointmentChange(let prompt):
+            AgentAppointmentChange(api: api, prompt: prompt) { receipt, link in
+                addAgentAction(prompt, kind: .workflow("Flyttet aftale"), receipt: receipt, link: link)
+            }
+        case .gmailCleanup(let prompt):
+            AgentGmailCleanup(api: api, bot: bot, prompt: prompt) { receipt in
+                addAgentAction(prompt, kind: .workflow("Mailoprydning"), receipt: receipt, source: "PC")
+            }
+        case .pcRepair(let prompt):
+            AgentPCRepair(api: api, initialPrompt: prompt) { receipt in
+                addAgentAction(prompt, kind: .workflow("Billedmotor på PC"), receipt: receipt, source: "PC")
+            }
+        case .agentComputer(let goal):
+            NavigationStack {
+                let roster = (try? MigratedAppData.shared.loadBots().get()) ?? []
+                BotComputerView(bot: bot, roster: roster, api: api, initialPrompt: goal)
+                    .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { interactiveTool = nil } } }
+            }
+        case .phoneScreen(let prompt):
+            AgentScreenShareView(api: api, bot: bot, prompt: prompt)
+        case .sales(let prompt):
+            AgentSalesView(api: api, bot: bot, prompt: prompt)
+        case .surprise(let prompt):
+            VillageSurprisesView(api: api, bot: bot, prompt: prompt)
+        case .builtTools(let prompt):
+            if let api {
+                NavigationStack {
+                    AgentBuiltTools(api: api, initialBrief: prompt, buildsOnOpen: !prompt.isEmpty)
+                        .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { interactiveTool = nil } } }
+                }
+            }
+            else { ContentUnavailableView("Forbind PC’en", systemImage: "desktopcomputer") }
+        case .window(let prompt):
+            AgentWindowHelp(api: api, botName: bot.name, prompt: prompt) { receipt in
+                addAgentAction(prompt, kind: .workflow("PC-opgave"), receipt: receipt, source: "PC")
+            }
+        case .taste(let target, let kind):
+            AgentTasteTest(bot: target, api: api, kind: kind)
+        }
+    }
+
+    private var everydayToolsSheet: some View {
+        NavigationStack {
+            EverydayToolsView(showAppleApps: keepHistory, draftTitle: "Brug i chat") { text in
+                guard running == nil, let updated = EverydayDraft.appending(text, to: draft, limit: 1_200) else {
+                    return false
+                }
+                draft = updated
+                showEverydayTools = false
+                return true
+            }
+            .safeAreaInset(edge: .bottom) {
+                if keepHistory { AssistantCaptureStrip().padding(FadedSpacing.edge) }
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Luk") { showEverydayTools = false } }
+            }
+        }
+    }
+
+    private var loadedConversation: some View {
+        conversationTools
             .onChange(of: source) { if source != .phone { nextDocument = nil } }
             .task {
                 loadModels()
@@ -283,6 +306,10 @@ import UIKit
             }
             .task(id: instagramPollingID) { await monitorInstagramReports() }
             .task(id: gmailCheck?.id) { await gmailCheck?.run(bot: bot, api: api) }
+    }
+
+    private var observedConversation: some View {
+        loadedConversation
             .onChange(of: running != nil, initial: true) {
                 ChatScreenWake.hold(wakeID, whileReplying: running != nil && phase == .active)
             }
@@ -311,6 +338,10 @@ import UIKit
                 stopVoice()
             }
             .onReceive(kokoro.$notice) { if let message = $0 { notice = message } }
+    }
+
+    private var persistedConversation: some View {
+        observedConversation
             .sheet(isPresented: $showVoice) { voiceSettings }
             .sheet(isPresented: $showTranscript) { AgentDictationTranscript(segments: whisper.segments) }
             .sheet(item: $translating) { AgentTranslationView(original: $0.reply, suggestedModel: selectedModel) }
@@ -338,196 +369,6 @@ import UIKit
                 running?.cancel()
                 speech.stop()
             }
-        }
-    }
-
-    var modelCard: some View {
-        FadedCard {
-            VStack(alignment: .leading, spacing: 8) {
-                Picker("Svar fra", selection: Binding(get: { source }, set: { selected in
-                    source = selected
-                    if selected == .composio && !cloudModels.contains(where: { $0.id == selectedComposioModel }) {
-                        selectedComposioModel = cloudModels.first?.id ?? ""
-                    }
-                    rememberedSource = selected.rawValue
-                })) {
-                    Text("iPhone").tag(Source.phone)
-                    if !pcModels.isEmpty { Text("PC").tag(Source.pc) }
-                    if !cloudModels.isEmpty { Text("Cloud").tag(Source.composio) }
-                }
-                .pickerStyle(.segmented)
-                .disabled(running != nil)
-                if source == .composio {
-                    Picker("Cloudmodel", selection: $selectedComposioModel) {
-                        ForEach(cloudModels) { Text($0.title).tag($0.id) }
-                    }.disabled(running != nil)
-                    FadedDetailText("Virker over internet med PC’en slukket. Forbrug afhænger af kontoen.")
-                } else if source == .pc {
-                    Picker("PC-model", selection: Binding(get: { selectedPCModel }, set: { id in
-                        selectedPCModel = id
-                        rememberedPCModel = id
-                    })) {
-                        ForEach(pcModels) { model in Text(model.title).tag(model.id) }
-                    }
-                    .disabled(running != nil)
-                } else if models.isEmpty {
-                    FadedDetailText("Vælg eller hent en telefonmodel, før du chatter offline.")
-                } else {
-                    Picker("Telefonmodel", selection: Binding(get: { selectedModel }, set: { id in
-                        selectedModel = id
-                        rememberedModel = id
-                    })) {
-                        ForEach(models) { model in Text(model.title).tag(model.id) }
-                    }
-                    .disabled(running != nil)
-                }
-                FadedSecondaryButton("Lokale modeller", icon: "arrow.down.circle") {
-                    modelBeforeSettings = preferredModel
-                    showModels = true
-                }
-                    .disabled(running != nil)
-                if keepHistory {
-                    ComposioCloudSetup(api: api).disabled(running != nil)
-                    NvidiaCloudSetup(api: api).disabled(running != nil)
-                    OpenRouterCloudSetup(api: api).disabled(running != nil)
-                }
-            }.frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    func turnCard(_ turn: PrivateChatTurn) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            AgentChatBubble(user: true, title: "Dig", pc: false) {
-                Text(turn.prompt).textSelection(.enabled)
-                    .contextMenu {
-                        Button("Redigér besked", systemImage: "pencil") { edit(turn) }.disabled(running != nil)
-                        if !turn.reply.isEmpty { retryMenu(turn) }
-                    }
-            }
-            if !turn.reply.isEmpty {
-                AgentChatBubble(user: false,
-                                title: [bot.name, turn.source, turn.replyModelName].compactMap { $0 }.joined(separator: " · "),
-                                pc: turn.source == "PC") {
-                    if let card = turn.replyCard {
-                        Text(card.title).font(.headline)
-                        ForEach(Array(card.items.enumerated()), id: \.offset) { _, item in
-                            Label(item, systemImage: "circle.fill").labelStyle(.titleOnly)
-                        }
-                    } else {
-                        ChatTranscriptView(reply: turn.reply)
-                    }
-                    if let sources = turn.webSources, !sources.isEmpty {
-                        DisclosureGroup("Kilder · \(sources.count)") {
-                            ForEach(sources.filter(\.isWeb)) { source in
-                                Link(destination: source.url) {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(source.title)
-                                        Text(source.readPage ? "Side læst" : "Søgeuddrag")
-                                            .font(.caption).foregroundStyle(palette.secondary)
-                                    }
-                                }
-                                .frame(minHeight: 44)
-                            }
-                        }
-                    }
-                    if let sources = turn.documentSources, !sources.isEmpty {
-                        DisclosureGroup("Dokumentkilder") {
-                            ForEach(sources) { source in
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(verbatim: "[\(source.id)] \(source.name)")
-                                    if let page = source.page { Text("Side \(page)").font(.caption) }
-                                }
-                                .padding(.vertical, 3)
-                            }
-                        }
-                    }
-                    if running == nil || turns.last?.id != turn.id { HStack {
-                        let playing = speech.playback == .reply(turn.id) ||
-                            (pcVoiceReplyID == turn.id && (kokoro.playing || kokoro.loading))
-                        Button(playing ? "Stop oplæsning" : "Læs op", systemImage: playing ? "stop.circle" : "speaker.wave.2") {
-                            readReply(turn)
-                        }
-                        .frame(minHeight: 44)
-                        Button("Kopiér", systemImage: "doc.on.doc") { UIPasteboard.general.string = turn.reply }
-                            .frame(minHeight: 44)
-                        Button("Oversæt til dansk", systemImage: "character.bubble") { translating = turn }
-                            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                        if let api, keepHistory { kokoroMenu(turn, api: api) }
-                        if api != nil, keepHistory {
-                            Button("Lav Gmail-kladde", systemImage: "envelope") { gmailDraft = turn }
-                                .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                        }
-                    } }
-                }
-            } else if running != nil {
-                AgentChatBubble(user: false, title: bot.name, pc: turn.source == "PC") {
-                    FadedThinkingIndicator(title: "Svarer…").frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-        }
-    }
-
-    var composer: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if let notice { FadedDetailText(notice) }
-            if running != nil { FadedThinkingIndicator(title: "\(bot.name) svarer…") }
-            if running == nil {
-                voiceActions
-                if keepHistory && source == .phone {
-                    HStack {
-                        Button("Dokumenter", systemImage: "doc.text") { showDocuments = true }
-                            .frame(minHeight: 44)
-                        if let nextDocument {
-                            Text(verbatim: nextDocument.name).lineLimit(1)
-                            Button("Fjern fra næste besked", systemImage: "xmark.circle") { self.nextDocument = nil }
-                                .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                        }
-                    }
-                    .font(.caption)
-                }
-                HStack {
-                    if api != nil {
-                        Button(web ? "Nettet er valgt" : "Brug nettet", systemImage: "globe") {
-                            web.toggle()
-                            if web { nextDocument = nil }
-                        }
-                            .tint(web ? palette.cyan : palette.secondary)
-                    }
-                    Button(answerAsCard ? "Kort valgt" : "Svar som kort", systemImage: "rectangle.on.rectangle") { answerAsCard.toggle() }
-                        .tint(answerAsCard ? palette.cyan : palette.secondary)
-                }
-                .font(.caption)
-            }
-            HStack(alignment: .bottom, spacing: 8) {
-                TextField("Skriv til \(bot.name)…", text: $draft, axis: .vertical)
-                    .lineLimit(1...4).frame(minHeight: 44)
-                    .textFieldStyle(.plain).padding(.horizontal, 12)
-                    .focused($composerFocused)
-                if composerFocused {
-                    Button("Skjul tastatur", systemImage: "keyboard.chevron.compact.down") { composerFocused = false }
-                        .labelStyle(.iconOnly)
-                        .frame(width: 44, height: 44)
-                        .fadedGlassSurface()
-                }
-                if running != nil {
-                    Button("Stop svar", systemImage: "stop.fill") { running?.cancel() }
-                        .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                } else {
-                    Button("Send", systemImage: "arrow.up") { send() }
-                        .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                        .buttonStyle(FadedButtonStyle(kind: .primary))
-                        .disabled(cleanDraft.isEmpty || cleanDraft.count > (web ? 500 : 1_200) ||
-                                  (currentModel.isEmpty && !shouldCheckGmail(cleanDraft) && chatIntent(cleanDraft) == nil &&
-                                   !canAskAboutSharedCalendar(cleanDraft)) ||
-                                  whisper.active || whisper.processing)
-                }
-            }
-        }
-        .padding(14)
-        .background { ChatGlassSurface(radius: 22, colors: source == .pc
-            ? [FadedBrand.pc, FadedBrand.blue] : [FadedBrand.mint, FadedColors.purple]) }
-        .fadedWorkingBeam(active: running != nil, pc: source == .pc)
-        .padding(.horizontal, FadedSpacing.edge).padding(.vertical, 8)
     }
 
     func loadPCModels() async {
