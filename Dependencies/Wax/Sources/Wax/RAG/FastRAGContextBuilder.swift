@@ -1,0 +1,683 @@
+import Foundation
+import WaxCore
+import WaxTextSearch
+import WaxVectorSearch
+
+package struct FastRAGContextBuilder: Sendable {
+    package init() {}
+
+    /// Build a deterministic RAG context: at most one expansion + ranked snippets.
+    /// - Parameters:
+    ///   - query: user query string
+    ///   - embedding: optional caller-supplied embedding (no query-time embedding inside Wax)
+    ///   - wax: Wax handle
+    ///   - config: Fast RAG configuration
+    package func build(
+        query: String,
+        embedding: [Float]? = nil,
+        vectorEnginePreference: VectorEnginePreference = .auto,
+        vectorSearchTimeout: Duration? = nil,
+        wax: Wax,
+        session: WaxSession? = nil,
+        engineOverrides: UnifiedSearchEngineOverrides? = nil,
+        frameFilter: FrameFilter? = nil,
+        timeRange: SearchTimeRange? = nil,
+        scopeContext: MemoryScopeContext? = nil,
+        accessStatsManager: AccessStatsManager? = nil,
+        reranking: RerankStage? = nil,
+        config: FastRAGConfig = .init()
+    ) async throws -> RAGContext {
+        let clamped = clamp(config)
+        let counter = try await TokenCounter.shared()
+        // One evaluation clock for this build. Do not invent wall time or
+        // epoch/zero (MemorySemantics ageDays treats 0 as "recent").
+        // MemoryOrchestrator.ragConfigForRecall() always fills this; other
+        // callers must set FastRAGConfig.deterministicNowMs.
+        guard let nowMs = clamped.deterministicNowMs else {
+            throw WaxError.io(
+                "FastRAGContextBuilder.build requires FastRAGConfig.deterministicNowMs"
+            )
+        }
+
+        // 1) Run unified search
+        // Access-aware ranking needs a little headroom so a stale top result can
+        // be displaced by a recently/frequently used candidate just outside the
+        // normal context window. The bound keeps enabled-mode work predictable.
+        let accessEnabled = accessStatsManager != nil
+        let reranking = reranking.flatMap { $0.applies(to: clamped.searchMode) ? $0 : nil }
+        let searchTopK = AccessRankingWindow.candidateCount(
+            requestedTopK: clamped.searchTopK,
+            accessEnabled: accessEnabled,
+            multiplier: 2,
+            applyWhenRequestedTopKAtMost: 24
+        )
+        let request = try SearchRequest(
+            query: query,
+            lane: try SearchLane.from(mode: clamped.searchMode, embedding: embedding),
+            vectorEnginePreference: vectorEnginePreference,
+            vectorSearchTimeout: vectorSearchTimeout,
+            // Reranking rescores its whole candidate window, which may reach past topK.
+            topK: max(searchTopK, reranking?.options.candidateCount ?? 0),
+            timeRange: timeRange,
+            frameFilter: frameFilter,
+            nowMs: nowMs,
+            scopeContext: scopeContext,
+            rrfK: clamped.rrfK,
+            previewMaxBytes: clamped.previewMaxBytes
+        )
+        let response = if let engineOverrides {
+            try await wax.search(request, engineOverrides: engineOverrides)
+        } else if let session {
+            try await session.search(request)
+        } else {
+            try await wax.search(request)
+        }
+        let accessStatsMap: [UInt64: FrameAccessStats] = if let accessStatsManager {
+            await AccessFrequencyRanker.statsForRanking(
+                frameIds: response.results.map(\.frameId),
+                manager: accessStatsManager,
+                wax: wax
+            )
+        } else {
+            [:]
+        }
+        let accessRankedResults = RankedSearch.applyAccessRanking(
+            results: response.results,
+            query: query,
+            accessStats: accessStatsMap,
+            nowMs: nowMs,
+            maxWindow: searchTopK,
+            enabled: accessEnabled
+        )
+        let queryAnalyzer = QueryAnalyzer()
+        let answerRankedResults = clamped.enableAnswerFocusedRanking
+            ? Self.orderCandidatesForAnswer(
+                results: accessRankedResults,
+                query: query,
+                config: clamped,
+                analyzer: queryAnalyzer
+            )
+            : accessRankedResults
+        let rankedResults = if let reranking {
+            try await reranking.rerank(query: query, results: answerRankedResults) { result in
+                await rerankText(for: result, wax: wax, maxBytes: clamped.expansionMaxBytes)
+            }
+        } else {
+            answerRankedResults
+        }
+        // The search request may be overfetched only to give access-aware
+        // reranking headroom. Context assembly still honors the caller's
+        // requested result count.
+        let contextResults = Array(rankedResults.prefix(max(0, clamped.searchTopK)))
+
+        // Pre-compute query signals for tier selection if enabled
+        let querySignals: QuerySignals? = clamped.enableQueryAwareTierSelection
+            ? queryAnalyzer.analyze(query: query)
+            : nil
+        let queryIntent = queryAnalyzer.detectIntent(query: query)
+
+        // Prefetch surrogate metadata in parallel with expansion work.
+        // This keeps determinism while overlapping Wax actor hops.
+        let shouldPrefetchSurrogates = clamped.mode == .denseCached
+            && clamped.maxSurrogates > 0
+            && clamped.surrogateMaxTokens > 0
+            && clamped.maxContextTokens > 0
+        let sourceFrameIds = contextResults.map { $0.frameId }
+        let surrogateMapTask: [UInt64: UInt64] = shouldPrefetchSurrogates
+            ? await wax.surrogateFrameIds(for: sourceFrameIds)
+            : [:]
+        let sourceFrameMetasTask: [UInt64: FrameMeta] = shouldPrefetchSurrogates
+            ? await wax.frameMetas(frameIds: sourceFrameIds)
+            : [:]
+
+        var expansionTextByFrame: [UInt64: String] = [:]
+        var expandedSourceFrameId: UInt64?
+        if clamped.expansionMaxTokens > 0, clamped.expansionMaxBytes > 0 {
+            for result in contextResults {
+                if let expanded = try await expansionText(
+                    frameId: result.frameId,
+                    wax: wax,
+                    maxBytes: clamped.expansionMaxBytes
+                ) {
+                    expansionTextByFrame[result.frameId] = expanded
+                    expandedSourceFrameId = result.frameId
+                    break
+                }
+            }
+        }
+
+        var surrogateBySource: [UInt64: (frameId: UInt64, text: String)] = [:]
+        if clamped.mode == .denseCached,
+           clamped.maxContextTokens > 0,
+           clamped.maxSurrogates > 0,
+           clamped.surrogateMaxTokens > 0 {
+            let estimatedExpansionTokens = expansionTextByFrame.isEmpty ? 0 : min(
+                clamped.expansionMaxTokens,
+                clamped.maxContextTokens
+            )
+            let remainingTokens = max(0, clamped.maxContextTokens - estimatedExpansionTokens)
+            let estimatedTokensPerSurrogate = max(1, clamped.surrogateMaxTokens / 2)
+            let estimatedMaxSurrogates = max(1, remainingTokens / estimatedTokensPerSurrogate)
+            let maxToLoad = min(
+                clamped.maxSurrogates,
+                min(clamped.searchTopK, 32),
+                estimatedMaxSurrogates + 2
+            )
+
+            // Batch resolve surrogate ids in a single actor hop to avoid TaskGroup churn.
+            let surrogateMap = surrogateMapTask
+            let expandedFrameId = expandedSourceFrameId
+
+            // Keep only the top candidates, preserving response order.
+            var orderedSurrogateIds: [UInt64] = []
+            orderedSurrogateIds.reserveCapacity(maxToLoad)
+            for result in contextResults {
+                if let expandedFrameId, result.frameId == expandedFrameId { continue }
+                guard let surrogateId = surrogateMap[result.frameId] else { continue }
+                orderedSurrogateIds.append(surrogateId)
+                if orderedSurrogateIds.count >= maxToLoad { break }
+            }
+
+            // Batch load surrogate contents to avoid per-frame actor hops.
+            // If any surrogate is corrupted, fall back to per-frame loads and skip failures.
+            let surrogateContents: [UInt64: Data] = await {
+                do {
+                    return try await wax.frameContents(frameIds: orderedSurrogateIds)
+                } catch {
+                    var recovered: [UInt64: Data] = [:]
+                    recovered.reserveCapacity(orderedSurrogateIds.count)
+                    for surrogateId in orderedSurrogateIds {
+                        do {
+                            let data = try await wax.frameContent(frameId: surrogateId)
+                            recovered[surrogateId] = data
+                        } catch {
+                            WaxDiagnostics.logSwallowed(
+                                error,
+                                context: "surrogate frame content load",
+                                fallback: "skip surrogate candidate"
+                            )
+                        }
+                    }
+                    return recovered
+                }
+            }()
+
+            let tierSelector = SurrogateTierSelector(
+                policy: clamped.tierSelectionPolicy,
+                scorer: ImportanceScorer()
+            )
+            let frameMetaMap = sourceFrameMetasTask
+            let surrogateWorkItems = contextResults
+                .compactMap { result -> (result: SearchResponse.Result, surrogateFrameId: UInt64)? in
+                    if let expandedFrameId, result.frameId == expandedFrameId { return nil }
+                    guard let surrogateId = surrogateMap[result.frameId] else { return nil }
+                    return (result: result, surrogateFrameId: surrogateId)
+                }
+                .prefix(maxToLoad)
+
+            var surrogateCandidates = Array<(result: SearchResponse.Result, surrogateFrameId: UInt64, text: String)?>(
+                repeating: nil,
+                count: surrogateWorkItems.count
+            )
+
+            await withTaskGroup(of: (Int, (SearchResponse.Result, UInt64, String)?).self) { group in
+                for (index, item) in surrogateWorkItems.enumerated() {
+                    group.addTask {
+                        guard let data = surrogateContents[item.surrogateFrameId] else { return (index, nil) }
+
+                        let frameTimestamp = frameMetaMap[item.result.frameId]?.timestamp ?? nowMs
+                        let context = TierSelectionContext(
+                            frameTimestamp: frameTimestamp,
+                            accessStats: accessStatsMap[item.result.frameId],
+                            querySignals: querySignals,
+                            nowMs: nowMs
+                        )
+                        let selectedTier = tierSelector.selectTier(context: context)
+                        guard let text = SurrogateTierSelector.extractTier(from: data, tier: selectedTier),
+                              !text.isEmpty else { return (index, nil) }
+
+                        return (index, (item.result, item.surrogateFrameId, text))
+                    }
+                }
+
+                for await (index, candidate) in group {
+                    surrogateCandidates[index] = candidate
+                }
+            }
+
+            for (result, surrogateFrameId, text) in surrogateCandidates.compactMap({ $0 }) {
+                surrogateBySource[result.frameId] = (surrogateFrameId, text)
+            }
+        }
+
+        var snippetTextByFrame: [UInt64: String] = [:]
+        if clamped.maxContextTokens > 0, clamped.snippetMaxTokens > 0, clamped.maxSnippets > 0 {
+            var snippetCandidates: [(result: SearchResponse.Result, preview: String)] = []
+            snippetCandidates.reserveCapacity(min(clamped.maxSnippets, 32))
+            for result in contextResults {
+                if expansionTextByFrame[result.frameId] != nil { continue }
+                if surrogateBySource[result.frameId] != nil { continue }
+                guard snippetCandidates.count < clamped.maxSnippets else { break }
+                guard let preview = result.previewText, !preview.isEmpty else { continue }
+                snippetCandidates.append((result, preview))
+            }
+
+            if !snippetCandidates.isEmpty {
+                let snippetFallbackMaxBytes = min(
+                    clamped.expansionMaxBytes,
+                    max(4 * 1024, clamped.previewMaxBytes * 64)
+                )
+                let snippetMaxTokens = clamped.snippetMaxTokens
+                var previews: [String] = snippetCandidates.map { $0.preview }
+                // Only previews that need the full frame load it; the rest stay as they are, so
+                // the common case starts no tasks.
+                let fullFrameIndices: [Int] = snippetCandidates.indices.filter { (index: Int) -> Bool in
+                    Self.shouldUseFullFrameForSnippet(
+                        preview: snippetCandidates[index].preview,
+                        intent: queryIntent,
+                        analyzer: queryAnalyzer
+                    )
+                }
+                if !fullFrameIndices.isEmpty {
+                    await withTaskGroup(of: (Int, String).self) { group in
+                        for index in fullFrameIndices {
+                            let (result, preview) = snippetCandidates[index]
+                            group.addTask {
+                                do {
+                                    if let expanded = try await expansionText(
+                                        frameId: result.frameId,
+                                        wax: wax,
+                                        maxBytes: snippetFallbackMaxBytes
+                                    ),
+                                    !expanded.isEmpty {
+                                        return (index, await Self.tokenFittedSnippetText(
+                                            preview: preview,
+                                            frameText: expanded,
+                                            intent: queryIntent,
+                                            analyzer: queryAnalyzer,
+                                            maxTokens: snippetMaxTokens,
+                                            countTokens: { await counter.count($0) }
+                                        ))
+                                    }
+                                } catch {
+                                    WaxDiagnostics.logSwallowed(
+                                        error,
+                                        context: "snippet full-frame expansion",
+                                        fallback: "keep preview snippet"
+                                    )
+                                }
+                                return (index, preview)
+                            }
+                        }
+
+                        for await (index, text) in group {
+                            previews[index] = text
+                        }
+                    }
+                }
+
+                for (index, (result, _)) in snippetCandidates.enumerated() {
+                    snippetTextByFrame[result.frameId] = previews[index]
+                }
+            }
+        }
+
+        var payloads: [RecallAssembly.Payload] = []
+        payloads.reserveCapacity(contextResults.count)
+        for result in contextResults {
+            let surrogate = surrogateBySource[result.frameId]
+            payloads.append(
+                RecallAssembly.Payload(
+                    hit: result,
+                    expansionText: expansionTextByFrame[result.frameId],
+                    surrogateText: surrogate?.text,
+                    snippetText: snippetTextByFrame[result.frameId] ?? result.previewText ?? "",
+                    surrogateFrameId: surrogate?.frameId,
+                    accessStats: accessStatsMap[result.frameId]
+                )
+            )
+        }
+
+        let tokenizer = RecallAssembly.Tokenizer(
+            count: { text in await counter.count(text) },
+            truncate: { text, maxTokens in await counter.truncate(text, maxTokens: maxTokens) },
+            truncateCounted: { text, maxTokens in await counter.truncateCounted(text, maxTokens: maxTokens) }
+        )
+        var context = await RecallAssembly.pack(
+            query: query,
+            payloads: payloads,
+            config: clamped,
+            tokenizer: tokenizer,
+            nowMs: nowMs
+        )
+        context.diagnostics = Self.diagnostics(
+            requested: clamped.searchMode,
+            embedding: embedding,
+            vectorSearchTimedOut: response.vectorSearchTimedOut
+        )
+        return context
+    }
+
+    // MARK: - Helpers
+
+    /// Hybrid/vector without a query embedding ran as text. Do not report
+    /// vector/hybrid effective with ``QueryEmbeddingState/notRequested``.
+    package static func diagnostics(
+        requested: SearchMode,
+        embedding: [Float]?,
+        vectorSearchTimedOut: Bool
+    ) -> RAGContext.Diagnostics {
+        let embeddingAvailable = embedding.map { !$0.isEmpty } ?? false
+        if vectorSearchTimedOut || !embeddingAvailable {
+            return .text(
+                requested: requested,
+                embedding: embeddingAvailable ? .available : .notRequested
+            )
+        }
+        switch requested {
+        case .textOnly:
+            return .text(requested: .textOnly, embedding: .available)
+        case .vectorOnly, .hybrid:
+            return .vector(requested: requested, effective: requested)
+        }
+    }
+
+    private func clamp(_ config: FastRAGConfig) -> FastRAGConfig {
+        var c = config
+        c.maxContextTokens = max(0, c.maxContextTokens)
+        c.expansionMaxTokens = min(max(0, c.expansionMaxTokens), c.maxContextTokens)
+        c.expansionMaxBytes = max(0, c.expansionMaxBytes)
+        c.snippetMaxTokens = max(0, c.snippetMaxTokens)
+        c.maxSnippets = max(0, c.maxSnippets)
+        c.maxSurrogates = max(0, c.maxSurrogates)
+        c.surrogateMaxTokens = max(0, c.surrogateMaxTokens)
+        c.searchTopK = max(0, c.searchTopK)
+        c.rrfK = max(0, c.rrfK)
+        c.previewMaxBytes = max(0, c.previewMaxBytes)
+        c.answerRerankWindow = max(0, c.answerRerankWindow)
+        c.answerDistractorPenalty = min(1, max(0, c.answerDistractorPenalty))
+        return c
+    }
+
+    static func shouldUseFullFrameForSnippet(preview: String, intent: QueryIntent, analyzer: QueryAnalyzer) -> Bool {
+        if preview.isEmpty { return false }
+
+        // FTS5 snippet() truncates with '...' and wraps matched tokens in
+        // private-use highlight markers (user brackets are preserved).
+        // Short durable memories (preferences, tokens, mission codes) often lose their
+        // trailing identifiers in secondary hits. Expand to full frame content whenever
+        // the preview shows truncation so Memory.search returns complete short texts.
+        if containsEllipsis(preview) {
+            return true
+        }
+
+        // The date may sit outside the preview window. Fetch the frame; the
+        // expansion is only kept if the frame has a date (see expandedSnippetText).
+        if intent.contains(.asksDate), !analyzer.containsDateLiteral(preview) {
+            return true
+        }
+
+        if intent.contains(.asksOwnership), RerankingHelpers.words(preview.lowercased()).contains("owns") {
+            return true
+        }
+
+        return false
+    }
+
+    /// `text.contains("...")`. Foundation's search ran for every snippet preview and was
+    /// about a tenth of context building, so it runs only when the UTF-8 holds three periods
+    /// in a row: nothing else is canonically equivalent to "...", so other text cannot match.
+    static func containsEllipsis(_ text: String) -> Bool {
+        var periods = 0
+        for byte in text.utf8 {
+            guard byte == UInt8(ascii: ".") else {
+                periods = 0
+                continue
+            }
+            periods += 1
+            if periods == 3 { return text.contains("...") }
+        }
+        return false
+    }
+
+    /// ``expandedSnippetText(preview:frameText:intent:analyzer:maxCharacters:)``
+    /// sized for a token budget. The window starts at ~3 characters per token;
+    /// when that overshoots (CJK, emoji), it is cut once more in proportion to
+    /// the measured tokens so the date stays inside the budget.
+    static func tokenFittedSnippetText(
+        preview: String,
+        frameText: String,
+        intent: QueryIntent,
+        analyzer: QueryAnalyzer,
+        maxTokens: Int,
+        countTokens: (String) async -> Int
+    ) async -> String {
+        let maxCharacters = maxTokens * 3
+        let text = expandedSnippetText(
+            preview: preview,
+            frameText: frameText,
+            intent: intent,
+            analyzer: analyzer,
+            maxCharacters: maxCharacters
+        )
+        guard intent.contains(.asksDate), text != preview else { return text }
+        let tokens = await countTokens(text)
+        guard tokens > maxTokens else { return text }
+        // Never cut below the date literal itself.
+        let literalLength = analyzer.dateLiterals(in: frameText).first?.count ?? 1
+        let fitted = max(literalLength, maxCharacters * maxTokens / tokens)
+        return expandedSnippetText(
+            preview: preview,
+            frameText: frameText,
+            intent: intent,
+            analyzer: analyzer,
+            maxCharacters: fitted
+        )
+    }
+
+    /// Text to use for a snippet once the full frame was fetched.
+    ///
+    /// For a date question whose preview lacks a date, the frame is used only
+    /// when it contains one, and a long frame is cut to `maxCharacters`
+    /// centered on that date (a cut from the frame start could drop it).
+    /// Otherwise a truncated ("...") or ownership preview gets the full frame.
+    static func expandedSnippetText(
+        preview: String,
+        frameText: String,
+        intent: QueryIntent,
+        analyzer: QueryAnalyzer,
+        maxCharacters: Int
+    ) -> String {
+        if intent.contains(.asksDate), !analyzer.containsDateLiteral(preview) {
+            if let window = dateCenteredWindow(in: frameText, analyzer: analyzer, maxCharacters: maxCharacters) {
+                return window
+            }
+            if !containsEllipsis(preview) { return preview }
+        }
+        return frameText
+    }
+
+    /// `text` itself when it fits, else a `maxCharacters` slice centered on the
+    /// first date literal, with the date in the first third of the slice.
+    /// Recall assembly truncates snippets from the start, so the date must sit
+    /// early. `nil` when `text` has no date literal.
+    static func dateCenteredWindow(in text: String, analyzer: QueryAnalyzer, maxCharacters: Int) -> String? {
+        guard let literal = analyzer.dateLiterals(in: text).first,
+              let match = text.range(of: literal) else { return nil }
+        guard maxCharacters > 0, text.count > maxCharacters else { return text }
+        let matchStart = text.distance(from: text.startIndex, to: match.lowerBound)
+        let lead = min(matchStart, maxCharacters / 3)
+        let end = min(text.count, matchStart - lead + maxCharacters)
+        let start = end - maxCharacters
+        let lower = text.index(text.startIndex, offsetBy: start)
+        let upper = text.index(lower, offsetBy: maxCharacters)
+        return String(text[lower..<upper])
+    }
+
+    /// Reorder already-ranked hits for an answer budget. Does not rewrite Ranking's published score.
+    static func orderCandidatesForAnswer(
+        results: [SearchResponse.Result],
+        query: String,
+        config: FastRAGConfig,
+        analyzer: QueryAnalyzer = QueryAnalyzer()
+    ) -> [SearchResponse.Result] {
+        let cappedWindow = min(max(0, config.answerRerankWindow), results.count)
+        guard cappedWindow > 1 else { return results }
+
+        let intents = analyzer.detectIntent(query: query)
+        let queryTerms = Set(analyzer.normalizedTerms(query: query))
+        let queryEntities = analyzer.entityTerms(query: query)
+        let queryYears = analyzer.yearTerms(in: query)
+        let queryDateKeys = analyzer.normalizedDateKeys(in: query)
+        let vectorInfluenced: Bool
+        switch config.searchMode {
+        case .vectorOnly:
+            vectorInfluenced = true
+        case .hybrid(let alpha):
+            vectorInfluenced = alpha < 0.999
+        case .textOnly:
+            vectorInfluenced = false
+        }
+        if intents.isEmpty && queryTerms.isEmpty {
+            return results
+        }
+
+        // Composite is only a sort key. Result.score stays Ranking's published score.
+        func sortKey(_ result: SearchResponse.Result) -> Float {
+            var total = result.score
+            guard let preview = result.previewText, !preview.isEmpty else { return total }
+
+            let previewLower = preview.lowercased()
+            let previewTerms = Set(analyzer.normalizedTerms(query: preview))
+            let previewEntities = analyzer.entityTerms(query: preview)
+            let previewYears = analyzer.yearTerms(in: preview)
+            let previewDateKeys = analyzer.normalizedDateKeys(in: preview)
+            if !queryTerms.isEmpty, !previewTerms.isEmpty {
+                let overlap = Float(queryTerms.intersection(previewTerms).count)
+                let recall = overlap / Float(max(1, queryTerms.count))
+                let precision = overlap / Float(max(1, previewTerms.count))
+                total += recall * 0.80
+                total += precision * 0.40
+            }
+
+            if !queryEntities.isEmpty {
+                let hits = queryEntities.intersection(previewEntities).count
+                let coverage = Float(hits) / Float(max(1, queryEntities.count))
+                total += coverage * (vectorInfluenced ? 1.25 : 0.90)
+                if hits == 0 {
+                    total -= vectorInfluenced ? 0.65 : 0.35
+                }
+            }
+
+            if !queryYears.isEmpty {
+                let yearHits = queryYears.intersection(previewYears).count
+                let yearCoverage = Float(yearHits) / Float(max(1, queryYears.count))
+                total += yearCoverage * 1.35
+                if yearHits == 0, !previewYears.isEmpty {
+                    total -= vectorInfluenced ? 1.35 : 1.05
+                }
+            }
+
+            if !queryDateKeys.isEmpty {
+                let dateHits = queryDateKeys.intersection(previewDateKeys).count
+                let dateCoverage = Float(dateHits) / Float(max(1, queryDateKeys.count))
+                total += dateCoverage * 1.15
+                if dateHits == 0, !previewDateKeys.isEmpty {
+                    total -= vectorInfluenced ? 1.15 : 0.90
+                }
+            }
+
+            // Answer-shape signals shared with UnifiedRanking (RerankingHelpers).
+            // No fixture phrases: ordinary words must not move a result.
+            if intents.contains(.asksLocation),
+               RerankingHelpers.containsRelocationStatement(preview) || RerankingHelpers.containsMoveToPhrase(previewLower) {
+                total += 0.45
+            }
+            if intents.contains(.asksDate), analyzer.containsDateLiteral(preview) {
+                total += 0.45
+            }
+            if intents.contains(.asksDate),
+               RerankingHelpers.containsTentativeLanguage(previewLower) {
+                let basePenalty = config.answerDistractorPenalty
+                total -= vectorInfluenced ? basePenalty * 2.8 : basePenalty * 1.8
+            }
+            if intents.contains(.asksOwnership),
+               RerankingHelpers.containsOwnershipStatement(previewLower) {
+                total += 0.45
+            }
+            return total
+        }
+
+        // Compute each key once; the comparator runs O(n log n) times.
+        let head = results.prefix(cappedWindow)
+            .map { (result: $0, key: sortKey($0)) }
+            .sorted { lhs, rhs in
+                if lhs.key != rhs.key { return lhs.key > rhs.key }
+                if lhs.result.score != rhs.result.score { return lhs.result.score > rhs.result.score }
+                return lhs.result.frameId < rhs.result.frameId
+            }
+            .map(\.result)
+
+        if cappedWindow == results.count { return head }
+        return head + results.dropFirst(cappedWindow)
+    }
+
+    /// The full frame text a reranker scores: the frame payload, or the search preview when
+    /// the payload is larger than `maxBytes`, not UTF-8, or unreadable.
+    private func rerankText(for result: SearchResponse.Result, wax: Wax, maxBytes: Int) async -> String {
+        do {
+            if let text = try await expansionText(frameId: result.frameId, wax: wax, maxBytes: maxBytes) {
+                return text
+            }
+        } catch {
+            WaxDiagnostics.logSwallowed(error, context: "rerank frame text load", fallback: "score the preview")
+        }
+        return result.previewText ?? ""
+    }
+
+    private func expansionText(
+        frameId: UInt64,
+        wax: Wax,
+        maxBytes: Int
+    ) async throws -> String? {
+        guard maxBytes > 0 else { return nil }
+
+        // Fetch meta and payload sequentially to avoid Swift 6 async let actor isolation double-free crash.
+        let meta = try await wax.frameMetaIncludingPending(frameId: frameId)
+        let data = try await wax.frameContentIncludingPending(frameId: frameId)
+
+        let canonicalBytes: UInt64
+        if meta.canonicalEncoding == .plain {
+            canonicalBytes = meta.payloadLength
+        } else if let length = meta.canonicalLength {
+            canonicalBytes = length
+        } else {
+            throw WaxError.invalidToc(reason: "missing canonical_length for frame \(frameId)")
+        }
+        guard canonicalBytes > 0 else { return nil }
+        guard canonicalBytes <= UInt64(maxBytes) else { return nil }
+
+        try Self.validateExpansionPayloadSize(
+            expectedBytes: canonicalBytes,
+            actualBytes: data.count,
+            maxBytes: maxBytes
+        )
+        guard let text = String(data: data, encoding: .utf8),
+              !text.isEmpty else { return nil }
+        return text
+    }
+
+    static func validateExpansionPayloadSize(
+        expectedBytes: UInt64,
+        actualBytes: Int,
+        maxBytes: Int
+    ) throws {
+        guard maxBytes > 0 else { return }
+        if actualBytes > maxBytes {
+            throw WaxError.io("expansion payload exceeds cap: \(actualBytes) > \(maxBytes)")
+        }
+        if actualBytes != Int(expectedBytes) {
+            throw WaxError.io("expansion payload length mismatch: expected \(expectedBytes), got \(actualBytes)")
+        }
+    }
+}

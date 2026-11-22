@@ -1,0 +1,112 @@
+# WAL and Crash Recovery
+
+How the write-ahead log ring buffer ensures durability and enables crash recovery.
+
+## Overview
+
+The WAL (Write-Ahead Log) is a fixed-size circular ring buffer that records all mutations before they are committed to the main file structure. This design ensures that:
+
+1. A crash at any point never corrupts the store
+2. Uncommitted mutations are automatically replayed on next open
+3. Writes can be batched for performance without sacrificing durability
+
+## Ring Buffer Architecture
+
+The WAL occupies a contiguous region starting at file offset 8 KiB. New long-term stores use an 8 MiB WAL by default, configurable at creation time. Broker session stores use a 4 MiB WAL. Existing stores retain their recorded size when opened; a copy-first compaction can reclaim a legacy 256 MiB ring. The ring buffer uses two pointers:
+
+- **Write position** — where the next record will be written
+- **Checkpoint position** — the boundary of committed records
+
+Records between the checkpoint and write positions are **pending** (uncommitted). On commit, the checkpoint advances to match the write position.
+
+## WAL Records
+
+Each WAL record has a 48-byte header:
+
+| Offset | Type | Field |
+|--------|------|-------|
+| 0–7 | UInt64 | Sequence number (monotonically increasing) |
+| 8–11 | UInt32 | Payload length |
+| 12–15 | UInt32 | Flags (bit 0 = isPadding) |
+| 16–47 | 32 bytes | Payload checksum (SHA-256) |
+
+Records come in three types:
+
+- **Data** — Contains a mutation payload (frame put, delete, supersede, or embedding) with a SHA-256 checksum
+- **Padding** — Fills gaps when there isn't enough space at the ring's end for a new record; the ring wraps around
+- **Sentinel** — All-zero marker indicating the end of valid records
+
+## WAL Entries
+
+Each data record's payload encodes a ``WALEntry`` with an opcode:
+
+| Opcode | Entry | Description |
+|--------|-------|-------------|
+| `0x01` | `putFrame` | Store frame metadata and payload reference |
+| `0x02` | `deleteFrame` | Mark a frame as deleted |
+| `0x03` | `supersedeFrame` | Link an older frame to its replacement |
+| `0x04` | `putEmbedding` | Store a vector embedding for a frame |
+
+## Fsync Policies
+
+The ``WALFsyncPolicy`` controls when writes are flushed to disk:
+
+| Policy | Behavior |
+|--------|----------|
+| `.always` | Fsync after every write (safest, slowest) |
+| `.onCommit` | Fsync only when the WAL is checkpointed |
+| `.everyBytes(threshold)` | Fsync after accumulating a threshold of bytes |
+
+Choose based on your durability requirements. `.everyBytes(1_048_576)` (1 MiB) is a good balance for most applications.
+
+## Crash Recovery
+
+When opening a store, WaxCore performs the following recovery sequence:
+
+1. **Header A/B selection** — Both header pages are read and validated. The page with the highest `headerPageGeneration` that passes checksum validation is selected.
+
+2. **Replay snapshot check** — If the selected header contains a valid WAL replay snapshot (magic `WALSNAP1` at offset 136), recovery can skip already-committed WAL records and resume from the snapshot's position. This significantly speeds up recovery for large WAL buffers.
+
+3. **WAL scan** — Starting from the checkpoint position, the ``WALRingReader`` scans forward through the ring buffer, reading all pending (uncommitted) records. The scan stops at the first sentinel, torn record envelope (bad header, payload checksum, non-increasing sequence, or a padding record that does not end exactly at the ring end), or on returning to the checkpoint.
+
+4. **Torn-tail handling** — Each pending `putFrame` record points at a data payload written outside the ring. With `.onCommit` or `.everyBytes` fsync, payloads are not synced before their WAL records (they are written with `pwrite` but not fsynced), so a crash can persist any subset of pending payloads, including a later one but not an earlier one. Uncommitted records are not a durability promise, so open cuts the WAL at the first pending put whose payload is out of bounds or fails its checksum, whatever follows it, and keeps the valid prefix. It zeroes the dropped WAL records in one pass and fsyncs before returning. Truncations are counted in the WAL stats (`replayTruncationCount`). Open fails closed and leaves the file untouched instead when it is opened with `.always` fsync or with `repair` set to false. The fsync policy that wrote the WAL is not stored in the file, so the `.always` rule follows the policy of the process that opens the store. Committed data is never truncated.
+
+5. **Sequence floor** — Bytes past the end of the valid chain can still hold well-formed records: a dropped tail whose zeroing a crash interrupted, or records that reached disk after an earlier record was torn. Replay only follows strictly increasing sequences, so every open sets the writer's last sequence to `base + walSize / 48 + 1` (the next record is one higher), where `base` is the highest sequence open knows of: the committed sequence, the persisted replay snapshot, and every record in the scanned chain. Every record left in the ring was written before the last commit or after a point that `base` covers. That point is the last commit, or the first record a session appended after open: the writer fsyncs before and right after that first record, so it is never lost while a later record survives. Records written after that point fit in the ring at once, at least 48 bytes each, so their sequences stay at or below the floor, and no stale record can follow a new one. Sequence numbers therefore jump on every open; replay tolerates the gaps. In WAL stats (`wax stats`, the MCP `stats` tool), `lastSeq` runs about `walSize / 48` ahead of `committedSeq` from an open until a commit applies new records (roughly 175,000 for the default 8 MiB WAL), so the difference is not a count of pending records: `pendingBytes` and `pendingFrames` report pending work.
+
+6. **State reconstruction** — Pending mutations are applied to rebuild in-memory indexes and frame metadata.
+
+## Proactive Commit
+
+WaxCore supports proactive commit thresholds to bound the amount of data at risk in the WAL:
+
+```swift
+let options = WaxOptions(
+    proactiveCommitThreshold: 1024  // Auto-commit after 1024 pending entries
+)
+```
+
+When the pending entry count exceeds this threshold, a commit is triggered automatically during the next write operation.
+
+## Replay State Snapshots
+
+When `enableReplayStateSnapshot` is set in ``WaxOptions``, the header stores a snapshot of the WAL state at the last commit. This snapshot includes:
+
+- File generation
+- Committed sequence number
+- Footer offset
+- Write and checkpoint positions
+- Pending byte count
+- Last sequence number
+
+On recovery, this snapshot allows the reader to skip the committed portion of the WAL and start scanning from the snapshot's position, reducing recovery time from O(WAL size) to O(pending bytes).
+
+## Checksum Verification
+
+Every layer of the persistence stack uses SHA-256 checksums:
+
+- **WAL records** — SHA-256 of the payload bytes
+- **Header pages** — SHA-256 of the header with the checksum field zeroed
+- **TOC** — SHA-256 of the TOC body, excluding the final 32 bytes, padded with 32 zero bytes
+- **Footer** — Validates that the TOC hash matches
+
+This multi-layer checksum strategy ensures that corruption is detected at every level.

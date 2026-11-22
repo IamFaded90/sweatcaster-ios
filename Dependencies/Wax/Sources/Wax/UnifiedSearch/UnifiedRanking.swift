@@ -1,0 +1,653 @@
+import Foundation
+import WaxTextSearch
+
+/// Pure rerank transforms over fused unified-search hits.
+///
+/// Ranking owns the published `score`. Recall assembly may reorder later
+/// but must not rewrite these values.
+package enum UnifiedRanking {
+    package static func semanticMemoryRerank(
+        results: [SearchResponse.Result],
+        scopeContext: MemoryScopeContext?,
+        nowMs: Int64,
+        maxWindow: Int
+    ) -> [SearchResponse.Result] {
+        let cappedWindow = min(max(0, maxWindow), results.count)
+        guard cappedWindow > 0 else { return results }
+
+        let scoredHead = results.prefix(cappedWindow).enumerated().compactMap { index, result -> (index: Int, composite: Float, adjustment: Float, result: SearchResponse.Result)? in
+            let semantic = MemorySemantics.rankingReasons(
+                metadata: result.metadata,
+                scope: scopeContext,
+                nowMs: nowMs
+            )
+            guard semantic.adjustment > -9.5 else { return nil }
+            var updated = result
+            if !semantic.reasons.isEmpty {
+                updated.explanations = dedupedExplanations(result.explanations + semantic.reasons)
+            }
+            return (index: index, composite: result.score + semantic.adjustment, adjustment: semantic.adjustment, result: updated)
+        }
+
+        guard !scoredHead.isEmpty else { return Array(results.dropFirst(cappedWindow)) }
+        let meaningfulAdjustmentExists = scoredHead.contains { abs($0.adjustment) >= 0.11 }
+        guard meaningfulAdjustmentExists else {
+            let retained = scoredHead.sorted { $0.index < $1.index }.map(\.result)
+            if cappedWindow == results.count {
+                return retained
+            }
+            var combined = retained
+            combined.reserveCapacity(results.count)
+            combined.append(contentsOf: results.dropFirst(cappedWindow).filter {
+                !MemorySemantics.parse(metadata: $0.metadata, nowMs: nowMs).isExpired
+            })
+            return combined
+        }
+
+        let rankedHead = scoredHead.sorted { lhs, rhs in
+            if lhs.composite != rhs.composite { return lhs.composite > rhs.composite }
+            if lhs.result.score != rhs.result.score { return lhs.result.score > rhs.result.score }
+            return lhs.index < rhs.index
+        }.map { item -> SearchResponse.Result in
+            var result = item.result
+            result.score = item.composite
+            return result
+        }
+
+        if cappedWindow == results.count {
+            return rankedHead
+        }
+        var combined = rankedHead
+        combined.reserveCapacity(results.count)
+        combined.append(contentsOf: results.dropFirst(cappedWindow).filter {
+            !MemorySemantics.parse(metadata: $0.metadata, nowMs: nowMs).isExpired
+        })
+        return combined
+    }
+
+    /// Lift a strong lexical hit above a vector-only neighbor that shares no
+    /// distinctive query tokens. Order-only: published scores stay on the fused
+    /// scale except a `nextUp` bump so later score-sorts keep the new order.
+    /// One-token OR-fallback hits stay put; two text-lane hits are not reordered.
+    package static func distinctiveTokenRerank(
+        results: [SearchResponse.Result],
+        query: String,
+        nowMs: Int64,
+        maxWindow: Int,
+        analyzer: QueryAnalyzer = QueryAnalyzer()
+    ) -> [SearchResponse.Result] {
+        let queryTerms = Set(analyzer.normalizedTerms(query: query))
+        guard !queryTerms.isEmpty else { return results }
+        let cappedWindow = min(max(0, maxWindow), results.count)
+        guard cappedWindow > 1 else { return results }
+        // Only text-lane hits are lifted, so a window without one (any vector-only search)
+        // comes back unchanged; skip tokenizing its previews.
+        guard results.prefix(cappedWindow).contains(where: { $0.sources.contains(.text) }) else {
+            return results
+        }
+
+        let recentMs: Int64 = 3 * 24 * 60 * 60 * 1000
+        struct Scored {
+            var index: Int
+            var coverage: Float
+            var overlapCount: Int
+            var isRecent: Bool
+            var isText: Bool
+            var isVectorOnly: Bool
+            var result: SearchResponse.Result
+        }
+
+        let scoredHead: [Scored] = results.prefix(cappedWindow).enumerated().map { index, result in
+            let preview = dehighlightedPreviewText(result.previewText ?? "")
+            let previewTerms = Set(analyzer.normalizedTerms(query: preview))
+            let overlap = queryTerms.intersection(previewTerms)
+            let createdAtMs = MemorySemantics.parse(metadata: result.metadata, nowMs: nowMs).createdAtMs
+            let isRecent = createdAtMs.map { TimestampAge.elapsedMs(since: $0, nowMs: nowMs) <= recentMs } ?? false
+            let isText = result.sources.contains(.text)
+            let isVectorOnly = result.sources.contains(.vector) && !isText
+            return Scored(
+                index: index,
+                coverage: Float(overlap.count) / Float(queryTerms.count),
+                overlapCount: overlap.count,
+                isRecent: isRecent,
+                isText: isText,
+                isVectorOnly: isVectorOnly,
+                result: result
+            )
+        }
+
+        func isStrongLexical(_ item: Scored) -> Bool {
+            // Two distinctive tokens, not a 1-of-N OR-fallback or a lone identifier
+            // (identifiers already have identifierExactMatchRerank).
+            item.isText && item.overlapCount >= 2
+        }
+
+        guard let vectorIndex = scoredHead.firstIndex(where: { $0.isVectorOnly && $0.overlapCount == 0 }),
+              scoredHead.contains(where: { isStrongLexical($0) && $0.index > vectorIndex })
+        else {
+            return results
+        }
+
+        let vectorScore = scoredHead[vectorIndex].result.score
+        let lifted = scoredHead.filter { isStrongLexical($0) && $0.index > vectorIndex }
+            .sorted { lhs, rhs in
+                if lhs.overlapCount != rhs.overlapCount { return lhs.overlapCount > rhs.overlapCount }
+                if lhs.coverage != rhs.coverage { return lhs.coverage > rhs.coverage }
+                if lhs.isRecent != rhs.isRecent { return lhs.isRecent && !rhs.isRecent }
+                return lhs.index < rhs.index
+            }
+
+        var head = Array(scoredHead)
+        let liftIDs = Set(lifted.map(\.result.frameId))
+        head.removeAll { liftIDs.contains($0.result.frameId) }
+        let insertAt = head.firstIndex(where: { $0.index == vectorIndex }) ?? vectorIndex
+        var nextScore = vectorScore
+        let promoted: [Scored] = lifted.reversed().map { item in
+            nextScore = min(1, nextScore.nextUp)
+            var updated = item.result
+            updated.score = nextScore
+            updated.explanations = dedupedExplanations(updated.explanations + ["distinctive token overlap"])
+            if item.isRecent {
+                updated.explanations = dedupedExplanations(updated.explanations + ["recent lexical match"])
+            }
+            var copy = item
+            copy.result = updated
+            return copy
+        }.reversed()
+        head.insert(contentsOf: promoted, at: insertAt)
+
+        var rankedHead = head.map(\.result)
+        // Keep published scores descending after the lift.
+        for index in 1..<rankedHead.count {
+            if rankedHead[index].score > rankedHead[index - 1].score {
+                rankedHead[index].score = rankedHead[index - 1].score
+            }
+        }
+
+        if cappedWindow == results.count {
+            return rankedHead
+        }
+        var combined = rankedHead
+        combined.reserveCapacity(results.count)
+        combined.append(contentsOf: results.dropFirst(cappedWindow))
+        return combined
+    }
+
+    /// Weight of intent signals relative to the fused retrieval score.
+    package static let intentSignalScale: Float = 0.02
+
+    package static func intentAwareRerank(
+        results: [SearchResponse.Result],
+        query: String,
+        maxWindow: Int,
+        analyzer: QueryAnalyzer = QueryAnalyzer()
+    ) -> [SearchResponse.Result] {
+        let cappedWindow = min(max(0, maxWindow), results.count)
+        guard cappedWindow > 1 else { return results }
+
+        let intents = analyzer.detectIntent(query: query)
+        let queryTerms = Set(analyzer.normalizedTerms(query: query))
+        let queryEntities = analyzer.entityTerms(query: query)
+        let queryYears = analyzer.yearTerms(in: query)
+        let queryDateKeys = analyzer.normalizedDateKeys(in: query)
+        let rawPhrases = MatchPlan.rawQuotedPhrases(from: query)
+        let lowerRawPhrases = rawPhrases.map { $0.lowercased() }
+        let normalizedPhrases = MatchPlan.normalizedQuotedPhrases(from: query)
+        let queryNumericEntities = queryEntities.filter { termContainsDigits($0) }
+        let queryAlphaEntities = queryEntities.filter { isLettersOnly($0) }
+        let queryNumericTerms = queryTerms.filter { isDigitsOnly($0) }
+        let hasTargetIntent =
+            intents.contains(.asksLocation)
+            || intents.contains(.asksDate)
+            || intents.contains(.asksOwnership)
+
+        let hasDisambiguationSignals =
+            !queryEntities.isEmpty
+            || !queryYears.isEmpty
+            || !queryDateKeys.isEmpty
+            || !rawPhrases.isEmpty
+            || !normalizedPhrases.isEmpty
+
+        if !hasTargetIntent || !hasDisambiguationSignals {
+            return results
+        }
+
+        // Ranking owns the published score. Recall assembly may reorder later
+        // but must not rewrite these values.
+        func compositeScore(for result: SearchResponse.Result) -> Float {
+            var total = result.score
+            guard let preview = result.previewText, !preview.isEmpty else { return total }
+
+            let comparablePreview = dehighlightedPreviewText(preview)
+            // Each preview feature is read only when the query has the matching signal,
+            // so skip extracting it otherwise (the window is scored on every search).
+            let previewTerms: Set<String> = queryTerms.isEmpty
+                ? [] : Set(analyzer.normalizedTerms(query: comparablePreview))
+            let previewEntities: Set<String> = queryEntities.isEmpty
+                ? [] : analyzer.entityTerms(query: comparablePreview)
+            let previewYears: Set<String> = queryYears.isEmpty
+                ? [] : analyzer.yearTerms(in: comparablePreview)
+            let previewDateKeys: Set<String> = queryDateKeys.isEmpty
+                ? [] : analyzer.normalizedDateKeys(in: comparablePreview)
+            let previewAlphaEntities = previewEntities.filter { isLettersOnly($0) }
+            let lower = comparablePreview.lowercased()
+            let normalizedLower = normalizedPhrases.isEmpty
+                ? "" : normalizedPhraseComparableText(comparablePreview)
+            let vectorInfluenced = result.sources.contains(.vector)
+
+            if !queryTerms.isEmpty, !previewTerms.isEmpty {
+                let overlap = Float(queryTerms.intersection(previewTerms).count)
+                let recall = overlap / Float(max(1, queryTerms.count))
+                let precision = overlap / Float(max(1, previewTerms.count))
+                total += recall * 0.55   // Lower than FastRAG: false positives more visible in search UI
+                total += precision * 0.25
+            }
+
+            if !queryEntities.isEmpty {
+                let entityHits = queryEntities.intersection(previewEntities).count
+                let coverage = Float(entityHits) / Float(max(1, queryEntities.count))
+                if !queryNumericEntities.isEmpty {
+                    let numericHits = queryNumericEntities.intersection(previewEntities).count
+                    let numericCoverage = Float(numericHits) / Float(max(1, queryNumericEntities.count))
+                    total += numericCoverage * 1.95
+                }
+                if !queryAlphaEntities.isEmpty {
+                    let alphaHits = queryAlphaEntities.intersection(previewAlphaEntities).count
+                    let alphaCoverage = Float(alphaHits) / Float(max(1, queryAlphaEntities.count))
+                    total += alphaCoverage * 1.25
+                }
+                total += coverage * 0.30
+                if entityHits == 0 {
+                    total -= !queryNumericEntities.isEmpty ? 0.85 : 0.45
+                    if !queryNumericTerms.isEmpty,
+                       !queryNumericTerms.intersection(previewTerms).isEmpty {
+                        total -= 0.75
+                    }
+                }
+                if !queryAlphaEntities.isEmpty,
+                   queryAlphaEntities.intersection(previewAlphaEntities).isEmpty,
+                   !previewAlphaEntities.isEmpty {
+                    total -= 0.40
+                }
+            }
+
+            if !queryYears.isEmpty {
+                let yearHits = queryYears.intersection(previewYears).count
+                let yearCoverage = Float(yearHits) / Float(max(1, queryYears.count))
+                total += yearCoverage * 1.25
+                if yearHits == 0, !previewYears.isEmpty {
+                    total -= 1.10
+                }
+            }
+
+            if !queryDateKeys.isEmpty {
+                let dateHits = queryDateKeys.intersection(previewDateKeys).count
+                let dateCoverage = Float(dateHits) / Float(max(1, queryDateKeys.count))
+                total += dateCoverage * 1.15
+                if dateHits == 0, !previewDateKeys.isEmpty {
+                    total -= 0.95
+                }
+            }
+
+            let strictRawPhrases = lowerRawPhrases.filter { phrase in
+                phrase.contains("-") || phrase.split(whereSeparator: \.isWhitespace).count >= 2
+            }
+            var exactPhraseHits = 0
+            var strictExactHits = 0
+            if !lowerRawPhrases.isEmpty {
+                for phrase in lowerRawPhrases where lower.contains(phrase) {
+                    exactPhraseHits += 1
+                }
+                for phrase in strictRawPhrases where lower.contains(phrase) {
+                    strictExactHits += 1
+                }
+                let strictPhraseIntent = !strictRawPhrases.isEmpty
+                if exactPhraseHits > 0 {
+                    total += Float(exactPhraseHits) * (strictPhraseIntent ? 2.10 : 1.20)
+                } else {
+                    total -= strictPhraseIntent ? 1.40 : 0.35
+                }
+                let strictMisses = strictRawPhrases.count - strictExactHits
+                if strictMisses > 0 {
+                    total -= Float(strictMisses) * 0.85
+                }
+            }
+
+            if !normalizedPhrases.isEmpty {
+                var normalizedHits = 0
+                for phrase in normalizedPhrases where normalizedLower.contains(phrase) {
+                    normalizedHits += 1
+                }
+                let coverage = Float(normalizedHits) / Float(max(1, normalizedPhrases.count))
+                let strictPhraseMiss = !strictRawPhrases.isEmpty && strictExactHits == 0
+                total += coverage * (strictPhraseMiss ? 0.20 : 0.75)
+                if strictPhraseMiss {
+                    total -= 0.55
+                }
+                if normalizedHits == 0 {
+                    total -= strictPhraseMiss ? 0.45 : 0.20
+                }
+            }
+
+            // Answer-shape signals only. No phrases from benchmark fixtures:
+            // ordinary words ("health", "checklist") must not move a result.
+            if intents.contains(.asksLocation) {
+                if RerankingHelpers.containsRelocationStatement(comparablePreview) {
+                    total += 1.60
+                } else if RerankingHelpers.containsMoveToPhrase(lower) {
+                    total += 0.45
+                }
+            }
+
+            if intents.contains(.asksDate) {
+                if analyzer.containsDateLiteral(comparablePreview) {
+                    total += 1.20
+                }
+                if RerankingHelpers.containsTentativeLanguage(lower) {
+                    let scaledPenalty = max(
+                        vectorInfluenced ? 2.90 : 2.45,
+                        result.score * (vectorInfluenced ? 1.60 : 1.40)
+                    )
+                    total -= scaledPenalty
+                }
+            }
+
+            if intents.contains(.asksOwnership), RerankingHelpers.containsOwnershipStatement(lower) {
+                total += 1.10
+            }
+
+            return total
+        }
+
+        // The signals above are sized in whole points, but fused RRF scores are
+        // about 1/(k + rank), roughly 0.1 at rank 1. At full size a date literal
+        // or an entity hit outranks every retrieval signal in the window, so the
+        // signals are scaled down to break near-ties between retrieved results.
+        var scoredHead: [(index: Int, score: Float)] = []
+        scoredHead.reserveCapacity(cappedWindow)
+        for index in 0..<cappedWindow {
+            let result = results[index]
+            let signal = compositeScore(for: result) - result.score
+            scoredHead.append((index: index, score: result.score + signal * intentSignalScale))
+        }
+        scoredHead.sort { lhs, rhs in
+            if lhs.score != rhs.score { return lhs.score > rhs.score }
+            let lhsResult = results[lhs.index]
+            let rhsResult = results[rhs.index]
+            if lhsResult.score != rhsResult.score { return lhsResult.score > rhsResult.score }
+            return lhsResult.frameId < rhsResult.frameId
+        }
+
+        var rerankedHead: [SearchResponse.Result] = []
+        rerankedHead.reserveCapacity(cappedWindow)
+        for (rank, candidate) in scoredHead.enumerated() {
+            var result = results[candidate.index]
+            result.score = candidate.score
+            if var diagnostics = result.rankingDiagnostics {
+                diagnostics.tieBreakReason = rank == 0 ? .topResult : .rerankComposite
+                result.rankingDiagnostics = diagnostics
+            }
+            rerankedHead.append(result)
+        }
+
+        if cappedWindow == results.count {
+            return rerankedHead
+        }
+        var combined = rerankedHead
+        combined.reserveCapacity(results.count)
+        combined.append(contentsOf: results.dropFirst(cappedWindow))
+        return combined
+    }
+
+    /// Query-side exact-intent boost for identifiers and quoted phrases.
+    /// FTS `unicode61` splits identifier punctuation, so similar prose can beat a
+    /// unique token on BM25; same-repo/project semantic rerank can then lift a
+    /// neighbor. A token-boundary match receives the strong bonus, while a
+    /// substring match receives only a small lexical nudge. This pass runs after
+    /// semantic rerank so an exact phrase hit stays rank 1. Vector-only ranking
+    /// is unchanged.
+    package static func identifierExactMatchRerank(
+        results: [SearchResponse.Result],
+        query: String,
+        maxWindow: Int
+    ) -> [SearchResponse.Result] {
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return results }
+        let cappedWindow = min(max(0, maxWindow), results.count)
+        guard cappedWindow > 0 else { return results }
+
+        let needles = exactIntentNeedles(from: needle)
+        guard !needles.isEmpty else { return results }
+
+        // Larger than same-repo (0.9) + same-project (0.7) + decision (0.45) + durable (0.25).
+        let exactTokenBonus: Float = 5.0
+        let substringBonus: Float = 0.5
+
+        let scoredHead = results.prefix(cappedWindow).enumerated().map { index, result -> (index: Int, composite: Float, strength: ExactIntentMatchStrength, result: SearchResponse.Result) in
+            let haystack = dehighlightedPreviewText(result.previewText ?? "").lowercased()
+            let strength = bestExactIntentMatch(in: haystack, needles: needles)
+            var updated = result
+            switch strength {
+            case .token:
+                updated.explanations = dedupedExplanations(result.explanations + ["exact identifier match"])
+            case .substring:
+                updated.explanations = dedupedExplanations(result.explanations + ["identifier substring match"])
+            case .none:
+                break
+            }
+            return (
+                index: index,
+                composite: result.score + strength.bonus(exactTokenBonus: exactTokenBonus, substringBonus: substringBonus),
+                strength: strength,
+                result: updated
+            )
+        }
+
+        guard scoredHead.contains(where: { $0.strength != .none }) else { return results }
+
+        let rankedHead = scoredHead.sorted { lhs, rhs in
+            if lhs.strength != rhs.strength { return lhs.strength.rawValue > rhs.strength.rawValue }
+            if lhs.composite != rhs.composite { return lhs.composite > rhs.composite }
+            if lhs.result.score != rhs.result.score { return lhs.result.score > rhs.result.score }
+            return lhs.index < rhs.index
+        }.map { item -> SearchResponse.Result in
+            var result = item.result
+            result.score = item.composite
+            return result
+        }
+
+        if cappedWindow == results.count {
+            return rankedHead
+        }
+        var combined = rankedHead
+        combined.reserveCapacity(results.count)
+        combined.append(contentsOf: results.dropFirst(cappedWindow))
+        return combined
+    }
+
+    package static func dedupedExplanations(_ reasons: [String]) -> [String] {
+        var seen = Set<String>()
+        var ordered: [String] = []
+        ordered.reserveCapacity(reasons.count)
+        for reason in reasons {
+            let normalized = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty, seen.insert(normalized).inserted else { continue }
+            ordered.append(normalized)
+        }
+        return ordered
+    }
+
+    /// Quoted phrases carry the exact target inside a natural-language query;
+    /// identifier queries use the whole trimmed value. Preserve all quoted
+    /// phrases so a result matching any explicit target can be promoted.
+    private static func exactIntentNeedles(from query: String) -> [String] {
+        let phrases = MatchPlan.rawQuotedPhrases(from: query).map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+        return phrases.isEmpty ? [query] : phrases
+    }
+
+    private static func bestExactIntentMatch(
+        in haystack: String,
+        needles: [String]
+    ) -> ExactIntentMatchStrength {
+        guard !haystack.isEmpty else { return .none }
+        var best: ExactIntentMatchStrength = .none
+        for needle in needles {
+            let candidate = needle.lowercased()
+            guard !candidate.isEmpty else { continue }
+            let strength = exactIntentMatchStrength(needle: candidate, in: haystack)
+            if strength.rawValue > best.rawValue {
+                best = strength
+                if best == .token { break }
+            }
+        }
+        return best
+    }
+
+    /// Classify a case-insensitive occurrence by the characters immediately
+    /// around it. Identifier glue is treated as part of the token when it
+    /// continues into another identifier scalar, while hyphen/underscore glue
+    /// remains strict for the #166 path. This preserves UUID/dot/path equality
+    /// without making sentence punctuation defeat a quoted name.
+    private static func exactIntentMatchStrength(
+        needle: String,
+        in haystack: String
+    ) -> ExactIntentMatchStrength {
+        let identifierGlue = CharacterSet(charactersIn: "-_.:/@#%+")
+        var searchStart = haystack.startIndex
+        var best: ExactIntentMatchStrength = .none
+
+        while searchStart < haystack.endIndex,
+              let range = haystack.range(of: needle, options: [.literal], range: searchStart..<haystack.endIndex)
+        {
+            let before = range.lowerBound > haystack.startIndex
+                ? haystack.index(before: range.lowerBound)
+                : nil
+            let after = range.upperBound < haystack.endIndex
+                ? range.upperBound
+                : nil
+            let hasTokenBoundaries = isExactIntentBoundary(
+                at: before,
+                direction: .before,
+                in: haystack,
+                glue: identifierGlue
+            ) && isExactIntentBoundary(
+                at: after,
+                direction: .after,
+                in: haystack,
+                glue: identifierGlue
+            )
+            if hasTokenBoundaries {
+                return .token
+            }
+            best = .substring
+            searchStart = range.upperBound
+        }
+        return best
+    }
+
+    private enum ExactIntentMatchStrength: Int, Equatable {
+        case none = 0
+        case substring = 1
+        case token = 2
+
+        func bonus(exactTokenBonus: Float, substringBonus: Float) -> Float {
+            switch self {
+            case .none: 0
+            case .substring: substringBonus
+            case .token: exactTokenBonus
+            }
+        }
+    }
+
+    private enum ExactIntentBoundaryDirection {
+        case before
+        case after
+    }
+
+    private static func isExactIntentBoundary(
+        at index: String.Index?,
+        direction: ExactIntentBoundaryDirection,
+        in haystack: String,
+        glue: CharacterSet
+    ) -> Bool {
+        guard let index else { return true }
+        let character = haystack[index]
+        let scalarView = character.unicodeScalars
+        if scalarView.contains(where: { CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0) }) {
+            return false
+        }
+        // Hyphen and underscore are always identifier glue. A quoted phrase
+        // such as "Ada Lovelace" must not treat "Ada Lovelace-Foundation"
+        // as an equal token sequence merely because the query itself has no
+        // identifier punctuation.
+        if scalarView.contains(where: { $0 == "-" || $0 == "_" }) {
+            return false
+        }
+        guard scalarView.contains(where: glue.contains) else {
+            return true
+        }
+
+        // Punctuation in an identifier can also be ordinary sentence
+        // punctuation (for example, `build.agent_v2.`). Walk through a glue
+        // run and only reject the boundary when it continues into another
+        // identifier scalar. This keeps `build.agent_v2.extra` as a prefix
+        // distractor while allowing a terminal period after the exact ID.
+        var cursor: String.Index
+        switch direction {
+        case .before:
+            guard index > haystack.startIndex else { return true }
+            cursor = haystack.index(before: index)
+        case .after:
+            guard index < haystack.endIndex else { return true }
+            cursor = haystack.index(after: index)
+        }
+        while cursor < haystack.endIndex {
+            let adjacent = haystack[cursor]
+            let adjacentScalars = adjacent.unicodeScalars
+            if adjacentScalars.contains(where: {
+                CharacterSet.letters.contains($0) || CharacterSet.decimalDigits.contains($0)
+            }) {
+                return false
+            }
+            guard adjacentScalars.contains(where: glue.contains) else {
+                return true
+            }
+            switch direction {
+            case .before:
+                guard cursor > haystack.startIndex else { return true }
+                cursor = haystack.index(before: cursor)
+            case .after:
+                cursor = haystack.index(after: cursor)
+            }
+        }
+        return true
+    }
+
+    /// Strips FTS5 snippet highlight markers (private-use codepoints owned by
+    /// `FTS5SearchEngine`). Legitimate user brackets are preserved.
+    package static func dehighlightedPreviewText(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: FTS5SearchEngine.snippetOpenMarker, with: "")
+            .replacingOccurrences(of: FTS5SearchEngine.snippetCloseMarker, with: "")
+    }
+
+    private static func isDigitsOnly(_ text: String) -> Bool {
+        !text.isEmpty && text.unicodeScalars.allSatisfy { CharacterSet.decimalDigits.contains($0) }
+    }
+
+    private static func isLettersOnly(_ text: String) -> Bool {
+        !text.isEmpty && text.unicodeScalars.allSatisfy { CharacterSet.letters.contains($0) }
+    }
+
+    private static func termContainsDigits(_ text: String) -> Bool {
+        text.unicodeScalars.contains { CharacterSet.decimalDigits.contains($0) }
+    }
+
+    private static func normalizedPhraseComparableText(_ text: String) -> String {
+        QueryAnalyzer.alphanumericRuns(text.lowercased())
+            .map(String.init)
+            .joined(separator: " ")
+    }
+}

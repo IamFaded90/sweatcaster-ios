@@ -1,0 +1,3 @@
+import WaxCore
+import WaxTextSearch
+import WaxVectorSearch

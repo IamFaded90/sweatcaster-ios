@@ -1,0 +1,114 @@
+# Vector Search Engines
+
+Compare the CPU and GPU backends and understand their performance characteristics.
+
+## Overview
+
+WaxVectorSearch ships package-only CPU and GPU vector engines for Wax internals. They conform to the package-only ``VectorSearchEngine`` protocol, which is not public API for downstream applications. This article documents the contributor-facing implementation surface.
+
+## AccelerateVectorEngine (CPU)
+
+``AccelerateVectorEngine`` stores flat vectors and performs exact CPU search. It uses Accelerate for matrix multiplication when available and a Swift fallback elsewhere.
+
+### Configuration
+
+| Parameter | Value |
+|-----------|-------|
+| Storage | Flat Float32 vectors |
+| Search | Exact top-K scan |
+| Metrics | Cosine, Dot Product, L2 |
+
+### When to Use
+
+- Cross-platform deployments (no Metal required)
+- Small to medium index sizes
+- When you need dot product or L2 metrics
+- When deterministic exact results are preferred
+
+Wax package internals select this engine for CPU-backed indexes through the vector engine loader and session configuration.
+
+## MetalVectorEngine (GPU)
+
+> Deprecated: Wax's search path does not use `MetalVectorEngine`. It searches with AccelerateVectorEngine (exact, CPU) or MetalANNSVectorEngine (approximate, GPU). `MetalVectorEngine` and its shaders will be removed in the next major version.
+
+``MetalVectorEngine`` uses Metal compute shaders for brute-force cosine distance computation on the GPU. It achieves high throughput through SIMD vectorization and Unified Memory.
+
+### Metal Shader Pipeline
+
+The search pipeline has two stages:
+
+1. **Distance computation** — Each GPU thread computes the cosine distance between the query vector and one stored vector. The engine selects between two kernels:
+
+   | Kernel | Dimensions | Strategy |
+   |--------|------------|----------|
+   | SIMD4 | < 384 | Process 4 floats per iteration |
+   | SIMD8 | >= 384 | Process 8 floats with dual accumulators for ILP |
+
+2. **Top-K reduction** — For large indexes (>= 1,000 vectors), GPU-side top-K reduction avoids transferring all distances to the CPU:
+   - **Stage 1**: Per-threadgroup partial top-K via bitonic sort or heap
+   - **Stage 2**: Iterative merge across threadgroups until a single top-K remains
+   - **Fallback**: For smaller indexes, CPU-side O(n log k) heap selection
+
+### Unified Memory
+
+Vectors are stored directly in an `MTLBuffer` using Apple Silicon's Unified Memory Architecture. This eliminates CPU-to-GPU copies — the CPU writes vectors directly to the buffer, and the GPU reads them without any transfer.
+
+### Buffer Pooling
+
+Transient buffers (query vectors, distance arrays) are pooled and reused across searches to avoid per-query allocation overhead.
+
+### Availability
+
+Wax package internals check Metal availability before selecting this backend. Metal is normally available on Apple Silicon Macs and iPhones.
+
+### Limitations
+
+- **Cosine similarity only** — The Metal kernels assume the query vector is pre-normalized
+- **Brute-force search** — O(n) per query, best for indexes under ~100K vectors where GPU parallelism compensates
+
+## Engine Selection
+
+Wax package internals choose the backend when a vector index is loaded or created. The selection logic prefers MetalANNS for compatible larger Apple-platform indexes and falls back to Accelerate when required by platform capability or index size.
+
+## Common Operations
+
+Both package-only engines use the same operation flow:
+
+```swift
+// Add vectors
+try await engine.add(frameId: 1, vector: embedding)
+try await engine.addBatch(frameIds: ids, vectors: vectors)
+
+// Search
+let results = try await engine.search(vector: queryVector, topK: 10)
+// Returns: [(frameId: UInt64, score: Float)]
+// Score: higher is better (1.0 = identical for cosine)
+
+// Remove
+try await engine.remove(frameId: 1)
+
+// Persist
+try await engine.stageForCommit(into: waxStore)
+```
+
+## Score Interpretation
+
+The ``VectorMetric`` converts raw distances to similarity scores:
+
+| Metric | Formula | Range |
+|--------|---------|-------|
+| Cosine | `1 - distance` | 0 (orthogonal) to 1 (identical) |
+| Dot Product | `-distance` | Unbounded |
+| L2 | `-distance` | Unbounded (0 = identical) |
+
+## Serialization Format
+
+Both engines serialize to the MV2V binary format:
+
+```
+[Magic: 4B "MV2V"][Version: 2B][Encoding: 1B][Similarity: 1B]
+[Dimensions: 4B][VectorCount: 8B][PayloadLength: 8B][Reserved: 8B]
+[Payload: variable]
+```
+
+Encoding `1` is reserved for legacy USearch indexes and is no longer supported. Rebuild the vector index to persist the current flat-vector format used by Accelerate and MetalANNS.

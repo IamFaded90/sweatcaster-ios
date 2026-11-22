@@ -1,0 +1,482 @@
+import Foundation
+
+package struct QueryIntent: OptionSet, Sendable, Equatable {
+    package let rawValue: Int
+
+    package init(rawValue: Int) {
+        self.rawValue = rawValue
+    }
+
+    package static let asksLocation = QueryIntent(rawValue: 1 << 0)
+    package static let asksDate = QueryIntent(rawValue: 1 << 1)
+    package static let asksOwnership = QueryIntent(rawValue: 1 << 2)
+    package static let multiHop = QueryIntent(rawValue: 1 << 3)
+}
+
+/// Query characteristics that influence tier selection.
+package struct QuerySignals: Sendable, Equatable {
+    /// Query contains specific entities (names, dates, numbers)
+    package var hasSpecificEntities: Bool
+    
+    /// Number of words in the query
+    package var wordCount: Int
+    
+    /// Query contains quoted phrases (exact match intent)
+    package var hasQuotedPhrases: Bool
+    
+    /// Estimated specificity score (0.0 = vague, 1.0 = very specific)
+    package var specificityScore: Float
+}
+
+/// Analyzes queries to extract signals for tier selection.
+package struct QueryAnalyzer: Sendable {
+    package init() {}
+    
+    /// Analyze a query to extract signals that influence tier selection.
+    ///
+    /// Specific queries (with entities, quotes) should use fuller tiers,
+    /// while vague queries can use more compressed tiers.
+    package func analyze(query: String) -> QuerySignals {
+        let words = query.split { $0.isWhitespace || $0.isPunctuation }
+        
+        // Check for specific entities (numbers, capitalized words)
+        let hasNumbers = query.rangeOfCharacter(from: .decimalDigits) != nil
+        let hasCapitalized = words.contains { word in
+            guard let first = word.first else { return false }
+            return first.isUppercase
+        }
+        let hasSpecificEntities = hasNumbers || hasCapitalized
+        
+        // Check for quoted phrases (indicates exact match intent)
+        let hasQuotedPhrases = query.contains("\"")
+        
+        // Calculate specificity score (0.0 to 1.0)
+        var specificity: Float = 0.0
+        
+        // Longer queries tend to be more specific
+        // Max 0.4 contribution at 8+ words
+        specificity += min(Float(words.count) / 8.0, 0.4)
+        
+        // Entities indicate specific intent
+        if hasSpecificEntities {
+            specificity += 0.35
+        }
+        
+        // Quoted phrases indicate exact match requirements
+        if hasQuotedPhrases {
+            specificity += 0.25
+        }
+        
+        return QuerySignals(
+            hasSpecificEntities: hasSpecificEntities,
+            wordCount: words.count,
+            hasQuotedPhrases: hasQuotedPhrases,
+            specificityScore: min(1.0, specificity)
+        )
+    }
+
+    /// Normalize query text into deterministic lexical terms for matching/reranking.
+    /// `text.split(whereSeparator: { !$0.isLetter && !$0.isNumber })`. That split was a
+    /// large part of reranking previews, so ASCII text splits on its bytes: each Character
+    /// is one byte, or "\r\n", a separator either way, and the letters and numbers are
+    /// exactly A-Z, a-z and 0-9.
+    static func alphanumericRuns(_ text: String) -> [Substring] {
+        let utf8 = text.utf8
+        guard utf8.allSatisfy({ $0 < 0x80 }) else {
+            return text.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        }
+        var runs: [Substring] = []
+        var runStart: String.Index?
+        var index = utf8.startIndex
+        while index != utf8.endIndex {
+            let byte = utf8[index]
+            let lowered = byte | 0x20
+            let isAlphanumeric = (lowered >= UInt8(ascii: "a") && lowered <= UInt8(ascii: "z"))
+                || (byte >= UInt8(ascii: "0") && byte <= UInt8(ascii: "9"))
+            if isAlphanumeric {
+                if runStart == nil { runStart = index }
+            } else if let start = runStart {
+                runs.append(text[start..<index])
+                runStart = nil
+            }
+            utf8.formIndex(after: &index)
+        }
+        if let runStart { runs.append(text[runStart..<utf8.endIndex]) }
+        return runs
+    }
+
+    package func normalizedTerms(query: String) -> [String] {
+        Self.alphanumericRuns(query.lowercased())
+            .map(String.init)
+            .map(normalizeToken)
+            .filter { !$0.isEmpty && !Self.stopWords.contains($0) }
+    }
+
+    /// `CharacterSet.uppercaseLetters.contains(scalar)`. Foundation's lookup was most of
+    /// entity extraction during reranks, and its ASCII members are exactly A-Z.
+    static func isUppercaseLetter(_ scalar: Unicode.Scalar) -> Bool {
+        if scalar.isASCII { return ("A"..."Z").contains(scalar) }
+        return CharacterSet.uppercaseLetters.contains(scalar)
+    }
+
+    /// Extract entity-like terms (for example: "person18", "atlas10") for intent-aware reranking.
+    package func entityTerms(query: String) -> Set<String> {
+        let original = Self.alphanumericRuns(query)
+            .map(String.init)
+            .filter { !$0.isEmpty }
+        let raw = original.map { $0.lowercased() }
+        guard !raw.isEmpty else { return [] }
+
+        var entities: Set<String> = []
+        entities.reserveCapacity(raw.count)
+
+        for token in raw where Self.containsLetters(token) && Self.containsDigits(token) {
+            entities.insert(token)
+        }
+
+        if raw.count > 1 {
+            for index in 0..<(raw.count - 1) {
+                let lhs = raw[index]
+                let rhs = raw[index + 1]
+                if Self.isLettersOnly(lhs), Self.isDigitsOnly(rhs) {
+                    entities.insert(lhs + rhs)
+                }
+            }
+        }
+
+        if !original.isEmpty {
+            for (index, token) in original.enumerated() {
+                let normalized = token.lowercased()
+                guard Self.isLettersOnly(normalized) else { continue }
+                guard normalized.count >= 3 else { continue }
+                guard !Self.stopWords.contains(normalized) else { continue }
+                guard !Self.entityNoiseTerms.contains(normalized) else { continue }
+
+                let hasUppercase = token.unicodeScalars.contains(where: Self.isUppercaseLetter)
+                let hasEntityCue =
+                    index > 0 &&
+                    Self.entityCueWords.contains(raw[index - 1]) &&
+                    normalized.count >= 4
+                let hasNameFollowerCue =
+                    index + 1 < raw.count &&
+                    Self.nameFollowerCueWords.contains(raw[index + 1]) &&
+                    normalized.count >= 4
+
+                if hasUppercase || hasEntityCue || hasNameFollowerCue {
+                    entities.insert(normalized)
+                }
+            }
+        }
+
+        return entities
+    }
+
+    /// Four-digit year cues extracted from text (for timeline disambiguation).
+    package func yearTerms(in text: String) -> Set<String> {
+        Set(
+            Self.alphanumericRuns(text)
+                .map(String.init)
+                .filter {
+                    $0.count == 4 &&
+                    $0.unicodeScalars.allSatisfy { CharacterSet.decimalDigits.contains($0) }
+                }
+        )
+    }
+
+    /// Date literals in encounter order.
+    ///
+    /// Supported deterministic formats:
+    /// - `Month D, YYYY` and `Month D YYYY` (full + abbreviated months)
+    /// - `D Month YYYY` and `D Mon YYYY`
+    /// - ISO-like `YYYY-MM-DD`, plus `/` or `.` separators and 1-2 digit month/day
+    package func dateLiterals(in text: String) -> [String] {
+        // Every supported format has a four-digit year (`\d{4}`), so text without four
+        // consecutive decimal digits has none; most snippets have none.
+        guard Self.containsFourConsecutiveDecimalDigits(text) else { return [] }
+        let full = Self.captureMatches(regex: Self.fullMonthDateRegex, text: text, captureGroup: 0)
+        let abbreviated = Self.captureMatches(regex: Self.abbreviatedMonthDateRegex, text: text, captureGroup: 0)
+        let dayFirst = Self.captureMatches(regex: Self.dayFirstMonthDateRegex, text: text, captureGroup: 0)
+        let iso = Self.captureMatches(regex: Self.isoDateRegex, text: text, captureGroup: 0)
+
+        let all = (full + abbreviated + dayFirst + iso)
+            .sorted { lhs, rhs in
+                if lhs.location != rhs.location { return lhs.location < rhs.location }
+                return lhs.value.count < rhs.value.count
+            }
+
+        var seen: Set<String> = []
+        var ordered: [String] = []
+        ordered.reserveCapacity(all.count)
+        for item in all {
+            let value = item.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard Self.normalizedDateKey(from: value) != nil else {
+                continue
+            }
+            if seen.insert(value).inserted {
+                ordered.append(value)
+            }
+        }
+        return ordered
+    }
+
+    /// Normalized date keys in ISO form (YYYY-MM-DD) across supported date literal formats.
+    package func normalizedDateKeys(in text: String) -> Set<String> {
+        let literals = dateLiterals(in: text)
+        var keys: Set<String> = []
+        keys.reserveCapacity(literals.count)
+
+        for literal in literals {
+            if let key = Self.normalizedDateKey(from: literal) {
+                keys.insert(key)
+            }
+        }
+
+        return keys
+    }
+
+    /// True when any supported date literal is present.
+    package func containsDateLiteral(_ text: String) -> Bool {
+        !dateLiterals(in: text).isEmpty
+    }
+
+    /// Whole-word intent cues. Substrings never count ("update" is not "date",
+    /// "capacity" is not "city", "whole" is not "who").
+    package func detectIntent(query: String) -> QueryIntent {
+        let words = Set(RerankingHelpers.words(query.lowercased()))
+
+        var intent: QueryIntent = []
+        if !words.isDisjoint(with: Self.locationCueWords) {
+            intent.insert(.asksLocation)
+        }
+        if !words.isDisjoint(with: Self.dateCueWords) {
+            intent.insert(.asksDate)
+        }
+        if !words.isDisjoint(with: Self.ownershipCueWords) {
+            intent.insert(.asksOwnership)
+        }
+        let enabledIntentCount =
+            (intent.contains(.asksLocation) ? 1 : 0) +
+            (intent.contains(.asksDate) ? 1 : 0) +
+            (intent.contains(.asksOwnership) ? 1 : 0)
+        if words.contains("and") && enabledIntentCount > 1 {
+            intent.insert(.multiHop)
+        }
+        return intent
+    }
+
+    private static let locationCueWords: Set<Substring> = [
+        "where", "city", "move", "moves", "moved", "moving",
+    ]
+
+    private static let dateCueWords: Set<Substring> = ["when", "date", "dates"]
+
+    private static let ownershipCueWords: Set<Substring> = [
+        "who", "whom", "whose", "owner", "owners", "ownership", "owns",
+    ]
+
+    // MARK: - Private
+
+    private func normalizeToken(_ token: String) -> String {
+        guard token.count > 3 else { return token }
+        if token.hasSuffix("ies"), token.count > 4 {
+            return String(token.dropLast(3)) + "y"
+        }
+        if token.hasSuffix("ing"), token.count > 5 {
+            return String(token.dropLast(3))
+        }
+        if token.hasSuffix("ed"), token.count > 4 {
+            return String(token.dropLast(2))
+        }
+        if token.hasSuffix("es"), token.count > 4 {
+            return String(token.dropLast(2))
+        }
+        if token.hasSuffix("s"), token.count > 4 {
+            return String(token.dropLast())
+        }
+        return token
+    }
+
+    private static let stopWords: Set<String> = [
+        "a", "an", "and", "are", "at", "did", "do", "for", "from", "in", "is", "of",
+        "on", "or", "the", "to", "what", "when", "where", "which", "who", "with"
+    ]
+
+    private static let entityCueWords: Set<String> = [
+        "for", "about", "did", "does", "with", "from"
+    ]
+
+    private static let nameFollowerCueWords: Set<String> = [
+        "moved", "move", "owns", "owned"
+    ]
+
+    /// Capitalized query words that name an intent or a generic work artifact,
+    /// not an entity. Keep it generic; no benchmark-fixture vocabulary.
+    private static let entityNoiseTerms: Set<String> = [
+        "city", "date", "owner", "owns", "project", "timeline", "status",
+        "updates", "update", "report", "team",
+    ]
+
+    private static let fullMonthDateRegex = try? NSRegularExpression(
+        pattern: #"\b(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:,\s*|\s+)\d{4}\b"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let abbreviatedMonthDateRegex = try? NSRegularExpression(
+        pattern: #"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?\s+\d{1,2}(?:,\s*|\s+)\d{4}\b"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let dayFirstMonthDateRegex = try? NSRegularExpression(
+        pattern: #"\b\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\.?(?:,\s*|\s+)\d{4}\b"#,
+        options: [.caseInsensitive]
+    )
+
+    private static let isoDateRegex = try? NSRegularExpression(
+        pattern: #"\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\b"#,
+        options: []
+    )
+
+    private static let monthByName: [String: Int] = [
+        "january": 1, "jan": 1,
+        "february": 2, "feb": 2,
+        "march": 3, "mar": 3,
+        "april": 4, "apr": 4,
+        "may": 5,
+        "june": 6, "jun": 6,
+        "july": 7, "jul": 7,
+        "august": 8, "aug": 8,
+        "september": 9, "sep": 9, "sept": 9,
+        "october": 10, "oct": 10,
+        "november": 11, "nov": 11,
+        "december": 12, "dec": 12,
+    ]
+
+    /// True when `text` has four consecutive decimal digits as ICU's `\d` matches them
+    /// (General_Category Nd).
+    static func containsFourConsecutiveDecimalDigits(_ text: String) -> Bool {
+        var run = 0
+        for scalar in text.unicodeScalars {
+            let isDigit = scalar.isASCII
+                ? (scalar.value >= 0x30 && scalar.value <= 0x39)
+                : scalar.properties.generalCategory == .decimalNumber
+            run = isDigit ? run + 1 : 0
+            if run == 4 { return true }
+        }
+        return false
+    }
+
+    private static func containsLetters(_ token: String) -> Bool {
+        token.unicodeScalars.contains { CharacterSet.letters.contains($0) }
+    }
+
+    private static func containsDigits(_ token: String) -> Bool {
+        token.unicodeScalars.contains { CharacterSet.decimalDigits.contains($0) }
+    }
+
+    private static func isLettersOnly(_ token: String) -> Bool {
+        !token.isEmpty && token.unicodeScalars.allSatisfy { CharacterSet.letters.contains($0) }
+    }
+
+    private static func isDigitsOnly(_ token: String) -> Bool {
+        !token.isEmpty && token.unicodeScalars.allSatisfy { CharacterSet.decimalDigits.contains($0) }
+    }
+
+    private static func captureMatches(
+        regex: NSRegularExpression?,
+        text: String,
+        captureGroup: Int
+    ) -> [(location: Int, value: String)] {
+        guard let regex else { return [] }
+        let range = NSRange(location: 0, length: text.utf16.count)
+        return regex.matches(in: text, options: [], range: range).compactMap { match in
+            guard captureGroup < match.numberOfRanges else { return nil }
+            let capture = match.range(at: captureGroup)
+            guard capture.location != NSNotFound,
+                  let swiftRange = Range(capture, in: text)
+            else {
+                return nil
+            }
+            return (location: capture.location, value: String(text[swiftRange]))
+        }
+    }
+
+    private static func normalizedDateKey(from literal: String) -> String? {
+        let trimmed = literal.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let isoMatch = captureMatches(regex: isoDateRegex, text: trimmed, captureGroup: 0).first,
+           isoMatch.value == trimmed {
+            let components = trimmed
+                .split(whereSeparator: { $0 == "-" || $0 == "/" || $0 == "." })
+                .map(String.init)
+            guard components.count == 3,
+                  let year = Int(components[0]),
+                  let month = Int(components[1]),
+                  let day = Int(components[2]),
+                  isValidCalendarDate(year: year, month: month, day: day)
+            else {
+                return nil
+            }
+            return String(format: "%04d-%02d-%02d", year, month, day)
+        }
+
+        let parts = trimmed
+            .replacingOccurrences(of: ",", with: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        guard parts.count == 3 else { return nil }
+
+        let first = parts[0].lowercased().replacingOccurrences(of: ".", with: "")
+        let second = parts[1].lowercased().replacingOccurrences(of: ".", with: "")
+        let third = parts[2]
+
+        let year: Int
+        let month: Int
+        let day: Int
+
+        if let parsedMonth = monthByName[first],
+           let parsedDay = Int(parts[1]),
+           let parsedYear = Int(third) {
+            year = parsedYear
+            month = parsedMonth
+            day = parsedDay
+        } else if let parsedDay = Int(parts[0]),
+                  let parsedMonth = monthByName[second],
+                  let parsedYear = Int(third) {
+            year = parsedYear
+            month = parsedMonth
+            day = parsedDay
+        } else {
+            return nil
+        }
+
+        guard isValidCalendarDate(year: year, month: month, day: day) else { return nil }
+
+        return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
+    private static func isValidCalendarDate(year: Int, month: Int, day: Int) -> Bool {
+        guard (1900...2999).contains(year),
+              (1...12).contains(month),
+              (1...31).contains(day)
+        else {
+            return false
+        }
+
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        components.timeZone = TimeZone(secondsFromGMT: 0)
+
+        guard let date = gregorianUTC.date(from: components) else {
+            return false
+        }
+        let resolved = gregorianUTC.dateComponents([.year, .month, .day], from: date)
+        return resolved.year == year && resolved.month == month && resolved.day == day
+    }
+
+    private static let gregorianUTC: Calendar = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+        return calendar
+    }()
+}

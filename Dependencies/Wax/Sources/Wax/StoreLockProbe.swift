@@ -1,0 +1,49 @@
+import Foundation
+import WaxCore
+
+package enum StoreLockProbe {
+    package static func preflightExclusiveAccess(at url: URL, timeout: Duration?) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let lock = try FileLock.acquire(at: url, mode: .exclusive, timeout: timeout)
+        try lock.release()
+    }
+
+    /// Non-blocking exclusive probe. Missing stores are treated as free.
+    /// Returns `true` when exclusive access can be taken immediately.
+    package static func tryExclusiveAccess(at url: URL) throws -> Bool {
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        guard let lock = try FileLock.tryAcquire(at: url, mode: .exclusive) else {
+            return false
+        }
+        try lock.release()
+        return true
+    }
+
+    package static func decorateLockError(
+        _ error: Error,
+        at url: URL,
+        timeout: Duration?,
+        operation: String
+    ) -> Error {
+        guard let waxError = error as? WaxError,
+              case let .lockUnavailable(details) = waxError
+        else {
+            return error
+        }
+
+        let timeoutLabel = timeout.map(formatDuration(_:)) ?? "the configured timeout"
+        return WaxError.lockUnavailable(
+            "\(details). Wax \(operation) failed fast after \(timeoutLabel) because another process is already using \(url.path). " +
+                "Run one shared HTTP server (http://127.0.0.1:3000/mcp) across clients instead of a second process on this store, or stop the existing Wax process before retrying."
+        )
+    }
+
+    private static func formatDuration(_ duration: Duration) -> String {
+        let components = duration.components
+        let seconds = Double(components.seconds) + (Double(components.attoseconds) / 1_000_000_000_000_000_000)
+        if seconds == 0 {
+            return "0s"
+        }
+        return String(format: "%.2fs", seconds)
+    }
+}

@@ -1,0 +1,24 @@
+import Foundation
+
+/// Errors that can occur while ingesting a PDF.
+package enum PDFIngestError: Error, Sendable, Equatable {
+    case fileNotFound(url: URL)
+    case loadFailed(url: URL)
+    case noExtractableText(url: URL, pageCount: Int)
+    case unsupportedPlatform(url: URL)
+}
+
+extension PDFIngestError: LocalizedError {
+    package var errorDescription: String? {
+        switch self {
+        case let .fileNotFound(url):
+            return "PDF file not found: \(url.path)"
+        case let .loadFailed(url):
+            return "PDF file could not be opened: \(url.path)"
+        case let .noExtractableText(url, pageCount):
+            return "PDF has no extractable text (pages: \(pageCount)): \(url.path)"
+        case let .unsupportedPlatform(url):
+            return "PDF ingest is unavailable because PDFKit is not available on this platform: \(url.path)"
+        }
+    }
+}

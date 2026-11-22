@@ -1,0 +1,79 @@
+/// Unified search response.
+package struct SearchResponse: Sendable, Equatable {
+    /// Single source-vocabulary type shared with `RAGContext`.
+    package typealias Source = RAGContext.Source
+
+    package enum RankingTieBreakReason: String, Sendable, Equatable {
+        case topResult
+        case rerankComposite
+        case fusedScore
+        case bestLaneRank
+        case frameID
+    }
+
+    package struct RankingLaneContribution: Sendable, Equatable {
+        package var source: Source
+        package var weight: Float
+        package var rank: Int
+        package var rrfScore: Float
+
+        package init(source: Source, weight: Float, rank: Int, rrfScore: Float) {
+            self.source = source
+            self.weight = weight
+            self.rank = rank
+            self.rrfScore = rrfScore
+        }
+    }
+
+    package struct RankingDiagnostics: Sendable, Equatable {
+        package var bestLaneRank: Int?
+        package var laneContributions: [RankingLaneContribution]
+        package var tieBreakReason: RankingTieBreakReason
+
+        package init(
+            bestLaneRank: Int?,
+            laneContributions: [RankingLaneContribution],
+            tieBreakReason: RankingTieBreakReason = .topResult
+        ) {
+            self.bestLaneRank = bestLaneRank
+            self.laneContributions = laneContributions
+            self.tieBreakReason = tieBreakReason
+        }
+    }
+
+    package struct Result: Sendable, Equatable {
+        package var frameId: UInt64
+        package var score: Float
+        package var previewText: String?
+        package var sources: [Source]
+        package var rankingDiagnostics: RankingDiagnostics?
+        package var metadata: [String: String]
+        package var explanations: [String]
+
+        package init(
+            frameId: UInt64,
+            score: Float,
+            previewText: String? = nil,
+            sources: [Source],
+            rankingDiagnostics: RankingDiagnostics? = nil,
+            metadata: [String: String] = [:],
+            explanations: [String] = []
+        ) {
+            self.frameId = frameId
+            self.score = score
+            self.previewText = previewText
+            self.sources = sources
+            self.rankingDiagnostics = rankingDiagnostics
+            self.metadata = metadata
+            self.explanations = explanations
+        }
+    }
+
+    package var results: [Result]
+    package var vectorSearchTimedOut: Bool
+
+    package init(results: [Result], vectorSearchTimedOut: Bool = false) {
+        self.results = results
+        self.vectorSearchTimedOut = vectorSearchTimedOut
+    }
+}

@@ -1,0 +1,839 @@
+import Foundation
+import WaxCore
+import WaxTextSearch
+import WaxVectorSearch
+
+package actor WaxSession {
+    private typealias ConcreteVectorEngine = LoadedVectorSearchEngine
+
+    package enum Mode: Sendable, Equatable {
+        case readOnly
+        case readWrite(WriterPolicy = .wait)
+    }
+
+    package enum WriterPolicy: Sendable, Equatable {
+        case wait
+        case fail
+        case timeout(Duration)
+    }
+
+    package struct Config: Sendable, Equatable {
+        package var enableTextSearch: Bool
+        package var enableVectorSearch: Bool
+        package var enableStructuredMemory: Bool
+        package var vectorEnginePreference: VectorEnginePreference
+        package var vectorMetric: VectorMetric
+        package var vectorDimensions: Int?
+        /// Index durable frames the text index does not cover yet (WAL replay, or a store
+        /// commit without a staged lex index) when a read-write session opens. The next commit
+        /// persists them, so only the store's owning writer turns this on: brief opens must
+        /// leave the file untouched, and read-only sessions never catch up.
+        package var catchUpTextIndexOnOpen: Bool
+
+        package init(
+            enableTextSearch: Bool = true,
+            enableVectorSearch: Bool = true,
+            enableStructuredMemory: Bool = true,
+            vectorEnginePreference: VectorEnginePreference = .auto,
+            vectorMetric: VectorMetric = .cosine,
+            vectorDimensions: Int? = nil,
+            catchUpTextIndexOnOpen: Bool = false
+        ) {
+            self.enableTextSearch = enableTextSearch
+            self.enableVectorSearch = enableVectorSearch
+            self.enableStructuredMemory = enableStructuredMemory
+            self.vectorEnginePreference = vectorEnginePreference
+            self.vectorMetric = vectorMetric
+            self.vectorDimensions = vectorDimensions
+            self.catchUpTextIndexOnOpen = catchUpTextIndexOnOpen
+        }
+
+        package static let `default` = Config()
+    }
+
+    package let wax: Wax
+    package let mode: Mode
+    package let config: Config
+
+    private let textEngine: FTS5SearchEngine?
+    private var concreteVectorEngine: ConcreteVectorEngine?
+    /// Metric of `concreteVectorEngine`: `config.vectorMetric`, or the attaching provider's
+    /// when the engine loads late through `ensureVectorEngine(dimensions:metric:)`.
+    private var vectorEngineMetric: VectorMetric
+    private var lastPendingEmbeddingSequence: UInt64?
+    private var writerLeaseId: UUID?
+    private var isClosed = false
+    private var commitCheckpointHook: (@Sendable (CommitCheckpoint) async -> Void)?
+    /// Runs in `commitFrameImport` once the text index is staged, before the store commit.
+    private var frameImportCommitHookForTesting: (@Sendable () async -> Void)?
+    /// Thrown instead of loading a committed import's vectors into the engine, once.
+    private var frameImportVectorLoadFaultForTesting: (any Error)?
+    /// Text an open frame import indexed before its commit, and the hold on text searches
+    /// that keeps it unseen; `nil` when there is none.
+    private var importTextIndexing: ImportTextIndexing?
+
+    private struct ImportTextIndexing {
+        /// The text index's coverage watermark before the first early batch, restored if the
+        /// import does not commit.
+        let coverage: UInt64
+        var frameIds: [UInt64]
+    }
+    /// `concreteVectorEngine` misses committed vectors: a frame import's failed to load.
+    private var vectorEngineNeedsReload = false
+
+    /// Points inside `stage` and `commit` where a test can interleave concurrent writes.
+    package enum CommitCheckpoint: Sendable, Equatable {
+        /// Pending embeddings were synced into the vector engine; the vector index is not yet
+        /// staged. Reached from both `stage` and `commit`.
+        case afterVectorSync
+        /// Text and vector indexes are staged; the store commit has not started. `commit` only.
+        case afterStage
+    }
+
+    package init(wax: Wax, mode: Mode = .readOnly, config: Config = .default) async throws {
+        self.wax = wax
+        self.mode = mode
+        self.config = config
+        self.vectorEngineMetric = config.vectorMetric
+
+        var acquiredWriterLeaseId: UUID?
+        if case .readWrite(let policy) = mode {
+            let lease = try await wax.acquireWriterLease(policy: Self.mapWriterPolicy(policy))
+            acquiredWriterLeaseId = lease
+        }
+        self.writerLeaseId = acquiredWriterLeaseId
+
+        do {
+            // The text and vector indexes load from separate committed images under read
+            // locks, so the text load runs alongside the vector load instead of before it.
+            async let loadingTextEngine = Self.loadTextEngine(wax: wax, config: config)
+
+            let resolvedConcreteVectorEngine: ConcreteVectorEngine?
+            let resolvedLastPendingEmbeddingSequence: UInt64?
+
+            if config.enableVectorSearch {
+                let dimensions = try await Self.resolveVectorDimensions(for: wax, config: config)
+                if let dimensions {
+                    let loadedVectorEngine = try await Self.loadVectorEngine(
+                        wax: wax,
+                        metric: config.vectorMetric,
+                        dimensions: dimensions,
+                        preference: config.vectorEnginePreference
+                    )
+                    resolvedConcreteVectorEngine = loadedVectorEngine
+                    let snapshot = await wax.pendingEmbeddingMutations(since: nil)
+                    resolvedLastPendingEmbeddingSequence = snapshot.latestSequence
+                } else {
+                    resolvedConcreteVectorEngine = nil
+                    resolvedLastPendingEmbeddingSequence = nil
+                }
+            } else {
+                resolvedConcreteVectorEngine = nil
+                resolvedLastPendingEmbeddingSequence = nil
+            }
+
+            let resolvedTextEngine = try await loadingTextEngine
+            // Frames can be durable (WAL replay, or a store commit without a staged lex index)
+            // before the text index that covers them; the owning writer indexes what a crash
+            // left behind.
+            if case .readWrite = mode, config.catchUpTextIndexOnOpen, config.enableTextSearch,
+               let resolvedTextEngine {
+                try await resolvedTextEngine.catchUpUnindexedFrames(await wax.frameMetasIncludingPending())
+            }
+
+            self.textEngine = resolvedTextEngine
+            self.concreteVectorEngine = resolvedConcreteVectorEngine
+            self.lastPendingEmbeddingSequence = resolvedLastPendingEmbeddingSequence
+        } catch {
+            if let leaseId = acquiredWriterLeaseId {
+                await wax.releaseWriterLease(leaseId)
+                self.writerLeaseId = nil
+            }
+            throw error
+        }
+    }
+
+    private static func loadTextEngine(wax: Wax, config: Config) async throws -> FTS5SearchEngine? {
+        guard config.enableTextSearch || config.enableStructuredMemory else { return nil }
+        return try await FTS5SearchEngine.load(from: wax)
+    }
+
+    deinit {
+        if let leaseId = writerLeaseId {
+            let wax = wax
+            Task { await wax.releaseWriterLease(leaseId) }
+        }
+    }
+
+    package func close() async {
+        guard !isClosed else { return }
+        isClosed = true
+        if let leaseId = writerLeaseId {
+            writerLeaseId = nil
+            await wax.releaseWriterLease(leaseId)
+        }
+    }
+
+    /// Load the vector engine after a provider attaches when dimensions were unknown at open.
+    /// `metric` is the attaching provider's; an engine already loaded with another metric
+    /// (the store's recorded one) cannot serve it, so that throws.
+    package func ensureVectorEngine(dimensions: Int, metric: VectorMetric) async throws {
+        guard config.enableVectorSearch else { return }
+        if concreteVectorEngine != nil {
+            guard vectorEngineMetric == metric else {
+                throw WaxError.io(
+                    VectorSimilarityBinding.mismatchReason(stored: vectorEngineMetric, declared: metric)
+                )
+            }
+            return
+        }
+        let loaded = try await Self.loadVectorEngine(
+            wax: wax,
+            metric: metric,
+            dimensions: dimensions,
+            preference: config.vectorEnginePreference
+        )
+        concreteVectorEngine = loaded
+        vectorEngineMetric = metric
+        let snapshot = await wax.pendingEmbeddingMutations(since: nil)
+        lastPendingEmbeddingSequence = snapshot.latestSequence
+    }
+
+    // MARK: - Search
+
+    package func search(_ request: SearchRequest) async throws -> SearchResponse {
+        let searchVectorEngine = try await vectorEngineForSearch(request)
+        let overrides = UnifiedSearchEngineOverrides(
+            textEngine: textEngine,
+            loadedVectorEngine: searchVectorEngine,
+            structuredEngine: textEngine
+        )
+        return try await wax.search(request, engineOverrides: overrides)
+    }
+
+    package func searchText(query: String, topK: Int) async throws -> [TextSearchResult] {
+        guard config.enableTextSearch, let textEngine else {
+            throw WaxError.featureDisabled(feature: "text search")
+        }
+        guard let plan = MatchPlan.plan(query: query) else { return [] }
+        return try await textEngine.search(matchQuery: plan.primaryMatch, topK: topK)
+    }
+
+    // MARK: - Text Search (write)
+
+    package func indexText(frameId: UInt64, text: String) async throws {
+        try ensureWritable()
+        guard config.enableTextSearch, let textEngine else {
+            throw WaxError.featureDisabled(feature: "text search")
+        }
+        try await textEngine.index(frameId: frameId, text: text)
+    }
+
+    package func indexTextBatch(frameIds: [UInt64], texts: [String]) async throws {
+        try ensureWritable()
+        guard config.enableTextSearch, let textEngine else {
+            throw WaxError.featureDisabled(feature: "text search")
+        }
+        try await textEngine.indexBatch(frameIds: frameIds, texts: texts)
+    }
+
+    package func removeText(frameId: UInt64) async throws {
+        try ensureWritable()
+        guard config.enableTextSearch, let textEngine else {
+            throw WaxError.featureDisabled(feature: "text search")
+        }
+        try await textEngine.remove(frameId: frameId)
+    }
+
+    /// Frame IDs with a vector in the loaded engine, or `nil` when no engine is loaded.
+    /// Reflects only the pending embeddings synced so far (all of them right after open).
+    package func loadedVectorFrameIds() async -> Set<UInt64>? {
+        await concreteVectorEngine?.storedFrameIds()
+    }
+
+    /// Removes a frame from the in-memory vector index when vector search is enabled.
+    ///
+    /// Records the id for re-application after pending-embedding sync on the next stage/commit
+    /// (pending putEmbedding may re-add the frame before stage). No-ops the live engine when
+    /// vector search is configured but no engine is loaded yet (e.g. dimensions unknown).
+    /// Throws when vector search is disabled so callers can gate on `config.enableVectorSearch`.
+    package func removeVector(frameId: UInt64) async throws {
+        try ensureWritable()
+        guard config.enableVectorSearch else {
+            throw WaxError.featureDisabled(feature: "vector search")
+        }
+        try await wax.removeEmbedding(frameId: frameId)
+        guard let concreteVectorEngine else {
+            return
+        }
+        try await concreteVectorEngine.remove(frameId: frameId)
+    }
+
+    // MARK: - Structured Memory
+
+    package func upsertEntity(
+        key: EntityKey,
+        kind: String,
+        aliases: [String],
+        nowMs: Int64
+    ) async throws -> EntityRowID {
+        try ensureWritable()
+        guard config.enableStructuredMemory, let textEngine else {
+            throw WaxError.featureDisabled(feature: "structured memory")
+        }
+        return try await textEngine.upsertEntity(key: key, kind: kind, aliases: aliases, nowMs: nowMs)
+    }
+
+    package func resolveEntities(matchingAlias alias: String, limit: Int) async throws -> [StructuredEntityMatch] {
+        guard config.enableStructuredMemory, let textEngine else {
+            throw WaxError.featureDisabled(feature: "structured memory")
+        }
+        return try await textEngine.resolveEntities(matchingAlias: alias, limit: limit)
+    }
+
+    package func entity(forKey key: EntityKey) async throws -> StructuredEntityMatch? {
+        guard config.enableStructuredMemory, let textEngine else {
+            throw WaxError.featureDisabled(feature: "structured memory")
+        }
+        return try await textEngine.entity(forKey: key)
+    }
+
+    package func assertFact(
+        subject: EntityKey,
+        predicate: PredicateKey,
+        object: FactValue,
+        relation: VersionRelation = .sets,
+        valid: StructuredTimeRange,
+        system: StructuredTimeRange,
+        evidence: [StructuredEvidence]
+    ) async throws -> FactRowID {
+        try ensureWritable()
+        guard config.enableStructuredMemory, let textEngine else {
+            throw WaxError.featureDisabled(feature: "structured memory")
+        }
+        return try await textEngine.assertFact(
+            subject: subject,
+            predicate: predicate,
+            object: object,
+            relation: relation,
+            valid: valid,
+            system: system,
+            evidence: evidence
+        )
+    }
+
+    package func retractFact(factId: FactRowID, atMs: Int64) async throws {
+        try ensureWritable()
+        guard config.enableStructuredMemory, let textEngine else {
+            throw WaxError.featureDisabled(feature: "structured memory")
+        }
+        try await textEngine.retractFact(factId: factId, atMs: atMs)
+    }
+
+    package func facts(
+        about subject: EntityKey?,
+        predicate: PredicateKey?,
+        asOf: StructuredMemoryAsOf,
+        limit: Int
+    ) async throws -> StructuredFactsResult {
+        guard config.enableStructuredMemory, let textEngine else {
+            throw WaxError.featureDisabled(feature: "structured memory")
+        }
+        return try await textEngine.facts(about: subject, predicate: predicate, asOf: asOf, limit: limit)
+    }
+
+    package func edges(
+        for entity: EntityKey,
+        direction: StructuredEdgeDirection,
+        predicate: PredicateKey?,
+        asOf: StructuredMemoryAsOf,
+        limit: Int
+    ) async throws -> StructuredEdgesResult {
+        guard config.enableStructuredMemory, let textEngine else {
+            throw WaxError.featureDisabled(feature: "structured memory")
+        }
+        return try await textEngine.edges(for: entity, direction: direction, predicate: predicate, asOf: asOf, limit: limit)
+    }
+
+    // MARK: - Frames
+
+    package func put(
+        _ content: Data,
+        options: FrameMetaSubset = .init(),
+        compression: CanonicalEncoding = .plain
+    ) async throws -> UInt64 {
+        try ensureWritable()
+        return try await wax.put(content, options: options, compression: compression)
+    }
+
+    package func put(
+        _ content: Data,
+        options: FrameMetaSubset = .init(),
+        compression: CanonicalEncoding = .plain,
+        timestampMs: Int64
+    ) async throws -> UInt64 {
+        try ensureWritable()
+        return try await wax.put(content, options: options, compression: compression, timestampMs: timestampMs)
+    }
+
+    package func put(
+        _ content: Data,
+        embedding: [Float],
+        identity: EmbeddingIdentity? = nil,
+        options: FrameMetaSubset = .init(),
+        compression: CanonicalEncoding = .plain
+    ) async throws -> UInt64 {
+        try ensureWritable()
+        let merged = try Self.mergeOptions(options, identity: identity, embeddingCount: embedding.count)
+        let frameId = try await wax.put(content, options: merged, compression: compression)
+        try await wax.putEmbedding(frameId: frameId, vector: embedding)
+        return frameId
+    }
+
+    package func put(
+        _ content: Data,
+        embedding: [Float],
+        identity: EmbeddingIdentity? = nil,
+        options: FrameMetaSubset = .init(),
+        compression: CanonicalEncoding = .plain,
+        timestampMs: Int64
+    ) async throws -> UInt64 {
+        try ensureWritable()
+        let merged = try Self.mergeOptions(options, identity: identity, embeddingCount: embedding.count)
+        let frameId = try await wax.put(content, options: merged, compression: compression, timestampMs: timestampMs)
+        try await wax.putEmbedding(frameId: frameId, vector: embedding)
+        return frameId
+    }
+
+    package func putBatch(
+        contents: [Data],
+        options: [FrameMetaSubset],
+        compression: CanonicalEncoding = .plain
+    ) async throws -> [UInt64] {
+        try ensureWritable()
+        return try await wax.putBatch(contents, options: options, compression: compression)
+    }
+
+    package func putBatch(
+        contents: [Data],
+        options: [FrameMetaSubset],
+        compression: CanonicalEncoding = .plain,
+        timestampsMs: [Int64]
+    ) async throws -> [UInt64] {
+        try ensureWritable()
+        return try await wax.putBatch(contents, options: options, compression: compression, timestampsMs: timestampsMs)
+    }
+
+    package func putBatch(
+        contents: [Data],
+        embeddings: [[Float]],
+        identity: EmbeddingIdentity? = nil,
+        options: [FrameMetaSubset],
+        compression: CanonicalEncoding = .plain
+    ) async throws -> [UInt64] {
+        try ensureWritable()
+        guard contents.count == embeddings.count else {
+            throw WaxError.encodingError(reason: "putBatch: contents.count != embeddings.count")
+        }
+        guard contents.count == options.count else {
+            throw WaxError.encodingError(reason: "putBatch: contents.count != options.count")
+        }
+        var mergedOptions = options
+        if let identity {
+            for (index, embedding) in embeddings.enumerated() {
+                mergedOptions[index] = try Self.mergeOptions(
+                    mergedOptions[index],
+                    identity: identity,
+                    embeddingCount: embedding.count
+                )
+            }
+        }
+        let frameIds = try await wax.putBatch(contents, options: mergedOptions, compression: compression)
+        guard frameIds.count == embeddings.count else {
+            throw WaxError.encodingError(reason: "putBatch: embeddings.count != frameIds.count")
+        }
+        try await wax.putEmbeddingBatch(frameIds: frameIds, vectors: embeddings)
+        return frameIds
+    }
+
+    package func putBatch(
+        contents: [Data],
+        embeddings: [[Float]],
+        identity: EmbeddingIdentity? = nil,
+        options: [FrameMetaSubset],
+        timestampsMs: [Int64],
+        compression: CanonicalEncoding = .plain
+    ) async throws -> [UInt64] {
+        try ensureWritable()
+        guard contents.count == embeddings.count else {
+            throw WaxError.encodingError(reason: "putBatch: contents.count != embeddings.count")
+        }
+        guard contents.count == options.count else {
+            throw WaxError.encodingError(reason: "putBatch: contents.count != options.count")
+        }
+        guard contents.count == timestampsMs.count else {
+            throw WaxError.encodingError(reason: "putBatch: contents.count != timestampsMs.count")
+        }
+
+        var mergedOptions = options
+        if let identity {
+            for (index, embedding) in embeddings.enumerated() {
+                mergedOptions[index] = try Self.mergeOptions(
+                    mergedOptions[index],
+                    identity: identity,
+                    embeddingCount: embedding.count
+                )
+            }
+        }
+        let frameIds = try await wax.putBatch(contents, options: mergedOptions, compression: compression, timestampsMs: timestampsMs)
+        guard frameIds.count == embeddings.count else {
+            throw WaxError.encodingError(reason: "putBatch: embeddings.count != frameIds.count")
+        }
+        try await wax.putEmbeddingBatch(frameIds: frameIds, vectors: embeddings)
+        return frameIds
+    }
+
+    /// Finds the most recent active document frame whose metadata contains `key == value`.
+    ///
+    /// - Note: This performs an O(n) scan over `frameMetas()` and is acceptable for v2.
+    ///   A dedicated metadata index can optimize this in a later version.
+    package func findFrameByMetadata(key: String, value: String) async -> UInt64? {
+        let metas = await wax.frameMetas()
+        for meta in metas.reversed() {
+            guard meta.role == .document else { continue }
+            guard meta.status == .active, meta.supersededBy == nil else { continue }
+            guard meta.metadata?.entries[key] == value else { continue }
+            return meta.id
+        }
+        return nil
+    }
+
+    // MARK: - Frame import
+
+    /// Indexes text of the open frame import's frames before its commit, so the indexing runs
+    /// while the import writes more frames. The first call holds text searches until
+    /// ``commitFrameImport(texts:hasVectors:memoryBinding:)`` or
+    /// ``abandonImportTextIndexing()`` ends the import's indexing; searches already running
+    /// finish first. Does nothing when text search is off.
+    package func indexImportTexts(frameIds: [UInt64], texts: [String]) async throws {
+        guard config.enableTextSearch, let textEngine, !frameIds.isEmpty else { return }
+        try ensureWritable()
+        if importTextIndexing == nil {
+            let coverage = await textEngine.coverageWatermark()
+            await textEngine.holdSearches()
+            importTextIndexing = ImportTextIndexing(coverage: coverage, frameIds: [])
+        }
+        // Recorded first, so a batch that throws partway is removed again too.
+        importTextIndexing?.frameIds += frameIds
+        try await textEngine.indexBatch(frameIds: frameIds, texts: texts)
+    }
+
+    /// Removes the text ``indexImportTexts(frameIds:texts:)`` indexed for an import that will
+    /// not commit, restores the text index's coverage and lets searches run again.
+    package func abandonImportTextIndexing() async {
+        guard let indexing = importTextIndexing else { return }
+        importTextIndexing = nil
+        guard let textEngine else { return }
+        await Self.unindex(indexing.frameIds, from: textEngine)
+        await textEngine.lowerCoverage(to: indexing.coverage)
+        await textEngine.releaseSearches()
+    }
+
+    /// Commits the store's open frame import (``Wax/beginFrameImport()``): indexes `texts`,
+    /// stages the text index and, when `hasVectors`, the vector index configuration, commits,
+    /// then adds the committed vectors to the vector engine. If a step throws, `texts` and any
+    /// text indexed early leave the text index again and the import stays open for the
+    /// caller to abandon.
+    ///
+    /// Text searches wait from the indexing (the first early batch, if any) to the end of the
+    /// store commit, so none ranks a frame readers cannot see yet. If loading the vectors into
+    /// the engine fails after the commit, the next vector search reloads the engine from the
+    /// store.
+    package func commitFrameImport(
+        texts: [(frameId: UInt64, text: String)],
+        hasVectors: Bool,
+        memoryBinding: MemoryBinding?
+    ) async throws {
+        try ensureWritable()
+        let early = importTextIndexing
+        importTextIndexing = nil
+        await textEngine?.holdSearches()
+        let embeddings: [PutEmbedding]
+        do {
+            embeddings = try await commitFrameImportHoldingSearches(
+                texts: texts,
+                earlyIndexing: early,
+                hasVectors: hasVectors,
+                memoryBinding: memoryBinding
+            )
+        } catch {
+            await releaseImportSearchHolds(early: early)
+            throw error
+        }
+        await releaseImportSearchHolds(early: early)
+        guard !embeddings.isEmpty, let concreteVectorEngine else { return }
+        do {
+            if let fault = frameImportVectorLoadFaultForTesting {
+                frameImportVectorLoadFaultForTesting = nil
+                throw fault
+            }
+            try await concreteVectorEngine.addBatch(
+                frameIds: embeddings.map(\.frameId),
+                vectors: embeddings.map(\.vector)
+            )
+        } catch {
+            vectorEngineNeedsReload = true
+            WaxDiagnostics.logSwallowed(
+                error,
+                context: "frame import vector engine load",
+                fallback: "the next vector search reloads the engine from the committed vectors"
+            )
+        }
+    }
+
+    /// Ends the commit's hold on text searches and the early indexing's, if there was one.
+    private func releaseImportSearchHolds(early: ImportTextIndexing?) async {
+        await textEngine?.releaseSearches()
+        if early != nil {
+            await textEngine?.releaseSearches()
+        }
+    }
+
+    private func commitFrameImportHoldingSearches(
+        texts: [(frameId: UInt64, text: String)],
+        earlyIndexing: ImportTextIndexing?,
+        hasVectors: Bool,
+        memoryBinding: MemoryBinding?
+    ) async throws -> [PutEmbedding] {
+        let indexesTexts = config.enableTextSearch && !texts.isEmpty
+        let coverage: UInt64?
+        if let earlyIndexing {
+            coverage = earlyIndexing.coverage
+        } else {
+            coverage = await textEngine?.coverageWatermark()
+        }
+        do {
+            if indexesTexts, let textEngine {
+                try await textEngine.indexBatch(frameIds: texts.map(\.frameId), texts: texts.map(\.text))
+            }
+            try await stageTextIndex(compact: false)
+            if hasVectors {
+                guard let concreteVectorEngine else {
+                    throw WaxError.io("vector search enabled but no vector engine configured; set vectorDimensions")
+                }
+                try await concreteVectorEngine.stageForCommit(into: wax)
+            }
+            await frameImportCommitHookForTesting?()
+            return try await wax.commitFrameImport(memoryBinding: memoryBinding)
+        } catch {
+            if let textEngine {
+                let unindexed = (indexesTexts ? texts.map(\.frameId) : []) + (earlyIndexing?.frameIds ?? [])
+                if !unindexed.isEmpty {
+                    await Self.unindex(unindexed, from: textEngine)
+                }
+                if let coverage {
+                    await textEngine.lowerCoverage(to: coverage)
+                }
+            }
+            throw error
+        }
+    }
+
+    package func setFrameImportCommitHookForTesting(_ hook: (@Sendable () async -> Void)?) {
+        frameImportCommitHookForTesting = hook
+    }
+
+    package func failNextFrameImportVectorLoadForTesting(_ error: any Error) {
+        frameImportVectorLoadFaultForTesting = error
+    }
+
+    private static func unindex(_ frameIds: [UInt64], from textEngine: FTS5SearchEngine) async {
+        do {
+            try await textEngine.indexBatch(frameIds: frameIds, texts: Array(repeating: "", count: frameIds.count))
+        } catch {
+            WaxDiagnostics.logSwallowed(
+                error,
+                context: "frame import text index rollback",
+                fallback: "postings of the abandoned import stay until those frame ids are written again"
+            )
+        }
+    }
+
+    // MARK: - Lifecycle
+
+    package func stage(compact: Bool = false) async throws {
+        try ensureWritable()
+        try await stageTextIndex(compact: compact)
+        try await wax.withEmbeddingWritesPaused { [self] in
+            try await self.stageVectorIndex()
+        }
+    }
+
+    /// Text staging does not read embeddings, so it runs before the embedding write gate.
+    /// Embedding writes then wait only for the vector sync, vector stage and store commit:
+    /// one landing in between would make the commit refuse the staged index as stale.
+    package func commit(compact: Bool = false) async throws {
+        try ensureWritable()
+        try await stageTextIndex(compact: compact)
+        try await wax.withEmbeddingWritesPaused { [self] in
+            try await self.stageVectorIndex()
+            await self.reachCommitCheckpoint(.afterStage)
+            try await self.wax.commit()
+        }
+    }
+
+    /// Test seam: awaited at each ``CommitCheckpoint`` during `stage` and `commit`.
+    package func setCommitCheckpointHook(_ hook: (@Sendable (CommitCheckpoint) async -> Void)?) {
+        commitCheckpointHook = hook
+    }
+
+    private func reachCommitCheckpoint(_ checkpoint: CommitCheckpoint) async {
+        await commitCheckpointHook?(checkpoint)
+    }
+
+    private func stageTextIndex(compact: Bool) async throws {
+        guard let textEngine else { return }
+        try await textEngine.stageForCommit(into: wax, compact: compact)
+    }
+
+    /// Callers hold ``Wax/withEmbeddingWritesPaused(_:)``.
+    private func stageVectorIndex() async throws {
+        if let concreteVectorEngine {
+            try await stageVectorForCommit(using: concreteVectorEngine)
+        } else if config.enableVectorSearch {
+            let hasPendingEmbeddings = !(await wax.pendingEmbeddingMutations()).isEmpty
+            let hasCommittedIndex = (await wax.committedVecIndexManifest()) != nil
+            if hasPendingEmbeddings || hasCommittedIndex {
+                throw WaxError.io("vector search enabled but no vector engine configured; set vectorDimensions")
+            }
+        }
+    }
+
+    private func ensureWritable() throws {
+        guard case .readWrite = mode else {
+            throw WaxError.io("session is read-only")
+        }
+        guard !isClosed else {
+            throw WaxError.io("session is closed")
+        }
+    }
+
+    private static func mapWriterPolicy(_ policy: WriterPolicy) -> WaxWriterPolicy {
+        switch policy {
+        case .wait:
+            return .wait
+        case .fail:
+            return .fail
+        case .timeout(let duration):
+            return .timeout(duration)
+        }
+    }
+
+    private func stageVectorForCommit(using engine: ConcreteVectorEngine) async throws {
+        lastPendingEmbeddingSequence = try await WaxVectorSearchSession.syncPendingEmbeddings(
+            wax: wax,
+            into: engine,
+            watermark: lastPendingEmbeddingSequence
+        )
+        await reachCommitCheckpoint(.afterVectorSync)
+        try await engine.stageForCommit(into: wax)
+    }
+
+    private func vectorEngineForSearch(_ request: SearchRequest) async throws -> ConcreteVectorEngine? {
+        guard config.enableVectorSearch, let concreteVectorEngine else {
+            return nil
+        }
+
+        switch request.mode {
+        case .textOnly:
+            return nil
+        case .vectorOnly, .hybrid:
+            break
+        }
+
+        if vectorEngineNeedsReload {
+            return try await reloadVectorEngine(concreteVectorEngine)
+        }
+
+        guard case .readWrite = mode else {
+            return concreteVectorEngine
+        }
+
+        lastPendingEmbeddingSequence = try await WaxVectorSearchSession.syncPendingEmbeddings(
+            wax: wax,
+            into: concreteVectorEngine,
+            watermark: lastPendingEmbeddingSequence
+        )
+        return concreteVectorEngine
+    }
+
+    /// Replaces `stale` with an engine loaded from the store's committed and pending vectors.
+    private func reloadVectorEngine(_ stale: ConcreteVectorEngine) async throws -> ConcreteVectorEngine {
+        let reloaded = try await Self.loadVectorEngine(
+            wax: wax,
+            metric: vectorEngineMetric,
+            dimensions: stale.erased.dimensions,
+            preference: config.vectorEnginePreference
+        )
+        concreteVectorEngine = reloaded
+        lastPendingEmbeddingSequence = await wax.pendingEmbeddingMutations(since: nil).latestSequence
+        vectorEngineNeedsReload = false
+        return reloaded
+    }
+
+    private static func resolveVectorDimensions(for wax: Wax, config: Config) async throws -> Int? {
+        if let configured = config.vectorDimensions {
+            return configured
+        }
+        if let configuration = await wax.vectorIndexConfiguration() {
+            return Int(configuration.dimension)
+        }
+        return nil
+    }
+
+    private static func loadVectorEngine(
+        wax: Wax,
+        metric: VectorMetric,
+        dimensions: Int,
+        preference: VectorEnginePreference
+    ) async throws -> ConcreteVectorEngine {
+        try await LoadedVectorSearchEngine.load(
+            from: wax,
+            metric: metric,
+            dimensions: dimensions,
+            preference: preference
+        )
+    }
+
+    /// `options` with the provider identity's `wax.embedding.*` metadata, for a frame stored
+    /// with an `embeddingCount`-dimensional vector.
+    package static func mergeOptions(
+        _ options: FrameMetaSubset,
+        identity: EmbeddingIdentity?,
+        embeddingCount: Int
+    ) throws -> FrameMetaSubset {
+        guard let identity else { return options }
+
+        if let expectedDims = identity.dimensions, expectedDims != embeddingCount {
+            throw WaxError.io("embedding identity dimension mismatch: expected \(expectedDims), got \(embeddingCount)")
+        }
+
+        var merged = options
+        var metadata = merged.metadata ?? Metadata()
+        if let provider = identity.provider { metadata.entries["wax.embedding.provider"] = provider }
+        if let model = identity.model { metadata.entries["wax.embedding.model"] = model }
+        if let dims = identity.dimensions { metadata.entries["wax.embedding.dimension"] = String(dims) }
+        if let normalized = identity.normalized { metadata.entries["wax.embedding.normalized"] = String(normalized) }
+        merged.metadata = metadata
+        return merged
+    }
+}
+
+package extension Wax {
+    func openSession(
+        _ mode: WaxSession.Mode = .readOnly,
+        config: WaxSession.Config = .default
+    ) async throws -> WaxSession {
+        try await WaxSession(wax: self, mode: mode, config: config)
+    }
+}

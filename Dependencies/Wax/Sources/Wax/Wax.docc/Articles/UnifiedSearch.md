@@ -1,0 +1,86 @@
+# Unified Search
+
+Understand how Wax fuses BM25, vector, structured-memory, and timeline results.
+
+## Overview
+
+Wax's unified search pipeline is a package-only implementation detail, not public API. Public callers should use ``Memory/search(_:options:)`` and configure behavior through ``Memory/SearchOptions``.
+
+Internally, the pipeline runs multiple retrieval lanes and combines their candidates with reciprocal rank fusion (RRF). This hybrid approach combines exact keyword matches with semantic and temporal recall while keeping the user-facing API focused on memory ingestion and recall.
+
+## Search Lanes
+
+The internal request model can activate up to four lanes:
+
+| Lane | Role | Best For |
+|------|------|----------|
+| Text (BM25) | FTS-backed keyword retrieval | Exact names, codes, and phrases |
+| Vector | Embedding similarity | Paraphrased and semantic queries |
+| Structured Memory | Entity and fact evidence | Known relationships and attributed facts |
+| Timeline | Reverse chronological fallback | Recent or latest information |
+
+### Text Lane
+
+The text lane runs an FTS5 MATCH query with BM25 scoring. If the primary query returns too few results, a fallback OR-expanded query broadens retrieval.
+
+### Vector Lane
+
+The vector lane compares the query embedding with indexed frame embeddings. It is only active when the orchestrator has vector search enabled and an embedding provider is available.
+
+### Structured Memory Lane
+
+The structured-memory lane resolves entity mentions, finds related facts, and retrieves evidence frames. It is designed to surface frames connected through the knowledge graph.
+
+### Timeline Lane
+
+For queries that imply recency, such as "when did we last deploy?", the timeline lane ranks the frames the text and vector lanes retrieved from newest to oldest, with a small weight, so recency breaks near-ties without outranking relevance. When nothing matches, a search that enables the timeline fallback returns the most recent frames instead.
+
+## Reciprocal Rank Fusion
+
+Results from active lanes are merged using RRF:
+
+```
+score(d) = sum(weight_lane / (rrfK + rank_lane(d)))
+```
+
+Where:
+
+- `rrfK` is a smoothing constant.
+- `weight_lane` is the lane weight chosen by the internal classifier.
+- `rank_lane(d)` is the document's one-based rank in that lane.
+
+RRF avoids comparing raw scores across heterogeneous engines and naturally rewards documents that appear in more than one lane.
+
+Published `score` is the rank key used to order hits, not a probability and not raw RRF. Hybrid fusion may scale that fused rank onto `0...1`. Intent-aware and semantic rerank may then overwrite `score` with an unbounded composite; later callers should treat the number as the current rank key, not a stable 0–1 confidence.
+
+## Query Classification
+
+The package-only classifier labels each query with simple offline rules. The text and vector lanes always weigh equally; a per-type split lost recall on LongMemEval and LoCoMo because the rules misclassify too many queries.
+
+| Type | Trigger Examples | Effect |
+|------|------------------|--------|
+| Factual | "what is", "who is", "define" | Balanced lanes |
+| Semantic | "how", "why", "explain" | Balanced lanes |
+| Temporal | "when", "recent", "yesterday" | Balanced lanes plus a small recency weight |
+| Exploratory | Default | Balanced lanes |
+
+Classification is fully offline. It does not call network services or external models.
+
+## Public Usage
+
+Use ``Memory`` for supported retrieval:
+
+```swift
+let results = try await memory.search("quarterly roadmap")
+for item in results.items {
+    print(item.text)
+}
+
+// Which lanes actually ran?
+if let diagnostics = results.diagnostics {
+    print(diagnostics.effectiveMode)          // Memory.RetrievalMode (alias of SearchMode); prints "text", "vector", or "hybrid(alpha=…)"
+    print(diagnostics.queryEmbeddingState)    // e.g. .available or .noEmbedder
+}
+```
+
+The package-only request, response, and filtering types are intentionally omitted from the public documentation because downstream apps cannot construct or name them directly. Retrieval diagnostics are public via ``RAGContext/diagnostics``.

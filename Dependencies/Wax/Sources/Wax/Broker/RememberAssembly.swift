@@ -1,0 +1,209 @@
+import Foundation
+import WaxCore
+
+/// Remember response assembly and durable auto-supersede selection policy.
+/// Store I/O (`remember`, `supersede`, `flush`, session events) stays on the broker.
+package enum RememberAssembly {
+    package static let storedEchoLimit = 240
+
+    /// MCP compact keys for remember. Everything else in `payload` is
+    /// verbose-only (operator diagnostics, compat aliases, follow-up hints).
+    package static let compactRememberKeys: Set<String> = [
+        "status", "committed", "memory_id", "frame_id", "scope",
+        "content_bytes", "content_sha8", "echo", "echo_truncated",
+        "project", "repo",
+    ]
+
+    /// First 8 hex chars of the content SHA-256. Callers verify the echo
+    /// against the bytes they sent without re-reading the store.
+    package static func contentSHA8(for content: String) -> String {
+        String(SHA256Checksum.digest(Data(content.utf8)).hexString.prefix(8))
+    }
+
+    /// Project a full remember `payload` down to `compactRememberKeys`.
+    /// `project`/`repo` survive only when the full payload carried them.
+    package static func slimCompactRememberPayload(
+        _ payload: [String: AgentBrokerValue]
+    ) -> [String: AgentBrokerValue] {
+        payload.filter { compactRememberKeys.contains($0.key) }
+    }
+
+    package static let autoSupersedeMaxMatches = 32
+    package static let autoSupersedeTypes: Set<MemoryType> = [
+        .decision, .lesson, .constraint, .fact, .userPreference,
+    ]
+
+    /// Corpus row shape for pure supersede selection (no orchestrator dependency).
+    package struct Candidate: Sendable, Equatable {
+        package var frameId: UInt64
+        package var text: String
+        package var metadata: [String: String]
+        package var supersededBy: UInt64?
+
+        package init(
+            frameId: UInt64,
+            text: String,
+            metadata: [String: String],
+            supersededBy: UInt64? = nil
+        ) {
+            self.frameId = frameId
+            self.text = text
+            self.metadata = metadata
+            self.supersededBy = supersededBy
+        }
+    }
+
+    /// Wire payload for a completed remember. Keys stay stable for MCP/CLI clients.
+    ///
+    /// `sessionID` is the destination store (nil = durable). `echoedSessionID` is the
+    /// bound connection session so durable writes do not look failed (`session_id: null`).
+    package static func payload(
+        frameId: UInt64,
+        framesAdded: UInt64,
+        frameCount: UInt64,
+        pendingFrames: UInt64,
+        sessionID: UUID?,
+        echoedSessionID: UUID? = nil,
+        metadata: [String: String],
+        inferredScope: MemoryScopeContext = MemoryScopeContext(),
+        deduplicated: Bool,
+        searchable: Bool,
+        content: String
+    ) -> AgentBrokerValue {
+        let scope = sessionID == nil ? "durable" : "session"
+        let memoryID = sessionID.map {
+            "working:\($0.uuidString):\(frameId)"
+        } ?? "durable:\(frameId)"
+        let project = metadata[MemoryMetadataKeys.project] ?? inferredScope.projectName
+        let repo = metadata[MemoryMetadataKeys.repo] ?? inferredScope.repoName
+        let unresolvedProject = project?.isEmpty != false
+        let contentBytes = content.utf8.count
+        let echo = String(content.prefix(storedEchoLimit))
+        let echoTruncated = content.count > storedEchoLimit
+        let sha8 = contentSHA8(for: content)
+        let chunked = framesAdded > 1
+        var display =
+            "Full content stored (\(contentBytes) bytes, sha \(sha8)); echo shows first \(storedEchoLimit) chars."
+        if chunked {
+            display += " Large content chunked into \(framesAdded) frames; memory_id names the document frame."
+        }
+        if unresolvedProject {
+            display += " Project unresolved; default recall will miss this unless you pass project/repo or scope=global."
+        }
+        var payload: [String: AgentBrokerValue] = [
+            "status": .string("ok"),
+            "committed": .bool(true),
+            "frame_id": .from(frameId),
+            "memory_id": .string(memoryID),
+            "framesAdded": .from(framesAdded),
+            "frameCount": .from(frameCount),
+            "pendingFrames": .from(pendingFrames),
+            "scope": .string(scope),
+            "session_id": .from((echoedSessionID ?? sessionID)?.uuidString),
+            "memory_type": .string(metadata[MemoryMetadataKeys.type] ?? MemoryType.note.rawValue),
+            "durability": .string(metadata[MemoryMetadataKeys.durability] ?? MemoryDurability.working.rawValue),
+            "deduplicated": .bool(deduplicated),
+            "searchable": .bool(searchable),
+            "echo": .string(echo),
+            "echo_truncated": .bool(echoTruncated),
+            "content_sha8": .string(sha8),
+            // Compat aliases for one release; compact drops them.
+            "stored": .string(echo),
+            "stored_truncated": .bool(echoTruncated),
+            "chunked": .bool(chunked),
+            "chunk_count": .from(framesAdded),
+            "content_bytes": .from(Int64(contentBytes)),
+            "unresolved_project": .bool(unresolvedProject),
+            "display_text": .string(display),
+        ]
+        if let project, !project.isEmpty {
+            payload["project"] = .string(project)
+        }
+        if let repo, !repo.isEmpty {
+            payload["repo"] = .string(repo)
+        }
+        if let sha = metadata[MemoryMetadataKeys.gitSHA], !sha.isEmpty {
+            payload["git_sha"] = .string(sha)
+        }
+        if let branch = metadata[MemoryMetadataKeys.gitBranch], !branch.isEmpty {
+            payload["git_branch"] = .string(branch)
+        }
+        if let worktree = metadata[MemoryMetadataKeys.gitWorktree], !worktree.isEmpty {
+            payload["git_worktree"] = .string(worktree)
+        }
+        if let status = metadata[MemoryMetadataKeys.checkoutStatus], !status.isEmpty {
+            payload["checkout_status"] = .string(status)
+        }
+        if unresolvedProject {
+            payload["next_action"] = .string("pass project/repo or recall with scope=global")
+        }
+        return .object(payload)
+    }
+
+    /// Cheap gate before corpus I/O: session writes and non-policy types never scan.
+    package static func isAutoSupersedeEligible(
+        sessionID: UUID?,
+        metadata: [String: String],
+        nowMs: Int64
+    ) -> Bool {
+        guard sessionID == nil else { return false }
+        let info = MemorySemantics.parse(metadata: metadata, nowMs: nowMs)
+        guard autoSupersedeTypes.contains(info.type) else { return false }
+        guard info.durability == .durable || info.durability == .locked else { return false }
+        return info.project != nil
+    }
+
+    /// Metadata-only gate for one corpus row: same type, same project, durable,
+    /// not already superseded. Runs before any text is loaded or compared so a
+    /// durable remember does not tokenize the whole store.
+    package static func isSupersedeCandidate(
+        metadata: [String: String],
+        supersededBy: UInt64?,
+        type: MemoryType,
+        project: String,
+        nowMs: Int64
+    ) -> Bool {
+        guard supersededBy == nil else { return false }
+        let other = MemorySemantics.parse(metadata: metadata, nowMs: nowMs)
+        return other.type == type && other.project == project && other.durability == .durable
+    }
+
+    /// Same-project near-twins (`MemorySemantics.isNearTwin(older:newer:)`, with
+    /// the new content as `newer`) retire
+    /// prior unsuperseded durable twins. Pending or committed `supersededBy` is a
+    /// skip so a failed flush cannot restamp the same predecessor. Locked others
+    /// stay live. Returns candidate frame IDs; broker still supersedes + flushes.
+    package static func selectSupersedeFrameIDs(
+        sessionID: UUID?,
+        newFrameId: UInt64,
+        content: String,
+        metadata: [String: String],
+        documents: [Candidate],
+        nowMs: Int64
+    ) -> [UInt64] {
+        guard isAutoSupersedeEligible(sessionID: sessionID, metadata: metadata, nowMs: nowMs) else {
+            return []
+        }
+        let info = MemorySemantics.parse(metadata: metadata, nowMs: nowMs)
+        guard let project = info.project else { return [] }
+
+        let newSignature = MemorySemantics.TextSignature(content)
+        var selected: [UInt64] = []
+        selected.reserveCapacity(min(documents.count, autoSupersedeMaxMatches))
+        for document in documents {
+            guard selected.count < autoSupersedeMaxMatches else { break }
+            guard document.frameId != newFrameId else { continue }
+            guard isSupersedeCandidate(
+                metadata: document.metadata,
+                supersededBy: document.supersededBy,
+                type: info.type,
+                project: project,
+                nowMs: nowMs
+            ) else { continue }
+            let other = MemorySemantics.TextSignature(document.text)
+            guard MemorySemantics.isNearTwin(older: other, newer: newSignature) else { continue }
+            selected.append(document.frameId)
+        }
+        return selected
+    }
+}

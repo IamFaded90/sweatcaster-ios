@@ -1,0 +1,231 @@
+import Foundation
+import WaxCore
+import WaxVectorSearch
+
+package actor WaxVectorSearchSession {
+    private typealias ConcreteVectorEngine = LoadedVectorSearchEngine
+
+    package let wax: Wax
+    package var engine: any VectorSearchEngine { concreteEngine.erased }
+    package let metric: VectorMetric
+    package let dimensions: Int
+    private let concreteEngine: ConcreteVectorEngine
+    private var lastPendingEmbeddingSequence: UInt64?
+
+    package init(
+        wax: Wax,
+        metric: VectorMetric = .cosine,
+        dimensions: Int,
+        preference: VectorEnginePreference = .auto
+    ) async throws {
+        self.wax = wax
+        self.metric = metric
+        self.dimensions = dimensions
+        let loadedEngine = try await LoadedVectorSearchEngine.load(
+            from: wax,
+            metric: metric,
+            dimensions: dimensions,
+            preference: preference
+        )
+        self.concreteEngine = loadedEngine
+
+        let snapshot = await wax.pendingEmbeddingMutations(since: nil)
+        self.lastPendingEmbeddingSequence = snapshot.latestSequence
+    }
+
+    package func add(frameId: UInt64, vector: [Float]) async throws {
+        try await addToEngine(frameId: frameId, vector: vector)
+        try await wax.putEmbedding(frameId: frameId, vector: vector)
+    }
+
+    /// Removes the frame's vector durably: the removal is in the WAL and the next commit's run.
+    package func remove(frameId: UInt64) async throws {
+        try await wax.removeEmbedding(frameId: frameId)
+        try await removeFromEngine(frameId: frameId)
+    }
+
+    package func search(vector: [Float], topK: Int) async throws -> [(frameId: UInt64, score: Float)] {
+        var query = vector
+        if metric == .cosine, !query.isEmpty, !VectorMath.isNormalizedL2(query) {
+            query = VectorMath.normalizeL2(query)
+        }
+        return try await searchEngine(vector: query, topK: topK)
+    }
+
+    package func putWithEmbedding(
+        _ content: Data,
+        embedding: [Float],
+        options: FrameMetaSubset = .init(),
+        compression: CanonicalEncoding = .plain,
+        identity: EmbeddingIdentity? = nil
+    ) async throws -> UInt64 {
+        guard embedding.count == dimensions else {
+            throw WaxError.encodingError(reason: "vector dimension mismatch: expected \(dimensions), got \(embedding.count)")
+        }
+
+        var merged = options
+        if let identity {
+            if let expectedDims = identity.dimensions, expectedDims != embedding.count {
+                throw WaxError.invalidEmbedding(reason: "dimension mismatch: expected \(expectedDims), got \(embedding.count)")
+            }
+            var metadata = merged.metadata ?? Metadata()
+            if let provider = identity.provider { metadata.entries["memvid.embedding.provider"] = provider }
+            if let model = identity.model { metadata.entries["memvid.embedding.model"] = model }
+            if let dims = identity.dimensions { metadata.entries["memvid.embedding.dimension"] = String(dims) }
+            if let normalized = identity.normalized { metadata.entries["memvid.embedding.normalized"] = String(normalized) }
+            merged.metadata = metadata
+        }
+
+        let frameId = try await wax.put(content, options: merged, compression: compression)
+        try await addToEngine(frameId: frameId, vector: embedding)
+        try await wax.putEmbedding(frameId: frameId, vector: embedding)
+        return frameId
+    }
+
+    package func putWithEmbeddingBatch(
+        contents: [Data],
+        embeddings: [[Float]],
+        options: [FrameMetaSubset],
+        compression: CanonicalEncoding = .plain,
+        identity: EmbeddingIdentity? = nil
+    ) async throws -> [UInt64] {
+        guard !contents.isEmpty else { return [] }
+        guard contents.count == embeddings.count else {
+            throw WaxError.encodingError(reason: "putWithEmbeddingBatch: contents.count != embeddings.count")
+        }
+        guard contents.count == options.count else {
+            throw WaxError.encodingError(reason: "putWithEmbeddingBatch: contents.count != options.count")
+        }
+
+        for embedding in embeddings {
+            guard embedding.count == dimensions else {
+                throw WaxError.encodingError(reason: "vector dimension mismatch: expected \(dimensions), got \(embedding.count)")
+            }
+        }
+
+        var mergedOptions = options
+        if let identity {
+            for (index, _) in options.enumerated() {
+                if let expectedDims = identity.dimensions, expectedDims != embeddings[index].count {
+                    throw WaxError.invalidEmbedding(reason: "dimension mismatch: expected \(expectedDims), got \(embeddings[index].count)")
+                }
+                var metadata = mergedOptions[index].metadata ?? Metadata()
+                if let provider = identity.provider { metadata.entries["memvid.embedding.provider"] = provider }
+                if let model = identity.model { metadata.entries["memvid.embedding.model"] = model }
+                if let dims = identity.dimensions { metadata.entries["memvid.embedding.dimension"] = String(dims) }
+                if let normalized = identity.normalized { metadata.entries["memvid.embedding.normalized"] = String(normalized) }
+                mergedOptions[index].metadata = metadata
+            }
+        }
+
+        let frameIds = try await wax.putBatch(contents, options: mergedOptions, compression: compression)
+        try await addBatchToEngine(frameIds: frameIds, vectors: embeddings)
+        try await wax.putEmbeddingBatch(frameIds: frameIds, vectors: embeddings)
+        return frameIds
+    }
+
+    /// Embedding writes wait for the whole stage and commit, as in ``WaxSession/commit(compact:)``.
+    package func commit() async throws {
+        try await wax.withEmbeddingWritesPaused { [self] in
+            try await self.stageHoldingEmbeddingWrites()
+            try await self.wax.commit()
+        }
+    }
+
+    package func stageForCommit() async throws {
+        try await wax.withEmbeddingWritesPaused { [self] in
+            try await self.stageHoldingEmbeddingWrites()
+        }
+    }
+
+    private func stageHoldingEmbeddingWrites() async throws {
+        lastPendingEmbeddingSequence = try await Self.syncPendingEmbeddings(
+            wax: wax,
+            into: concreteEngine,
+            watermark: lastPendingEmbeddingSequence
+        )
+        try await stageEngineForCommit()
+    }
+
+    /// Single owner of vector-index watermark advance, shared by ``WaxVectorSearchSession``
+    /// and ``WaxSession``.
+    ///
+    /// Syncs the pending vector changes since `watermark` into `engine` (replaying the full
+    /// log when the store rolled back): each frame's last embedding, and its removal when the
+    /// frame's last change removed it. Returns the advanced watermark; on throw no caller
+    /// state moves.
+    static func syncPendingEmbeddings(
+        wax: Wax,
+        into engine: LoadedVectorSearchEngine,
+        watermark: UInt64?
+    ) async throws -> UInt64? {
+        var snapshot = await wax.pendingEmbeddingMutations(since: watermark)
+        if let latest = snapshot.latestSequence,
+           let last = watermark,
+           latest < last {
+            snapshot = await wax.pendingEmbeddingMutations(since: nil)
+        }
+        if !snapshot.embeddings.isEmpty {
+            try await engine.addBatch(
+                frameIds: snapshot.embeddings.map(\.frameId),
+                vectors: snapshot.embeddings.map(\.vector)
+            )
+        }
+        for frameId in snapshot.removedFrameIds {
+            try await engine.remove(frameId: frameId)
+        }
+        return snapshot.latestSequence
+    }
+
+    private func addToEngine(frameId: UInt64, vector: [Float]) async throws {
+        try await concreteEngine.add(frameId: frameId, vector: vector)
+    }
+
+    private func addBatchToEngine(frameIds: [UInt64], vectors: [[Float]]) async throws {
+        try await concreteEngine.addBatch(frameIds: frameIds, vectors: vectors)
+    }
+
+    private func removeFromEngine(frameId: UInt64) async throws {
+        try await concreteEngine.remove(frameId: frameId)
+    }
+
+    private func searchEngine(vector: [Float], topK: Int) async throws -> [(frameId: UInt64, score: Float)] {
+        try await concreteEngine.search(vector: vector, topK: topK)
+    }
+
+    private func stageEngineForCommit() async throws {
+        try await concreteEngine.stageForCommit(into: wax)
+    }
+}
+
+package extension Wax {
+    func enableVectorSearch(
+        metric: VectorMetric = .cosine,
+        dimensions: Int,
+        preference: VectorEnginePreference = .auto
+    ) async throws -> WaxVectorSearchSession {
+        try await WaxVectorSearchSession(
+            wax: self,
+            metric: metric,
+            dimensions: dimensions,
+            preference: preference
+        )
+    }
+
+    func enableVectorSearchFromManifest(
+        preference: VectorEnginePreference = .auto
+    ) async throws -> WaxVectorSearchSession {
+        guard let manifest = await committedVecIndexManifest() else {
+            throw WaxError.io("vec index manifest missing; enableVectorSearch(dimensions:) required")
+        }
+        guard let metric = VectorMetric(vecSimilarity: manifest.similarity) else {
+            throw WaxError.invalidToc(reason: "unsupported vec similarity \(manifest.similarity)")
+        }
+        return try await WaxVectorSearchSession(
+            wax: self,
+            metric: metric,
+            dimensions: Int(manifest.dimension),
+            preference: preference
+        )
+    }
+}

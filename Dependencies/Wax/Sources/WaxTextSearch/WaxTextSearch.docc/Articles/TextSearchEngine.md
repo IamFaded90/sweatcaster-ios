@@ -1,0 +1,121 @@
+# Text Search Engine
+
+Understand the package-only text search actor used by Wax internals.
+
+## Overview
+
+``FTS5SearchEngine`` is a package-only actor that combines SQLite FTS5 full-text search with a complete structured memory system. It is not public API; downstream applications should use the public Wax memory APIs instead. This article documents the implementation surface for Wax contributors.
+
+## Package-Internal Setup
+
+Inside Wax package targets and tests, the engine can be created from memory, serialized state, or a Wax store:
+
+```swift
+// Package-internal: in-memory (fresh)
+let engine = try await FTS5SearchEngine.inMemory()
+
+// From serialized data
+let engine = try await FTS5SearchEngine.deserialize(from: savedData)
+
+// From a Wax store
+let engine = try await FTS5SearchEngine.load(from: waxStore)
+```
+
+## Indexing
+
+Index frame content individually or in batches:
+
+```swift
+// Single document
+try await engine.index(frameId: 42, text: "Meeting notes from Q4 review")
+
+// Batch (much faster — single transaction for N documents)
+try await engine.indexBatch(
+    frameIds: [1, 2, 3],
+    texts: ["First doc", "Second doc", "Third doc"]
+)
+
+// Remove a document
+try await engine.remove(frameId: 42)
+```
+
+### Batching Strategy
+
+The engine maintains an internal queue of pending operations. Operations are flushed to SQLite in batches:
+
+| Queue | Threshold | Trigger |
+|-------|-----------|---------|
+| Text index ops | 2,048 documents | Auto-flush on threshold, or on search/serialize/count |
+| Structured memory ops | 512 operations | Auto-flush on threshold |
+
+This amortizes transaction overhead while keeping memory usage bounded.
+
+## Searching
+
+Search executes a planned FTS5 MATCH string and returns BM25-ranked hits. Ranking
+(`MatchPlan` in the Wax module) owns AND/OR planning; do not pass the raw user query.
+
+```swift
+let results = try await engine.search(matchQuery: "\"quarterly\" \"review\"", topK: 10)
+```
+
+Each package-internal search hit contains:
+
+- **`frameId`** — The matching frame's identifier
+- **`score`** — BM25 relevance score (higher is better)
+- **`snippet`** — Context around the match with `[` `]` delimiters and `...` for truncation (up to 10 terms)
+
+### MATCH execute
+
+The engine runs the MATCH string as-is. Callers must supply already-planned literals
+(for example `"swift" "actors"` or `"swift" OR "actors"`). Bare operators in a user
+string (`AND` / `OR` / `NOT` / `NEAR`) must be stripped by the planner, not forwarded here.
+
+### BM25 Scoring
+
+SQLite FTS5's built-in `bm25()` function provides Okapi BM25 ranking. Scores are in `0...1`, higher is better. The best hit's score is a saturating function of its BM25 relevance; every other hit gets that score times its share of the best hit's relevance. (When every query term is too common to carry IDF, which FTS5 clamps to 1e-6, each hit keeps its own saturated score.) That keeps BM25's order and spacing in the score, so rerankers that add small signals to it break near-ties instead of overriding the ranking. A hit's score does not depend on `topK`.
+
+## Structured Memory
+
+The engine also stores and queries an entity-fact knowledge graph. See the WaxCore module's Structured Memory article for the data model.
+
+### Entity Management
+
+Wax package internals use the structured-memory engine to upsert canonical entities, store aliases, and resolve fuzzy alias matches during broker and orchestrator workflows.
+
+### Fact Assertion and Querying
+
+Structured fact writes include subject, predicate, object, valid time, system time, and evidence links. Fact reads apply bitemporal filters and return package-internal result values for the higher-level Wax APIs to translate.
+
+## Persistence
+
+The engine serializes its entire state as a SQLite database blob:
+
+```swift
+// Serialize
+let data = try await engine.serialize(compact: true)
+
+// Stage for Wax commit
+try await engine.stageForCommit(into: waxStore, compact: false)
+```
+
+The `compact` flag runs `VACUUM` to reclaim unused space before serialization.
+
+`stageForCommit` hands the store the database image, without a copy for an in-memory engine. The store compares it page by page with the committed image and commits only the changed pages, as a delta run after the committed ones. When the deltas would hold more than a quarter of the image, or number 32, the commit writes the whole image as a new base instead.
+
+## Schema
+
+The engine uses the following SQLite tables:
+
+| Table | Purpose |
+|-------|---------|
+| `frames_fts` | FTS5 virtual table for full-text search |
+| `frame_mapping` | Maps frame IDs to FTS5 rowids |
+| `sm_entity` | Named entities with unique keys |
+| `sm_entity_alias` | Normalized aliases for fuzzy entity lookup |
+| `sm_predicate` | Relationship/property types |
+| `sm_fact` | RDF-like triples with bitemporal spans |
+| `sm_fact_span` | Temporal scopes for facts |
+| `sm_evidence` | Provenance links to source frames |
+
+The database uses application ID `0x57415854` ("WAXT") and schema version 2.

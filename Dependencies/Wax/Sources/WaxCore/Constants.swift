@@ -1,0 +1,75 @@
+import Foundation
+
+/// Constants matching `WAX_SPEC.md` (Wax v1.0).
+package enum Constants {
+    // MARK: - Magic Bytes
+
+    /// Header magic: "WAX1" (4 bytes)
+    package static let magic = Data([0x57, 0x41, 0x58, 0x31])
+
+    /// Footer magic: "WAX1FOOT" (8 bytes)
+    package static let footerMagic = Data([0x57, 0x41, 0x58, 0x31, 0x46, 0x4F, 0x4F, 0x54])
+
+    // MARK: - Version
+
+    package static let specMajor: UInt8 = 3
+    package static let specMinor: UInt8 = 1
+
+    /// Packed major/minor: `(major << 8) | minor` (little-endian on disk).
+    package static let specVersion: UInt16 = (UInt16(specMajor) << 8) | UInt16(specMinor)
+
+    /// Header page versions this build opens: 1.0 (one whole-index vector blob), 2.0 (vector
+    /// runs, one whole lex blob), 3.0 (lex runs) and 3.1 (runs with tree checksums, see
+    /// `RunChecksum`). An older file's first commit here rewrites both header pages as 3.1,
+    /// which older builds refuse.
+    package static let supportedSpecVersions: Set<UInt16> = [0x0100, 0x0200, 0x0300, specVersion]
+
+    // MARK: - Sizes
+
+    /// Header page size: 4 KiB
+    package static let headerPageSize: UInt64 = 4096
+
+    /// Back-compat alias (Phase 0 scaffold used `headerSize`).
+    package static let headerSize: UInt64 = headerPageSize
+
+    /// Header region size: 8 KiB (A+B pages)
+    package static let headerRegionSize: UInt64 = 8192
+
+    /// Footer size: 64 bytes (v1 footer includes `wal_committed_seq`)
+    package static let footerSize: UInt64 = 64
+    /// Footer generations a session may use: its recovery fence's ceiling lies this far above
+    /// its fence (see `WaxHeaderPage.RecoveryFence`).
+    static let generationsPerSession: UInt64 = 1 << 32
+
+    /// WAL record header size: 48 bytes (fixed for Wax v1).
+    package static let walRecordHeaderSize: UInt64 = 48
+
+    // MARK: - File Layout (v1 defaults)
+
+    /// WAL starts immediately after the header region.
+    package static let walOffset: UInt64 = headerRegionSize
+
+    /// WAL size for newly created long-term stores (8 MiB).
+    /// Existing 256 MiB files stay 256 MiB until copy-first compact; this only affects new creates.
+    package static let longTermWalSize: UInt64 = 8 * 1024 * 1024
+
+    /// Historical long-term WAL size retained by existing stores until copy-first compact.
+    package static let legacyLargeWalSize: UInt64 = 256 * 1024 * 1024
+
+    /// Default WAL size for new long-term stores.
+    package static let defaultWalSize: UInt64 = longTermWalSize
+
+    /// WAL size for new broker virtual session stores only; open keeps existing WAL.
+    package static let sessionWalSize: UInt64 = 4 * 1024 * 1024
+
+    // MARK: - Decoder Limits (recommended defaults)
+
+    package static let maxStringBytes: Int = 16 * 1024 * 1024
+    package static let maxBlobBytes: Int = 256 * 1024 * 1024
+    package static let maxArrayCount: Int = 10_000_000
+    package static let maxEmbeddingDimensions: Int = 1_000_000
+
+    /// About 560 bytes per frame, so roughly 950k frames. Commits refuse a larger TOC.
+    package static let maxTocBytes: UInt64 = 512 * 1024 * 1024
+    package static let maxFooterScanBytes: UInt64 = 32 * 1024 * 1024
+}
