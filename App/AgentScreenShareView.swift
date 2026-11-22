@@ -86,6 +86,10 @@ struct PhoneScreenFrameStatus: Decodable {
     }
 
     var body: some View {
+        playbackScreen
+    }
+
+    private var screenLayout: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -141,42 +145,54 @@ struct PhoneScreenFrameStatus: Decodable {
                 .navigationTitle("Del min skærm").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { stop(); dismiss() } } }
         }
-        .privacySensitive()
-        .sheet(isPresented: $readingScreenshot) {
-            if let screenshot { LocalImageAnalysisView(data: screenshot, onChooseNote: nil, api: api, initialPrompt: question) }
-        }
-        .task { reconnect() }
-        .onChange(of: phase) { _, next in setPaused(next != .background) }
-        .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in setPaused(true) }
-        .onChange(of: voice) { _, enabled in
-            if enabled { listen() } else {
-                voiceJob?.cancel(); stopListening(); speech.stop(); pcSpeech.stop(); speakingTurn = false
+    }
+
+    private var presentedScreen: some View {
+        screenLayout
+            .privacySensitive()
+            .sheet(isPresented: $readingScreenshot) {
+                if let screenshot { LocalImageAnalysisView(data: screenshot, onChooseNote: nil, api: api, initialPrompt: question) }
             }
-        }
-        .onChange(of: voiceDraft) { _, text in
-            voiceJob?.cancel()
-            guard voice, !asking, !speakingTurn, speech.playback == nil, !pcSpeech.playing, !pcSpeech.loading else { return }
-            voiceJob = Task {
-                do { try await Task.sleep(for: .seconds(1.8)) } catch { return }
-                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-                if ["stop deling", "stop skærmdeling", "afslut deling"].contains(text.lowercased()) { stop() }
-                else { ask(text) }
+            .task { reconnect() }
+            .onChange(of: phase) { _, next in setPaused(next != .background) }
+            .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in setPaused(true) }
+    }
+
+    private var listeningScreen: some View {
+        presentedScreen
+            .onChange(of: voice) { _, enabled in
+                if enabled { listen() } else {
+                    voiceJob?.cancel(); stopListening(); speech.stop(); pcSpeech.stop(); speakingTurn = false
+                }
             }
-        }
-        .onChange(of: dictation.active) { _, active in
-            if !active, dictation.problem != nil { voice = false; return }
-            if !active { listen() }
-        }
-        .onReceive(speech.$playback) { playback in if playback == nil { resumeAfterSpeech() } }
-        .onReceive(pcSpeech.$playing) { playing in if !playing { resumeAfterSpeech() } }
-        .onReceive(pcSpeech.$loading) { loading in if !loading { resumeAfterSpeech() } }
-        .onReceive(pcSpeech.$notice) { problem in
-            if problem != nil {
-                notice = "Oplæsningen kunne ikke starte. Svaret står i samtalen."
-                resumeAfterSpeech()
+            .onChange(of: voiceDraft) { _, text in
+                voiceJob?.cancel()
+                guard voice, !asking, !speakingTurn, speech.playback == nil, !pcSpeech.playing, !pcSpeech.loading else { return }
+                voiceJob = Task {
+                    do { try await Task.sleep(for: .seconds(1.8)) } catch { return }
+                    guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+                    if ["stop deling", "stop skærmdeling", "afslut deling"].contains(text.lowercased()) { stop() }
+                    else { ask(text) }
+                }
             }
-        }
-        .onDisappear { stop() }
+            .onChange(of: dictation.active) { _, active in
+                if !active, dictation.problem != nil { voice = false; return }
+                if !active { listen() }
+            }
+    }
+
+    private var playbackScreen: some View {
+        listeningScreen
+            .onReceive(speech.$playback) { playback in if playback == nil { resumeAfterSpeech() } }
+            .onReceive(pcSpeech.$playing) { playing in if !playing { resumeAfterSpeech() } }
+            .onReceive(pcSpeech.$loading) { loading in if !loading { resumeAfterSpeech() } }
+            .onReceive(pcSpeech.$notice) { problem in
+                if problem != nil {
+                    notice = "Oplæsningen kunne ikke starte. Svaret står i samtalen."
+                    resumeAfterSpeech()
+                }
+            }
+            .onDisappear { stop() }
     }
 
     private var screenshotCard: some View {

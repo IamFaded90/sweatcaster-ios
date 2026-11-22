@@ -4,7 +4,7 @@ import SwiftUI
 import UIKit
 
 extension Home {
-    private var homeLifecycle: some View {
+    var homeLifecycle: some View {
         homeContent
         .onAppear {
             prunePreviews()
@@ -18,23 +18,6 @@ extension Home {
         .onChange(of: (model.api as? LiveAPI)?.queueTargetID) { refreshQueueBadge() }
         .onChange(of: model.connected) { _, online in if online { cacheJobs() } }
         .onChange(of: model.jobs.map { "\($0.id):\($0.status.rawValue):\($0.progress)" }) { cacheJobs() }
-    }
-
-    private var homeFeedback: some View {
-        let completed: [String] = model.jobs.filter { $0.status == .completed }.map(\.id)
-        let rendering: [String] = model.jobs.filter { $0.status == .rendering }.map(\.id)
-        let failed: [String] = model.jobs.filter { $0.status == .failed }.map(\.id)
-        return homeLifecycle
-            .sensoryFeedback(.impact(weight: .light), trigger: appHaptics ? selectedModuleTab ?? space.rawValue : "")
-            .sensoryFeedback(.success, trigger: completed) { old, new in
-                appHaptics && !Set(new).subtracting(old).isEmpty
-            }
-            .sensoryFeedback(.impact(weight: .light), trigger: rendering) { old, new in
-                appHaptics && !Set(new).subtracting(old).isEmpty
-            }
-            .sensoryFeedback(.error, trigger: failed) { old, new in
-                appHaptics && !Set(new).subtracting(old).isEmpty
-            }
     }
 
     private var homePresentation: some View {
@@ -221,7 +204,7 @@ extension Home {
         }
     }
 
-    var homeSheets: some View {
+    private var homeWorkspaceSheets: some View {
         homeVideoDialogs
         .sheet(isPresented: $showCodeWorkspace) {
             CodeWorkspaceView(api: studioAPI, onBack: { showCodeWorkspace = false }, initialPath: searchCodePath)
@@ -250,6 +233,10 @@ extension Home {
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
         .sheet(isPresented: $showFadedCamera) { NavigationStack { FadedCaptureView(modal: true) } }
+    }
+
+    private var homeStudioSheets: some View {
+        homeWorkspaceSheets
         .sheet(isPresented: $showOfflineStudio, onDismiss: openShortcut) {
             OfflineStudio(api: studioAPI, sessionUnlocked: $nsfwSessionUnlocked,
                           onPrivateSessionEnded: showPrivateSessionNotice,
@@ -266,6 +253,10 @@ extension Home {
         }
         .sheet(isPresented: $showSavedVideos) { savedVideoLibrary }
         .sheet(isPresented: $showProjects) { FadedProjectsView() }
+    }
+
+    var homeSheets: some View {
+        homeStudioSheets
         .sheet(isPresented: $showHoldchatFromMore) {
             NavigationStack {
                 TeamWorkflowView(mode: .group, bots: FadedMoreScreenData.bots, api: studioAPI)
