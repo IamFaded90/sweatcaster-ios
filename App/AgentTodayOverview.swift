@@ -265,7 +265,7 @@ import UIKit
         let heading = "Kalender \(date.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted, locale: danish)))"
         guard !events.isEmpty else { return "\(heading): ingen aftaler." }
         let time = Date.FormatStyle(date: .omitted, time: .shortened, locale: danish)
-        let times = events.prefix(5).map { event in
+        let times: [String] = events.prefix(5).map { event in
             if event.allDay { return "hele dagen" }
             let start = event.start < day.start ? "fra dagen før" : event.start.formatted(time)
             let end = event.end >= day.end ? "til midnat" : event.end.formatted(time)

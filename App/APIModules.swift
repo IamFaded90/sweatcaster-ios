@@ -380,8 +380,8 @@ extension LiveAPI {
                 // Older paired PCs understand the original single-turn contract.
             }
         }
-        let previous = history.suffix(2).map {
-            let turn = $0.excerpt(promptLimit: 220, replyLimit: 280)
+        let previous: String = history.suffix(2).map { exchange -> String in
+            let turn = exchange.excerpt(promptLimit: 220, replyLimit: 280)
             return "Dig: \(turn.prompt)\nAgent: \(turn.reply)"
         }.joined(separator: "\n")
         let profile = AgentReplyDriver.computerInstructions(instructions, previous: previous)
