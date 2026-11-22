@@ -529,9 +529,10 @@ extension Home {
             var seen = Set<String>()
             // Filter eagerly so index traversal cannot mark clips as seen before copying them.
             let pageClips = Array(clips.filter { validWireID($0.id) && seen.insert($0.id).inserted }.prefix(limit))
-            folderPages[id] = pageClips
-            folderPageNotices[id] = notice
+            // Register selectable clips before publishing the page that renders them.
             model.includeFolderClips(pageClips, folderID: id)
+            folderPageNotices[id] = notice
+            folderPages[id] = pageClips
         } catch {
             guard !Task.isCancelled, videoFolderScope == server, selectedGameFolder == id, pageLoading == ticket else { return }
             AppDiagnostics.record(error)

@@ -137,8 +137,15 @@ final class PairingQRCodeTests: XCTestCase {
         ]
         var seen: Set<Home.InitialScreen> = []
         var openActivity: (() -> Void)?
+        func assertFixtureIsRegistered(file: StaticString = #filePath, line: UInt = #line) {
+            let actual: [String] = model.clips.map { "\($0.id):\($0.name)" }
+            XCTAssertTrue(model.clips.contains { $0.id == "clip-001" && $0.name == "fixture.mp4" },
+                          "The displayed folder must be registered in the shared catalog. Found: \(actual)", file: file, line: line)
+            XCTAssertEqual(model.clipFolderIDs["clip-001"], "1", file: file, line: line)
+        }
         let root = Home(model: model, onVideoFoldersAppeared: { $0 == "1" },
                         onDashboardAppeared: { openActivity = $0 }) { screen in
+            if screen == .videoFolderClips { assertFixtureIsRegistered() }
             if seen.insert(screen).inserted { screens[screen]?.fulfill() }
         }
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
@@ -182,7 +189,7 @@ final class PairingQRCodeTests: XCTestCase {
 
         defaults.set("video", forKey: AppStorageKeys.spacesShortcut)
         await fulfillment(of: [video, folders, clips], timeout: 8)
-        XCTAssertTrue(model.clips.contains { $0.id == "clip-001" && $0.name == "fixture.mp4" })
+        assertFixtureIsRegistered()
     }
 
     private func qr(address: String = "192.168.1.42", expiry: Date?, nonce: String? = nil) throws -> String {
