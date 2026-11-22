@@ -46,6 +46,7 @@ enum AppStorageKeys {
     static let chatVoiceLanguage = "chat.voice.language"
     static let chatVoiceBot = "chat.voiceBot"
     static let chatVoiceMode = "chat.voiceMode"
+    static let lumiReplyLanguage = "fadedai.lumi.replyLanguage"
     static let chatVoiceRate = "chat.voice.rate"
     static let codeActiveContext = "code.active.context"
     static let codeAutonomy = "code.autonomy"

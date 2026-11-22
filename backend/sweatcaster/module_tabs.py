@@ -120,16 +120,19 @@ def collection_answer(settings, message: str) -> str | None:
 
 
 def register_modules(app: FastAPI, settings, authorize) -> None:
+    from sweatcaster.document_routes import register_documents
     from sweatcaster.cast_relay import register_cast_relay
     from sweatcaster.window_help import register_window_help
     from sweatcaster.phone_screen import register_phone_screen
     from sweatcaster.film_companion import register_film_companion
+    from sweatcaster.agent_recording import register_recording
     from sweatcaster.agent_tool_builder import register_agent_tools
     from sweatcaster.sales_service import register_sales
     from sweatcaster.village_surprises import register_village_surprises
     from sweatcaster.agent_rooms import register_agent_rooms
     from sweatcaster.agent_repair import register_agent_repair
     from sweatcaster.agent_cases import register_agent_cases
+    from sweatcaster.agent_conversation import register_agent_chat
     from sweatcaster.bot_computer_routes import register_bot_computers
     from sweatcaster.lumi_companion import register_lumi
     from sweatcaster.bot_computers import BotComputerError, BotComputerWorker, ollama_reports, wire_uuid
@@ -160,14 +163,18 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
     register_studio_meshes(app, settings, authorize)
     register_cast_relay(app, settings, authorize)
     register_window_help(app, settings, authorize)
+    register_documents(app, settings, authorize)
     register_phone_screen(app, settings, authorize)
     register_film_companion(app, settings, authorize)
+    register_recording(app, settings, authorize)
     register_agent_tools(app, settings, authorize)
     surprises = register_village_surprises(app, settings, authorize, ollama_reports(settings, add_on=True),
                                            is_idle=lambda: computers.active_jobs() == 0)
     rooms = register_agent_rooms(app, settings, authorize, is_idle=lambda: computers.active_jobs() == 0)
     register_agent_repair(app, settings, authorize, batch=batch)
     library = register_composio(app, settings, authorize)
+    from sweatcaster.github_build_report import register_build_report
+    register_build_report(app, settings, authorize, library)
     cases = register_agent_cases(app, settings, authorize, library)
     register_mail_reschedule(app, settings, authorize, library)
     register_gmail_cleanup(app, settings, authorize, library)
@@ -230,6 +237,7 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
     workflows = batch.workflows
     original_lifespan = app.router.lifespan_context
     mcp = None
+    repository_mcp = None
     try:
         from mcp.server.fastmcp import FastMCP
         from mcp.server.transport_security import TransportSecuritySettings
@@ -242,6 +250,9 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             mcp = mcp_server(workflows.library, stateless_http=True, json_response=True,
                              max_request_body_size=32_768,
                              transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
+            repository_mcp = mcp_server(workflows.library, stateless_http=True, json_response=True,
+                                        max_request_body_size=32_768,
+                                        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
         else:
             logging.getLogger(__name__).warning("HTTP MCP requires mcp>=1.29.1,<2; the remaining API is available.")
 
@@ -283,6 +294,7 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             return studio_videos.status(job_id)
 
         mcp.streamable_http_app()
+        repository_mcp.streamable_http_app()
 
         class AuthenticatedMCP:
             async def __call__(self, scope, receive, send):
@@ -295,7 +307,11 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
                 if not permitted or "origin" in request.headers:
                     raise ApiError(403, "INVALID_INPUT", "MCP kræver en godkendt lokal adresse og en lokal klient.")
                 authorize(request, settings)
-                await mcp.session_manager.handle_request(scope, receive, send)
+                group = request.headers.get("x-fadedai-tools")
+                if group not in (None, "repository"):
+                    raise ApiError(422, "INVALID_INPUT", "Denne værktøjsgruppe findes ikke.")
+                server = repository_mcp if group == "repository" else mcp
+                await server.session_manager.handle_request(scope, receive, send)
 
         app.router.routes.append(Route("/api/modules/v1/mcp", AuthenticatedMCP(), methods=["GET", "POST", "DELETE"]))
 
@@ -305,6 +321,7 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             await stack.enter_async_context(original_lifespan(application))
             if mcp is not None:
                 await stack.enter_async_context(mcp.session_manager.run())
+                await stack.enter_async_context(repository_mcp.session_manager.run())
             worker = BatchWorker(batch)
             computers_worker = BotComputerWorker(computers)
             worker.start()
@@ -386,43 +403,7 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
         response.headers["Cache-Control"] = "no-store"
         return {"context": context, "sources": sources}
 
-    @app.put("/api/modules/v1/agent-chat", include_in_schema=False)
-    def agent_chat(request: Request, response: Response, body: dict = Body(...)):
-        import requests
-        from dataclasses import replace
-
-        from sweatcaster.bot_computers import BotComputerError, ModelBusy, run_local_text
-        from sweatcaster.config import ALLOWED_OLLAMA_MODELS
-        from sweatcaster.model_ids import TEXT_MODEL_TAGS, tag_for
-        from sweatcaster.ollama_gate import chat_payload
-        from sweatcaster.v2_api import catalog
-
-        authorize(request, settings)
-        model_id, prompt, instructions = (body.get(key) for key in ("modelID", "prompt", "instructions"))
-        if not all(isinstance(value, str) and 1 <= len(value.strip()) <= bound
-                   for value, bound in ((model_id, 80), (prompt, 2_000), (instructions, 3_000))):
-            raise ApiError(422, "INVALID_INPUT", "Beskeden eller agentens instruktioner er ugyldige.")
-        tag = tag_for(model_id)
-        if tag not in TEXT_MODEL_TAGS or tag not in ALLOWED_OLLAMA_MODELS:
-            raise ApiError(422, "INVALID_INPUT", "Vælg en PC-model til tekstchat.")
-        if not any(entry["id"] == model_id and entry["available"] for entry in catalog(settings)["models"]):
-            raise ApiError(503, "NOT_READY", "Den valgte model er ikke installeret på PC’en.")
-        payload = chat_payload(replace(settings, ollama_model=tag), [
-            {"role": "system", "content": instructions},
-            {"role": "user", "content": prompt},
-        ], stream=False, temperature=0.5)
-        try:
-            text = run_local_text(settings, payload, purpose="agent-chat")
-            if not isinstance(text, str) or not text.strip():
-                raise BotComputerError(502, "PC-modellen sendte et tomt svar.")
-        except ModelBusy as exc:
-            raise ApiError(503, "NOT_READY", "PC’en svarer på en anden opgave. Prøv igen om lidt.") from exc
-        except BotComputerError as exc:
-            raise ApiError(exc.status, "AGENT_CHAT_FAILED", exc.message) from exc
-        except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
-            raise ApiError(502, "AGENT_CHAT_FAILED", "Agentens PC-model svarede ikke. Tjek Ollama.") from exc
-        response.headers["Cache-Control"] = "no-store"
-        return {"text": text[:12_000]}
+    register_agent_chat(app, settings, authorize)
 
     @app.put("/api/modules/v1/bot-activity", include_in_schema=False)
     def bot_activity(request: Request, response: Response, body: dict = Body(...)):

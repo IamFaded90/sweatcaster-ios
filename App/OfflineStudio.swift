@@ -8,10 +8,16 @@ import UIKit
 import UniformTypeIdentifiers
 
 struct OfflineStudio: View {
+    func selectHistoryImage(_ file: URL) {
+        batchImageURLs = []
+        batchTurnID = nil
+        imageURL = file
+    }
+
     let api: LiveAPI?
     let privateImagePC: LiveAPI?
     @Binding private var regularStudioUnlocked: Bool
-    @State private var privateSessionOpen = true
+    @State private var privateSessionOpen: Bool
     let onPrivateSessionEnded: () -> Void
     let ephemeralOnly: Bool
     let imageOnly: Bool
@@ -29,11 +35,18 @@ struct OfflineStudio: View {
     @State var importChatText = false
     @State var privateDeadline: ContinuousClock.Instant?
     @State var sessionPreferences = StudioSessionPreferences()
+    @AppStorage(AppStorageKeys.lumiReplyLanguage) var lumiReplyLanguage = "da-DK"
+    @State var attachedChatPhoto: Data?
+    @State var secondChatPhoto: Data?
+    @State var loadingSecondChatPhoto = false
+    @State var loadingChatPhoto = false
+    @State var sentChatPhotos: [UUID: Data] = [:]
     @State var pcImageCatalog = StudioPCImageCatalog.checking
     @State var pcImageRefresh = 0
     @State var showImageDownloads = false
     @State var showPrivateVideo = false
     @State var privateVideoSource: URL?
+    @State var privateVideoChatInput: (photo: Data, prompt: String)?
     @State var privateModelDownload: Task<Void, Never>?
     @State var privateModelProgress = 0.0
     @State var privateModelProblem: String?
@@ -108,18 +121,19 @@ struct OfflineStudio: View {
     @AppStorage(AppStorageKeys.offlineStudioImageFavorites) var imageFavoritesData = Data()
     @AppStorage(AppStorageKeys.offlineStudioImageBatteryProtection) var imageBatteryProtection = true
     @State var studioSeed: UInt32?
-    @State var makeFourImages = false
     @State var basePhoto: PhotosPickerItem?
     @State var baseImage: Data?
+    @State var secondBaseImage: Data?
+    @State var loadingSecondBase = false
     @State var referenceMask: StudioReferenceMask?
     @State var showReferenceMaskEditor = false
     @State var loadingBaseImage = false
     @State var batchImageURLs: [URL] = []
     @State var batchTurnID: UUID?
     @State var upscaleProgress: Double?
-    @State var imageBenchmark: String?
     @State var imageCooling = false
     @State var temporaryImagesID = UUID()
+    @StateObject var conversationSearch = PrivateConversationSearch()
     @State var useLoRA = false
     @State var authenticating = false
     @State var studioAuthentication: LAContext?
@@ -130,6 +144,8 @@ struct OfflineStudio: View {
     @State var textContextLimit = 2048
     @State var privateBatteryLevel: Float = -1
     @StateObject var speech = SpeechBox()
+    @StateObject var studioPCSpeech = ChristelPlayer()
+    @State var studioPCSlot: SpeechBox.Playback?
     @State var pendingImageDeletion: URL?
     @State var pendingLoRADeletion: String?
     @FocusState var promptFocused: Bool
@@ -145,6 +161,7 @@ struct OfflineStudio: View {
         self.api = ephemeralOnly ? nil : api
         self.privateImagePC = ephemeralOnly ? (privateImagePC ?? api) : nil
         _regularStudioUnlocked = sessionUnlocked
+        _privateSessionOpen = State(initialValue: imageOnly)
         self.onPrivateSessionEnded = onPrivateSessionEnded
         self.ephemeralOnly = ephemeralOnly
         let presentsOnlyImages = imageOnly
@@ -198,6 +215,7 @@ struct OfflineStudio: View {
 
     func setReferenceImage(_ data: Data?) {
         baseImage = data
+        if data == nil { secondBaseImage = nil; loadingSecondBase = false }
         referenceMask = nil
         showReferenceMaskEditor = false
     }
@@ -210,6 +228,10 @@ struct OfflineStudio: View {
     var selectedPrivateBot: VillageBot? {
         if ephemeralOnly || imageOnly { return nil }
         return privateBots.first { $0.id.uuidString == privateBotID } ?? privateBots.first
+    }
+
+    var usesLumiReplyLanguage: Bool {
+        privateSession && (ephemeralOnly || selectedPrivateBot?.id == VillageBot.lumiID)
     }
 
     var currentBotTurns: [PrivateChatTurn] { turns.filter(belongsToCurrentBot) }
@@ -227,6 +249,10 @@ struct OfflineStudio: View {
 
     var body: some View {
         NavigationStack { studioNavigation }
+            .interactiveDismissDisabled(privateSession && !imageOnly && sessionUnlocked)
+            .task {
+                if privateSession && !imageOnly { authenticate() }
+            }
     }
 
     private var studioChrome: some View {
@@ -274,6 +300,11 @@ struct OfflineStudio: View {
                         Menu("Samtale", systemImage: "ellipsis.circle") {
                             Button("Ny samtale", systemImage: "square.and.pencil") { newPrivateConversation() }
                             if privateSession {
+                                if !imageOnly {
+                                    Button("Søg i denne samtale", systemImage: "magnifyingglass") {
+                                        if canShowStudio { conversationSearch.presented = true }
+                                    }.disabled(currentBotTurns.isEmpty)
+                                }
                                 Button("Galleri og indstillinger", systemImage: "gearshape") { studioPage = .gallery }
                             }
                         }
@@ -293,10 +324,12 @@ struct OfflineStudio: View {
             }
             .sheet(isPresented: $showPrivateVideo, onDismiss: {
                 privateVideoSource = nil
+                privateVideoChatInput = nil
                 resetIdleTimer()
             }) {
                 LumiStudio(api: privateImagePC, videoOnly: true,
-                           initialVideoReference: privateVideoSource.flatMap { privateImages[$0] },
+                           initialVideoReference: privateVideoChatInput?.photo ?? privateVideoSource.flatMap { privateImages[$0] },
+                           initialVideoPrompt: privateVideoChatInput?.prompt ?? "",
                            onVideoActivity: { resetIdleTimer() })
                     .accessibilityHidden(!canShowStudio)
                     .overlay {
@@ -355,6 +388,11 @@ struct OfflineStudio: View {
 
     private var studioPrivacyControls: some View {
         AnyView(studioPresentations)
+            .sheet(isPresented: $conversationSearch.presented, onDismiss: { conversationSearch.close() }) {
+                if privateSession && !imageOnly && canShowStudio {
+                    PrivateConversationSearchSheet(search: conversationSearch, turns: currentBotTurns)
+                }
+            }
             .sheet(isPresented: $showSessionNote) { sessionNoteSheet }
             .fileImporter(isPresented: $importChatText, allowedContentTypes: [.plainText]) { result in
                 if case .success(let url) = result { loadPromptFile(url, intoImages: false) }
@@ -395,6 +433,10 @@ struct OfflineStudio: View {
                 resetIdleTimer()
             }
             .onChange(of: studioPhase) { _, phase in handleStudioPhase(phase) }
+            .onChange(of: privateBotID) { conversationSearch.close(); stopStudioSpeech() }
+            .onChange(of: studioPCSpeech.notice) { _, message in
+                if let message, canShowStudio { status = message }
+            }
             .onChange(of: history, initial: true) { rebuildGalleryCache() }
             .onChange(of: galleryFilter) { rebuildGalleryCache() }
             .onChange(of: galleryTag) { rebuildGalleryCache() }
@@ -430,7 +472,7 @@ struct OfflineStudio: View {
                 privateBatteryLevel = UIDevice.current.batteryLevel
             }
             .onDisappear {
-                guard !showModels, !showImageDownloads, !showPrivateVideo, !showBotBuilder, !showPromptEditor, !showSessionNote,
+                guard !conversationSearch.presented, !showModels, !showImageDownloads, !showPrivateVideo, !showBotBuilder, !showPromptEditor, !showSessionNote,
                       !showReferenceMaskEditor, imageViewer == nil,
                       imageDetailsSheet == nil, studioShareSheet == nil else { return }
                 stopStudioImageQueue()
@@ -463,7 +505,7 @@ struct OfflineStudio: View {
             }
             .padding(.top, privateSession ? 4 : 0)
             .simultaneousGesture(TapGesture().onEnded { _ in resetIdleTimer() })
-        } else if privateSession {
+        } else if privateSession && imageOnly {
             VStack(spacing: 18) {
                 Image(systemName: "lock.shield").font(.largeTitle).foregroundStyle(palette.purple)
                     .accessibilityHidden(true)
@@ -477,7 +519,7 @@ struct OfflineStudio: View {
                     .accessibilityHidden(true)
                 Text("Privat Studio").font(.largeTitle.bold())
                     .foregroundStyle(palette.text)
-                Text("Lås op én gang pr. session.")
+                Text("Lås op én gang pr. session med Face ID eller Touch ID.")
                     .multilineTextAlignment(.center).foregroundStyle(palette.secondary)
                 FadedPrimaryButton("Lås op", icon: "faceid") { authenticate() }
                     .disabled(authenticating || studioPhase != .active)

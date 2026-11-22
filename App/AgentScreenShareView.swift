@@ -4,6 +4,13 @@ import SwiftUI
 import UIKit
 
 enum AgentScreenIntent {
+    static func draftForScreenshot(_ question: String, current: String) -> String {
+        let caption = question.trimmingCharacters(in: .whitespacesAndNewlines)
+        let draft = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !caption.isEmpty, draft != caption, !draft.hasSuffix("\n" + caption) else { return current }
+        return draft.isEmpty ? caption : current + "\n" + caption
+    }
+
     static func matches(_ text: String) -> Bool {
         let lower = text.lowercased()
         if lower.range(of: #"\b(?:pc|computer|windows|vindue)\b"#, options: .regularExpression) != nil { return false }
@@ -13,10 +20,26 @@ enum AgentScreenIntent {
     }
 }
 
+struct PhoneScreenFrameStatus: Decodable {
+    let frames: Int
+    let age: Double?
+    let frozen: Bool
+
+    // The PC accepts a frozen frame, or a live frame received within the last 15 seconds.
+    var canRead: Bool { frames > 0 && (frozen || age.map { (0...15).contains($0) } == true) }
+
+    var message: String {
+        guard frames > 0 else { return "Venter på det første billede. Start delingen, og skift til den app, du vil spørge om." }
+        if frozen { return "Det seneste billede fra din delte app er klar." }
+        return canRead ? "Skærmen deles nu." : "Der er ikke kommet et nyt billede. Åbn den delte app igen, eller vælg et skærmbillede nedenfor."
+    }
+}
+
 @MainActor struct AgentScreenShareView: View {
+    private typealias Status = PhoneScreenFrameStatus
     let api: LiveAPI?
     let bot: VillageBot
-    let prompt: String
+    let useScreenshot: ((Data, String) -> Void)?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
     @State private var configuration: PhoneBroadcastConfiguration?
@@ -32,6 +55,7 @@ enum AgentScreenIntent {
     @State private var voiceDraft = ""
     @State private var voiceJob: Task<Void, Never>?
     @State private var answerJob: Task<Void, Never>?
+    @State private var answerRun = UUID()
     @State private var microphoneJob: Task<Void, Never>?
     @State private var microphoneRun = UUID()
     @State private var speakingTurn = false
@@ -41,11 +65,17 @@ enum AgentScreenIntent {
     @State private var connecting = false
     @State private var connectionFailed = false
     @State private var screenControl: Task<Void, Never>?
+    @State private var screenshot: Data?
+    @State private var loadingScreenshot = false
+    @State private var readingScreenshot = false
 
-    private struct Status: Decodable {
-        let frames: Int
-        let age: Double?
-        let frozen: Bool
+    init(api: LiveAPI?, bot: VillageBot, prompt: String, useScreenshot: ((Data, String) -> Void)? = nil) {
+        self.api = api
+        self.bot = bot
+        self.useScreenshot = useScreenshot
+        // The toolbar shortcut has no question yet. Keep any question typed in chat, even while the PC is offline.
+        let initial = prompt == "Se lige min skærm" ? "" : prompt
+        _question = State(initialValue: initial)
     }
 
     private struct Started: Decodable {
@@ -74,15 +104,12 @@ enum AgentScreenIntent {
                                 Text("Skærmdelingen er afsluttet.")
                                 FadedSecondaryButton("Start igen", icon: "arrow.clockwise") { stopping = false; reconnect() }
                             } else if connecting { ProgressView("Forbinder til PC’en…") }
-                            else if api != nil {
+                            else if api != nil, PhoneBroadcastConfiguration.hasSharedContainer {
                                 FadedSecondaryButton("Prøv forbindelsen igen", icon: "arrow.clockwise") { reconnect() }
                             }
-                            else { Text("Forbind din iPhone til FadedAI på PC’en for at dele skærmen med agenten.") }
-                            if let status {
-                                Text(status.frames == 0 ? "Venter på skærmbillede fra en anden app."
-                                     : status.frozen ? "Billedet fra din delte app er klar."
-                                     : "Skærmen deles nu.")
-                                    .font(.footnote).foregroundStyle(.secondary)
+                            else if api == nil { Text("Forbind din iPhone til FadedAI på PC’en for at dele skærmen med agenten.") }
+                            if let status, !connecting, !connectionFailed {
+                                Text(status.message).font(.footnote).foregroundStyle(.secondary)
                             }
                         }.frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -92,10 +119,14 @@ enum AgentScreenIntent {
                             Text(asking ? "Læser skærmen…" : speakingTurn ? "Agenten svarer…" : "Mikrofonen lytter efter dit spørgsmål.")
                                 .font(.footnote)
                         }
+                    }
+                    if configuration != nil || screenshot != nil {
                         TextField("Hvad vil du vide om skærmen?", text: $question, axis: .vertical)
                             .lineLimit(2...5).padding(14).fadedGlassSurface()
+                    }
+                    if configuration != nil {
                         FadedPrimaryButton("Spørg " + bot.name, icon: "text.bubble") { ask(question) }
-                            .disabled(asking || connectionFailed || (status?.frames ?? 0) == 0 || question.count > 500 || question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .disabled(asking || connecting || connectionFailed || status?.canRead != true || question.unicodeScalars.count > 500 || question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         if asking { ProgressView("Læser den delte skærm…") }
                         if !answer.isEmpty {
                             FadedCard { Text(answer).frame(maxWidth: .infinity, alignment: .leading).textSelection(.enabled) }
@@ -103,6 +134,7 @@ enum AgentScreenIntent {
                         FadedSecondaryButton("Stop skærmdeling", icon: "stop.circle") { stop() }
                     }
                     if let notice { Text(notice).foregroundStyle(.secondary) }
+                    screenshotCard
                     if let problem = dictation.problem { Text(problem).foregroundStyle(.secondary) }
                 }.padding(FadedSpacing.edge)
             }.background { FadedBackground() }
@@ -110,6 +142,9 @@ enum AgentScreenIntent {
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { stop(); dismiss() } } }
         }
         .privacySensitive()
+        .sheet(isPresented: $readingScreenshot) {
+            if let screenshot { LocalImageAnalysisView(data: screenshot, onChooseNote: nil, api: api, initialPrompt: question) }
+        }
         .task { reconnect() }
         .onChange(of: phase) { _, next in setPaused(next != .background) }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in setPaused(true) }
@@ -142,6 +177,28 @@ enum AgentScreenIntent {
             }
         }
         .onDisappear { stop() }
+    }
+
+    private var screenshotCard: some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Brug et skærmbillede").font(.headline)
+                ChatPhotoPicker(photo: $screenshot, loading: $loadingScreenshot,
+                                onError: { notice = $0 }, addTitle: "Vælg skærmbillede")
+                if let screenshot {
+                    if let useScreenshot {
+                        FadedSecondaryButton("Vedhæft i chatten med " + bot.name, icon: "bubble.left.and.bubble.right") {
+                            stop()
+                            useScreenshot(screenshot, question)
+                            dismiss()
+                        }.disabled(loadingScreenshot)
+                    }
+                    FadedSecondaryButton("Læs skærmbilledet", icon: "text.viewfinder") {
+                        readingScreenshot = true
+                    }.disabled(loadingScreenshot)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     private func reconnect() {
@@ -180,7 +237,6 @@ enum AgentScreenIntent {
             }
             try Task.checkCancellation()
             guard let config = configuration, !stopping else { return }
-            if question.isEmpty, !AgentScreenIntent.matches(prompt) { question = String(prompt.prefix(500)) }
             var failures = 0
             while !Task.isCancelled, configuration?.id == config.id {
                 do {
@@ -211,12 +267,26 @@ enum AgentScreenIntent {
                 connectionFailed = true
                 voice = false
                 stopListening()
-                notice = "Skærmhjælpen mistede forbindelsen. Tjek at FadedAI kører på PC’en, og tryk Prøv forbindelsen igen. " + error.localizedDescription
+                if let setupError = error as? PhoneBroadcastConfiguration.SetupError {
+                    notice = setupError.localizedDescription
+                } else {
+                    notice = Self.explanation(error, fallback: "Skærmhjælpen kunne ikke få forbindelse. Tjek, at FadedAI kører på PC’en, og prøv igen.")
+                }
             }
         }
     }
 
+    private static func explanation(_ error: Error, fallback: String) -> String {
+        if case .http(_, let problem)? = error as? APIError, let message = problem?.message, !message.isEmpty { return message }
+        if case .transport? = error as? APIError { return APIError.offline.title }
+        if case .offline? = error as? APIError { return APIError.offline.title }
+        return fallback
+    }
+
     private func createConfiguration(api: LiveAPI) async throws -> PhoneBroadcastConfiguration {
+        guard PhoneBroadcastConfiguration.hasSharedContainer else {
+            throw PhoneBroadcastConfiguration.SetupError.sharedContainerUnavailable
+        }
         // An unstructured create is allowed to return its id after cancellation, so
         // the canceled view can still delete exactly the session it just created.
         let creation = Task { () async throws -> Started in
@@ -260,7 +330,7 @@ enum AgentScreenIntent {
         guard configuration?.id == id else { return }
         voice = false
         voiceJob?.cancel()
-        answerJob?.cancel()
+        cancelQuestion()
         stopListening()
         speech.stop()
         pcSpeech.stop()
@@ -274,7 +344,13 @@ enum AgentScreenIntent {
         guard var config = configuration, let api, !stopping else { return }
         guard PhoneBroadcastConfiguration.read()?.id == config.id else { stop(); return }
         config.paused = paused
-        try? config.save()
+        do {
+            try config.save()
+        } catch {
+            stop()
+            notice = "Skærmdelingen blev stoppet. " + error.localizedDescription
+            return
+        }
         configuration = config
         let previous = screenControl
         screenControl = Task {
@@ -288,31 +364,51 @@ enum AgentScreenIntent {
 
     private func ask(_ text: String) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let config = configuration, let api, !asking, !connectionFailed, !clean.isEmpty, clean.count <= 500 else { return }
+        guard let config = configuration, let api, !asking, !connectionFailed, !clean.isEmpty, clean.unicodeScalars.count <= 500 else { return }
+        guard !connecting, status?.canRead == true else {
+            question = clean
+            notice = connecting ? "Venter på forbindelsen til PC’en." : status?.message
+            return
+        }
         asking = true
+        let run = UUID()
+        answerRun = run
         notice = nil
         voiceJob?.cancel()
         stopListening()
         answerJob = Task {
             let background = ScreenBackgroundLease {
+                guard self.answerRun == run else { return }
                 self.answerJob?.cancel()
                 self.notice = "iPhone satte skærmhjælpen på pause. Åbn FadedAI, og stil spørgsmålet igen."
             }
             defer {
-                asking = false
                 background.end()
-                resumeAfterSpeech()
+                if answerRun == run {
+                    asking = false
+                    answerJob = nil
+                    resumeAfterSpeech()
+                }
             }
             do {
                 struct Reply: Decodable { let reading: String; let capturedAt: Double }
                 let reply: Reply = try await api.moduleJSON("phone-screen/" + config.id + "/ask",
                     upload: JSONEncoder().encode(["question": clean]), timeout: 125)
                 try Task.checkCancellation()
+                guard answerRun == run, configuration?.id == config.id else { return }
                 answer = reply.reading
                 if voice { speak(reply.reading) }
             } catch is CancellationError { return }
-            catch { notice = "Kunne ikke læse skærmen. " + error.localizedDescription }
+            catch { if !Task.isCancelled { notice = Self.explanation(error, fallback: "Kunne ikke læse skærmen. Prøv igen, eller vælg et skærmbillede.") } }
         }
+    }
+
+    private func cancelQuestion() {
+        answerRun = UUID()
+        answerJob?.cancel()
+        answerJob = nil
+        asking = false
+        answer = ""
     }
 
     private func listen() {
@@ -350,7 +446,10 @@ enum AgentScreenIntent {
         speakingTurn = true
         stopListening()
         let id = AgentVoiceSelection.identifier(for: bot)
-        if let pcVoice = AgentPCVoice(rawValue: id), let api {
+        if let local = DownloadedAgentVoice.selected(id) {
+            pcSpeech.playDownloaded(text: text, voice: local, agentID: bot.id,
+                                   language: bot.language ?? "da-DK", rate: bot.voiceRate ?? 1)
+        } else if let pcVoice = AgentPCVoice(rawValue: id), let api {
             let spoken = text.count > 450 ? String(text.prefix(450)) + " Resten står i samtalen." : text
             pcSpeech.playAgentVoice(text: spoken, voice: pcVoice, agentID: bot.id, pc: api)
         } else if let selected = AgentVoiceSelection.resolve(identifier: id, language: bot.language ?? "da-DK") {
@@ -367,7 +466,7 @@ enum AgentScreenIntent {
         stopping = true
         voice = false
         voiceJob?.cancel()
-        answerJob?.cancel()
+        cancelQuestion()
         screenControl?.cancel()
         connectionJob?.cancel()
         connectionRun = UUID()

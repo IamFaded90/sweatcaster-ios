@@ -29,7 +29,7 @@ enum VoiceInboxParser {
         let punctuation = #"[;\n]+|[!?](?=\s|$)\s*|(?<!\bkl)(?<!\bca)(?<!\bnr)(?<!\bfx)(?<!\d)\.(?=\s|$)\s*"#
         let boundary = punctuation + #"|\.\s+(?="# + command + #")|,\s*(?:og\s+)?(?="# + command + #")|\s+og\s+(?="# + command + ")"
         let parts = String(raw.prefix(4_000)).replacingOccurrences(of: boundary, with: "\n", options: [.regularExpression, .caseInsensitive])
-        return parts.split(whereSeparator: \.isNewline).compactMap { part in
+        let items: [Item] = parts.split(whereSeparator: \.isNewline).compactMap { part in
             let text = part.trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
             guard !text.isEmpty else { return nil }
             let type: Kind
@@ -41,6 +41,13 @@ enum VoiceInboxParser {
             let title = text.replacingOccurrences(of: #"^(?:gem(?: lige)? (?:en note om |en idé om )?|not[ée]r(?: lige)? |mind mig om (?:at )?|husk at )"#,
                                                    with: "", options: [.caseInsensitive, .regularExpression])
             return Item(kind: type, text: String((title.isEmpty ? text : title).prefix(240)), original: text)
+        }
+        return items.flatMap { item -> [Item] in
+            guard case .add(let names) = AgentShoppingRequest.match(item.original) else { return [item] }
+            return names.map { name in
+                let line = "Køb " + name
+                return Item(kind: .shopping, text: line, original: names.count == 1 ? item.original : line)
+            }
         }
     }
 }

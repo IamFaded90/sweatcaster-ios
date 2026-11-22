@@ -2,13 +2,35 @@ import EventKit
 import SwiftUI
 import UIKit
 
+@MainActor struct MorningOverviewSheet: View {
+    let api: LiveAPI?
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                FadedCard { AgentTodayOverview(api: api, showsTitle: false) }
+                    .frame(maxWidth: 640)
+                    .padding(FadedSpacing.edge)
+                    .frame(maxWidth: .infinity)
+            }
+            .background { FadedBackground() }
+            .navigationTitle("Dagens overblik")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("Luk") { dismiss() } }
+        }
+    }
+}
+
 @MainActor struct AgentTodayOverview: View {
     let api: LiveAPI?
     let botName: String
+    let showsTitle: Bool
 
-    init(api: LiveAPI?, botName: String = "din agent") {
+    init(api: LiveAPI?, botName: String = "din agent", showsTitle: Bool = true) {
         self.api = api
         self.botName = botName
+        self.showsTitle = showsTitle
     }
 
     private enum Source: String {
@@ -63,7 +85,7 @@ import UIKit
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Dagens overblik").font(.headline)
+            if showsTitle { Text("Dagens overblik").font(.headline) }
             phoneSection(.calendar, state: events, empty: "Du har ingen aftaler i dag.", row: eventRow)
             Divider()
             phoneSection(.reminders, state: reminders, empty: "Du har ingen påmindelser med frist i dag eller tidligere.", row: reminderRow)
@@ -220,14 +242,37 @@ import UIKit
             events = .unavailable("Kunne ikke finde dagens dato.")
             return
         }
-        let predicate = store.predicateForEvents(withStart: today.start, end: today.end, calendars: nil)
-        let results = store.events(matching: predicate).compactMap { item -> Event? in
+        events = .ready(Self.dayEvents(store: store, day: today))
+    }
+
+    private static func dayEvents(store: EKEventStore, day: DateInterval) -> [Event] {
+        let predicate = store.predicateForEvents(withStart: day.start, end: day.end, calendars: nil)
+        return store.events(matching: predicate).compactMap { item -> Event? in
             guard item.status != .canceled, let start = item.startDate, let end = item.endDate,
-                  start < today.end, end > today.start else { return nil }
+                  start < day.end, end > day.start else { return nil }
             return Event(id: "\(item.calendarItemIdentifier):\(start.timeIntervalSinceReferenceDate)",
                          title: item.title ?? "Aftale", start: start, end: end, allDay: item.isAllDay)
+        }.sorted { $0.start < $1.start }
+    }
+
+    static func calendarSummary(for date: Date) -> String {
+        guard EKEventStore.authorizationStatus(for: .event) == .fullAccess else {
+            return "Adgang til Kalender mangler. Åbn Dagens overblik for at give læseadgang."
         }
-        events = .ready(results.sorted { $0.start < $1.start })
+        guard let day = Calendar.current.dateInterval(of: .day, for: date) else { return "Dagen kunne ikke findes." }
+        let events = dayEvents(store: EKEventStore(), day: day)
+        let danish = Locale(identifier: "da_DK")
+        let heading = "Kalender \(date.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted, locale: danish)))"
+        guard !events.isEmpty else { return "\(heading): ingen aftaler." }
+        let time = Date.FormatStyle(date: .omitted, time: .shortened, locale: danish)
+        let times = events.prefix(5).map { event in
+            if event.allDay { return "hele dagen" }
+            let start = event.start < day.start ? "fra dagen før" : event.start.formatted(time)
+            let end = event.end >= day.end ? "til midnat" : event.end.formatted(time)
+            return "\(start) – \(end)"
+        }
+        let more = events.count > times.count ? " (de første \(times.count) tider vises)" : ""
+        return "\(heading): \(events.count) \(events.count == 1 ? "aftale" : "aftaler")\(more). " + times.joined(separator: ", ")
     }
 
     private func readReminders() async {

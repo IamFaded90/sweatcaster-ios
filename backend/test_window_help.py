@@ -102,6 +102,25 @@ def test_vision_rejects_remote_before_contact():
         window_help._vision(SimpleNamespace(ollama_origin="http://devices.invalid:11434"), "bm8=", "")
 
 
+@pytest.mark.parametrize("installed,answers,expected", [
+    ({"qwen3-vl:4b", "moondream:1.8b"}, ["Qwen"], ["qwen3-vl:4b"]),
+    ({"qwen3-vl:4b", "moondream:1.8b"}, [None, "Moondream"], ["qwen3-vl:4b", "moondream:1.8b"]),
+    ({"moondream:1.8b"}, ["Moondream"], ["moondream:1.8b"]),
+    ({"unrelated-text-model"}, [], []),
+])
+def test_screen_selects_installed_vision_models(monkeypatch, installed, answers, expected):
+    from sweatcaster import ollama_runtime
+    monkeypatch.setattr(ollama_runtime, "installed_tags", lambda _: installed)
+    seen = []
+    def read(settings, image, question, tag):
+        seen.append(tag)
+        return answers[len(seen) - 1]
+    monkeypatch.setattr(window_help, "_read_image", read)
+    result = window_help._vision(SimpleNamespace(ollama_origin="http://127.0.0.1:11434"), "jpeg", "Hvad ser du?")
+    assert seen == expected
+    assert result == (answers[-1] if answers else None)
+
+
 def test_routes_require_pairing_and_never_cache():
     app = FastAPI()
 

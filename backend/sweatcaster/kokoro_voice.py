@@ -46,7 +46,15 @@ def kokoro_ready() -> tuple[bool, str]:
 
 _engine_lock = threading.Lock()
 _SPEED_BY_MOOD = {"roast": 0.98, "hype": 1.08, "sweaty": 0.95, "funny_npc": 1.03}
-CHAT_VOICES = ("af_heart", "am_michael")
+AGENT_VOICE_PRESETS = {
+    "kokoro-heart": "af_heart",
+    "kokoro-michael": "am_michael",
+    "kokoro-bella": "af_bella",
+    "kokoro-nicole": "af_nicole",
+    "kokoro-fenrir": "am_fenrir",
+    "kokoro-puck": "am_puck",
+}
+CHAT_VOICES = tuple(AGENT_VOICE_PRESETS.values())
 
 
 @lru_cache(maxsize=1)

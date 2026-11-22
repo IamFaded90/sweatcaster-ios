@@ -97,6 +97,7 @@ struct Home: View {
     @State var showLogin = false
     @State var showDashboardActivity = false
     @State var showAgentAssistant = false
+    @State var showMorningOverview = false
     @State var showMoreDestinations = false
     @State var showCreativeStudioShortcut = false
     @State var showFadedCamera = false
@@ -430,6 +431,7 @@ struct Home: View {
                         .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                         .keyboardShortcut("k", modifiers: .command)
                     Menu {
+                        Button("Dagens overblik", systemImage: "sunrise") { showMorningOverview = true }
                         Button("Noter", systemImage: "note.text") { showNotes = true }
                         if !teamPinned {
                             Button("Holdet", systemImage: "person.2", action: openTeam)

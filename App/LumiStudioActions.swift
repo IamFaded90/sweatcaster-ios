@@ -4,6 +4,42 @@ import AVFAudio
 import PhotosUI
 import SwiftUI
 
+struct LumiChatImageRequest {
+    let prompt: String
+    let isSelfPortrait: Bool
+
+    static func parse(_ message: String) -> Self? {
+        let danish = #"^(?:hej lumi[,! ]+|lumi[,!: ]+)?(?:(?:kan|vil|kunne|gider) du (?:ikke )?(?:lave|generere|sende|tegne|vise|tage)|lav|generér|generer|send|tegn|vis|tag|(?:kan|må) jeg få|jeg vil gerne (?:have|se))?(?: (?:lige|gerne|mig|også))*\s*(?:et |en |det )?(?:billede?|foto|selfie)(?=$|[\s.!?:])"#
+        let english = #"^(?:lumi[,!: ]+)?(?:(?:can|could|would) you )?(?:make|generate|create|draw|send|show|take)(?: me)? (?:a |an )?(?:picture|image|photo|selfie)(?=$|[\s.!?:])"#
+        let options: String.CompareOptions = [.regularExpression, .caseInsensitive]
+        guard let range = message.range(of: danish, options: options)
+                ?? message.range(of: english, options: options) else { return nil }
+        let punctuation = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "!?.:,"))
+        let suffix = String(message[range.upperBound...])
+        let description = suffix
+            .replacingOccurrences(of: #"^\s*(?:af\s+|med\s+|of\s+|with\s+|:)"#, with: "", options: options)
+            .trimmingCharacters(in: punctuation)
+        let person = #"^(?:dig(?: selv)?|lumi|yourself|you)(?=$|[\s,!?.])"#
+        let subject = description.range(of: person, options: options)
+        let otherSubject = suffix.range(of: #"^\s*(?:af|of)\s+"#, options: options) != nil
+        let selfie = message[range].lowercased().hasSuffix("selfie") && !otherSubject
+        guard subject != nil || selfie else { return Self(prompt: description, isSelfPortrait: false) }
+        let detail = subject.map { String(description[$0.upperBound...]).trimmingCharacters(in: punctuation) } ?? description
+        let identity = Self.portraitPrompt
+        return Self(prompt: detail.isEmpty ? identity : identity + " Composition and setting: " + detail, isSelfPortrait: true)
+    }
+
+    static let portraitPrompt = "Create a self-portrait of Lumi, the fictional character in the supplied portrait. Preserve her facial features, hair, and identity."
+
+    static func referencePortrait() -> Data? {
+        guard let url = VillageProductionArt.url("portrait-lumi"),
+              let bytes = try? Data(contentsOf: url, options: .mappedIfSafe),
+              let data = StudioPhotoInput.downsample(bytes),
+              (1...1_000_000).contains(data.count) else { return nil }
+        return data
+    }
+}
+
 extension LumiStudio {
     var sceneControls: some View {
         FadedCard {
@@ -17,6 +53,12 @@ extension LumiStudio {
                     ForEach(LumiInitiative.allCases) { kind in Text(kind.title).tag(kind) }
                 }
                 .pickerStyle(.segmented)
+                Toggle("Lumi må selv sende et portræt", isOn: Binding(get: { portraits.enabled }, set: portraits.setEnabled))
+                    .font(.subheadline)
+                if portraits.enabled {
+                    FadedDetailText(portraits.isPreparing ? "Din PC laver Lumis portræt. Slå valget fra for at stoppe."
+                                    : "Højst ét portræt i denne samtale. Lumi bruger sit eget billede på din PC.")
+                }
                 ViewThatFits(in: .horizontal) {
                     HStack {
                         leadButton
@@ -96,6 +138,7 @@ extension LumiStudio {
     }
 
     var sceneHasEdits: Bool {
+        if attachedPhoto != nil || secondChatPhoto != nil { return true }
         guard let sceneCard else { return !messages.isEmpty || !draft.isEmpty }
         guard let saved = scenes.first(where: { $0.id == sceneCard.id }) else { return true }
         return !saved.matches(sceneSnapshot(sceneCard))
@@ -112,7 +155,7 @@ extension LumiStudio {
             loadScenes()
             return
         }
-        stopAudio()
+        resetSceneInput()
         sceneCard = scene.card
         initiative = scene.initiative
         language = scene.language == "en-US" ? "en-US" : "da-DK"
@@ -122,6 +165,7 @@ extension LumiStudio {
         saveSceneTemporarily = scene.expiresAt != nil
         pendingScene = nil
         notice = nil
+        pruneSceneMedia()
     }
 
     func loadScenes() {
@@ -129,6 +173,7 @@ extension LumiStudio {
         clearExpiredOpenedScene(now: now)
         do {
             scenes = try LumiSceneLibrary.load(now: now)
+            pruneSceneMedia(now: now)
             libraryNotice = nil
         } catch {
             scenes = []
@@ -136,35 +181,31 @@ extension LumiStudio {
         }
     }
 
-    var nextSceneExpiry: Date? {
-        (scenes.map(\.expiresAt) + [openedSceneExpiry]).compactMap { $0 }.min()
-    }
-
-    func waitForSceneExpiry() async {
-        guard let expiry = nextSceneExpiry else { return }
-        while expiry.timeIntervalSinceNow > 0 {
-            do { try await Task.sleep(for: .seconds(expiry.timeIntervalSinceNow)) }
-            catch { return }
-        }
-        guard !Task.isCancelled else { return }
-        loadScenes()
-    }
-
     @discardableResult
     func clearExpiredOpenedScene(now: Date = .now) -> Bool {
         guard let expiry = openedSceneExpiry, expiry <= now else { return false }
-        sceneRevision = UUID()
+        resetSceneInput()
         openedSceneExpiry = nil
         sceneCard = nil
         messages = []
         draft = ""
+        pruneSceneMedia(now: now)
         initiative = .together
         saveSceneTemporarily = false
-        dictation.clearReview()
-        stopAudio()
         if sceneSheet == .edit || sceneSheet == .saveAs { sceneSheet = nil }
         notice = "Den midlertidige scene er udløbet."
         return true
+    }
+
+    private func resetSceneInput() {
+        portraits.endSession()
+        sceneRevision = UUID()
+        stopAudio()
+        dictation.clearReview()
+        attachedPhoto = nil
+        secondChatPhoto = nil
+        loadingChatPhoto = false
+        loadingSecondChat = false
     }
 
     func saveScene(_ card: LumiSceneCard) {
@@ -194,6 +235,7 @@ extension LumiStudio {
             try LumiSceneLibrary.save(updated)
             scenes = updated
             libraryNotice = nil
+            pruneSceneMedia()
         } catch {
             libraryNotice = "Scenen kunne ikke slettes. Prøv igen."
         }
@@ -212,13 +254,30 @@ extension LumiStudio {
     }
 
     func send(opening: Bool = false) {
-        guard let api, !busy, !dictation.active else { return }
-        let selectedMode = mode
-        guard !opening || selectedMode == 0 else { return }
-        if selectedMode == 0, clearExpiredOpenedScene() { return }
-        let selectedDraft = promptDraft(for: selectedMode)
-        let input = opening ? (language == "da-DK" ? "Tag føringen" : "Take the lead")
+        guard let api, !busy, !dictation.active, mode != 0 || (!loadingChatPhoto && !loadingSecondChat) else { return }
+        guard !opening || mode == 0 else { return }
+        if mode == 0, clearExpiredOpenedScene() { return }
+        portraits.interrupt()
+        let portraitTurn = portraits.revision
+        let selectedDraft = promptDraft(for: mode)
+        let originalInput = opening ? (language == "da-DK" ? "Tag føringen" : "Take the lead")
             : selectedDraft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let pair = mode == 0 && !opening ? secondChatPhoto : mode == 1 ? secondImageReference : nil
+        let chatPhoto = mode == 0 && !opening ? attachedPhoto : nil
+        let parsed = chatPhoto == nil ? LumiChatImageRequest.parse(originalInput) : LumiChatImageRequest.requestedWithPhoto(originalInput)
+        let imageFromChat = mode == 0 && !opening ? (parsed
+            ?? pair.map { _ in LumiChatImageRequest(prompt: originalInput, isSelfPortrait: false) }) : nil
+        if let chatPhoto, imageFromChat == nil { sendChatPhoto(chatPhoto, via: api); return }
+        let selectedMode = imageFromChat == nil ? mode : 1
+        let input = imageFromChat?.prompt ?? originalInput
+        if imageFromChat?.prompt.isEmpty == true {
+            notice = "Hvad skal der være på billedet? Skriv fx »Lav et billede af en solnedgang ved havet«."
+            return
+        }
+        if imageFromChat != nil && !isValidPrompt(input, for: 1) {
+            notice = "Forkort billedbeskrivelsen til højst 1.000 tegn."
+            return
+        }
         guard isValidPrompt(input, for: selectedMode) else { return }
         let imageInput = selectedMode == 1 && useImageTaste
             ? AgentImageTasteStyle.selected(for: VillageBot.lumiID)?.applying(to: input) ?? input : input
@@ -226,13 +285,24 @@ extension LumiStudio {
             notice = "Forkort beskrivelsen, eller slå billedstilen fra."
             return
         }
-        let selectedImageModel = pcImageModel
+        let selectedImageModel = pair != nil && mode == 0 ? (pcImageCatalog.pairModel(preferred: pcImageModel) ?? pcImageModel) : pcImageModel
+        if pair != nil && !selectedImageModel.isFlux { notice = "Vælg FLUX 2 på PC for at bruge begge fotos."; return }
         if selectedMode == 1 {
-            guard !loadingReference, pcImageCatalog.allows(selectedImageModel) else { return }
+            if let blocker = pcImageCatalog.blocker(for: selectedImageModel) {
+                notice = blocker
+                return
+            }
+            guard imageFromChat != nil || (!loadingReference && !loadingSecondImage) else { return }
         }
         if selectedMode == 2 && loadingVideoReference { return }
         composerFocused = false
-        let reference = selectedMode == 1 ? imageReference : nil
+        let wantsSelfPortrait = imageFromChat?.isSelfPortrait == true
+        let reference = pair != nil ? (mode == 0 ? attachedPhoto : imageReference) : wantsSelfPortrait ? LumiChatImageRequest.referencePortrait()
+            : selectedMode == 1 ? (imageFromChat == nil ? imageReference : chatPhoto) : nil
+        if wantsSelfPortrait && reference == nil {
+            notice = "Lumis portræt kunne ikke åbnes. Prøv at lukke og åbne chatten igen."
+            return
+        }
         let selectedVideoReference = selectedMode == 2 ? videoReference : nil
         let replyLanguage = language
         let selectedScene = sceneCard
@@ -244,8 +314,9 @@ extension LumiStudio {
         if !opening { selectedDraft.wrappedValue = "" }
         notice = nil
         busy = true
+        chatImagePending = imageFromChat != nil
         Task {
-            defer { busy = false }
+            defer { busy = false; chatImagePending = false }
             do {
                 if selectedMode == 0 {
                     let reply = try await api.lumiChat(message: input, history: previous, language: replyLanguage,
@@ -256,21 +327,26 @@ extension LumiStudio {
                     messages.append(LumiSceneMessage(role: .user, text: input, language: replyLanguage))
                     messages.append(LumiSceneMessage(role: .assistant, text: String(reply.unicodeScalars.prefix(4_000)),
                                                      language: replyLanguage))
+                    if !opening { offerLumiPortrait(after: portraitTurn, api: api, language: replyLanguage) }
                 } else if selectedMode == 1 {
-                    let data: Data
-                    if selectedImageModel == .realvis {
-                        data = try await api.lumiImage(prompt: imageInput, reference: reference)
-                    } else {
-                        data = try await api.privateStudioImage(prompt: imageInput, negative: "", reference: reference,
-                                                                mask: nil, strength: nil,
-                                                                seed: UInt32.random(in: 1...UInt32.max),
-                                                                engine: selectedImageModel.rawValue)
-                    }
+                    let data = try await renderLumiPicture(api: api, model: selectedImageModel, prompt: imageInput,
+                                                           reference: reference, pair: pair)
                     guard studioRevision == selectedStudioRevision else { return }
-                    let file = try writeStudioMedia(data, filename: "Lumi.png")
-                    picture = data
-                    pictureFile = file
-                    pictureReference = reference
+                    if imageFromChat != nil, clearExpiredOpenedScene() || sceneRevision != selectedSceneRevision { return }
+                    if imageFromChat != nil {
+                        let result = try chatPicture(data, caption: replyLanguage == "en-US" ? "Image ready." : "Billedet er klar.",
+                                                     language: replyLanguage)
+                        if let chatPhoto, reference == chatPhoto, attachedPhoto == chatPhoto, secondChatPhoto == pair {
+                            attachedPhoto = nil; secondChatPhoto = nil
+                        }
+                        messages.append(LumiSceneMessage(role: .user, text: originalInput, language: replyLanguage))
+                        messages.append(result)
+                    } else {
+                        let file = try writeStudioMedia(data, filename: "Lumi.png")
+                        picture = data
+                        pictureFile = file
+                        pictureReference = reference
+                    }
                 } else {
                     let receipt: LumiVideoJob
                     do {
@@ -292,10 +368,10 @@ extension LumiStudio {
                 }
             } catch {
                 guard !Task.isCancelled, studioRevision == selectedStudioRevision else { return }
-                if selectedMode == 0, clearExpiredOpenedScene() || sceneRevision != selectedSceneRevision { return }
+                if (selectedMode == 0 || imageFromChat != nil), clearExpiredOpenedScene() || sceneRevision != selectedSceneRevision { return }
                 AppDiagnostics.record(error)
                 if !opening && selectedDraft.wrappedValue.isEmpty && (selectedMode != 2 || pendingVideoJobID.isEmpty) {
-                    selectedDraft.wrappedValue = input
+                    selectedDraft.wrappedValue = originalInput
                 }
                 if selectedMode == 0, selectedScene != nil || selectedInitiative != .together || opening,
                    let apiError = error as? APIError, case .http(404, _) = apiError {
@@ -307,17 +383,42 @@ extension LumiStudio {
         }
     }
 
-    var modelHistory: [[String: String]] {
-        var remaining = 9_000
-        var selected: [[String: String]] = []
-        for message in messages.suffix(16).reversed() {
-            guard remaining >= 80 else { break }
-            let text = String(decoding: message.text.utf8.prefix(remaining), as: UTF8.self)
-            selected.append(["role": message.role.rawValue, "content": text])
-            remaining -= text.utf8.count
+    private func sendChatPhoto(_ photo: Data, via api: LiveAPI) {
+        let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.count <= 1_200 else { return }
+        let replyLanguage = language
+        let question = text.isEmpty ? (replyLanguage == "en-US" ? "Describe the photo." : "Beskriv billedet.") : text
+        let user = LumiSceneMessage(role: .user, text: question, language: replyLanguage)
+        let revision = studioRevision
+        let scene = sceneRevision
+        messages.append(user)
+        sceneMedia.sentPhotos[user.id] = photo
+        attachedPhoto = nil
+        draft = ""
+        composerFocused = false
+        notice = nil
+        busy = true
+        Task {
+            defer { busy = false }
+            do {
+                let result = try await AgentChatPhotoReply.answer(photo, question: question, agent: "Lumi",
+                                                                  language: replyLanguage, pc: api)
+                guard studioRevision == revision, !clearExpiredOpenedScene(), sceneRevision == scene else { return }
+                messages.append(LumiSceneMessage(role: .assistant, text: String(result.text.prefix(4_000)),
+                                                 language: replyLanguage))
+            } catch {
+                guard studioRevision == revision, !clearExpiredOpenedScene(), sceneRevision == scene else { return }
+                sceneMedia.sentPhotos[user.id] = nil
+                messages.removeAll { $0.id == user.id }
+                attachedPhoto = photo
+                if draft.isEmpty { draft = text }
+                show(error)
+            }
         }
-        if selected.last?["role"] == "assistant" { selected.removeLast() }
-        return Array(selected.reversed())
+    }
+
+    var modelHistory: [[String: String]] {
+        LumiSceneMessage.chatHistory(messages)
     }
 
     func resumeVideoIfNeeded() async {
@@ -367,11 +468,11 @@ extension LumiStudio {
         pendingVideoJobID = ""
     }
 
-    private var scratchDirectory: URL {
+    var scratchDirectory: URL {
         FileManager.default.temporaryDirectory.appending(path: StudioScratch.prefix + scratchID.uuidString, directoryHint: .isDirectory)
     }
 
-    private func writeStudioMedia(_ data: Data, filename: String) throws -> URL {
+    func writeStudioMedia(_ data: Data, filename: String) throws -> URL {
         StudioScratch.purgeOnceAtLaunch()
         let directory = scratchDirectory
         let file = directory.appending(path: filename)
@@ -396,6 +497,18 @@ extension LumiStudio {
         } catch {
             AppDiagnostics.record(error)
             notice = "Filen kunne ikke slettes. Prøv igen, mens iPhone er låst op."
+        }
+    }
+
+    func deleteChatPicture(_ id: UUID) {
+        guard !busy, let file = sceneMedia.pictures[id] else { return }
+        do {
+            try LocalFileStore(root: scratchDirectory).delete(file)
+            sceneMedia.pictures[id] = nil
+            messages.removeAll { $0.id == id }
+        } catch {
+            AppDiagnostics.record(error)
+            notice = "Billedet kunne ikke slettes. Prøv igen."
         }
     }
 
@@ -427,6 +540,8 @@ extension LumiStudio {
     }
 
     func discardStudioSession() {
+        portraits.endSession()
+        sceneRevision = UUID()
         studioRevision = UUID()
         if videoOnly {
             let id = UUID(uuidString: pendingVideoJobID) ?? videoResultID
@@ -446,7 +561,13 @@ extension LumiStudio {
         picture = nil
         pictureFile = nil
         pictureReference = nil
+        sceneMedia = LumiSceneMedia()
+        attachedPhoto = nil
         imageReference = nil
+        secondChatPhoto = nil
+        loadingSecondChat = false
+        secondImageReference = nil
+        loadingSecondImage = false
         videoReference = nil
         let directory = scratchDirectory
         do { try FileManager.default.removeItem(at: directory) }

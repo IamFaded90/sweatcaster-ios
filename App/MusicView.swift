@@ -8,6 +8,7 @@ import Kingfisher
 
     let onBack: () -> Void
     @Environment(\.fadedPalette) private var palette
+    @Environment(\.dynamicTypeSize) private var typeSize
     @ObservedObject private var player = MusicPlayer.shared
     @ObservedObject private var library = MusicLibrary.shared
     @State private var query = ""
@@ -27,9 +28,13 @@ import Kingfisher
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Picker("Musik", selection: $section) {
-                        ForEach(Section.allCases, id: \.self) { page in Text(page.rawValue).tag(page) }
-                    }.pickerStyle(.segmented)
+                    if typeSize.isAccessibilitySize {
+                        Picker("Vis i Musik", selection: $section) { sections }
+                            .pickerStyle(.menu)
+                    } else {
+                        Picker("Musik", selection: $section) { sections }
+                            .pickerStyle(.segmented)
+                    }
                     switch section {
                     case .home: overview
                     case .search: searchContent
@@ -39,7 +44,8 @@ import Kingfisher
                     if let notice = player.notice { Text(notice).foregroundStyle(palette.secondary) }
                 }.padding(FadedSpacing.edge)
             }.scrollDismissesKeyboard(.interactively)
-                .foregroundStyle(palette.text).background { FadedBackground() }
+                .foregroundStyle(palette.text)
+                .background { MusicBackdrop() }
                 .navigationTitle("Musik")
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
@@ -61,41 +67,50 @@ import Kingfisher
                 .alert("Ny playliste", isPresented: $showPlaylistName) {
                     TextField("Navn", text: $playlistName)
                     Button("Opret") { library.createPlaylist(playlistName); playlistName = ""; section = .library }
+                        .disabled(playlistName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     Button("Annuller", role: .cancel) {}
                 }
                 .sheet(isPresented: $showPlayer) { MusicPlayingView() }
                 .onDisappear { search?.cancel(); searching = false }
-        }
+        }.tint(MusicEdition.accent(palette))
+    }
+
+    private var sections: some View {
+        ForEach(Section.allCases, id: \.self) { page in Text(page.rawValue).tag(page) }
     }
 
     private var overview: some View {
-        VStack(alignment: .leading, spacing: 22) {
+        VStack(alignment: .leading, spacing: 24) {
             Button {
                 section = .search
             } label: {
-                HStack(alignment: .bottom) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Find din næste sang").font(.largeTitle.weight(.heavy))
-                        Label("Søg i musik", systemImage: "magnifyingglass").font(.subheadline.weight(.semibold))
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Find din næste sang")
+                            .font(.system(.title, design: .serif, weight: .bold))
+                            .fixedSize(horizontal: false, vertical: true)
+                        Label("Søg i musik", systemImage: "magnifyingglass")
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 14).padding(.vertical, 8)
+                            .foregroundStyle(MusicEdition.cream)
+                            .background(MusicEdition.ink, in: Capsule())
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                    if !typeSize.isAccessibilitySize {
+                        VinylArtwork().aspectRatio(1, contentMode: .fit)
+                            .containerRelativeFrame(.horizontal) { width, _ in
+                                min(94, max(56, width - 252))
+                            }
                     }
-                    Spacer(minLength: 0)
                 }
-                .frame(maxWidth: .infinity, minHeight: 145, alignment: .leading)
                 .padding(20)
-                .foregroundStyle(.white)
-                .background(alignment: .trailing) {
-                    Image(systemName: "waveform")
-                        .font(.system(size: 128, weight: .black))
-                        .foregroundStyle(.white.opacity(0.15))
-                        .rotationEffect(.degrees(-18))
-                        .offset(x: 14, y: 4)
-                        .accessibilityHidden(true)
+                .frame(maxWidth: .infinity, minHeight: 160, alignment: .leading)
+                .foregroundStyle(MusicEdition.ink)
+                .background {
+                    RoundedRectangle(cornerRadius: 22)
+                        .fill(LinearGradient(colors: [MusicEdition.cream, MusicEdition.apricot],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing))
                 }
-                .background(LinearGradient(colors: [Color(red: 0.16, green: 0.11, blue: 0.44),
-                                                     Color(red: 0.50, green: 0.22, blue: 0.48)],
-                                           startPoint: .topLeading, endPoint: .bottomTrailing))
-                .clipShape(RoundedRectangle(cornerRadius: 24))
-            }.buttonStyle(.plain)
+            }.buttonStyle(.plain).accessibilityLabel("Søg efter sang eller kunstner")
 
             if !library.recent.isEmpty { trackShelf("Sidst afspillet", tracks: library.recent) }
             if !library.saved.favorites.isEmpty { trackShelf("Favoritter", tracks: library.saved.favorites) }
@@ -114,7 +129,7 @@ import Kingfisher
                 Button("Søg", systemImage: "magnifyingglass") { performSearch() }
                     .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                     .disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }.padding(.horizontal, 14).fadedGlassSurface()
+            }.padding(.horizontal, 14).fadedGlassSurface(radius: 16, tint: MusicEdition.surface(palette))
             if searching { ProgressView("Finder musik…") }
             if let notice { Text(notice).foregroundStyle(palette.secondary) }
             if !searched { exploreShelf }
@@ -162,26 +177,31 @@ import Kingfisher
     }
 
     private var exploreShelf: some View {
-        shelf("Gå på opdagelse") {
-            genre("Dansk musik", icon: "sparkles", hue: 0.95)
-            genre("Hip-hop", icon: "mic.fill", hue: 0.66)
-            genre("Pop", icon: "bolt.fill", hue: 0.06)
-            genre("House", icon: "waveform", hue: 0.49)
+        VStack(alignment: .leading, spacing: 12) {
+            shelfTitle("Gå på opdagelse")
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 10),
+                                     count: typeSize.isAccessibilitySize ? 1 : 2), spacing: 10) {
+                genre("Dansk musik", icon: "sparkles", color: MusicEdition.mint)
+                genre("Hip-hop", icon: "mic.fill", color: MusicEdition.lilac)
+                genre("Pop", icon: "bolt.fill", color: MusicEdition.apricot)
+                genre("House", icon: "waveform", color: MusicEdition.sky)
+            }
         }
     }
 
-    private func genre(_ title: String, icon: String, hue: Double) -> some View {
+    private func genre(_ title: String, icon: String, color: Color) -> some View {
         Button {
             query = title
             performSearch()
         } label: {
             VStack(alignment: .leading, spacing: 12) {
-                Image(systemName: icon).font(.title2.bold()).accessibilityHidden(true)
-                Text(title).font(.headline).lineLimit(2)
-            }.frame(width: min(112, shelfWidth - 24), alignment: .leading)
-                .padding(14)
-                .foregroundStyle(.white)
-                .background(Color(hue: hue, saturation: 0.71, brightness: 0.42), in: .rect(cornerRadius: 16))
+                Image(systemName: icon).font(.title2).accessibilityHidden(true)
+                Text(title).font(.headline).fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .foregroundStyle(MusicEdition.ink)
+            .background(color, in: .rect(cornerRadius: 14))
         }.buttonStyle(.plain)
             .accessibilityHint("Søger efter musik i kataloget")
     }
@@ -190,12 +210,17 @@ import Kingfisher
 
     private func shelf<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(title).font(.title2.weight(.bold)).accessibilityAddTraits(.isHeader)
+            shelfTitle(title)
             ScrollView(.horizontal) {
                 LazyHStack(alignment: .top, spacing: 12, content: content)
                     .scrollTargetLayout()
             }.scrollTargetBehavior(.viewAligned).scrollIndicators(.hidden)
         }
+    }
+
+    private func shelfTitle(_ title: String) -> some View {
+        Text(title).font(.system(.title2, design: .serif, weight: .bold))
+            .accessibilityAddTraits(.isHeader)
     }
 
     @ViewBuilder private var miniPlayer: some View {
@@ -211,27 +236,17 @@ import Kingfisher
                     }
                 }.buttonStyle(.plain)
                 if player.loading { ProgressView() }
-                else {
-                    Button(player.playing ? "Pause" : "Afspil", systemImage: player.playing ? "pause.fill" : "play.fill") { player.toggle() }
-                        .labelStyle(.iconOnly).frame(width: 44, height: 44)
-                }
+                Button(player.canPause ? "Pause" : "Afspil", systemImage: player.canPause ? "pause.fill" : "play.fill") { player.toggle() }
+                    .labelStyle(.iconOnly).frame(width: 44, height: 44)
                 Button("Næste sang", systemImage: "forward.end.fill") { player.next() }
                     .labelStyle(.iconOnly).frame(width: 44, height: 44)
             }.padding(10)
                 .foregroundStyle(palette.text)
-                .background {
-                    RoundedRectangle(cornerRadius: 18)
-                        .fill(.regularMaterial)
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 18)
-                                .fill(Color(red: 0.48, green: 0.32, blue: 0.81).opacity(0.16))
-                        }
-                }
-                .overlay { RoundedRectangle(cornerRadius: 18).strokeBorder(palette.secondary.opacity(0.25)) }
+                .fadedGlassSurface(radius: 18, tint: MusicEdition.surface(palette))
                 .overlay(alignment: .bottom) {
                     if player.duration.isFinite, player.duration > 0, player.position.isFinite {
                         ProgressView(value: max(0, min(player.position, player.duration)), total: player.duration)
-                            .tint(palette.lime)
+                            .tint(MusicEdition.accent(palette))
                             .padding(.horizontal, 14)
                             .accessibilityHidden(true)
                             .allowsHitTesting(false)
@@ -247,13 +262,16 @@ import Kingfisher
                 ForEach(library.saved.favorites) { track in
                     trackRow(track) { player.play(library.saved.favorites, at: library.saved.favorites.firstIndex(of: track) ?? 0) }
                 }
-            }
+                if library.saved.favorites.isEmpty {
+                    Text("Vælg Gem favorit i en sangs menu for at finde den her.").font(.footnote)
+                }
+            }.padding(14).fadedGlassSurface(radius: 16, tint: MusicEdition.surface(palette))
             DisclosureGroup("Hentet · \(library.saved.downloads.count)") {
                 ForEach(library.saved.downloads) { track in
                     trackRow(track) { player.play(library.saved.downloads, at: library.saved.downloads.firstIndex(of: track) ?? 0) }
                 }
                 if library.saved.downloads.isEmpty { Text("Hent en sang fra dens menu for at lytte offline.").font(.footnote) }
-            }
+            }.padding(14).fadedGlassSurface(radius: 16, tint: MusicEdition.surface(palette))
             ForEach(library.saved.playlists) { playlist in
                 DisclosureGroup(playlist.name + " · \(playlist.tracks.count)") {
                     Button("Afspil playliste", systemImage: "play.fill") { player.play(playlist.tracks) }
@@ -266,7 +284,7 @@ import Kingfisher
                         }
                     }
                     Button("Slet playliste", systemImage: "trash", role: .destructive) { library.deletePlaylist(playlist.id) }.frame(minHeight: 44)
-                }
+                }.padding(14).fadedGlassSurface(radius: 16, tint: MusicEdition.surface(palette))
             }
             Button("Opret playliste", systemImage: "text.badge.plus") { showPlaylistName = true }.frame(minHeight: 44)
         }
@@ -302,7 +320,7 @@ import Kingfisher
                     Button("Hent til offline", systemImage: "arrow.down.circle") { library.startDownload(track) }
                 }
             }.frame(minWidth: 44, minHeight: 44)
-        }.padding(10).fadedGlassSurface()
+        }.padding(10).fadedGlassSurface(radius: 14, tint: MusicEdition.surface(palette))
     }
 
     private func artwork(_ track: MusicTrack, size: CGFloat = 44) -> some View {
@@ -356,5 +374,80 @@ struct MusicCover: View {
                            startPoint: .topLeading, endPoint: .bottomTrailing)
             Image(systemName: symbol).font(.title3.weight(.semibold)).foregroundStyle(.white)
         }
+    }
+}
+
+enum MusicEdition {
+    static let ink = Color(red: 24 / 255, green: 41 / 255, blue: 48 / 255)
+    static let cream = Color(red: 255 / 255, green: 243 / 255, blue: 211 / 255)
+    static let apricot = Color(red: 248 / 255, green: 177 / 255, blue: 132 / 255)
+    static let mint = Color(red: 158 / 255, green: 228 / 255, blue: 201 / 255)
+    static let lilac = Color(red: 201 / 255, green: 186 / 255, blue: 245 / 255)
+    static let sky = Color(red: 162 / 255, green: 210 / 255, blue: 243 / 255)
+
+    static func accent(_ palette: FadedPalette) -> Color {
+        palette.isDark ? mint : Color(red: 15 / 255, green: 91 / 255, blue: 77 / 255)
+    }
+
+    static func surface(_ palette: FadedPalette) -> Color {
+        palette.isDark
+            ? Color(red: 49 / 255, green: 61 / 255, blue: 65 / 255)
+            : Color(red: 255 / 255, green: 251 / 255, blue: 239 / 255)
+    }
+
+    static func paper(_ palette: FadedPalette) -> Color {
+        switch palette.theme {
+        case .day: Color(red: 246 / 255, green: 239 / 255, blue: 224 / 255)
+        case .faded: Color(red: 34 / 255, green: 49 / 255, blue: 54 / 255)
+        case .oled: .black
+        }
+    }
+}
+
+struct MusicBackdrop: View {
+    @Environment(\.fadedPalette) private var palette
+    @Environment(\.fadedLookPreset) private var lookPreset
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    var body: some View {
+        ZStack {
+            MusicEdition.paper(palette)
+            if palette.theme == .faded, let lookPreset {
+                lookPreset.background(in: palette)
+            } else if palette.theme != .oled && contrast == .standard {
+                Canvas { context, size in
+                    let center = CGPoint(x: size.width * 1.12, y: size.height * 0.78)
+                    var grooves = Path()
+                    for radius in stride(from: CGFloat(48), through: size.width * 1.4, by: 18) {
+                        grooves.addEllipse(in: CGRect(x: center.x - radius, y: center.y - radius,
+                                                      width: radius * 2, height: radius * 2))
+                    }
+                    context.stroke(grooves, with: .color(palette.text.opacity(0.045)), lineWidth: 1)
+                }
+            }
+        }.ignoresSafeArea().allowsHitTesting(false).accessibilityHidden(true)
+    }
+}
+
+private struct VinylArtwork: View {
+    var body: some View {
+        Canvas { context, size in
+            let side = min(size.width, size.height)
+            let disc = CGRect(x: (size.width - side) / 2, y: (size.height - side) / 2,
+                              width: side, height: side)
+            context.fill(Path(ellipseIn: disc), with: .color(MusicEdition.ink))
+            var rings = Path()
+            for ring in 1...9 {
+                let inset = CGFloat(ring) * side * 0.032
+                rings.addEllipse(in: disc.insetBy(dx: inset, dy: inset))
+            }
+            context.stroke(rings, with: .color(MusicEdition.sky.opacity(0.42)), lineWidth: 0.7)
+            let label = disc.insetBy(dx: side * 0.32, dy: side * 0.32)
+            context.fill(Path(ellipseIn: label), with: .linearGradient(
+                Gradient(colors: [MusicEdition.mint, MusicEdition.lilac]), startPoint: label.origin,
+                endPoint: CGPoint(x: label.maxX, y: label.maxY)))
+            let hole = disc.insetBy(dx: side * 0.472, dy: side * 0.472)
+            context.fill(Path(ellipseIn: hole), with: .color(MusicEdition.ink))
+        }.accessibilityHidden(true).allowsHitTesting(false)
     }
 }

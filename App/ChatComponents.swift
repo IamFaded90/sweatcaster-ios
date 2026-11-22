@@ -41,55 +41,6 @@ struct StatsBar: View {
     }
 }
 
-struct ChatTranscriptView: View {
-    let reply: String
-
-    var body: some View {
-        let blocks = reply.components(separatedBy: "```")
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(blocks.indices, id: \.self) { index in
-                if index.isMultiple(of: 2) {
-                    if let formatted = try? AttributedString(markdown: blocks[index],
-                        options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-                        Text(formatted)
-                    } else { Text(blocks[index]) }
-                } else {
-                    let lines = blocks[index].split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
-                    ScrollView(.horizontal) {
-                        Text(highlight(lines.count == 2 ? String(lines[1]) : blocks[index]))
-                            .font(.system(.body, design: .monospaced)).padding(8)
-                    }.background(.secondary.opacity(0.10))
-                }
-            }
-        }.textSelection(.enabled)
-    }
-
-    private func highlight(_ code: String) -> AttributedString {
-        let source = AttributedString(code)
-        let characters = source.characters
-        let keywords: Set<String> = ["let", "var", "func", "return", "if", "else", "for", "import", "class", "def", "async", "await"]
-        var output = AttributedString()
-        var start = characters.startIndex
-        while start < characters.endIndex {
-            let character = characters[start]
-            var end = characters.index(after: start)
-            if character.isLetter || character.isNumber || character == "_" {
-                while end < characters.endIndex {
-                    let next = characters[end]
-                    guard next.isLetter || next.isNumber || next == "_" else { break }
-                    characters.formIndex(after: &end)
-                }
-            }
-            var segment = AttributedString(source[start..<end])
-            if keywords.contains(String(segment.characters)) { segment.foregroundColor = .purple }
-            output.append(segment)
-            start = end
-        }
-        return output
-    }
-}
-
-
 @MainActor @Observable final class ChatDictation {
     private let engine = AVAudioEngine()
     private var request: SFSpeechAudioBufferRecognitionRequest?
@@ -99,18 +50,67 @@ struct ChatTranscriptView: View {
     private var sessionActive = false
     private var runID = UUID()
     private var deadline: Task<Void, Never>?
-    private(set) var active = false
+    private let offline = ChatWhisperInput()
+    private var appleActive = false
+    var active: Bool { appleActive || offline.phase != .idle }
     private(set) var problem: String?
     private(set) var hasTranscript = false
 
     func clearReview() { hasTranscript = false }
+
+    var offlineStatus: String? {
+        switch offline.phase {
+        case .idle: nil
+        case .starting: "Starter mikrofonen…"
+        case .recording: "Optager på iPhone. Tryk Stop for at få teksten."
+        case .transcribing: "Skriver det, du sagde…"
+        }
+    }
+
+    var microphoneLabel: String {
+        if offline.phase == .transcribing { return "Annuller transskribering" }
+        return active ? "Stop diktering" : "Diktér på iPhone"
+    }
+
+    func startInChat(language: String = "da-DK", draft: @escaping () -> String, update: @escaping (String) -> Void) async {
+        guard !active, !Task.isCancelled else { return }
+        guard !AgentWhisper.availableModels(for: language).isEmpty else {
+            let initial = draft()
+            await start(language: language) { update(ChatWhisperInput.appending($0, to: initial)) }
+            return
+        }
+        problem = nil
+        clearReview()
+        await offline.start(AgentWhisperCapture(), language: language) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(let text) where !text.isEmpty:
+                self.hasTranscript = true
+                update(ChatWhisperInput.appending(text, to: draft()))
+            case .success: self.problem = "Jeg kunne ikke høre nogen tale. Prøv igen."
+            case .failure(let error):
+                switch error {
+                case LocalComputeError.lowMemory: self.problem = "Diktering mangler ledig hukommelse på telefonen."
+                case LocalComputeError.busy: self.problem = "En anden lokal opgave kører. Prøv igen om lidt."
+                case APIError.input: self.problem = "Tjek, at FadedAI har adgang til mikrofonen i Indstillinger."
+                case is CancellationError: break
+                default: self.problem = "Offline-dikteringen kunne ikke gennemføres. Prøv igen."
+                }
+            }
+        }
+    }
+
+    func finishInput() {
+        if offline.phase == .recording { offline.finish() }
+        else { stop() }
+    }
 
     func start(language: String = "da-DK", contextualStrings: [String] = [], conversation: Bool = false,
                update: @escaping (String) -> Void) async {
         guard !active else { return }
         let id = UUID()
         runID = id
-        active = true
+        appleActive = true
         problem = nil
         hasTranscript = false
         let speechAllowed = await withCheckedContinuation { continuation in
@@ -118,9 +118,13 @@ struct ChatTranscriptView: View {
         }
         guard runID == id else { return }
         guard !Task.isCancelled else { stop(); return }
-        guard speechAllowed, let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language)),
+        guard speechAllowed else {
+            fail("Tillad talegenkendelse i Indstillinger, eller hent en offline-model under Stemme i en agentchat.")
+            return
+        }
+        guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: language)),
               recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else {
-            fail("Diktering på det valgte sprog er ikke tilgængelig på telefonen. Tjek talegenkendelse i Indstillinger.")
+            fail("Apples diktering er ikke klar på det valgte sprog. Du kan hente en offline-model under Stemme i en agentchat.")
             return
         }
         let micAllowed = await AVAudioApplication.requestRecordPermission()
@@ -179,7 +183,8 @@ struct ChatTranscriptView: View {
         deadline?.cancel()
         deadline = nil
         runID = UUID()
-        active = false
+        offline.cancel()
+        appleActive = false
         engine.stop()
         if tapInstalled {
             engine.inputNode.removeTap(onBus: 0)

@@ -129,6 +129,7 @@ extension LiveAPI {
         call.httpBody = data
         call.setValue("application/json, text/event-stream", forHTTPHeaderField: "Accept")
         call.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        call.setValue("repository", forHTTPHeaderField: "X-FadedAI-Tools")
         if let version { call.setValue(version, forHTTPHeaderField: "MCP-Protocol-Version") }
         let (reply, response) = try await loggedData(for: call)
         guard let http = response as? HTTPURLResponse, reply.count <= 500_000 else { throw APIError.malformed }

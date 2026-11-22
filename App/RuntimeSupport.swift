@@ -531,8 +531,8 @@ struct ResourceMonitor: View {
         PhoneModelDownloads.shared.cancel()
         StudioImageDownloads.shared.cancel()
         GGUFModelDownloads.shared.cancel()
-        try deleteOwnedData(documents: .documentsDirectory, support: .applicationSupportDirectory,
-                            temporary: FileManager.default.temporaryDirectory)
+        StudioGalleryThumbnailCache.shared.clear()
+        try deleteOwnedData(documents: .documentsDirectory, support: .applicationSupportDirectory, temporary: FileManager.default.temporaryDirectory)
         try Pairing.removeAll()
         CloudModelKey.remove()
         ComposioCloudAccount.shared.remove()

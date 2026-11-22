@@ -59,8 +59,22 @@ enum AgentChatPreferences {
     }
 
     static func remember(_ value: String, for bot: UUID? = nil, defaults: UserDefaults = .standard) {
+        write(value, to: bot, previous: values(for: bot, defaults: defaults), defaults: defaults)
+    }
+
+    @discardableResult
+    static func replace(_ entry: Entry, with text: String, defaults: UserDefaults = .standard) -> Bool {
+        let value = text.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        var previous = values(for: entry.bot, defaults: defaults)
+        guard (1...240).contains(value.count), let index = previous.firstIndex(of: entry.value) else { return false }
+        previous.remove(at: index)
+        write(value, to: entry.bot, previous: previous, defaults: defaults)
+        return true
+    }
+
+    private static func write(_ value: String, to bot: UUID?, previous: [String], defaults: UserDefaults) {
         let name = isFormOfAddress(value)
-        var updated = values(for: bot, defaults: defaults).filter { old in
+        var updated = previous.filter { old in
             normalized(old) != normalized(value) && !(name && isFormOfAddress(old))
         }
         updated.append(String(value.prefix(240)))

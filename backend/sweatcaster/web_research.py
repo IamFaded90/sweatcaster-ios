@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import ipaddress
+import http.client
 import json
+import os
 import re
 import socket
 from time import monotonic
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import certifi
 import urllib3
 
-from sweatcaster.searxng_search import SearXNGError, _public_url, _text, search_web
+from sweatcaster.searxng_search import SearXNGError, _public_url, _read_json, _text, search_web
 
 MAX_PAGE_BYTES = 512_000
 MAX_SOURCES = 3
+_DOCS = re.compile(r"\b(?:context7|api[- ]?dokumentation\w*|api docs|sdk docs)\b", re.I)
+_LIBRARY = re.compile(r"\b(?:swiftui|fastapi|langgraph|pydantic|playwright|ollama|python|react|docker|pytorch)\b", re.I)
+_LOOKUP = re.compile(r"\b(?:dokumentation\w*|docs|documentation|api|sdk|kodeeksempel\w*|code example\w*)\b", re.I)
 
 
 def research_query(raw):
@@ -108,8 +113,67 @@ def page_excerpt(url):
         return ""
 
 
+def documentation_excerpts(query):
+    """Retrieve attributed examples for an opted-in software documentation search."""
+    headers = {"Accept": "application/json", "User-Agent": "FadedAI Research"}
+    if key := os.environ.get("CONTEXT7_API_KEY", "").strip():
+        headers["Authorization"] = "Bearer " + key
+    params = {"query": query, "type": "json"}
+    if match := _LIBRARY.search(query):
+        params["library"] = match.group()
+    connection = http.client.HTTPSConnection("context7.com", timeout=5)
+    try:
+        connection.request("GET", "/api/v3/search?" + urlencode(params), headers=headers)
+        with connection.getresponse() as response:
+            if response.status != 200 or response.headers.get_content_type() != "application/json":
+                return []
+            data = _read_json(response, monotonic() + 5)
+    except (OSError, http.client.HTTPException, ValueError, RecursionError):
+        return []
+    finally:
+        connection.close()
+    if not isinstance(data, dict):
+        return []
+    items = []
+    for field in ("codeSnippets", "infoSnippets"):
+        entries = data.get(field)
+        for row in entries if isinstance(entries, list) else ():
+            if not isinstance(row, dict):
+                continue
+            url = _public_url(row.get("codeId") or row.get("pageId"))
+            if not url or any(item["url"] == url for item in items):
+                continue
+            title = _text(row.get("codeTitle") or row.get("breadcrumb"), 140, 300) or "Dokumentation"
+            excerpt = _text(row.get("codeDescription") or row.get("content"), 800, 1400)
+            examples = row.get("codeList")
+            if isinstance(examples, list):
+                example = next((v["code"] for v in examples if isinstance(v, dict) and isinstance(v.get("code"), str)), "")
+                if example.strip():
+                    excerpt += "\n" + example.strip()[:650]
+            if excerpt.strip():
+                items.append({"title": title, "url": url, "excerpt": excerpt})
+            if len(items) == MAX_SOURCES:
+                return items
+    return items
+
+
 def collect_sources(query, *, search=search_web, read=page_excerpt, cancelled=lambda: False):
     sections, sources = [], []
+    if cancelled():
+        return "", []
+    if _DOCS.search(query) or (_LIBRARY.search(query) and _LOOKUP.search(query)):
+        docs = documentation_excerpts(query)
+        library = _LIBRARY.search(query)
+        if not docs and library and not cancelled():
+            from sweatcaster.docs_gateway import lookup
+            docs = lookup(query, library.group())
+        for item in docs:
+            if cancelled():
+                return "", []
+            sources.append({"title": item["title"], "url": item["url"], "readPage": False})
+            sections.append(f"[{len(sources)}] {item['title']}\n{item['url']}\nDokumentationsuddrag via Context7: {item['excerpt']}")
+        if sources or cancelled():
+            return "\n\n".join(sections), sources
     for item in search(query):
         if cancelled() or len(sources) == MAX_SOURCES:
             break

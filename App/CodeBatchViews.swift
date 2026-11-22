@@ -57,6 +57,8 @@ struct BatchReviewView: View {
                 TextField("ejer/projekt", text: $repo).textInputAutocapitalization(.never).autocorrectionDisabled()
                     .accessibilityLabel("GitHub-projekt")
                 FadedDetailText("Skriv navnet som på GitHub. Hent projektet, hvis det mangler på PC’en.")
+                GitHubFailurePanel(api: api, repo: projectName)
+                    .id(projectName)
                 Button("Hent projekt til PC’en") { projectToClone = projectName }
                     .disabled(busy || projectName.isEmpty)
                 Button("Slet lokal projektkopi", systemImage: "trash", role: .destructive) {
@@ -173,6 +175,68 @@ struct BatchReviewView: View {
             AppDiagnostics.record(error)
             failure = pcBusyMessage(error) ?? "Kopien kunne ikke slettes. Tjek PC’en og projektets kodejob, grene og rutiner."
         }
+    }
+}
+
+struct GitHubBuildReport: Decodable {
+    let text: String
+    let url: URL
+
+    static let fadedAIProject = "IamFaded90/sweatcaster-ios"
+
+    static func requestedProject(in message: String) -> String? {
+        let query = message.lowercased()
+        guard !query.contains("/actions/runs/"), query.count <= 500,
+              query.range(of: #"\b(build(?:et|en|s)?|bygningen|bygget|byggelog(?:gen)?|github actions)\b"#, options: .regularExpression) != nil,
+              query.range(of: #"\b(fejl\w*|failed|fail|failure|failing|error)\b"#, options: .regularExpression) != nil,
+              query.range(of: #"\b(hvorfor|why|tjek|check|undersøg|vis|show|læs|read|buildet|bygningen|byggeloggen)\b"#, options: .regularExpression) != nil
+        else { return nil }
+        if let link = message.range(of: #"(?i)https://github\.com/[a-z0-9-]+/[a-z0-9_.-]+"#, options: .regularExpression),
+           let url = URL(string: String(message[link])) {
+            return url.pathComponents.dropFirst().prefix(2).joined(separator: "/").trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        }
+        if let slug = message.range(of: #"(?<![a-zA-Z0-9./-])[a-zA-Z0-9][a-zA-Z0-9-]{0,38}/[a-zA-Z0-9_-][a-zA-Z0-9_.-]{0,99}(?!/)"#, options: .regularExpression) {
+            return String(message[slug]).trimmingCharacters(in: CharacterSet(charactersIn: "."))
+        }
+        return fadedAIProject
+    }
+}
+
+private struct GitHubFailurePanel: View {
+    let api: LiveAPI
+    let repo: String
+    @State private var loading = false
+    @State private var report: GitHubBuildReport?
+    @State private var failure: String?
+
+    var body: some View {
+        Button("Hvorfor fejlede buildet?", systemImage: "doc.text.magnifyingglass") {
+            Task {
+                loading = true
+                failure = nil
+                report = nil
+                defer { loading = false }
+                do { report = try await api.failedBuild(in: repo) }
+                catch { failure = AppErrorPresentation(error).title }
+            }
+        }
+        .disabled(loading || repo.isEmpty)
+        if loading { ProgressView("Læser GitHub Actions…") }
+        if let failure { FadedDetailText(failure) }
+        if let report {
+            Text(report.text).textSelection(.enabled)
+            Link("Se kørslen på GitHub", destination: report.url)
+        }
+    }
+}
+
+extension LiveAPI {
+    func failedBuild(in repo: String) async throws -> GitHubBuildReport {
+        let data = try JSONEncoder().encode(["repo": repo])
+        let result: GitHubBuildReport = try await moduleJSON("github-build/failure", upload: data, timeout: 90)
+        guard result.url.scheme == "https", result.url.host?.lowercased() == "github.com",
+              result.url.user == nil, result.url.password == nil else { throw APIError.malformed }
+        return result
     }
 }
 

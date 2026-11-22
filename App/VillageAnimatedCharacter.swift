@@ -48,6 +48,7 @@ struct VillageSpriteFace: View {
 @MainActor struct AgentSpeakingStage: View {
     let bot: VillageBot
     var listening = false
+    var api: LiveAPI?
     @ObservedObject private var motion = VillageSpeechMotion.shared
     @State private var destination: Destination?
 
@@ -105,7 +106,7 @@ struct VillageSpriteFace: View {
             case .portrait(let name):
                 VillagePortraitScreen(bot: bot, name: name)
             case .vrm:
-                VillageVRMScreen(bot: bot)
+                VillageVRMScreen(bot: bot, api: api)
             }
         }
     }

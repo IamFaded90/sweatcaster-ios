@@ -39,7 +39,7 @@ struct SharedAssistantInput: Identifiable, Sendable {
         let filename: String?
     }
 
-    static let appGroup = "group.dk.sweatcaster.ios.share"
+    static let appGroup = FadedSharedContainer.identifier
     private static let fileLimit = 10 * 1_024 * 1_024
     private static let textLimit = 24_000
     private static let pageLimit = 30
@@ -62,7 +62,7 @@ struct SharedAssistantInput: Identifiable, Sendable {
         let inbox: URL
         if let explicitInbox { inbox = explicitInbox }
         else {
-            guard let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroup) else {
+            guard let group = FadedSharedContainer.url else {
                 throw Failure.unavailable
             }
             inbox = group.appending(path: "ShareInbox", directoryHint: .isDirectory)
@@ -206,8 +206,7 @@ struct SharedAssistantInput: Identifiable, Sendable {
                 recognized = readable
             } else if scanned < scannedPageLimit {
                 scanned += 1
-                guard let image = renderedPage(page) else { continue }
-                recognized = try recognizeText(image)
+                recognized = try recognizePage(page)
             } else { truncated = true; continue }
             let capped = recognized.unicodeScalars.prefix(remaining)
             remaining -= capped.count
@@ -215,6 +214,11 @@ struct SharedAssistantInput: Identifiable, Sendable {
             pages.append((index + 1, String(capped)))
         }
         return (pages, truncated)
+    }
+
+    static func recognizePage(_ page: PDFPage) throws -> String {
+        guard let image = renderedPage(page) else { return "" }
+        return try recognizeText(image)
     }
 
     private static func renderedPage(_ page: PDFPage) -> CGImage? {

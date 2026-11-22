@@ -15,7 +15,16 @@ enum GGUFHub {
         let bytes: Int64
         let sha256: String
         var id: String { repository + "/" + revision + "/" + name }
+        var isCatalogMiniCPM: Bool {
+            repository == GGUFHub.miniCPM.repository && name == GGUFHub.miniCPM.name &&
+                bytes == GGUFHub.miniCPM.bytes && sha256 == GGUFHub.miniCPM.sha256
+        }
     }
+
+    static let miniCPM = File(repository: "openbmb/MiniCPM5-1B-GGUF",
+                              revision: "5385560dd3e232bcc3577fd9442c332cad2facbd",
+                              name: "MiniCPM5-1B-Q4_K_M.gguf", bytes: 688_065_920,
+                              sha256: "81b64d05a23b17b34c475f42b3e72fbde62d4b92cc34541f7a8031d0752deafa")
 
     enum Failure: Error {
         case request, credentials, invalidHash
@@ -171,12 +180,14 @@ enum GGUFHubKey {
     struct Pending: Codable, Equatable, Sendable {
         let uuid: UUID
         let file: GGUFHub.File
+        var installationID: UUID { file.isCatalogMiniCPM ? GGUFPhoneModel.miniCPMFolder : uuid }
     }
 
     private(set) var pending: Pending?
     private(set) var progress: Double?
     private(set) var interrupted = false
     private(set) var notice: String?
+    private(set) var noticeFile: GGUFHub.File?
     private(set) var revision = 0
     private let delegate = GGUFDownloadDelegate()
     @ObservationIgnored private var preparing: Task<Void, Never>?
@@ -205,7 +216,7 @@ enum GGUFHubKey {
         Task {
             let items = await downloadSession.allTasks
             guard self.pending == pending, preparing == nil else { return }
-            if GGUFPhoneModel.installed(pending.uuid) != nil {
+            if GGUFPhoneModel.installed(pending.installationID) != nil || GGUFPhoneModel.installed(pending.uuid) != nil {
                 clear(pending, notice: "Modellen er klar på iPhone.")
             } else if !items.contains(where: { $0.taskDescription == pending.uuid.uuidString }) {
                 interrupted = true
@@ -215,6 +226,11 @@ enum GGUFHubKey {
 
     func start(_ file: GGUFHub.File) {
         guard pending == nil else { return }
+        noticeFile = file
+        if file.isCatalogMiniCPM, GGUFPhoneModel.installed(GGUFPhoneModel.miniCPMFolder) != nil {
+            notice = "MiniCPM5 er allerede hentet."
+            return
+        }
         guard PhoneModels.hasDownloadSpace(bytes: file.bytes + 100_000_000) else {
             notice = "Der er for lidt ledig plads til modellen."
             return
@@ -246,6 +262,7 @@ enum GGUFHubKey {
 
     private func enqueue(_ entry: Pending) {
         interrupted = false
+        noticeFile = entry.file
         notice = nil
         preparing = Task {
             defer { if pending == entry { preparing = nil } }
@@ -306,6 +323,7 @@ enum GGUFHubKey {
         pending = nil
         progress = nil
         interrupted = false
+        noticeFile = entry.file
         self.notice = notice
         revision += 1
     }
@@ -359,7 +377,7 @@ private final class GGUFDownloadDelegate: NSObject, URLSessionDownloadDelegate, 
             guard digest == entry.file.sha256 else { throw GGUFHub.Failure.invalidHash }
             try lock.withLock {
                 guard active == entry else { throw CancellationError() }
-                try GGUFPhoneModel.put(location, uuid: entry.uuid, filename: entry.file.name, moving: true)
+                try GGUFPhoneModel.put(location, uuid: entry.installationID, filename: entry.file.name, moving: true)
             }
             deliver?(.installed(entry.uuid))
         } catch is CancellationError {

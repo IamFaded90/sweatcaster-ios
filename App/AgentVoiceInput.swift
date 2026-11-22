@@ -124,7 +124,9 @@ enum AgentWhisper {
             .map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func transcribeSegments(_ url: URL, language: String, model: Model = .base) throws -> [LocalWhisperEngine.Segment] {
+    static func transcribeSegments(_ url: URL, language: String, model: Model = .base,
+                                   cancellation: LocalWhisperEngine.Cancellation? = nil) throws -> [LocalWhisperEngine.Segment] {
+        try cancellation?.checkCancellation()
         let file = try AVAudioFile(forReading: url)
         let frameCount = AVAudioFrameCount(min(Int64(sampleRate * 45), file.length))
         guard frameCount > 0 else { return [] }
@@ -136,12 +138,14 @@ enum AgentWhisper {
         guard let samples = pcm.floatChannelData?[0] else { throw APIError.malformed }
         guard hasMicrophoneSignal(UnsafeBufferPointer(start: samples, count: Int(pcm.frameLength))) else { return [] }
         // The Danish checkpoint was tuned with short text-only transcripts. Whisper still returns clip ranges.
-        guard let result = LocalWhisperEngine.transcribeSegments(
-            modelPath: model.file.path, samples: samples, count: Int32(pcm.frameLength),
-            language: languageCode(language), timestamped: model != .danish
-        ) else {
-            throw Failure.inference
+        let result = withExtendedLifetime(pcm) {
+            LocalWhisperEngine.transcribeSegments(
+                modelPath: model.file.path, samples: samples, count: Int32(pcm.frameLength),
+                language: languageCode(language), timestamped: model != .danish, cancellation: cancellation
+            )
         }
+        try cancellation?.checkCancellation()
+        guard let result else { throw Failure.inference }
         return result
     }
 
@@ -171,9 +175,16 @@ struct AgentVoiceSilence {
     }
 }
 
-@MainActor @Observable final class AgentWhisperCapture {
+@MainActor protocol ChatWhisperRecording: AnyObject {
+    func start(language: String, silenceAfter: TimeInterval?, whenFull: @escaping @MainActor () -> Void) async throws
+    func finish(language: String) async throws -> String
+    func cancel()
+}
+
+@MainActor @Observable final class AgentWhisperCapture: ChatWhisperRecording {
     private static var modelTransferActive = false
     @ObservationIgnored private var installation: Task<Void, Error>?
+    @ObservationIgnored private var cancelDecode: (@Sendable () -> Void)?
     private var modelRevision = 0
     private var recorder: AVAudioRecorder?
     private var recordingURL: URL?
@@ -276,20 +287,40 @@ struct AgentVoiceSilence {
         releaseMic()
         processing = true
         recordingURL = nil
+        let cancellation = LocalWhisperEngine.Cancellation()
+        let operation = Task { try await recognize(file, language: language, cancellation: cancellation) }
+        let stop: @Sendable () -> Void = { cancellation.cancel(); operation.cancel() }
+        cancelDecode = stop
         defer {
             try? FileManager.default.removeItem(at: file)
             processing = false
+            cancelDecode = nil
         }
+        let result = try await withTaskCancellationHandler { try await operation.value } onCancel: { stop() }
+        try cancellation.checkCancellation()
+        try Task.checkCancellation()
+        guard revision == id else { throw CancellationError() }
+        segments = result
+        return result.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func recognize(_ file: URL, language: String,
+                           cancellation: LocalWhisperEngine.Cancellation) async throws -> [LocalWhisperEngine.Segment] {
+        try cancellation.checkCancellation()
         let models = AgentWhisper.availableModels(for: language)
         guard !models.isEmpty else { throw APIError.storage }
         for (index, model) in models.enumerated() {
-            guard revision == id else { throw CancellationError() }
+            try cancellation.checkCancellation()
             let hasFallback = index + 1 < models.count
             do {
-                let result = try await recognize(file, language: language, model: model)
-                guard revision == id else { throw CancellationError() }
-                segments = result
-                return result.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                return try await LocalCompute.run(minimumMiB: model.minimumMemoryMiB) {
+                    try await withTaskCancellationHandler {
+                        try await Task.detached(priority: .userInitiated) {
+                            try AgentWhisper.transcribeSegments(file, language: language, model: model,
+                                                               cancellation: cancellation)
+                        }.value
+                    } onCancel: { cancellation.cancel() }
+                }
             } catch LocalComputeError.lowMemory where hasFallback {
                 continue
             } catch AgentWhisper.Failure.inference where hasFallback {
@@ -299,15 +330,8 @@ struct AgentVoiceSilence {
         throw LocalComputeError.lowMemory
     }
 
-    private func recognize(_ file: URL, language: String, model: AgentWhisper.Model) async throws -> [LocalWhisperEngine.Segment] {
-        try await LocalCompute.run(minimumMiB: model.minimumMemoryMiB) {
-            try await Task.detached(priority: .userInitiated) {
-                try AgentWhisper.transcribeSegments(file, language: language, model: model)
-            }.value
-        }
-    }
-
     func cancel() {
+        cancelDecode?()
         revision = UUID()
         segments = []
         releaseMic()
@@ -326,5 +350,74 @@ struct AgentVoiceSilence {
         }
         recorder = nil
         active = false
+    }
+}
+
+@MainActor @Observable final class ChatWhisperInput {
+    enum Phase { case idle, starting, recording, transcribing }
+
+    private struct Session {
+        let id = UUID()
+        let capture: any ChatWhisperRecording
+        let language: String
+        let receive: (Result<String, Error>) -> Void
+    }
+
+    private(set) var phase: Phase = .idle
+    @ObservationIgnored private var session: Session?
+    @ObservationIgnored private var transcription: Task<Void, Never>?
+
+    static func appending(_ transcript: String, to draft: String) -> String {
+        let words = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !words.isEmpty else { return draft }
+        let separator = draft.isEmpty || draft.last?.isWhitespace == true ? "" : " "
+        return draft + separator + words
+    }
+
+    func start(_ capture: any ChatWhisperRecording, language: String,
+               receive: @escaping (Result<String, Error>) -> Void) async {
+        guard phase == .idle else { return }
+        let current = Session(capture: capture, language: language, receive: receive)
+        let id = current.id
+        session = current
+        phase = .starting
+        do {
+            try await capture.start(language: language, silenceAfter: nil) { [weak self] in
+                guard self?.session?.id == id else { return }
+                self?.finish()
+            }
+            guard session?.id == current.id else { return }
+            if Task.isCancelled { cancel(); return }
+            phase = .recording
+        } catch {
+            guard session?.id == current.id else { return }
+            cancel()
+            if !(error is CancellationError) { receive(.failure(error)) }
+        }
+    }
+
+    func finish() {
+        guard phase == .recording, let current = session else { return }
+        phase = .transcribing
+        transcription = Task {
+            guard session?.id == current.id, !Task.isCancelled else { return }
+            let result: Result<String, Error>
+            do { result = .success(try await current.capture.finish(language: current.language)) }
+            catch { result = .failure(error) }
+            guard session?.id == current.id, !Task.isCancelled else { return }
+            session = nil
+            transcription = nil
+            phase = .idle
+            current.receive(result)
+        }
+    }
+
+    func cancel() {
+        transcription?.cancel()
+        transcription = nil
+        let capture = session?.capture
+        session = nil
+        phase = .idle
+        capture?.cancel()
     }
 }

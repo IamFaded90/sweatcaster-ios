@@ -1,9 +1,190 @@
 // Tests migration and bounded storage using isolated defaults and temporary files.
 import Foundation
+import UIKit
 import XCTest
 @testable import SweatCaster
 
+final class LumiSceneExpiryTests: XCTestCase {
+    func testPrivateSearchUsesSavedDialogueAndDropsAnExpiredMatch() throws {
+        let now = Date.now
+        let card = LumiSceneCard(title: "Aftentur", setting: "Havnen")
+        let line = LumiSceneMessage(role: .user, text: "Min båd hedder Månestriben.", language: "da-DK")
+        var first = LumiSavedScene.snapshot(card: card, initiative: .together, language: "da-DK", messages: [line], draft: "")
+        first.expiresAt = now.addingTimeInterval(1)
+        let expired = scene("Månestriben", expiry: now)
+        let other = scene("Bogklubben")
+        let saved = [other, first, expired]
+        let found = try LumiSavedScene.matching("månestriben", in: saved, at: now)
+        XCTAssertTrue(found.contains(first.id))
+        XCTAssertFalse(found.contains(expired.id))
+        XCTAssertFalse(try LumiSavedScene.matching("månestriben", in: saved, at: now.addingTimeInterval(1)).contains(first.id))
+        XCTAssertEqual(try LumiSavedScene.matching("  ", in: saved, at: now), [other.id, first.id])
+    }
+
+    func testPrivateSearchSamplesEverySavedExchangeBeyondALongDraft() throws {
+        let filler = String(repeating: "Introduktion. ", count: 230)
+        let dialogue = (1...16).map { i in
+            LumiSceneMessage(role: i.isMultiple(of: 2) ? .assistant : .user,
+                             text: "Linje \(i): " + filler + "slut-\(i)!", language: "da-DK")
+        }
+        let saved = LumiSavedScene.snapshot(card: .init(title: "Værksted"), initiative: .together,
+            language: "da-DK", messages: dialogue, draft: filler + "Kladdeslut")
+        let excerpts = saved.semanticExcerpts
+        XCTAssertEqual(excerpts.count, 5)
+        XCTAssertTrue(excerpts.allSatisfy { $0.unicodeScalars.count < 1_000 })
+        XCTAssertTrue(excerpts[0].contains("Kladdeslut"))
+        for i in 1...16 {
+            XCTAssertTrue(excerpts[1 + (i - 1) / 4].contains("slut-\(i)!"))
+        }
+        let titles = ["Aften ved vandet", "Månestriben"]
+        XCTAssertEqual(try LocalTextRanking.lexicalOrder(query: "månestr", texts: titles, completingLastWord: true), [1])
+        XCTAssertEqual(try LocalTextRanking.lexicalOrder(query: "månestr", texts: titles), [])
+        XCTAssertEqual(try LocalTextRanking.lexicalOrder(query: "må", texts: titles, completingLastWord: true), [])
+    }
+
+    private func scene(_ title: String, expiry: Date? = nil) -> LumiSavedScene {
+        var scene = LumiSavedScene.snapshot(
+            card: LumiSceneCard(title: title), initiative: .together, language: "da-DK",
+            messages: [LumiSceneMessage(role: .user, text: title, language: "da-DK")], draft: "")
+        scene.expiresAt = expiry
+        return scene
+    }
+
+    @MainActor func testExpiryRemovesOnlyTemporarySceneWithoutReopeningStudio() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let library = LumiSceneLibrary(root: root)
+        let file = root.appendingPathComponent("library.json")
+        let permanent = scene("Behold")
+        let temporary = scene("Midlertidig", expiry: .now.addingTimeInterval(0.15))
+        try library.write([permanent, temporary])
+        let store = LocalFileStore(root: root)
+        let timeout = ContinuousClock.now.advanced(by: .seconds(3))
+        var stored = try store.read([LumiSavedScene].self, from: file)
+        while stored.count > 1 && ContinuousClock.now < timeout {
+            try await Task.sleep(for: .milliseconds(25))
+            stored = try store.read([LumiSavedScene].self, from: file)
+        }
+        XCTAssertEqual(stored.map(\.id), [permanent.id])
+        try library.write([scene("Sidste midlertidige scene", expiry: .now.addingTimeInterval(0.15))])
+        let lastDeadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while store.exists(file) && ContinuousClock.now < lastDeadline { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertFalse(store.exists(file))
+        XCTAssertTrue(try library.read().isEmpty)
+    }
+
+    @MainActor func testColdReadPrunesExpiredScenesAndKeepsOneResavedPermanently() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let launchTime = Date.now
+        var promoted = scene("Gem permanent", expiry: launchTime.addingTimeInterval(0.15))
+        let store = LocalFileStore(root: root)
+        let file = root.appendingPathComponent("library.json")
+        try store.write([scene("Udløbet", expiry: .distantPast), promoted], to: file)
+        let reopened = LumiSceneLibrary(root: root)
+        XCTAssertEqual(try reopened.read(now: launchTime).map(\.id), [promoted.id])
+        promoted.expiresAt = nil
+        try reopened.write([promoted])
+        try await Task.sleep(for: .milliseconds(250))
+        let stored = try store.read([LumiSavedScene].self, from: file)
+        XCTAssertEqual(stored.map(\.id), [promoted.id])
+        XCTAssertNil(stored.first?.expiresAt)
+    }
+
+    func testExpiredSceneAttachmentsLeaveDiskAndMemoryWhileOtherScenesKeepTheirPhotos() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let expired = scene("Udløbet")
+        let saved = scene("Gemt")
+        let open = scene("Åben")
+        let store = LocalFileStore(root: root)
+        var media = LumiSceneMedia()
+        for scene in [expired, saved, open] {
+            let id = try XCTUnwrap(scene.messages.first?.id)
+            let file = root.appendingPathComponent("Lumi-\(id).png")
+            let bytes = Data(scene.card.title.utf8)
+            try LocalFileStore.writeBytes(bytes, to: file, within: root)
+            media.sentPhotos[id] = bytes
+            media.pictures[id] = file
+        }
+        let preview = root.appendingPathComponent("Lumi.png")
+        try LocalFileStore.writeBytes(Data([1]), to: preview, within: root)
+        let pictures = media.pictures
+        media.retain(for: open.messages, saved: [saved], in: root)
+        let expected = Set((open.messages + saved.messages).map(\.id))
+        XCTAssertEqual(Set(media.pictures.keys), expected)
+        XCTAssertEqual(Set(media.sentPhotos.keys), expected)
+        for (id, file) in pictures { XCTAssertEqual(store.exists(file), expected.contains(id)) }
+        XCTAssertTrue(store.exists(preview))
+    }
+}
+
 final class MigrationTests: XCTestCase {
+    @MainActor func testGalleryThumbnailReusesOnlyTheCurrentOrdinaryFile() async throws {
+        let files = FileManager.default
+        let root = files.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try files.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? files.removeItem(at: root) }
+        let source = root.appendingPathComponent("image.png")
+        let link = root.appendingPathComponent("link.png")
+        let png = UIGraphicsImageRenderer(size: CGSize(width: 512, height: 128)).pngData { context in
+            context.cgContext.setFillColor(UIColor.red.cgColor)
+            context.cgContext.fill(CGRect(x: 0, y: 0, width: 512, height: 128))
+        }
+        try png.write(to: source)
+        let cache = StudioGalleryThumbnailCache()
+        let first = await cache.image(for: source, in: root)
+        XCTAssertEqual(first?.width, 384)
+        let hit = await cache.image(for: source, in: root) { _ in nil }
+        XCTAssertTrue(first === hit)
+        try png.write(to: source, options: .atomic)
+        let stale = await cache.image(for: source, in: root) { _ in nil }
+        XCTAssertNil(stale)
+        try files.createSymbolicLink(at: link, withDestinationURL: source)
+        let linked = await cache.image(for: link, in: root)
+        let outside = await cache.image(for: source, in: root.appendingPathComponent("other"))
+        let privateURL = try XCTUnwrap(URL(string: "fadedai-private://studio/abc/image.png"))
+        let privateImage = await cache.image(for: privateURL, in: root)
+        XCTAssertNil(linked)
+        XCTAssertNil(outside)
+        XCTAssertNil(privateImage)
+        let replacement = await cache.image(for: source, in: root)
+        XCTAssertNotNil(replacement)
+        cache.remove(source)
+        let evicted = await cache.image(for: source, in: root) { _ in nil }
+        XCTAssertNil(evicted)
+        try files.removeItem(at: source)
+        let missing = await cache.image(for: source, in: root)
+        XCTAssertNil(missing)
+    }
+
+    @MainActor func testClearingGalleryDuringDecodeDiscardsLateThumbnail() async throws {
+        let files = FileManager.default
+        let root = files.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try files.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? files.removeItem(at: root) }
+        let source = root.appendingPathComponent("sample.png")
+        let bytes = UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).pngData { _ in }
+        try bytes.write(to: source)
+        let cache = StudioGalleryThumbnailCache()
+        let started = expectation(description: "Thumbnail decode started")
+        let finish = DispatchSemaphore(value: 0)
+        let pending = Task {
+            await cache.image(for: source, in: root) { file in
+                started.fulfill()
+                guard finish.wait(timeout: .now() + 5) == .success else { return nil }
+                return StudioGalleryThumbnailCache.decode(file)
+            }
+        }
+        await fulfillment(of: [started], timeout: 4)
+        cache.clear()
+        finish.signal()
+        let late = await pending.value
+        XCTAssertNil(late)
+        let cached = await cache.image(for: source, in: root) { _ in nil }
+        XCTAssertNil(cached)
+    }
+
     @MainActor func testMigratesAllSixValuesAndReadsThemOnRelaunch() throws {
         let fixture = try makeFixture()
         defer { fixture.cleanup() }

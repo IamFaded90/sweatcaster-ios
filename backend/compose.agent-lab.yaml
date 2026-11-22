@@ -1,0 +1,19 @@
+name: fadedai-agent-lab
+services:
+  model-lab:
+    image: ghcr.io/open-webui/open-webui:v0.13.4
+    ports:
+      - "127.0.0.1:3077:8080"
+    environment:
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
+      ENABLE_OPENAI_API: "false"
+      HF_HUB_OFFLINE: "1"
+      RAG_EMBEDDING_MODEL_AUTO_UPDATE: "false"
+      ENABLE_VERSION_UPDATE_CHECK: "false"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    volumes:
+      - model-lab:/app/backend/data
+volumes:
+  model-lab:

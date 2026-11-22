@@ -15,6 +15,7 @@ from tkinter import filedialog, ttk
 from typing import Callable
 
 from install_fadedai_pc import install
+from install_document_reader import install_document_reader
 from sweatcaster.aio_runtime import AIO_IMAGE
 
 
@@ -255,6 +256,10 @@ class SetupWindow:
                 install(root)
             except (OSError, ValueError, SyntaxError):
                 return self.state, "FadedAI kunne ikke opdateres. Tjek mappen, versionen og skriveadgangen."
+            try:
+                install_document_reader(root)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                return self.state, "PC-delen er opdateret. Dokumentlæseren kunne ikke installeres. Prøv Opdatér igen med internet."
             return self.state, "PC-delen er opdateret. Genstart PC’en, og åbn din sædvanlige FadedAI-genvej."
 
         self.work("Opdaterer PC-delen af FadedAI…", update)

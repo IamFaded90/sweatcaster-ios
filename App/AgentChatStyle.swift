@@ -1,4 +1,5 @@
 import BorderBeam
+import Foundation
 import SwiftUI
 
 /// Shared with the main chat's glass surface, transcript renderer and source colors.
@@ -89,5 +90,145 @@ struct FadedWorkingBeam: ViewModifier {
 extension View {
     func fadedWorkingBeam(active: Bool, pc: Bool, radius: CGFloat = 22) -> some View {
         modifier(FadedWorkingBeam(active: active, pc: pc, radius: radius))
+    }
+}
+
+enum ChatReplyBlock: Equatable {
+    case text(String)
+    case heading(level: Int, text: String)
+    case item(marker: String, indent: Int, text: String)
+    case code(String)
+
+    static func parse(_ reply: String) -> [Self] {
+        var blocks: [Self] = []
+        var lines: [String] = []
+        var fence: Substring?
+        var item: (marker: String, indent: Int)?
+
+        func finishBlock() {
+            if !lines.isEmpty {
+                let value = lines.joined(separator: "\n")
+                if fence != nil {
+                    blocks.append(.code(value))
+                } else if let item {
+                    blocks.append(.item(marker: item.marker, indent: item.indent, text: value))
+                } else {
+                    blocks.append(.text(value))
+                }
+            }
+            lines.removeAll(keepingCapacity: true)
+            item = nil
+        }
+
+        for line in reply.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline) {
+            let indent = line.prefix(while: { $0 == " " }).count
+            let content = line.dropFirst(indent)
+            let marker = content.prefix(while: { $0 == content.first })
+            let rest = content.dropFirst(marker.count)
+            if let open = fence {
+                if indent <= 3, marker.first == open.first, marker.count >= open.count, rest.allSatisfy(\.isWhitespace) {
+                    finishBlock()
+                    fence = nil
+                } else {
+                    lines.append(String(line))
+                }
+            } else if indent <= 3, marker.count >= 3,
+                      marker.first == "~" || (marker.first == "`" && !rest.contains("`")) {
+                finishBlock()
+                fence = marker
+            } else if line.allSatisfy(\.isWhitespace) {
+                finishBlock()
+            } else if indent <= 3, marker.first == "#", marker.count <= 6, rest.first?.isWhitespace == true {
+                finishBlock()
+                blocks.append(.heading(level: marker.count, text: String(rest.drop(while: \.isWhitespace))))
+            } else if indent <= 3, let (bullet, body) = listItem(content) {
+                finishBlock()
+                item = (bullet, indent)
+                lines.append(String(body))
+            } else {
+                lines.append(String(item == nil ? line : content))
+            }
+        }
+        finishBlock()
+        return blocks
+    }
+
+    private static func listItem(_ line: Substring) -> (String, Substring)? {
+        let token = line.prefix(while: { !$0.isWhitespace })
+        let body = line.dropFirst(token.count)
+        guard !body.isEmpty else { return nil }
+        if token == "-" || token == "*" || token == "+" {
+            return ("•", body.drop(while: \.isWhitespace))
+        }
+        guard (2...10).contains(token.count), token.last == "." || token.last == ")",
+              token.dropLast().allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+        return (String(token), body.drop(while: \.isWhitespace))
+    }
+}
+
+struct ChatTranscriptView: View {
+    let reply: String
+    var privatePresentation = false
+
+    var body: some View {
+        if privatePresentation { transcript.textSelection(.disabled) }
+        else { transcript.textSelection(.enabled) }
+    }
+
+    private var transcript: some View {
+        let blocks = ChatReplyBlock.parse(reply)
+        return VStack(alignment: .leading, spacing: 8) {
+            ForEach(blocks.indices, id: \.self) { index in
+                switch blocks[index] {
+                case let .text(text):
+                    Text(Self.inlineText(text, allowsLinks: !privatePresentation))
+                case let .heading(level, text):
+                    Text(Self.inlineText(text, allowsLinks: !privatePresentation))
+                        .font(level == 1 ? .title3.weight(.semibold) : .headline)
+                        .accessibilityAddTraits(.isHeader)
+                case let .item(marker, indent, text):
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(verbatim: marker).monospacedDigit()
+                        Text(Self.inlineText(text, allowsLinks: !privatePresentation))
+                    }
+                    .padding(.leading, CGFloat(indent) * 4)
+                case let .code(code):
+                    ScrollView(.horizontal) {
+                        Text(highlight(code)).font(.system(.body, design: .monospaced)).padding(8)
+                    }.background(.secondary.opacity(0.10))
+                }
+            }
+        }
+    }
+
+    static func inlineText(_ text: String, allowsLinks: Bool = true) -> AttributedString {
+        var formatted = (try? AttributedString(markdown: text,
+            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(text)
+        if !allowsLinks { formatted.link = nil }
+        return formatted
+    }
+
+    private func highlight(_ code: String) -> AttributedString {
+        let source = AttributedString(code)
+        let characters = source.characters
+        let keywords: Set<String> = ["let", "var", "func", "return", "if", "else", "for", "import", "class", "def", "async", "await"]
+        var output = AttributedString()
+        var start = characters.startIndex
+        while start < characters.endIndex {
+            let character = characters[start]
+            var end = characters.index(after: start)
+            if character.isLetter || character.isNumber || character == "_" {
+                while end < characters.endIndex {
+                    let next = characters[end]
+                    guard next.isLetter || next.isNumber || next == "_" else { break }
+                    characters.formIndex(after: &end)
+                }
+            }
+            var segment = AttributedString(source[start..<end])
+            if keywords.contains(String(segment.characters)) { segment.foregroundColor = .purple }
+            output.append(segment)
+            start = end
+        }
+        return output
     }
 }

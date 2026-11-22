@@ -36,7 +36,7 @@ def availability(client, base_url, pony_model):
             "pony": contains("CheckpointLoaderSimple", "ckpt_name", pony_model)}
 
 
-def graph(prompt, seed, width, height, reference_name=None, mask_name=None, adult=False):
+def graph(prompt, seed, width, height, reference_name=None, mask_name=None, adult=False, second_reference=None):
     """Build an instruction-guided image edit or generation graph.
 
     A supplied mask controls only the final composite. The reference latent
@@ -44,6 +44,8 @@ def graph(prompt, seed, width, height, reference_name=None, mask_name=None, adul
     """
     if mask_name and not reference_name:
         raise ValueError("A mask requires a reference image")
+    if second_reference and (not reference_name or mask_name):
+        raise ValueError("Two characters require two unmasked references")
     graph = {
         "1": {"class_type": "UNETLoader", "inputs": {"unet_name": MODEL, "weight_dtype": "default"}},
         "2": {"class_type": "CLIPLoader", "inputs": {"clip_name": TEXT_ENCODER, "type": "flux2", "device": "default"}},
@@ -69,6 +71,13 @@ def graph(prompt, seed, width, height, reference_name=None, mask_name=None, adul
         graph["22"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["4", 0], "latent": ["21", 0]}}
         graph["23"] = {"class_type": "ReferenceLatent", "inputs": {"conditioning": ["5", 0], "latent": ["21", 0]}}
         graph["10"]["inputs"].update(positive=["22", 0], negative=["23", 0])
+    if second_reference:
+        graph["27"] = {"class_type": "LoadImage", "inputs": {"image": second_reference + " [temp]"}}
+        graph["28"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["27", 0], "vae": ["3", 0]}}
+        for key, parent in (("29", "22"), ("30", "23")):
+            graph[key] = {"class_type": "ReferenceLatent", "inputs": {
+                "conditioning": [parent, 0], "latent": ["28", 0]}}
+        graph["10"]["inputs"].update(positive=["29", 0], negative=["30", 0])
     if mask_name:
         graph["24"] = {"class_type": "LoadImageMask", "inputs": {"image": mask_name + " [temp]", "channel": "red"}}
         graph["25"] = {"class_type": "ImageCompositeMasked", "inputs": {

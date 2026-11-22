@@ -11,7 +11,7 @@ enum AgentTraderaIntent {
         if starts(#"(?:vis(?:e)?|tjek(?:ke)?|åbn(?:e)?|se) (?:mine |dine |alle )?(?:tradera[ -]?)?prisvagter\b"#) {
             return .traderaWatches
         }
-        guard text.contains("tradera") || text.contains("prisvagt") else { return nil }
+        guard text.contains("tradera") || text.contains("prisvagt") || publicLink(in: text) != nil else { return nil }
         if listing(text) != nil { return .traderaWatch }
         if starts(#"(?:hold(?:e)? øje med|overvåg(?:e)?|følg(?:e)? prisen|(?:lav(?:e)?|opret(?:te)?|start(?:e)?|sæt(?:te)?) (?:en )?prisvagt|giv(?:e)? mig besked,? (?:når|hvis))\b"#) {
             return .traderaWatch
@@ -35,6 +35,14 @@ enum AgentTraderaIntent {
         guard let match = prompt.range(of: #"https://(?:www\.)?tradera\.com/[^\s<>"]+"#,
                                        options: [.regularExpression, .caseInsensitive]) else { return nil }
         return listing(String(prompt[match]).trimmingCharacters(in: CharacterSet(charactersIn: ".,;!?)”")))
+    }
+
+    static func publicLink(in text: String) -> URL? {
+        guard let match = text.range(of: #"https://[^\s<>"]+"#, options: [.regularExpression, .caseInsensitive]),
+              let parts = URLComponents(string: String(text[match]).trimmingCharacters(in: CharacterSet(charactersIn: ".,;!?)”"))),
+              let host = parts.host, host.contains("."), parts.user == nil, parts.password == nil,
+              parts.port == nil || parts.port == 443 else { return nil }
+        return parts.url
     }
 
     static func amount(_ text: String) -> Double? {
@@ -76,20 +84,26 @@ enum AgentTraderaIntent {
 }
 
 enum AgentTraderaSource: String, Codable {
-    case api, traderaMail
+    case api, traderaMail, publicPage
 }
 
 struct AgentTraderaAccess: Decodable {
     let configured: Bool
     let mailAvailable: Bool?
+    let publicPageAvailable: Bool?
 
     var suggested: AgentTraderaSource {
         if configured || mailAvailable == nil { return .api }
+        if publicPageAvailable == true { return .publicPage }
         return .traderaMail
     }
 
     func ready(_ source: AgentTraderaSource) -> Bool {
-        source == .api ? configured : mailAvailable == true
+        switch source {
+        case .api: configured
+        case .traderaMail: mailAvailable == true
+        case .publicPage: publicPageAvailable == true
+        }
     }
 }
 
@@ -169,7 +183,7 @@ extension View {
             for agent in Set(pending.values) {
                 guard !Task.isCancelled else { return }
                 guard let list: AgentTraderaList = try? await api.moduleJSON("tradera/watches", timeout: 15,
-                    query: [.init(name: "bot_id", value: agent)]) else { continue }
+                    query: [.init(name: "bot_id", value: agent), .init(name: "include_web", value: "true")]) else { continue }
                 guard !Task.isCancelled else { return }
                 let existingIDs = Set(list.watches.map { $0.id.uuidString })
                 for (id, owner) in pending where owner == agent && !existingIDs.contains(id) {
@@ -222,7 +236,7 @@ extension View {
         self.id = id
         self.listOnly = listOnly
         let limit = AgentTraderaIntent.limit(in: prompt)
-        _address = State(initialValue: AgentTraderaIntent.listingInPrompt(prompt)?.absoluteString ?? "")
+        _address = State(initialValue: (AgentTraderaIntent.listingInPrompt(prompt) ?? AgentTraderaIntent.publicLink(in: prompt))?.absoluteString ?? "")
         _amount = State(initialValue: limit.amount)
         _currency = State(initialValue: AgentTraderaIntent.currency(for: limit.currency, wishes: AgentChatPreferences.entries(for: bot.id).map(\.value)))
     }
@@ -234,10 +248,20 @@ extension View {
         let notifyByEmail: Bool
         let source: AgentTraderaSource
     }
-    private var source: AgentTraderaSource { chosenSource ?? access?.suggested ?? .traderaMail }
+    private var source: AgentTraderaSource {
+        if let chosenSource { return chosenSource }
+        if access?.publicPageAvailable == true, AgentTraderaIntent.publicLink(in: address) != nil,
+           AgentTraderaIntent.listing(address) == nil { return .publicPage }
+        return access?.suggested ?? .traderaMail
+    }
+    private var listingURL: URL? {
+        if source == .publicPage, let url = AgentTraderaIntent.publicLink(in: address),
+           url.absoluteString == address.trimmingCharacters(in: .whitespacesAndNewlines) { return url }
+        return AgentTraderaIntent.listing(address)
+    }
     private struct Cancelled: Decodable { let cancelled: Bool }
     private struct SingleWatch: Decodable { let watch: AgentTraderaItem? }
-    private var scope: [URLQueryItem] { [.init(name: "bot_id", value: bot.id.uuidString)] }
+    private var scope: [URLQueryItem] { [.init(name: "bot_id", value: bot.id.uuidString), .init(name: "include_web", value: "true")] }
     private var visible: [AgentTraderaItem] { listOnly ? watches : watches.filter { $0.id == id } }
 
     var body: some View {
@@ -301,8 +325,8 @@ extension View {
 
     private var editor: some View {
         VStack(alignment: .leading, spacing: 10) {
-            TextField("Link til Tradera-annonce", text: $address).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
-            if let listing = AgentTraderaIntent.listing(address) { Link("Åbn annoncen på Tradera", destination: listing) }
+            TextField(source == .publicPage ? "Link til varesiden" : "Link til Tradera-annonce", text: $address).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+            if let listingURL { Link("Åbn varesiden", destination: listingURL) }
             TextField("Giv besked ved en pris under …", text: $amount).keyboardType(.decimalPad)
             Picker("Din prisgrænse er i", selection: $currency) {
                 Text("Vælg valuta").tag("")
@@ -311,6 +335,9 @@ extension View {
             }
             if access?.mailAvailable != nil {
                 Picker("Hvor skal prisen komme fra?", selection: Binding(get: { source }, set: { chosenSource = $0 })) {
+                    if access?.publicPageAvailable == true {
+                        Text("Læs varesiden uden login").tag(AgentTraderaSource.publicPage)
+                    }
                     Text("Tradera-mails i Gmail").tag(AgentTraderaSource.traderaMail)
                     Text("Direkte fra Tradera").tag(AgentTraderaSource.api)
                 }
@@ -320,6 +347,8 @@ extension View {
                 if access?.mailAvailable == false {
                     Button("Forbind min Gmail", systemImage: "envelope") { run { try await connectGmail() } }.disabled(busy)
                 }
+            } else if source == .publicPage {
+                FadedDetailText("PC’en læser butikkens varepris hver halve time. Vælg den valuta, som butikken viser.")
             } else if access?.configured == false {
                 setup
             }
@@ -327,15 +356,15 @@ extension View {
                 Toggle("Mail mig også ved en pris under grænsen", isOn: $email)
                 FadedDetailText("PC’en følger prisen, mens FadedAI kører. Du kan lukke appen på telefonen.")
                 Button(source == .traderaMail ? "Følg prisen via min Gmail" : "Start prisvagt", systemImage: "bell") { run { try await create() } }
-                    .disabled(busy || AgentTraderaIntent.listing(address) == nil || AgentTraderaIntent.amount(amount) == nil || currency.isEmpty)
+                    .disabled(busy || listingURL == nil || AgentTraderaIntent.amount(amount) == nil || currency.isEmpty)
             }
         }
     }
 
     @ViewBuilder private func item(_ row: AgentTraderaItem) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let link = AgentTraderaIntent.listing(row.url) {
-                Link(row.title.isEmpty ? "Åbn annoncen hos Tradera" : row.title, destination: link)
+            if let link = row.source == .publicPage ? AgentTraderaIntent.publicLink(in: row.url) : AgentTraderaIntent.listing(row.url) {
+                Link(row.title.isEmpty ? "Åbn annoncen" : row.title, destination: link)
             }
             Label(row.stateLabel, systemImage: row.state == "triggered" ? "bell.fill" : "tag")
             Text("Giv besked under " + AgentTraderaItem.money(row.threshold, row.currency))
@@ -361,7 +390,7 @@ extension View {
     private func reload() async {
         guard let api else { return }
         do {
-            let status: AgentTraderaAccess = try await api.moduleJSON("tradera/status")
+            let status: AgentTraderaAccess = try await api.moduleJSON("tradera/status", query: [.init(name: "include_web", value: "true")])
             let rows: [AgentTraderaItem]
             if listOnly {
                 let result: AgentTraderaList = try await api.moduleJSON("tradera/watches", query: scope)
@@ -396,7 +425,7 @@ extension View {
     }
 
     private func create() async throws {
-        guard let api, let url = AgentTraderaIntent.listing(address), let threshold = AgentTraderaIntent.amount(amount) else { return }
+        guard let api, let url = listingURL, let threshold = AgentTraderaIntent.amount(amount) else { return }
         guard access?.ready(source) == true else { return }
         let body = NewWatch(url: url.absoluteString, threshold: threshold, currency: currency, notifyByEmail: email, source: source)
         let watch: AgentTraderaItem = try await api.moduleJSON("tradera/watches/" + id.uuidString, upload: JSONEncoder().encode(body),

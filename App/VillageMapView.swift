@@ -4,6 +4,7 @@ import UIKit
 @MainActor struct VillageMapView: View {
     @AppStorage(AppStorageKeys.villageMapNames) private var showNames = true
     @AppStorage("village.map.navigationLocked.v2") private var navigationLocked = true
+    @AppStorage(VillageCamera.Focus.storageKey) private var focus = VillageCamera.Focus.center
     @Binding var zoom: Double
     let bots: [VillageLifeBot]
     let night: Bool
@@ -17,7 +18,6 @@ import UIKit
     var onSelectCemetery: () -> Void = {}
     var onSelectCreator: () -> Void = {}
 
-    @State private var offset: CGSize = .zero
     @GestureState private var magnification: CGFloat = 1
     @GestureState private var translation: CGSize = .zero
 
@@ -25,7 +25,7 @@ import UIKit
         GeometryReader { geometry in
             let size = geometry.size
             let scale = CGFloat(VillageCamera.clampZoom(zoom * Double(magnification)))
-            let pan = clampedPan(adding: translation, zoom: scale, size: size)
+            let pan = focus.offset(zoom: scale, frame: size, adding: translation)
             ZStack {
                 mapContent(size: size)
                     .scaleEffect(scale)
@@ -43,7 +43,6 @@ import UIKit
                         guard !navigationLocked else { return }
                         let finalScale = VillageCamera.clampZoom(zoom * Double(value.magnification))
                         zoom = finalScale > 1.001 ? finalScale : 1
-                        offset = VillageCamera.clampOffset(offset, zoom: CGFloat(zoom), frame: size)
                     },
                 including: navigationLocked ? .subviews : .all
             )
@@ -53,15 +52,14 @@ import UIKit
                         if !navigationLocked { current = value.translation }
                     }
                     .onEnded { value in
-                        if !navigationLocked { offset = clampedPan(adding: value.translation, zoom: scale, size: size) }
+                        guard !navigationLocked, scale > 1.001 else { return }
+                        let moved = focus.offset(zoom: scale, frame: size, adding: value.translation)
+                        focus = VillageCamera.Focus(offset: moved, zoom: scale, frame: size)
                     },
                 including: !navigationLocked && scale > 1.001 ? .all : .subviews
             )
-            .onChange(of: size) { _, newSize in
-                offset = VillageCamera.clampOffset(offset, zoom: CGFloat(zoom), frame: newSize)
-            }
-            .onChange(of: zoom) { _, value in
-                offset = value <= 1.001 ? .zero : VillageCamera.clampOffset(offset, zoom: CGFloat(value), frame: size)
+            .onChange(of: zoom, initial: true) { _, value in
+                if VillageCamera.clampZoom(value) <= 1.001, focus != .center { focus = .center }
             }
             .clipShape(RoundedRectangle(cornerRadius: 20))
             .overlay {
@@ -89,7 +87,6 @@ import UIKit
                     Button {
                         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
                             zoom = 1
-                            offset = .zero
                         }
                     } label: {
                         Label(VillageCopy.cameraReset, systemImage: "arrow.up.left.and.down.right.magnifyingglass")
@@ -143,14 +140,6 @@ import UIKit
                 .fadedGlassSurface()
         }
         .accessibilityLabel("Find et sted eller en beboer")
-    }
-
-    private func clampedPan(adding translation: CGSize, zoom: CGFloat, size: CGSize) -> CGSize {
-        VillageCamera.clampOffset(
-            CGSize(width: offset.width + translation.width, height: offset.height + translation.height),
-            zoom: zoom,
-            frame: size
-        )
     }
 
     private func mapContent(size: CGSize) -> some View {

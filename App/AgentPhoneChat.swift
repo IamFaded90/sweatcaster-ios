@@ -38,18 +38,24 @@ import UIKit
     @State var source = Source.phone
     @State var turns: [PrivateChatTurn] = []
     @State var draft = ""
+    @State var attachedPhoto: Data?
+    @State var loadingPhoto = false
+    @State var sentPhotos: [UUID: Data] = [:]
     @FocusState var composerFocused: Bool
     @State var notice: String?
     @State var running: Task<Void, Never>?
     @State var pendingPrompt: String?
     @State var showModels = false
     @State var showEverydayTools = false
+    @State var showAgentShortcuts = false
+    @State var selectedAgentShortcut: (() -> Void)?
     @State var interactiveTool: AgentInteractiveTool?
     @State var showTasteChoices = false
     @State private var showPCTools = false
     @State var showDocuments = false
     @State var nextDocument: AgentDocument?
     @State var showTranscript = false
+    @State var showRecordingTranscript = false
     @State var translating: PrivateChatTurn?
     @State var gmailDraft: PrivateChatTurn?
     @State var gmailCheck: AgentGmailCheck.Request?
@@ -125,7 +131,7 @@ import UIKit
         ScrollViewReader { scroll in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    AgentSpeakingStage(bot: bot, listening: appleDictation.active || whisper.active)
+                    AgentSpeakingStage(bot: bot, listening: appleDictation.active || whisper.active, api: api)
                     DisclosureGroup {
                         modelCard
                     } label: {
@@ -201,6 +207,9 @@ import UIKit
 
     private var conversationTools: some View {
         conversationScreen
+            .sheet(isPresented: $showAgentShortcuts, onDismiss: runSelectedAgentShortcut) {
+                agentShortcutsSheet
+            }
             .sheet(isPresented: $showPCTools) {
                 if let api { AgentPCToolsView(api: api, botID: bot.id) }
             }
@@ -215,7 +224,7 @@ import UIKit
                 loadModels(preferSetting: preferredModel != modelBeforeSettings)
             }) { PhoneModelsView() }
             .sheet(isPresented: $showDocuments) {
-                AgentDocumentsView(bot: bot) { document in
+                AgentDocumentsView(bot: bot, api: api, answersOnPC: source == .pc) { document in
                     nextDocument = document
                     web = false
                 } onRemove: { id in
@@ -247,7 +256,10 @@ import UIKit
                     .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { interactiveTool = nil } } }
             }
         case .phoneScreen(let prompt):
-            AgentScreenShareView(api: api, bot: bot, prompt: prompt)
+            AgentScreenShareView(api: api, bot: bot, prompt: prompt) { image, question in
+                attachedPhoto = image
+                draft = AgentScreenIntent.draftForScreenshot(question, current: draft)
+            }
         case .sales(let prompt):
             AgentSalesView(api: api, bot: bot, prompt: prompt)
         case .surprise(let prompt):
@@ -290,7 +302,7 @@ import UIKit
 
     private var loadedConversation: some View {
         conversationTools
-            .onChange(of: source) { if source != .phone { nextDocument = nil } }
+            .onChange(of: source) { if source == .composio { nextDocument = nil } }
             .task {
                 loadModels()
                 if !loaded && keepHistory {
@@ -344,6 +356,9 @@ import UIKit
         observedConversation
             .sheet(isPresented: $showVoice) { voiceSettings }
             .sheet(isPresented: $showTranscript) { AgentDictationTranscript(segments: whisper.segments) }
+            .sheet(isPresented: $showRecordingTranscript) {
+                if let api { AgentRecordingTranscript(api: api, language: AgentWhisper.languageCode(dictationLanguage)) }
+            }
             .sheet(item: $translating) { AgentTranslationView(original: $0.reply, suggestedModel: selectedModel) }
             .sheet(item: $gmailDraft) { turn in
                 if let api { GmailDraftView(api: api, draft: turn.reply) }
@@ -392,6 +407,7 @@ import UIKit
             return
         }
         draft = turn.prompt
+        if let photo = sentPhotos[turn.id] { attachedPhoto = photo }
         composerFocused = true
     }
 

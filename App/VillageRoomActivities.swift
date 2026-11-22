@@ -1,4 +1,88 @@
+import AVFAudio
 import SwiftUI
+
+@MainActor struct VillageSpeakingRoom: View {
+    let artwork: String
+    let zone: VillageZoneID
+    let residents: [VillageLifeBot]
+    let animated: Bool
+    @Environment(\.villagePlannerAPI) private var api
+    @Environment(\.scenePhase) private var phase
+    @Environment(\.fadedPalette) private var palette
+    @StateObject private var player = ChristelPlayer()
+    @State private var selectedID: String?
+    @State private var notice: String?
+
+    private var activeID: String? { player.playing || player.loading ? selectedID : nil }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            VillageInteriorArtwork(name: artwork, label: zone.title, residents: residents, animateResidents: animated,
+                                   speakingID: activeID, onHear: hear, onMoveSpeaker: { id, pan in
+                if activeID == id { player.updatePan(pan) }
+            })
+            .frame(height: 230).frame(maxWidth: .infinity)
+            .background(palette.card, in: RoundedRectangle(cornerRadius: 18))
+            .clipShape(RoundedRectangle(cornerRadius: 18))
+            if let message = notice ?? player.notice {
+                Text(message).font(.footnote).foregroundStyle(palette.secondary)
+                    .accessibilityAddTraits(.updatesFrequently)
+            }
+        }
+        .onDisappear { player.stop() }
+        .onChange(of: phase) { _, next in if next != .active { player.stop() } }
+        .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { event in
+            if (event.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.began.rawValue {
+                player.stop()
+            }
+        }
+        .onChange(of: residents.map(\.id)) { _, ids in
+            if let selectedID, !ids.contains(selectedID) { player.stop() }
+        }
+    }
+
+    private func hear(_ bot: VillageLifeBot, pan: Float) {
+        let stopping = activeID == bot.id
+        player.stop()
+        notice = nil
+        guard !stopping else { return }
+        let id = UUID(uuidString: bot.id)
+        guard let profiles = try? MigratedAppData.shared.loadBots().get() else {
+            notice = "Agentens stemmevalg kunne ikke læses. Prøv igen."
+            return
+        }
+        let profile = profiles.first { $0.id == id }
+            ?? (id == VillageBot.lumiID ? VillageBot.lumi() : nil)
+        let identifier = profile.map { AgentVoiceSelection.identifier(for: $0) } ?? "da-DK"
+        selectedID = bot.id
+        if let local = DownloadedAgentVoice.selected(identifier) {
+            player.playDownloaded(text: line(bot, language: "da-DK"), voice: local, agentID: id, rate: profile?.voiceRate ?? 1, pan: pan)
+        } else if let voice = AgentPCVoice(rawValue: identifier), let id {
+            guard let api else { notice = "Forbind PC’en for at høre agentens valgte stemme."; return }
+            player.playAgentVoice(text: line(bot, language: voice.language), voice: voice, agentID: id, pc: api, pan: pan)
+        } else {
+            let language = identifier.hasPrefix("en-") ? identifier : "da-DK"
+            guard let voice = AgentVoiceSelection.resolve(identifier: identifier, language: language) else {
+                notice = AgentVoiceSelection.unavailable
+                return
+            }
+            let utterance = LocalSpeechVoice.utterance(line(bot, language: voice.language), voice: voice, rate: profile?.voiceRate ?? 1)
+            player.playRoomVoice(utterance, agentID: id, pan: pan)
+        }
+    }
+
+    private func line(_ bot: VillageLifeBot, language: String) -> String {
+        guard language.hasPrefix("en") else { return VillageCopy.speech(bot.speechHint) ?? bot.poseLabel }
+        switch bot.activity {
+        case .idle: return bot.pcJobQueued ? "I'm waiting for a task." : "I'm ready."
+        case .walk: return "I'm on my way."
+        case .work: return bot.localPractice ? "I'm practising." : "I'm working."
+        case .talk: return "I'm having a chat."
+        case .rest: return "I'm taking a break."
+        case .sleep: return "I'm asleep."
+        }
+    }
+}
 
 @MainActor struct VillageRoomActivities: View {
     let residents: [VillageLifeBot]

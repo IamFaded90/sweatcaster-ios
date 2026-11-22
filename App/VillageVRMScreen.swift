@@ -4,12 +4,14 @@ import WebKit
 
 @MainActor struct VillageVRMScreen: View {
     let bot: VillageBot
+    var api: LiveAPI?
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @AppStorage(AppStorageKeys.qolReduceMotion) private var calmMotion = false
     @ObservedObject private var speech = VillageSpeechMotion.shared
     @StateObject private var voiceTest = SpeechBox()
+    @StateObject private var pcVoiceTest = ChristelPlayer()
     @State private var model: Selection?
     @State private var picker = false
     @State private var hasCustomFigure = false
@@ -57,6 +59,7 @@ import WebKit
                         speechButton
                     }
                     if let failure { FadedDetailText(failure) }
+                    if let voiceNotice = pcVoiceTest.notice { FadedDetailText(voiceNotice) }
                     if fileTask != nil { ProgressView("Læser figuren…") }
                     Button("Vælg VRM fra Filer", systemImage: "square.and.arrow.down") { picker = true }
                         .frame(minHeight: 44)
@@ -99,13 +102,13 @@ import WebKit
         }
         .onDisappear {
             fileTask?.cancel()
-            voiceTest.stop()
+            stopPreview()
         }
     }
 
     private var speechButton: some View {
-        Button(voiceTest.playback == nil ? "Prøv dansk tale" : "Stop oplæsning",
-               systemImage: voiceTest.playback == nil ? "speaker.wave.2" : "stop.fill",
+        Button(isPreviewing ? "Stop oplæsning" : "Prøv agentens stemme",
+               systemImage: isPreviewing ? "stop.fill" : "speaker.wave.2",
                action: previewSpeech)
             .frame(minHeight: 44)
     }
@@ -165,22 +168,40 @@ import WebKit
     }
 
     private func select(_ bytes: Data, source: Source) {
-        voiceTest.stop()
+        stopPreview()
         ready = false
         model = Selection(id: UUID(), bytes: bytes, source: source)
     }
 
+    private var isPreviewing: Bool { voiceTest.playback != nil || pcVoiceTest.loading || pcVoiceTest.playing }
+
+    private func stopPreview() {
+        voiceTest.stop()
+        pcVoiceTest.stop()
+    }
+
     private func previewSpeech() {
-        if voiceTest.playback != nil {
-            voiceTest.stop()
+        if isPreviewing {
+            stopPreview()
             return
         }
-        let configured = LocalSpeechVoice.resolve(identifier: bot.voice, language: "da-DK")
-        guard let voice = LocalSpeechVoice.forReply(configured, language: "da-DK") else {
-            failure = "Der er ingen dansk oplæsningsstemme på telefonen."
+        failure = nil
+        let identifier = AgentVoiceSelection.identifier(for: bot)
+        if let local = DownloadedAgentVoice.selected(identifier) {
+            pcVoiceTest.playDownloaded(text: LocalSpeechVoice.previewSentence(language: "da-DK"), voice: local, agentID: bot.id, rate: bot.voiceRate ?? 1)
             return
         }
-        let phrase = "Hej, jeg taler dansk. Kan du se mig blinke, mens jeg snakker?"
+        if let voice = AgentPCVoice(rawValue: identifier) {
+            guard let api else { failure = "Forbind PC’en for at høre agentens valgte stemme."; return }
+            pcVoiceTest.playAgentVoice(text: LocalSpeechVoice.previewSentence(language: voice.language),
+                                       voice: voice, agentID: bot.id, pc: api)
+            return
+        }
+        guard let voice = AgentVoiceSelection.resolve(identifier: identifier, language: "da-DK") else {
+            failure = AgentVoiceSelection.unavailable
+            return
+        }
+        let phrase = LocalSpeechVoice.previewSentence(language: voice.language)
         voiceTest.play(LocalSpeechVoice.utterance(phrase, voice: voice, rate: bot.voiceRate ?? 1),
                        as: .preview, agentID: bot.id)
     }

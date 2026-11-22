@@ -74,3 +74,39 @@ def test_lumi_voice_is_available_only_with_its_own_reference(tmp_path, monkeypat
     for voice in ("roest-lumi", "roest-nic"):
         assert handlers["PUT"](None, Response(), {"voice": voice, "text": "Hej!"})["audio"]
     assert calls == [("lumi", "Hej!"), ("nic", "Hej!")]
+
+
+def test_new_danish_voices_use_distinct_synthetic_references(tmp_path, monkeypatch):
+    from sweatcaster import kokoro_voice
+    make_runtime(tmp_path)
+    monkeypatch.setenv("FADEDAI_ROEST_ROOT", str(tmp_path))
+    monkeypatch.setattr(kokoro_voice, "kokoro_ready", lambda: (True, "ready"))
+    references = []
+
+    def reference(text, path, *, voice):
+        references.append(voice)
+        path.write_bytes(voice.encode())
+
+    def speak(command, **options):
+        assert command[-2] == "synthetic"
+        assert json.loads(options["input"])["text"] == "Godmorgen"
+        Path(command[-3]).write_bytes(b"RIFF0000WAVE" + Path(command[-1]).read_bytes() + bytes(48))
+        return CompletedProcess(command, 0)
+
+    monkeypatch.setattr(kokoro_voice, "synthesize_kokoro", reference)
+    monkeypatch.setattr(microsoft_voice.subprocess, "run", speak)
+    app = FastAPI()
+    microsoft_voice.register_christel(app, None, lambda request, settings: None)
+    handlers = {next(iter(item.methods)): item.endpoint for item in app.routes
+                if item.path == "/api/modules/v1/agent-local-voices"}
+    assert {"roest-freja", "roest-storm"}.issubset(handlers["GET"](None, Response())["voices"])
+    microsoft_voice.synthetic_reference.cache_clear()
+    try:
+        def play(voice):
+            return handlers["PUT"](None, Response(), {"voice": voice, "text": "Godmorgen"})["audio"]
+        freja = play("roest-freja")
+        assert play("roest-storm") != freja
+        assert play("roest-freja") == freja
+        assert references == ["af_bella", "am_fenrir"]
+    finally:
+        microsoft_voice.synthetic_reference.cache_clear()

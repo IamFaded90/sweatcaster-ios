@@ -96,6 +96,7 @@ import SwiftUI
     @State private var loading = false
     @State private var loaded = false
     @State private var sending = false
+    @State private var needsReceiptCheck = false
     @State private var delivered: URL?
     @State private var confirmation = false
     @State private var recovery: ReadRecovery?
@@ -281,19 +282,25 @@ import SwiftUI
                 Button("Vælg anden mail") {
                     self.target = nil
                     selectedID = nil
+                    needsReceiptCheck = false
                     draft = suggestedDraft
                     onDraftChanged(nil)
                     notice = nil
                 }
-                .disabled(sending)
+                .disabled(sending || loading)
                 Spacer()
                 Button("Send via Gmail", systemImage: "paperplane") {
                     editing = false
                     confirmation = true
                 }
-                .disabled(sending || !validDraft)
+                .disabled(sending || loading || !validDraft)
             }
             .frame(minHeight: 44)
+            if needsReceiptCheck {
+                Button("Tjek om svaret blev sendt", systemImage: "envelope.badge") {
+                    Task { await checkSent(thread: target.threadID) }
+                }.disabled(loading || sending).frame(minHeight: 44)
+            }
         }
     }
 
@@ -410,7 +417,25 @@ import SwiftUI
                 throw APIError.malformed
             }
         } catch {
-            notice = errorText(error, fallback: "Afsendelsen kunne ikke bekræftes. Tjek Sendt i Gmail før et nyt forsøg.")
+            needsReceiptCheck = true
+            guard !Task.isCancelled else { return }
+            await checkSent(thread: target.threadID, failureNotice: errorText(error,
+                fallback: "Afsendelsen kunne ikke bekræftes. Tjek Sendt i Gmail før et nyt forsøg."))
+        }
+    }
+
+    private func checkSent(thread: String, failureNotice: String = "Ingen kvittering endnu. Tjek Sendt i Gmail.") async {
+        guard !loading, delivered == nil else { return }
+        loading = true
+        defer { loading = false }
+        do {
+            let receipt: Receipt = try await api.moduleJSON("composio/gmail/reply/receipts/" + requestID.uuidString, timeout: 12)
+            try Task.checkCancellation()
+            guard receipt.threadID == thread, accept(receipt) else { notice = failureNotice; return }
+            needsReceiptCheck = false
+            notice = nil
+        } catch {
+            if !Task.isCancelled { notice = failureNotice }
         }
     }
 

@@ -13,6 +13,7 @@ enum PhoneModelError: Error {
 }
 
 enum PhoneModels {
+    static let miniCPMCatalogID = "minicpm5-1b"
     static let selectionKey = AppStorageKeys.phoneModel
     static let favoritesKey = AppStorageKeys.phoneModelFavorites
     static let liteBatteryKey = AppStorageKeys.phoneModelLiteBattery
@@ -30,16 +31,16 @@ enum PhoneModels {
 
     static var textOptions: [TextOption] {
         [.init(id: "apple", name: "Apple Foundation Models")] +
-            catalog.map { TextOption(id: $0.id, name: $0.name) } +
+            catalog.map { TextOption(id: $0.selectionID, name: $0.name) } +
             [.init(id: "imported", name: "Importeret model")] +
-            GGUFPhoneModel.installed.map { TextOption(id: $0.id, name: $0.name) }
+            GGUFPhoneModel.installed.filter { $0.id != GGUFPhoneModel.miniCPMID }.map { TextOption(id: $0.id, name: $0.name) }
     }
 
     static func textModelName(_ id: String) -> String {
         switch id {
         case "apple": "Apple Foundation Models"
         case "imported": "Importeret model"
-        default: GGUFPhoneModel.installed(id: id)?.name ?? catalog.first(where: { $0.id == id })?.name ?? id
+        default: GGUFPhoneModel.installed(id: id)?.name ?? catalog.first(where: { $0.id == id || $0.selectionID == id })?.name ?? id
         }
     }
 
@@ -51,6 +52,7 @@ enum PhoneModels {
         enum PackageFormat: String {
             case coreML = "Core ML"
             case coreAI = "Core AI"
+            case gguf = "GGUF"
         }
 
         let id, name, description: String
@@ -61,9 +63,22 @@ enum PhoneModels {
         let estimatedDownloadBytes: Int64
         let minimumFreeBytes: Int64
         let unavailableReason: String?
+        var selectionID: String { id == PhoneModels.miniCPMCatalogID ? GGUFPhoneModel.miniCPMID : id }
 
         var modelCardURL: URL? { URL(string: "https://huggingface.co/\(modelCardRepository)") }
-        var recommendsPC: Bool { estimatedDownloadBytes > 3_000_000_000 }
+        static let largeDownloadBytes: Int64 = 3_000_000_000
+        var recommendsPC: Bool { estimatedDownloadBytes > Self.largeDownloadBytes }
+
+        func downloadBudget() -> (remaining: Int64, free: Int64) {
+            if let model, let variant = QwenPhoneRuntime.Variant(modelID: id) {
+                let folder = PhoneModels.downloadedRoot.appending(path: model.folderName, directoryHint: .isDirectory)
+                let weightsReady = PhoneModels.compatibleBundle(folder, qwen: variant, requireTokenizer: false)
+                if let budget = QwenPhoneRuntime.downloadBudget(for: variant, in: folder, weightsReady: weightsReady) {
+                    return budget
+                }
+            }
+            return (estimatedDownloadBytes, minimumFreeBytes)
+        }
     }
 
     static func hasDownloadSpace(bytes: Int64) -> Bool {
@@ -101,11 +116,11 @@ enum PhoneModels {
                   estimatedDownloadBytes: 1_261_991_992 + QwenPhoneRuntime.Variant.compact.tokenizerBytes,
                   minimumFreeBytes: 2_200_000_000,
                   unavailableReason: nil),
-            .init(id: "minicpm5-1b", name: "MiniCPM5 1B",
-                  description: "Kompakt tekstmodel med særskilt tilstand til ræsonnement.", bestFor: "Korte spørgsmål og logiske opgaver.",
-                  model: nil, modelCardRepository: "mlboydaisuke/MiniCPM5-1B-CoreAI", packageFormat: .coreAI,
-                  estimatedDownloadBytes: 1_300_000_000, minimumFreeBytes: 0,
-                  unavailableReason: "iPhone-pakken kræver iOS 27 og en Core AI-motor. FadedAI har endnu ikke denne motor."),
+            .init(id: miniCPMCatalogID, name: "MiniCPM5 1B",
+                  description: "Lille tekstmodel til korte spørgsmål og opfølgninger.", bestFor: "Korte svar, også når PC’en er slukket.",
+                  model: nil, modelCardRepository: GGUFHub.miniCPM.repository, packageFormat: .gguf,
+                  estimatedDownloadBytes: GGUFHub.miniCPM.bytes, minimumFreeBytes: GGUFHub.miniCPM.bytes + 100_000_000,
+                  unavailableReason: nil),
             .init(id: ModelDownloader.ModelInfo.qwen3vl_2b.id, name: "Qwen3-VL 2B",
                   description: "Denne pakke kan læse tekst og analysere ét billede ad gangen.", bestFor: "At beskrive billeder og svare på spørgsmål om dem.",
                   model: .qwen3vl_2b, modelCardRepository: "mlboydaisuke/qwen3-vl-2b-coreml", packageFormat: .coreML,
@@ -263,7 +278,7 @@ enum PhoneModels {
         case ModelDownloader.ModelInfo.qwen35_08b.id: ["code"]
         case ModelDownloader.ModelInfo.gemma4e2b.id: ["vision", "long_context"]
         case ModelDownloader.ModelInfo.qwen3vl_2b.id: ["vision"]
-        case "minicpm5-1b": ["long_context"]
+        case PhoneModels.miniCPMCatalogID: ["long_context"]
         default: []
         }
     }
@@ -360,6 +375,7 @@ enum PhoneModels {
     private(set) var preparingModelID: String?
     private(set) var directModelID: String?
     private(set) var directProgress = 0.0
+    private(set) var restorationNotice: String?
 
     static func failureMessage(for error: Error) -> String {
         if let failure = error as? URLError {
@@ -409,6 +425,7 @@ enum PhoneModels {
               !downloader.isDownloading || (downloader.isPaused && downloader.downloadingModelId == model.id) else {
             throw PhoneModelError.downloadBusy
         }
+        restorationNotice = nil
         defaults.set(model.id, forKey: key)
         defaults.set(defaults.string(forKey: PhoneModels.selectionKey) ?? "apple", forKey: previousSelectionKey)
         do {
@@ -451,6 +468,10 @@ enum PhoneModels {
         guard tokenizerPreparation == nil else { throw PhoneModelError.downloadBusy }
         preparingModelID = modelID
         let work = Task {
+            if let entry = PhoneModels.catalog.first(where: { $0.id == modelID }),
+               !PhoneModels.hasDownloadSpace(bytes: entry.downloadBudget().free) {
+                throw CocoaError(.fileWriteOutOfSpace)
+            }
             try await QwenPhoneRuntime.prepareTokenizer(for: variant, folder: folder)
             // Existing weights can already be complete once the local tokenizer is repaired.
             if case .vision = variant, PhoneModels.installedDirectory(modelID) == nil {
@@ -480,13 +501,20 @@ enum PhoneModels {
             if let folder {
                 do { try await prepareQwen(variant, modelID: modelID, folder: folder) }
                 catch is CancellationError { return }
-                catch { AppDiagnostics.record(error); return }
+                catch {
+                    AppDiagnostics.record(error)
+                    if defaults.string(forKey: key) == modelID {
+                        restorationNotice = PhoneModels.textModelName(modelID) + " · " + Self.failureMessage(for: error)
+                    }
+                    return
+                }
             }
         }
         await publishCompletionIfReady()
     }
 
     func cancel() {
+        restorationNotice = nil
         tokenizerPreparation?.cancel()
         UserDefaults.standard.removeObject(forKey: key)
         UserDefaults.standard.removeObject(forKey: previousSelectionKey)
@@ -527,6 +555,7 @@ enum PhoneModels {
         if previousSelection == (defaults.string(forKey: PhoneModels.selectionKey) ?? "apple") {
             defaults.set(id, forKey: PhoneModels.selectionKey)
         }
+        restorationNotice = nil
         defaults.removeObject(forKey: key)
         defaults.removeObject(forKey: previousSelectionKey)
         let center = UNUserNotificationCenter.current()

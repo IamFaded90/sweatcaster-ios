@@ -4,6 +4,8 @@ import Foundation
 
 struct GGUFPhoneModel: Identifiable, Sendable {
     static let prefix = "gguf:"
+    static let miniCPMFolder = UUID(uuidString: "8e646703-e08f-492d-9074-3fde197f2cd4")!
+    static var miniCPMID: String { prefix + miniCPMFolder.uuidString.lowercased() }
     static let maximumBytes: Int64 = 20 * 1_073_741_824
     static let root = URL.applicationSupportDirectory.appending(path: "GGUFModels", directoryHint: .isDirectory)
 
@@ -11,8 +13,16 @@ struct GGUFPhoneModel: Identifiable, Sendable {
     let url: URL
     let bytes: Int64
     var id: String { Self.prefix + uuid.uuidString.lowercased() }
-    var name: String { url.deletingPathExtension().lastPathComponent }
+    var name: String { uuid == Self.miniCPMFolder ? "MiniCPM5 1B" : url.deletingPathExtension().lastPathComponent }
     var memoryEstimateMiB: UInt64 { UInt64((Double(bytes) * 1.25 / 1_048_576).rounded(.up)) + 420 }
+
+    func chatPrompt(from formatted: String) -> String {
+        guard uuid == Self.miniCPMFolder ||
+            (url.lastPathComponent == GGUFHub.miniCPM.name && bytes == GGUFHub.miniCPM.bytes) else { return formatted }
+        // MiniCPM's template includes BOS even though its tokenizer does not add it.
+        let prompt = formatted.hasPrefix("<s>") ? formatted : "<s>" + formatted
+        return prompt.hasSuffix("<|im_start|>assistant\n") ? prompt + "<think>\n\n</think>\n\n" : prompt
+    }
 
     static var installed: [Self] {
         let folders = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)) ?? []
@@ -95,6 +105,45 @@ struct GGUFPhoneModel: Identifiable, Sendable {
     }
 }
 
+/// One RAM-only slot, owned by the ordinary chat. A fresh llama context writes it before any user tokens are evaluated.
+final class PhonePromptCache: @unchecked Sendable {
+    static let instructions = "Besvar brugerens seneste besked direkte. En hilsen skal bare have en kort hilsen som svar. "
+        + "Brug tidligere beskeder, når de er relevante. Du udfører ingen opgaver på PC’en. Svarpræferencer:"
+    static let miniCPMPrefix = "<s><|im_start|>system\n" + instructions
+    static let maximumBytes = 4 * 1_024 * 1_024
+
+    struct Scope: Sendable {
+        let sessionID: UUID
+        let cache: PhonePromptCache
+    }
+
+    struct Key: Equatable {
+        let sessionID: UUID
+        let modelHash: String
+        let tokens: [Int32]
+    }
+
+    private let lock = NSLock()
+    private var entry: (key: Key, state: Data)?
+
+    static func commonTokens(publicPrefix: [Int32], prompt: [Int32]) -> [Int32] {
+        var length = 0
+        // Stop before a public token that merges with the variable suffix during tokenization.
+        while length < publicPrefix.count, length < prompt.count, publicPrefix[length] == prompt[length] { length += 1 }
+        guard length > 0, length < prompt.count else { return [] }
+        return Array(publicPrefix.prefix(length))
+    }
+
+    func state(for key: Key) -> Data? {
+        lock.withLock { entry?.key == key ? entry?.state : nil }
+    }
+
+    func save(_ state: Data, for key: Key) {
+        guard !state.isEmpty, state.count <= Self.maximumBytes else { return }
+        lock.withLock { entry = (key, state) }
+    }
+}
+
 enum GGUFPhoneRuntime {
     struct Report: Sendable {
         let firstToken: Double
@@ -109,14 +158,14 @@ enum GGUFPhoneRuntime {
 
     @MainActor static func generate(
         _ model: GGUFPhoneModel, prompt: String, instructions: String, history: [PhoneModels.ChatExchange],
-        maximumTokens: Int32, update: @escaping @MainActor (String) -> Void
+        maximumTokens: Int32, prefixCache: PhonePromptCache.Scope? = nil, update: @escaping @MainActor (String) -> Void
     ) async throws -> Report {
         guard PhoneMemoryBudget.assess(model).fit != .unavailable else { throw LocalComputeError.lowMemory }
         LocalCompute.beginModelLoad()
         let messages = (instructions.isEmpty ? [] : [Message("system", instructions)]) +
             history.flatMap { [Message("user", $0.prompt), Message("assistant", $0.reply)] } + [Message("user", prompt)]
         let worker = Task.detached(priority: .userInitiated) {
-            try await run(model, messages: messages, maximumTokens: maximumTokens,
+            try await run(model, messages: messages, maximumTokens: maximumTokens, prefixCache: prefixCache,
                           ready: { await LocalCompute.didLoadModel() }, update: update)
         }
         return try await withTaskCancellationHandler {
@@ -133,7 +182,7 @@ enum GGUFPhoneRuntime {
     }
 
     private static func run(
-        _ file: GGUFPhoneModel, messages: [Message], maximumTokens: Int32,
+        _ file: GGUFPhoneModel, messages: [Message], maximumTokens: Int32, prefixCache: PhonePromptCache.Scope?,
         ready: @Sendable () async -> Void, update: @escaping @MainActor (String) -> Void
     ) async throws -> Report {
         let clock = ContinuousClock()
@@ -162,14 +211,23 @@ enum GGUFPhoneRuntime {
         await ready()
         try Task.checkCancellation()
 
-        let formatted = try format(messages, model: model)
+        let formatted = file.chatPrompt(from: try format(messages, model: model))
         var tokens = [llama_token](repeating: 0, count: Int(contextParameters.n_ctx))
         let tokenCount = tokens.withUnsafeMutableBufferPointer { buffer in
             llama_tokenize(vocabulary, formatted, Int32(formatted.utf8.count), buffer.baseAddress,
                            Int32(buffer.count), true, true)
         }
         guard tokenCount > 0, tokenCount + maximumTokens <= Int32(contextParameters.n_ctx) else { throw PhoneModelError.contextLimit }
-        for startIndex in stride(from: 0, to: Int(tokenCount), by: Int(contextParameters.n_batch)) {
+        let prefixCount: Int
+        if let scope = prefixCache, file.uuid == GGUFPhoneModel.miniCPMFolder,
+           file.bytes == GGUFHub.miniCPM.bytes, file.url.lastPathComponent == GGUFHub.miniCPM.name,
+           formatted.hasPrefix(PhonePromptCache.miniCPMPrefix) {
+            prefixCount = try preparePrefix(scope, context: context, vocabulary: vocabulary,
+                                            prompt: Array(tokens.prefix(Int(tokenCount))))
+        } else {
+            prefixCount = 0
+        }
+        for startIndex in stride(from: prefixCount, to: Int(tokenCount), by: Int(contextParameters.n_batch)) {
             try Task.checkCancellation()
             let count = min(Int(contextParameters.n_batch), Int(tokenCount) - startIndex)
             let code = tokens.withUnsafeMutableBufferPointer { buffer in
@@ -221,6 +279,41 @@ enum GGUFPhoneRuntime {
         let seconds = max(0.001, interval(first.duration(to: clock.now)))
         return Report(firstToken: interval(start.duration(to: first)), tokensPerSecond: Double(max(0, generated - 1)) / seconds,
                       footprint: footprint, reply: reply)
+    }
+
+    private static func preparePrefix(_ scope: PhonePromptCache.Scope, context: OpaquePointer,
+                                      vocabulary: OpaquePointer, prompt: [llama_token]) throws -> Int {
+        let text = PhonePromptCache.miniCPMPrefix
+        var publicTokens = [llama_token](repeating: 0, count: 256)
+        let count = publicTokens.withUnsafeMutableBufferPointer {
+            llama_tokenize(vocabulary, text, Int32(text.utf8.count), $0.baseAddress, Int32($0.count), true, true)
+        }
+        guard count > 0, Int(count) <= publicTokens.count else { return 0 }
+        var verified = PhonePromptCache.commonTokens(publicPrefix: Array(publicTokens.prefix(Int(count))), prompt: prompt)
+        guard !verified.isEmpty else { return 0 }
+        let key = PhonePromptCache.Key(sessionID: scope.sessionID, modelHash: GGUFHub.miniCPM.sha256, tokens: verified)
+        if let state = scope.cache.state(for: key) {
+            let restored = state.withUnsafeBytes {
+                llama_state_seq_set_data(context, $0.bindMemory(to: UInt8.self).baseAddress, $0.count, 0)
+            }
+            if restored == state.count { return verified.count }
+            llama_memory_clear(llama_get_memory(context), true)
+        }
+        try Task.checkCancellation()
+        let code = verified.withUnsafeMutableBufferPointer {
+            llama_decode(context, llama_batch_get_one($0.baseAddress, Int32($0.count)))
+        }
+        guard code == 0 else { throw Failure.inference }
+        llama_synchronize(context)
+        let size = llama_state_seq_get_size(context, 0)
+        if size > 0, size <= PhonePromptCache.maximumBytes {
+            var state = Data(count: size)
+            let written = state.withUnsafeMutableBytes {
+                llama_state_seq_get_data(context, $0.bindMemory(to: UInt8.self).baseAddress, $0.count, 0)
+            }
+            if written == size { scope.cache.save(state, for: key) }
+        }
+        return verified.count
     }
 
     private static func interval(_ duration: Duration) -> Double {

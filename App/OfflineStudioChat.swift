@@ -63,72 +63,6 @@ extension OfflineStudio {
         }
     }
 
-    private func privateTurn(_ turn: PrivateChatTurn) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Spacer(minLength: 46)
-                Text(turn.prompt)
-                    .foregroundStyle(FadedColors.deep)
-                    .padding(12).background(palette.purple, in: RoundedRectangle(cornerRadius: 16))
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                Label(turn.source ?? "Privat bot", systemImage: turn.imageName == nil ? "heart.fill" : "photo")
-                    .font(.caption.bold()).foregroundStyle(palette.isDark ? palette.purple : palette.text)
-                if !turn.reply.isEmpty {
-                    if privateSession {
-                        Text(turn.reply)
-                    } else {
-                        Text(turn.reply).textSelection(.enabled)
-                    }
-                    if turn.imageName == nil {
-                        let reading = speech.playback == .reply(turn.id)
-                        let title = reading ? "Stop oplæsning" : "Læs svar op"
-                        Button(title, systemImage: reading ? "stop.circle" : "speaker.wave.2") {
-                            readReply(turn)
-                        }
-                            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
-                            .disabled(task != nil)
-                    }
-                }
-                if let issue = privateReplyIssues[turn.id] {
-                    FadedDetailText(issue)
-                    if !hasPrompt {
-                        FadedSecondaryButton("Brug som kladde", icon: "square.and.pencil") {
-                            prompt = turn.prompt
-                            promptFocused = true
-                        }.disabled(task != nil)
-                    }
-                }
-                if let name = turn.imageName {
-                    let file = studioImageURL(name)
-                    if let image = studioThumbnail(file, maxPixelSize: 1024) {
-                        Image(uiImage: image).resizable().scaledToFit()
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
-                            .accessibilityLabel("Genereret billede")
-                        HStack {
-                            if !privateSession {
-                                ShareLink(item: file) { Label("Del", systemImage: "square.and.arrow.up") }
-                            }
-                            imageTurnActions(file)
-                            Button("Slet", systemImage: "trash", role: .destructive) { pendingImageDeletion = file }
-                        }.frame(minHeight: 44)
-                    } else {
-                        Text("Billedet er slettet.").foregroundStyle(.secondary)
-                    }
-                }
-                Button("Slet samtaleled", systemImage: "trash", role: .destructive) {
-                    deleteTurn(turn.id)
-                }.frame(minHeight: 44).disabled(task != nil)
-            }
-            .padding(14).frame(maxWidth: .infinity, alignment: .leading)
-            .foregroundStyle(palette.text)
-            .background(palette.card, in: RoundedRectangle(cornerRadius: 18))
-            .overlay(alignment: .leading) {
-                Capsule().fill(palette.purple).frame(width: 4).padding(.vertical, 8).accessibilityHidden(true)
-            }
-        }.id(turn.id)
-    }
-
     @ViewBuilder private var privateComposer: some View {
         if privateSession { sessionComposer }
         else { ordinaryStudioComposer }
@@ -189,8 +123,16 @@ extension OfflineStudio {
         VStack(alignment: .leading, spacing: 6) {
             if task != nil {
                 FadedSecondaryButton("Stop", icon: "stop.fill") { task?.cancel() }
+            } else {
+                ChatPhotoPicker(photo: $attachedChatPhoto, loading: $loadingChatPhoto, onError: { status = $0 })
+                    .onChange(of: attachedChatPhoto == nil) { _, empty in
+                        if empty { secondChatPhoto = nil; loadingSecondChatPhoto = false }
+                    }
+                if let attachedChatPhoto { privateChatPhotoActions(attachedChatPhoto) }
             }
-            if let problem = dictation.problem, !dictation.active {
+            if let progress = dictation.offlineStatus {
+                FadedDetailText(progress).accessibilityAddTraits(.updatesFrequently)
+            } else if let problem = dictation.problem, !dictation.active {
                 Text(problem).font(.footnote).foregroundStyle(palette.secondary)
             } else if (!textReady || privateModelDownload != nil) && !promptFocused {
                 privateTextModelSetup
@@ -204,7 +146,7 @@ extension OfflineStudio {
                 sessionPlusMenu
                 TextField("Skriv til din private bot…", text: $prompt, axis: .vertical)
                     .lineLimit(1...(promptFocused ? 3 : 5)).frame(minHeight: 44).focused($promptFocused)
-                if promptFocused {
+                if promptFocused && !dictation.active {
                     Button("Skjul tastatur", systemImage: "keyboard.chevron.compact.down") { promptFocused = false }
                         .labelStyle(.iconOnly).frame(width: 44, height: 44)
                 } else {
@@ -213,7 +155,7 @@ extension OfflineStudio {
                             .frame(width: 44, height: 44).contentShape(Rectangle())
                     }
                     .buttonStyle(.plain).foregroundStyle(palette.text)
-                    .accessibilityLabel(dictation.active ? "Stop diktering" : "Diktér på telefonen")
+                    .accessibilityLabel(dictation.microphoneLabel)
                     .disabled(task != nil)
                 }
                 Button(action: sendPrivateMessage) {
@@ -222,8 +164,8 @@ extension OfflineStudio {
                         .frame(width: 44, height: 44).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain).accessibilityLabel("Send besked")
-                .disabled(!textReady || !hasPrompt || !messageFitsContext || task != nil)
-                .opacity(textReady && hasPrompt && messageFitsContext && task == nil ? 1 : 0.5)
+                .disabled(!canSendPrivateMessage)
+                .opacity(canSendPrivateMessage ? 1 : 0.5)
             }
         }
         .padding(10).background(palette.card, in: RoundedRectangle(cornerRadius: 22))
@@ -282,14 +224,14 @@ extension OfflineStudio {
 
     private func toggleSessionDictation() {
         guard privateSession, canShowStudio, task == nil else { return }
-        if dictation.active { dictation.stop(); return }
-        speech.stop()
-        let existing = prompt.isEmpty ? "" : prompt + " "
+        if dictation.active { dictation.finishInput(); return }
+        stopStudioSpeech()
         let sessionID = temporaryImagesID
         Task {
-            await dictation.start { text in
+            guard studioPage == .chat, canShowStudio, sessionID == temporaryImagesID else { return }
+            await dictation.startInChat(draft: { prompt }) { text in
                 guard privateSession, sessionUnlocked, !sessionExpired, sessionID == temporaryImagesID else { return }
-                prompt = String((existing + text).prefix(12_000))
+                prompt = String(text.prefix(12_000))
             }
         }
     }
@@ -326,30 +268,72 @@ extension OfflineStudio {
         }.accessibilityLabel("Tidligere prompts").disabled(task != nil)
     }
 
+    private var canSendPrivateMessage: Bool {
+        guard !dictation.active, !loadingChatPhoto, !loadingSecondChatPhoto else { return false }
+        let message = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        if secondChatPhoto != nil { return task == nil && !message.isEmpty && message.count <= 1_000 }
+        if attachedChatPhoto != nil { return task == nil && message.count <= 1_200 }
+        let image = usesLumiReplyLanguage && LumiChatImageRequest.parse(message) != nil
+        return hasPrompt && task == nil && (image || (textReady && messageFitsContext))
+    }
+
     private func sendPrivateMessage() {
         let message = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard canShowStudio, textReady, !message.isEmpty, messageFitsContext, task == nil else { return }
+        guard canShowStudio, canSendPrivateMessage else { return }
         dictation.stop()
+        if let attachedChatPhoto {
+            if let edit = LumiChatImageRequest.requestedWithPhoto(message)
+                ?? secondChatPhoto.map({ _ in LumiChatImageRequest(prompt: message, isSelfPortrait: false) }) {
+                let usePortrait = edit.isSelfPortrait && secondChatPhoto == nil
+                generateImageFromChat(edit, first: usePortrait ? nil : attachedChatPhoto, second: secondChatPhoto)
+                return
+            }
+            sendPrivatePhoto(attachedChatPhoto, question: message)
+            return
+        }
+        if usesLumiReplyLanguage, let request = LumiChatImageRequest.parse(message) {
+            promptFocused = false
+            generateImageFromChat(request)
+            return
+        }
         // Privat: aldrig PC, aldrig Grok, aldrig forbindelser.
         let model = effectiveTextModel
         let instructions = companionInstructions
-        var remaining = chatInputBudget - estimateTokens(message) - 8
-        var context: [PhoneModels.ChatExchange] = []
-        let recentTurns = currentBotTurns.reversed().lazy.filter {
+        let modelPrompt = message + lumiReplyLanguageCue
+        let recentTurns: [PhoneModels.ChatExchange] = currentBotTurns.reversed().lazy.filter {
             $0.imageName == nil && !$0.reply.isEmpty && privateReplyIssues[$0.id] == nil
-        }
-        for turn in recentTurns.prefix(8) {
-            let cost = estimateTokens(turn.prompt) + estimateTokens(turn.reply) + 16
-            guard cost <= remaining else { break }
-            context.append(.init(prompt: turn.prompt, reply: turn.reply))
-            remaining -= cost
-        }
-        let history = Array(context.reversed())
+        }.prefix(8).reversed().map { .init(prompt: $0.prompt, reply: $0.reply) }
+        let history = PhoneModels.ChatExchange.studioHistory(recentTurns, tokenBudget: chatInputBudget - estimateTokens(modelPrompt) - 8)
         rememberPrompt(message)
         runPrivateReply(historyPrompt: message, source: "Telefon · \(studioTextModelName(model))",
                         progress: "Din bot skriver…", countsAsVillageChat: true) { id in
-            try await replyInStudio(model: model, prompt: message, instructions: instructions, history: history) {
+            try await replyInStudio(model: model, prompt: modelPrompt, instructions: instructions, history: history) {
                 updateChatReply(id, with: $0)
+            }
+        }
+    }
+
+    private func sendPrivatePhoto(_ photo: Data, question: String) {
+        let language = lumiReplyLanguage
+        let request = question.isEmpty ? (language == "en-US" ? "Describe the photo." : "Beskriv billedet.") : question
+        let session = temporaryImagesID
+        promptFocused = false
+        attachedChatPhoto = nil
+        runPrivateReply(historyPrompt: request, source: "iPhone", progress: "Undersøger billedet…",
+                        failureText: "Fotoet kunne ikke analyseres. Prøv igen med et andet foto.") { id in
+            sentChatPhotos[id] = photo
+            do {
+                let result = try await AgentChatPhotoReply.answer(photo, question: request, agent: "Lumi",
+                                                                  language: language, pc: nil)
+                try Task.checkCancellation()
+                guard isCurrentPrivateSession(session), chatWorkID == id else { return }
+                updateChatReply(id, with: result.text)
+            } catch {
+                if isCurrentPrivateSession(session), chatWorkID == id {
+                    attachedChatPhoto = photo
+                    if prompt.isEmpty { prompt = question }
+                }
+                throw error
             }
         }
     }
@@ -401,6 +385,7 @@ extension OfflineStudio {
     }
 
     private func runPrivateReply(historyPrompt: String, source: String, progress: String, countsAsVillageChat: Bool = false,
+                                 failureText: String? = nil,
                                  work: @escaping @MainActor (UUID) async throws -> Void) {
         let turn = PrivateChatTurn(prompt: historyPrompt, reply: "", source: source, botID: selectedPrivateBot?.id)
         let villageBotID = countsAsVillageChat && !privateSession ? turn.botID : nil
@@ -441,8 +426,8 @@ extension OfflineStudio {
                     } else if case .contextLimit? = error as? PhoneModelError {
                         issue = "Samtalen er for lang til modellen. Forkort beskeden, eller start en ny samtale."
                     } else {
-                        issue = privateSession ? "Dolphin kunne ikke svare. Prøv igen, eller start en ny samtale."
-                            : "Telefonen kunne ikke svare. Prøv igen, eller skift lokal tekstmodel."
+                        issue = failureText ?? (privateSession ? "Dolphin kunne ikke svare. Prøv igen, eller start en ny samtale."
+                            : "Telefonen kunne ikke svare. Prøv igen, eller skift lokal tekstmodel.")
                     }
                     if privateSession {
                         status = ""
@@ -469,7 +454,13 @@ extension OfflineStudio {
 
     private var companionInstructions: String {
         if privateSession {
-            return "Svar direkte på brugerens seneste besked og på samme sprog. Skriv naturligt. Ved rollespil mellem voksne følger du scenen med en konkret replik. Brug lun, fræk humor eller drilsk flirt, når brugeren lægger op til det. Hold et almindeligt spørgsmål almindeligt. Brug kun relevante fakta fra samtalen."
+            let languageRule: String
+            if usesLumiReplyLanguage {
+                languageRule = lumiReplyLanguage == "en-US"
+                    ? "Always write your entire reply in English, including when the user or earlier replies use Danish."
+                    : "Du er Lumi. Hele dit svar skal være på naturligt dansk, også når brugeren skriver på engelsk eller tidligere svar var på engelsk."
+            } else { languageRule = "Svar på samme sprog som brugeren." }
+            return languageRule + " Svar direkte på brugerens seneste besked. Skriv naturligt. Ved rollespil mellem voksne følger du scenen med en konkret replik. Brug lun, fræk humor eller drilsk flirt, når brugeren lægger op til det. Hold et almindeligt spørgsmål almindeligt. Brug kun relevante fakta fra samtalen."
         }
         return Self.companionInstructions(for: selectedPrivateBot, preset: personalityPreset)
     }
@@ -497,7 +488,12 @@ extension OfflineStudio {
     }
 
     private var chatInputBudget: Int { max(256, textContextLimit - 384 - estimateTokens(companionInstructions) - 96) }
-    private var messageFitsContext: Bool { estimateTokens(prompt) + 8 <= chatInputBudget }
+    private var lumiReplyLanguageCue: String {
+        guard usesLumiReplyLanguage else { return "" }
+        return lumiReplyLanguage == "en-US" ? "\n\n[Reply in English.]" : "\n\n[Svar kun på dansk.]"
+    }
+
+    private var messageFitsContext: Bool { estimateTokens(prompt + lumiReplyLanguageCue) + 8 <= chatInputBudget }
 
     private func estimateTokens(_ text: String) -> Int { (text.utf8.count + 2) / 3 }
 
@@ -538,19 +534,8 @@ extension OfflineStudio {
         if let data = try? JSONEncoder().encode(items) { promptHistoryData = data }
     }
 
-    private func readReply(_ turn: PrivateChatTurn) {
-        if speech.playback == .reply(turn.id) { speech.stop(); status = "Oplæsning stoppet."; return }
-        let bot = turn.botID.flatMap { id in privateBots.first { $0.id == id } } ?? selectedPrivateBot
-        let language = privateSession ? sessionPreferences.voiceLanguage : previewLanguage
-        let label = language == "da-DK" ? "dansk" : "engelsk"
-        guard let voice = studioVoice(language: language, bot: bot) else {
-            status = "Stemme til \(label) er ikke tilgængelig på telefonen."
-            return
-        }
-        dictation.stop()
-        let utterance = LocalSpeechVoice.utterance(LocalSpeechVoice.replyText(turn.reply), voice: voice, rate: bot?.voiceRate ?? 1)
-        speech.play(utterance, as: .reply(turn.id), agentID: bot?.id)
-        status = "Læser op på \(label)."
+    func readReply(_ turn: PrivateChatTurn) {
+        playStudioSpeech(text: turn.reply, bot: studioSpeaker(for: turn), slot: .reply(turn.id))
     }
 
     var effectiveTextModel: String {
@@ -575,13 +560,13 @@ extension OfflineStudio {
             .joined(separator: "\n\n")
     }
 
-    private func deleteTurn(_ id: UUID) {
+    func deleteTurn(_ id: UUID) {
         turns.removeAll { $0.id == id }
         privateReplyIssues[id] = nil
         savePrivateConversation()
     }
 
-    private var hasPrompt: Bool { !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    var hasPrompt: Bool { !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     var textReady: Bool {
         if privateSession { return privateModelDownload == nil && DolphinPhoneRuntime.isInstalled }
         return effectiveTextModel != "apple" && PhoneModels.isReady(effectiveTextModel)

@@ -1,6 +1,28 @@
 // Owns video selection, persistence, submission, and job status.
 import Foundation
 
+struct PCStudioVideoCatalog: Decodable {
+    struct Mode: Decodable, Identifiable {
+        let id, title: String
+        let photos: Int
+        let ready: Bool
+        let missing: [String]
+    }
+    let modes: [Mode]
+    let lastJob, message: String?
+}
+
+struct PCStudioVideoJob: Decodable {
+    enum State: String, Decodable { case working, ready, failed }
+    let id, mode: String
+    let state: State
+}
+
+struct PCStudioVideoInput: Encodable {
+    let id, mode, prompt: String
+    let photos: [Data]
+}
+
 struct SavedVideoClip: Codable, Sendable {
     let clip: Clip
     let folderID: String?

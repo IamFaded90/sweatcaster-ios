@@ -460,6 +460,7 @@ extension Home {
 
     func openShortcut() {
         guard !shortcut.isEmpty else { return }
+        if shortcut == OpenFadedAIMorningOverview.destination && showOfflineStudio { return }
         let destination = shortcut
         shortcut = ""
         switch destination {
@@ -479,6 +480,8 @@ extension Home {
                   let bot = bots.first(where: { $0.id == botID && $0.id != VillageBot.lumiID }) else { return }
             searchBot = SearchBot(id: UUID(), entry: .chat(bot), opensAction: actionID)
         case OpenFadedAIHarperChat.destination: openHarperChat()
+        case OpenFadedAIMorningOverview.destination:
+            showMorningOverview = true
         case OpenFadedAICamera.destination:
             guard !privateStudioPresented else { return }
             showFadedCamera = true

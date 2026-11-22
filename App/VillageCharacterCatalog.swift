@@ -40,12 +40,33 @@ enum VillageCharacterCatalog {
     }
 
     static func availableDefault(preferred: String, among profiles: [VillageBot]) -> String {
-        let occupied = Set(profiles.map(\.villageFigure))
+        availableDefault(preferred: preferred, occupied: Set(profiles.map(\.villageFigure)))
+    }
+
+    private static func availableDefault(preferred: String, occupied: Set<String>) -> String {
         guard occupied.contains(preferred), let character = all.first(where: { $0.id == preferred }) else {
             return preferred
         }
         let free = all.filter { !occupied.contains($0.id) }
         return free.first(where: { $0.female == character.female })?.id ?? free.first?.id ?? preferred
+    }
+
+    /// Keep chosen figures and the first occurrence of every other figure before filling gaps in older rosters.
+    static func resolveRoster(_ profiles: [VillageBot]) -> [VillageBot] {
+        var result = profiles
+        var occupied = Set(profiles.filter { $0.villageFigureWasPicked || $0.id == VillageBot.lumiID }.map(\.villageFigure))
+        var collisions: [Int] = []
+        for index in profiles.indices {
+            let profile = profiles[index]
+            guard !profile.villageFigureWasPicked, profile.id != VillageBot.lumiID else { continue }
+            if !occupied.insert(profile.villageFigure).inserted { collisions.append(index) }
+        }
+        for index in collisions {
+            let figure = availableDefault(preferred: result[index].villageFigure, occupied: occupied)
+            result[index].villageFigure = figure
+            occupied.insert(figure)
+        }
+        return result
     }
 
     static func resolved(name: String, id: String, defaults: UserDefaults = .standard) -> String {
@@ -101,6 +122,7 @@ struct VillageFigurePicker: View {
     private func choice(_ character: VillageCharacterCatalog.Character) -> some View {
         let selected = selection == character.id
         let used = occupied.contains(character.id)
+        let selectionInk = palette.isDark ? palette.lime : Color(red: 0.04, green: 0.39, blue: 0.31)
         return Button { selection = character.id } label: {
             VStack(spacing: 8) {
                 if let image = VillageProductionArt.frame(character: character.id, direction: 0, step: 0) {
@@ -109,7 +131,7 @@ struct VillageFigurePicker: View {
                 }
                 HStack(spacing: 6) {
                     Text(character.name).font(.headline)
-                    if selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(palette.lime) }
+                    if selected { Image(systemName: "checkmark.circle.fill").foregroundStyle(selectionInk) }
                 }
                 Text(character.detail).font(.caption).foregroundStyle(palette.secondary)
                     .multilineTextAlignment(.center)
@@ -118,7 +140,7 @@ struct VillageFigurePicker: View {
             .frame(maxWidth: .infinity, minHeight: 172)
             .padding(12)
             .fadedGlassSurface(radius: 20)
-            .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(selected ? palette.lime : .clear, lineWidth: 2))
+            .overlay(RoundedRectangle(cornerRadius: 20).strokeBorder(selected ? selectionInk : .clear, lineWidth: 2))
         }
         .buttonStyle(.plain)
         .disabled(used && !selected)

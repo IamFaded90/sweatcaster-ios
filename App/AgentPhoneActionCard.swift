@@ -424,16 +424,30 @@ enum AgentPhoneLanguage {
     }
 
     static func time(in prompt: String, marker: String) -> (Int, Int)? {
-        let words = "nul|en|et|to|tre|fire|fem|seks|syv|otte|ni|ti|elleve|tolv"
-        let clock = marker + #"\s*(\d{1,2})(?:[:.](\d{1,2}))?(?!\d|[:.]\d)\b"#
-        if let time = prompt.phoneMatch(clock), let hour = Int(time[1]), let minute = Int(time[2].isEmpty ? "0" : time[2]),
-           (0...23).contains(hour), (0...59).contains(minute) { return (hour, minute) }
-        if let time = prompt.phoneMatch(marker + "\\s*(" + words + ")\\b"),
-           let hour = ["nul": 0, "en": 1, "et": 1, "to": 2, "tre": 3, "fire": 4, "fem": 5, "seks": 6,
-                       "syv": 7, "otte": 8, "ni": 9, "ti": 10, "elleve": 11, "tolv": 12][time[1].lowercased()] {
-            return (hour, 0)
+        let numberWords = ["nul": 0, "en": 1, "et": 1, "to": 2, "tre": 3, "fire": 4,
+                           "fem": 5, "seks": 6, "syv": 7, "otte": 8, "ni": 9, "ti": 10,
+                           "elleve": 11, "tolv": 12]
+        let number = #"(\d{1,2}|nul|en|et|to|tre|fire|fem|seks|syv|otte|ni|ti|elleve|tolv)"#
+        let fraction = #"\s*(?:(halv|kvart i|kvart over)\s+)?"#
+        let minutes = #"(?:[:.](\d{1,2}))?(?!\d|[:.]\d)\b"#
+        let period = #"(?:\s+(?:(?:om|i)\s+)?(morgenen|morgenstunden|formiddagen|eftermiddagen|aftenen|aften))?"#
+        guard let parts = prompt.phoneMatch(marker + fraction + number + minutes + period),
+              var hour = Int(parts[2]) ?? numberWords[parts[2].lowercased()],
+              (0...23).contains(hour),
+              var minute = Int(parts[3].isEmpty ? "0" : parts[3]), minute < 60 else { return nil }
+        let phrase = parts[1].lowercased()
+        let daypart = parts[4].lowercased()
+        if !phrase.isEmpty && !parts[3].isEmpty { return nil }
+        if hour < 12 && ["eftermiddagen", "aftenen", "aften"].contains(daypart) { hour += 12 }
+        switch phrase {
+        case "halv", "kvart i":
+            hour = (hour + 23) % 24
+            minute = phrase == "halv" ? 30 : 45
+        case "kvart over":
+            minute = 15
+        default: break
         }
-        return nil
+        return (hour, minute)
     }
 
     private static func validDate(year: Int, month: Int, day: Int, calendar: Calendar) -> Date? {
@@ -443,6 +457,9 @@ enum AgentPhoneLanguage {
     }
 
     private static func relativeTime(in prompt: String, now: Date) -> Date? {
+        if prompt.phoneMatch(#"\bom (?:et kvarter|en kvart time)\b"#) != nil { return now.addingTimeInterval(900) }
+        if prompt.phoneMatch(#"\bom en halv time\b"#) != nil { return now.addingTimeInterval(1800) }
+        if prompt.phoneMatch(#"\bom halvanden time\b"#) != nil { return now.addingTimeInterval(5400) }
         guard let time = prompt.phoneMatch(#"\bom\s+(\d{1,3})\s+(minut(?:ter)?|timer?)\b"#),
               let value = Int(time[1]), value > 0 else { return nil }
         return now.addingTimeInterval(Double(value) * (time[2].lowercased().hasPrefix("time") ? 3600 : 60))

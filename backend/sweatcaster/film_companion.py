@@ -57,7 +57,7 @@ def runtime_root():
     return Path(__file__).resolve().parents[2] / "build" / "whisper-pc-test"
 
 
-def speech(pcm, start, through, settings):
+def speech(pcm, start, through, settings, *, language="en"):
     with tempfile.TemporaryDirectory(prefix="faded-film-") as folder:
         audio = Path(folder) / "scene.wav"
         with wave.open(str(audio), "wb") as writer:
@@ -67,7 +67,7 @@ def speech(pcm, start, through, settings):
         if all((root / part).is_file() for part in RUNTIME):
             prefix = Path(folder) / "dialogue"
             command = [str(root / RUNTIME[0]), "-m", str(root / RUNTIME[-1]), "-f", str(audio),
-                       "-l", "en", "-osrt", "-of", str(prefix), "-ng", "-np", "-t", "4"]
+                       "-l", language, "-osrt", "-of", str(prefix), "-ng", "-np", "-t", "4"]
             try:
                 result = subprocess.run(command, timeout=70, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 if result.returncode == 0 and prefix.with_suffix(".srt").exists():
@@ -80,7 +80,7 @@ def speech(pcm, start, through, settings):
             try:
                 from faster_whisper import WhisperModel
                 model = WhisperModel(str(model_dir), device="cpu", compute_type="int8", local_files_only=True)
-                parts, _ = model.transcribe(str(audio), language="en", vad_filter=True, condition_on_previous_text=False)
+                parts, _ = model.transcribe(str(audio), language=language, vad_filter=True, condition_on_previous_text=False)
                 return [{"start": start + row.start, "end": start + row.end, "text": row.text.strip()[:320]}
                         for row in parts if row.text.strip() and 0 <= row.start < row.end <= through - start
                         and row.no_speech_prob <= 0.6 and row.avg_logprob >= -1]

@@ -35,8 +35,12 @@ def remove_video(folder, job_id):
 
 
 def discard_render(client, client_factory, comfy, folder, job_id, prompt_id, finished):
+    discard_prompt(client, client_factory, comfy, prompt_id, finished, lambda _: remove_video(folder, job_id))
+
+
+def discard_prompt(client, client_factory, comfy, prompt_id, finished, remove_artifacts):
     def remove_files(session):
-        remove_video(folder, job_id)
+        remove_artifacts(session)
         if prompt_id is not None:
             response = session.post(comfy + "/history", json={"delete": [prompt_id]},
                                     timeout=(2, 3), allow_redirects=False)
@@ -72,4 +76,4 @@ def discard_render(client, client_factory, comfy, folder, job_id, prompt_id, fin
                 except (requests.RequestException, ApiError, KeyError, TypeError, IndexError, ValueError):
                     time.sleep(10)
 
-    Thread(target=finish_cleanup, daemon=True, name="lumi-video-cleanup").start()
+    Thread(target=finish_cleanup, daemon=True, name="lumi-render-cleanup").start()

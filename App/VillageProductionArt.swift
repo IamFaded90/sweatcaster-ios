@@ -204,6 +204,9 @@ struct VillageCharacterMotion: View {
     let label: String
     var residents: [VillageLifeBot] = []
     var animateResidents = false
+    var speakingID: String?
+    var onHear: ((VillageLifeBot, Float) -> Void)?
+    var onMoveSpeaker: ((String, Float) -> Void)?
 
     var body: some View {
         Group {
@@ -222,6 +225,7 @@ struct VillageCharacterMotion: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .fadedGlassSurface(radius: 18)
         .clipShape(RoundedRectangle(cornerRadius: 18))
+        .accessibilityElement(children: .contain)
         .accessibilityLabel(label)
     }
 
@@ -229,28 +233,57 @@ struct VillageCharacterMotion: View {
         if !residents.isEmpty {
             GeometryReader { canvas in
                 let visible = residents.prefix(10)
-                let roomy = visible.count <= 3
-                let frontCount = min(5, visible.count)
-                let size = min(144, canvas.size.width * (roomy ? 0.38 : 0.29), canvas.size.height * (roomy ? 0.64 : 0.54))
                 ZStack {
                     ForEach(Array(visible.enumerated()), id: \.element.id) { index, bot in
-                        let inBack = index >= frontCount
-                        let rowCount = inBack ? visible.count - frontCount : frontCount
-                        let column = inBack ? index - frontCount : index
-                        let inset: CGFloat = roomy ? (rowCount == 2 ? 0.31 : 0.24) : (inBack ? 0.20 : 0.15)
-                        let x = rowCount == 1 ? 0.5 : inset + (1 - 2 * inset) * CGFloat(column) / CGFloat(rowCount - 1)
-                        let figureSize = inBack ? size * 0.70 : size
-                        let feetY = canvas.size.height * (inBack ? 0.61 : 0.88)
-                        VillageBotSprite(bot: bot, size: figureSize, animateWalk: animateResidents)
+                        let place = VillageRoomPlacement(index: index, count: visible.count, in: canvas.size)
+                        VillageBotSprite(bot: bot, size: place.size, animateWalk: animateResidents)
                             .shadow(color: .black.opacity(0.8), radius: 3, x: 1, y: 3)
-                            .position(x: canvas.size.width * x, y: feetY - figureSize * (114.0 / 128.0 - 0.5))
-                            .zIndex(inBack ? 0 : 1)
+                            .accessibilityHidden(true)
+                            .overlay(alignment: .bottomTrailing) {
+                                if let onHear {
+                                    let active = speakingID == bot.id
+                                    Button { onHear(bot, place.pan) } label: {
+                                        Image(systemName: active ? "stop.fill" : "speaker.wave.2.fill")
+                                            .font(.footnote.bold()).foregroundStyle(.white)
+                                            .padding(7).background(.black.opacity(0.80), in: Circle())
+                                            .frame(minWidth: 44, minHeight: 44)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(active ? "Stop oplæsning" : "Hør " + bot.displayName)
+                                }
+                            }
+                            .position(place.center)
+                            .zIndex(place.inBack ? 0 : 1)
+                            .onChange(of: place.pan) { _, pan in onMoveSpeaker?(bot.id, pan) }
                     }
                 }
             }
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
+            .allowsHitTesting(onHear != nil)
+            .accessibilityHidden(onHear == nil)
         }
     }
 
+}
+
+struct VillageRoomPlacement {
+    let size: CGFloat
+    let center: CGPoint
+    let inBack: Bool
+    let pan: Float
+
+    init(index: Int, count: Int, in canvas: CGSize) {
+        let frontCount = count <= 2 ? count : (count + 1) / 2
+        inBack = index >= frontCount
+        let columns = max(1, inBack ? count - frontCount : frontCount)
+        let column = inBack ? index - frontCount : index
+        let columnWidth = canvas.width * 0.94 / CGFloat(columns)
+        let rowHeight = canvas.height * (inBack ? 0.51 : count <= 2 ? 0.85 : 0.69)
+        size = min(208, columnWidth * (inBack ? 0.85 : 1), rowHeight)
+        let feetY = canvas.height * (inBack ? 0.54 : 0.90)
+        let stagger: CGFloat = inBack && columns == frontCount ? 0.25 : 0
+        let x = canvas.width * 0.03 + (CGFloat(column) + 0.5 + stagger) * columnWidth
+        center = CGPoint(x: min(x, canvas.width - size / 2),
+                         y: feetY - size * (114.0 / 128.0 - 0.5))
+        pan = canvas.width > 0 ? Float(max(-1, min(1, 2 * center.x / canvas.width - 1))) : 0
+    }
 }

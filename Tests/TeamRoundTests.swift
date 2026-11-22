@@ -2,6 +2,66 @@ import Foundation
 import XCTest
 @testable import SweatCaster
 
+final class ChatReplyBlockTests: XCTestCase {
+    func testStructuredReplyPreservesDanishTextAndSoftWrapsListItems() {
+        let reply = "## Dagens aftaler\r\n\r\n1. **Tandlæge**\r\n   kl. 11\r\n  - Tag kortet med\r\n\r\nGod tur!"
+        XCTAssertEqual(ChatReplyBlock.parse(reply), [
+            .heading(level: 2, text: "Dagens aftaler"),
+            .item(marker: "1.", indent: 0, text: "**Tandlæge**\nkl. 11"),
+            .item(marker: "•", indent: 2, text: "Tag kortet med"),
+            .text("God tur!")
+        ])
+    }
+
+    func testStreamingCodeKeepsFirstLineAndEmbeddedFences() {
+        let intro = "Skriv ```her``` midt i en linje."
+        let partial = intro + "\n````swift\nlet first = 1\n```\n"
+        XCTAssertEqual(ChatReplyBlock.parse(partial), [.text(intro), .code("let first = 1\n```\n")])
+        let complete = partial + "let next = 2\n````\n\nFærdig"
+        XCTAssertEqual(ChatReplyBlock.parse(complete),
+                       [.text(intro), .code("let first = 1\n```\nlet next = 2"), .text("Færdig")])
+        XCTAssertEqual(ChatReplyBlock.parse("~~~\n**ordret**\n~~~"), [.code("**ordret**")])
+    }
+
+    func testPCStreamRendersListsAndCodeAsTheTextArrives() throws {
+        let frames = [
+            ###"{"type":"text","content":"## Din dag\n- Køb mælk"}"###,
+            #"{"type":"text","content":"\n``"}"#,
+            #"{"type":"text","content":"`swift\nlet tid = 11"}"#,
+            #"{"type":"text","content":"\n```\nGod tur!"}"#,
+            #"{"type":"done","content":"","message_id":"test","model_id":"pc-test"}"#
+        ]
+        var parser = V2ChatParser()
+        var reply = ""
+        var rendered: [[ChatReplyBlock]] = []
+        for frame in frames {
+            for byte in "data: \(frame)\r\n\r\n".utf8 {
+                if let event = try parser.feed(byte), event.type == .text {
+                    reply += event.content
+                    rendered.append(ChatReplyBlock.parse(reply))
+                }
+            }
+        }
+        try parser.end()
+        let first: [ChatReplyBlock] = [.heading(level: 2, text: "Din dag"), .item(marker: "•", indent: 0, text: "Køb mælk")]
+        XCTAssertEqual(rendered.count, 4)
+        XCTAssertEqual(rendered.first, first)
+        XCTAssertEqual(try XCTUnwrap(rendered.dropFirst(2).first), first + [.code("let tid = 11")])
+        XCTAssertEqual(rendered.last, first + [.code("let tid = 11"), .text("God tur!")])
+    }
+
+    @MainActor func testPrivateMarkupKeepsReadableWordsAndClearsLinkActions() {
+        let markdown = "**Læs** [aftalen](https://example.com/test)"
+        let publicText = ChatTranscriptView.inlineText(markdown)
+        let privateText = ChatTranscriptView.inlineText(markdown, allowsLinks: false)
+        XCTAssertEqual(String(publicText.characters), "Læs aftalen")
+        XCTAssertEqual(String(privateText.characters), "Læs aftalen")
+        XCTAssertTrue(publicText.runs.contains { $0.link != nil })
+        XCTAssertTrue(privateText.runs.allSatisfy { $0.link == nil })
+    }
+}
+
+
 final class TeamRoundTests: XCTestCase {
     @MainActor func testTwoAgentsProduceOneAnswerAfterIndependentCorrection() async throws {
         let finder = UUID(), writer = UUID()

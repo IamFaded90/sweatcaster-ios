@@ -250,7 +250,7 @@ extension Home {
         }
         .sheet(isPresented: $showPhoneModels) { PhoneModelsView() }
         .sheet(isPresented: $showFadedCamera) { NavigationStack { FadedCaptureView(modal: true) } }
-        .sheet(isPresented: $showOfflineStudio) {
+        .sheet(isPresented: $showOfflineStudio, onDismiss: openShortcut) {
             OfflineStudio(api: studioAPI, sessionUnlocked: $nsfwSessionUnlocked,
                           onPrivateSessionEnded: showPrivateSessionNotice,
                           initialPage: studioPage == .chat ? nil : studioPage, initialImagePrompt: studioImagePrompt,
@@ -302,6 +302,7 @@ extension Home {
                 }
             }
             .sheet(item: $searchBot, content: presentSearchBot)
+            .sheet(isPresented: $showMorningOverview) { MorningOverviewSheet(api: studioAPI) }
             .sheet(isPresented: $showNotes) { FadedNotesSheet(onClose: { showNotes = false }) }
     }
 

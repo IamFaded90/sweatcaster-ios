@@ -4,6 +4,84 @@ import AVFAudio
 import Foundation
 import SwiftUI
 
+/// Render a short room status with the agent's selected system voice before stereo playback.
+@MainActor enum VillageRoomSpeechAudio {
+    static func render(_ utterance: AVSpeechUtterance) async throws -> Data {
+        let synth = AVSpeechSynthesizer()
+        let output = VillageRoomSpeechFile()
+        let timeout = Task {
+            do { try await Task.sleep(for: .seconds(20)) } catch { return }
+            output.fail(URLError(.timedOut))
+        }
+        defer {
+            timeout.cancel()
+            synth.stopSpeaking(at: .immediate)
+        }
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard output.start(continuation) else { return }
+                // A nonisolated callback receives short-lived buffers on AVFAudio's queue.
+                synth.write(utterance, toBufferCallback: output.receive)
+            }
+        } onCancel: {
+            output.fail(CancellationError())
+        }
+    }
+}
+
+/// AVFAudio may call back while the view is disappearing. The lock covers both the file and its single completion.
+final class VillageRoomSpeechFile: @unchecked Sendable {
+    private let lock = NSLock()
+    private let url = FileManager.default.temporaryDirectory.appendingPathComponent("room-\(UUID()).caf")
+    private var file: AVAudioFile?
+    private var continuation: CheckedContinuation<Data, Error>?
+    private var finished = false
+
+    func start(_ awaiting: CheckedContinuation<Data, Error>) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { awaiting.resume(throwing: CancellationError()); return false }
+        continuation = awaiting
+        return true
+    }
+
+    func receive(_ buffer: AVAudioBuffer) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !finished else { return }
+        do {
+            guard let pcm = buffer as? AVAudioPCMBuffer else { throw APIError.malformed }
+            if pcm.frameLength == 0 {
+                guard file != nil else { throw APIError.malformed }
+                file = nil
+                finish(.success(try Data(contentsOf: url)))
+                return
+            }
+            if file == nil {
+                file = try AVAudioFile(forWriting: url, settings: pcm.format.settings,
+                                       commonFormat: pcm.format.commonFormat, interleaved: pcm.format.isInterleaved)
+            }
+            try file?.write(from: pcm)
+        } catch {
+            finish(.failure(error))
+        }
+    }
+
+    func fail(_ error: Error) {
+        lock.lock()
+        defer { lock.unlock() }
+        if !finished { finish(.failure(error)) }
+    }
+
+    private func finish(_ result: Result<Data, Error>) {
+        finished = true
+        file = nil
+        try? FileManager.default.removeItem(at: url)
+        continuation?.resume(with: result)
+        continuation = nil
+    }
+}
+
 final class SpeechBox: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
     enum Playback: Equatable {
         case reply(UUID), preview

@@ -4,42 +4,6 @@ import AVFoundation
 import SwiftUI
 import UIKit
 
-struct PairingQRCode: Decodable {
-    let version: Int
-    let address: String
-    let token: String
-    let expiresAt: Date?
-    let nonce: String?
-
-    // Parsing validates the wire format. Scans must also pass PairingQRSession.accept.
-    static func parse(_ text: String) throws -> Self {
-        guard text.utf8.count <= 2_048,
-              let payload = try? contractDecoder().decode(Self.self, from: Data(text.utf8)),
-              payload.version == 1,
-              !payload.token.isEmpty, payload.token.utf8.count <= 512,
-              payload.nonce?.isEmpty != true,
-              payload.token.utf8.allSatisfy({ (33...126).contains($0) }) else { throw APIError.input }
-        let server = try Server(payload.address)
-        return Self(version: 1, address: server.address, token: payload.token,
-                    expiresAt: payload.expiresAt, nonce: payload.nonce)
-    }
-}
-
-@MainActor enum PairingQRSession {
-    enum Failure: Error { case replay }
-
-    private static var scannedNonces: Set<String> = []
-
-    static func accept(_ text: String, now: Date = .now) throws -> PairingQRCode {
-        let payload = try PairingQRCode.parse(text)
-        guard let expiresAt = payload.expiresAt, expiresAt > now else { throw APIError.pairingExpired }
-        if let nonce = payload.nonce, !scannedNonces.insert(nonce).inserted {
-            throw Failure.replay
-        }
-        return payload
-    }
-}
-
 struct LoginView: View {
     private enum ManualField: Equatable { case address, token, connection }
 
@@ -64,6 +28,7 @@ struct LoginView: View {
     @State private var attemptedConnection = false
     @State private var connecting = false
     @State private var scanning = false
+    @State private var scanHint = PairingQRTarget.Selection.searching.hint
     @State private var torchOn = false
     @State private var torchReady = false
     @State private var pinging = false
@@ -106,14 +71,18 @@ struct LoginView: View {
             .toolbar(close == nil ? .hidden : .visible, for: .navigationBar)
             .sheet(isPresented: $scanning) {
                 NavigationStack {
-                    PairingQRScanner(torchOn: $torchOn, torchReady: $torchReady, finish: finishScan)
+                    PairingQRScanner(torchOn: $torchOn, torchReady: $torchReady, hint: $scanHint, finish: finishScan)
                         .overlay {
-                            // QRCameraKits sigtemærke over FadedAIs kamera.
-                            Image(systemName: "qrcode.viewfinder")
-                                .font(.system(size: 196, weight: .light))
-                                .foregroundStyle(Color(red: 0.8, green: 1, blue: 0.35))
-                                .shadow(color: .black.opacity(0.8), radius: 5)
-                                .allowsHitTesting(false).accessibilityHidden(true)
+                            Canvas { context, size in
+                                let frame = PairingQRTarget.frame(in: CGRect(origin: .zero, size: size))
+                                context.stroke(Path(roundedRect: frame, cornerRadius: 12),
+                                               with: .color(Color(red: 0.8, green: 1, blue: 0.35)), lineWidth: 3)
+                            }.shadow(color: .black, radius: 3).allowsHitTesting(false).accessibilityHidden(true)
+                        }
+                        .overlay(alignment: .bottom) {
+                            Text(scanHint).font(.callout.weight(.medium)).multilineTextAlignment(.center)
+                                .foregroundStyle(.white).padding(12).background(.black.opacity(0.75), in: Capsule())
+                                .padding(16).allowsHitTesting(false)
                         }
                         .navigationTitle("Scan forbindelseskode")
                         .toolbar {
@@ -125,7 +94,7 @@ struct LoginView: View {
                                 }.disabled(!torchReady)
                             }
                         }
-                        .onDisappear { torchOn = false; torchReady = false }
+                        .onDisappear { torchOn = false; torchReady = false; scanHint = PairingQRTarget.Selection.searching.hint }
                 }
             }
             .toolbar {
@@ -470,6 +439,7 @@ struct LoginView: View {
 private struct PairingQRScanner: UIViewRepresentable {
     @Binding var torchOn: Bool
     @Binding var torchReady: Bool
+    @Binding var hint: String
     let finish: (Result<String, Error>) -> Void
 
     final class Preview: UIView {
@@ -481,12 +451,17 @@ private struct PairingQRScanner: UIViewRepresentable {
         let session = AVCaptureSession()
         let queue = DispatchQueue(label: "dk.fadedai.pairing-camera")
         let finish: (Result<String, Error>) -> Void
+        weak var preview: Preview?
+        let hint: Binding<String>
         var torchStatus: (Bool, Bool, Bool) -> Void = { _, _, _ in }
         private var camera: AVCaptureDevice?
         private var delivered = false
         private var started = false
 
-        init(finish: @escaping (Result<String, Error>) -> Void) { self.finish = finish }
+        init(hint: Binding<String>, finish: @escaping (Result<String, Error>) -> Void) {
+            self.hint = hint
+            self.finish = finish
+        }
 
         func start() {
             queue.async {
@@ -565,16 +540,29 @@ private struct PairingQRScanner: UIViewRepresentable {
 
         func metadataOutput(_ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject],
                             from connection: AVCaptureConnection) {
-            if let value = (metadataObjects.first as? AVMetadataMachineReadableCodeObject)?.stringValue {
-                deliver(.success(value))
+            // The capture output delivers its delegate callbacks on DispatchQueue.main.
+            MainActor.assumeIsolated { readCodes(metadataObjects) }
+        }
+
+        @MainActor private func readCodes(_ metadataObjects: [AVMetadataObject]) {
+            guard !delivered, let preview else { return }
+            let layer = preview.captureLayer
+            let codes: [(value: String, bounds: CGRect)] = metadataObjects.compactMap { object in
+                guard let qr = object as? AVMetadataMachineReadableCodeObject, qr.type == .qr,
+                      let value = qr.stringValue, let transformed = layer.transformedMetadataObject(for: qr) else { return nil }
+                return (value, transformed.bounds)
             }
+            let selection = PairingQRTarget.select(in: PairingQRTarget.frame(in: layer.bounds), from: codes)
+            if case .match(let value) = selection { deliver(.success(value)) }
+            else if hint.wrappedValue != selection.hint { hint.wrappedValue = selection.hint }
         }
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(finish: finish) }
+    func makeCoordinator() -> Coordinator { Coordinator(hint: $hint, finish: finish) }
 
     func makeUIView(context: Context) -> Preview {
         let view = Preview()
+        context.coordinator.preview = view
         view.captureLayer.session = context.coordinator.session
         view.captureLayer.videoGravity = .resizeAspectFill
         context.coordinator.start()

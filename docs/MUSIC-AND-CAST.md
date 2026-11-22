@@ -1,4 +1,16 @@
-# Musik og Cast · 19. november 2026
+# Musik og Cast
+
+## 22. november 2026
+
+I Musik kan du sætte en sang på pause, mens den åbner. Fjerner du sangen fra en pauset kø, står den næste klar, til du selv trykker afspil. Spoler du tilbage på Chromecast, bruger FadedAI det nye tidspunkt ved næste forsøg på at genoptage filmen.
+
+PC-relæet afviste det første filmstykke i en prøvefilm med fragmenteret MP4. Efter rettelsen kunne en særskilt testmodtager hente alle tre stykker, efter afsenderen var lukket. FFprobe afkodede alle 30 billeder og AAC-lyden. Otte relæprøver og fem lokale Swift-prøver bestod. Ændringerne i køen og Cast-betjeningen skal prøves på iPhone. Filmstykkerne i prøven havde den medietype, Apple anbefaler til formatet. [Apples HLS-specifikation](https://developer.apple.com/documentation/http-live-streaming/hls-authoring-specification-for-apple-devices/)
+
+Musikafspilleren beder iOS om at fortsætte ved låst skærm. Efter en lydafbrydelse genoptager den kun et nummer, der var sat til at spille, hvis iOS tillader det. Pause fra låseskærmen, sovetimeren eller frakobling af hovedtelefoner annullerer genoptagelsen. Swift-prøven dækkede både genoptagelse og de tilfælde, hvor musikken skal forblive på pause.
+
+Cast giver TV’et tid til at melde tilbage, når iPhone kommer tilbage i appen. Tiden med låst skærm udløser dermed ikke straks et nyt forsøg på at indlæse filmen. En separat testmodtager hentede næste filmstykke fra PC’en med afsenderen lukket efter ti minutters simuleret tid. Låseskærmens lyd og kontrolknapper på iPhone samt Cinejoy på brugerens Chromecast afventer fysisk prøve.
+
+## 19. november 2026
 
 Ændringerne ligger lokalt på `codex/spotube-musik-next-20261117`. Ingen push eller IPA er startet i denne omgang. Denne status erstatter de ældre Eevee- og ByTune-beskrivelser.
 
@@ -34,7 +46,7 @@ Filmvennen kan forklare scenen på dansk og vise eller læse den originale engel
 
 ## Før frigivelse
 
-- [ ] Installér den samlede PC-opdatering, når den ikke afbryder en film eller et job. Installeren er prøvet på en kopi.
+- [x] PC-relæets rettelse til fragmenteret MP4 blev installeret 22. november. Chromecast viste pauseskærmen, køerne var tomme, og PC-tjenesten svarede efter genstarten.
 - [ ] Kør Xcode-kompilering, ContractTests og kontrol af den samlede IPA. Windows-testene erstatter ikke dette.
 - [ ] Start Cinejoy på iPhone, cast, skift til Landsbyen, åbn en anden app, og lås skærmen i mindst to minutter. Kontrollér ruten i TV-siden.
 - [ ] Åbn appen igen uden, at filmen starter forfra. Prøv pause, søgning og Stop.

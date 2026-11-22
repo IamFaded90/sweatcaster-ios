@@ -32,15 +32,10 @@ extension ChatView {
     }
 
     private func phoneHistory(for message: String) -> [PhoneModels.ChatExchange] {
-        var remaining = max(0, 3_000 - message.count)
-        var history: [PhoneModels.ChatExchange] = []
-        for turn in turns.suffix(6).reversed() where turn.imageRequest != true && turn.notice == nil && !turn.reply.isEmpty {
-            let size = turn.prompt.count + turn.reply.count + 24
-            guard size <= remaining else { break }
-            history.append(.init(prompt: turn.prompt, reply: turn.reply))
-            remaining -= size
-        }
-        return Array(history.reversed())
+        let exchanges: [PhoneModels.ChatExchange] = turns.reversed().lazy.filter { $0.imageRequest != true && $0.notice == nil && !$0.reply.isEmpty }
+            .prefix(6).reversed()
+            .map { PhoneModels.ChatExchange(prompt: $0.prompt, reply: $0.reply) }
+        return PhoneModels.ChatExchange.recent(exchanges, for: message)
     }
 
     var transportMessage: String { transportMessage(for: effectiveReplySource) }
@@ -383,17 +378,10 @@ extension ChatView {
         guard let index = turnIndex(turnID) else { return }
         turns[index].source = "Telefon"
         status = "Telefon · Forbereder svar…"
-        let instructions = "Besvar brugerens seneste besked direkte. En hilsen skal bare have en kort hilsen som svar. "
-            + "Brug tidligere beskeder, når de er relevante. Du udfører ingen opgaver på PC’en. "
-            + "Svarpræferencer: " + preferences.joined(separator: ", ") + "."
-        let prompt: String
-        if modelID == "apple" && !history.isEmpty {
-            let context = history.map { "Bruger: \($0.prompt)\nSvar: \($0.reply)" }.joined(separator: "\n")
-            prompt = "\(context)\nBruger: \(message)"
-        } else {
-            prompt = message
-        }
-        try await PhoneModels.reply(modelID: modelID, prompt: prompt, instructions: instructions, history: history) { answer in
+        let instructions = PhonePromptCache.instructions + " " + preferences.joined(separator: ", ") + "."
+        let scope = PhonePromptCache.Scope(sessionID: sessionID, cache: phonePromptCache)
+        try await PhoneModels.reply(modelID: modelID, prompt: message, instructions: instructions, history: history,
+                                    prefixCache: scope) { answer in
             guard !Task.isCancelled, let index = turnIndex(turnID) else { return }
             turns[index].reply = safeText(answer)
             turns[index].replyModelID = modelID

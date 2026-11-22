@@ -27,6 +27,11 @@ enum PCModelSelection {
         entry.available && entry.capabilities.contains("chat") && !entry.requiresImageForChat
     }
 
+    static func preferredVision(in catalog: V2Models) -> V2Models.Entry? {
+        let models = installed(in: catalog).filter(\.supportsImageChat)
+        return models.first { $0.id == "qwen3-vl-4b" } ?? models.first(where: \.loaded) ?? models.first
+    }
+
     static func installed(in catalog: V2Models) -> [V2Models.Entry] {
         var seen = Set<String>()
         return catalog.models.filter { $0.available && !$0.id.isEmpty && seen.insert($0.id).inserted }
@@ -230,6 +235,8 @@ struct PCModelsView: View {
             ("llama3.1:8b", "4,9 GB", "Til idéudvikling, kreativ skrivning og almindelig chat.", "meta-llama/Llama-3.1-8B-Instruct")
         case "moondream-18":
             ("moondream:1.8b", "1,7 GB", "Til at beskrive og analysere billeder på PC’en.", "vikhyatk/moondream2")
+        case "qwen3-vl-4b":
+            ("qwen3-vl:4b", "3,3 GB", "Læser billeder og skærmtekst for dine agenter på PC’en.", "Qwen/Qwen3-VL-4B-Instruct")
         default: nil
         }
     }

@@ -129,6 +129,7 @@ import UIKit
                 where voice.language.hasPrefix("da") && namesSeen.insert(voice.name.lowercased()).inserted {
                 choices.append((voice.identifier, LocalSpeechVoice.label(voice)))
             }
+            if AgentVoiceDownload.shared.installed { choices += DownloadedAgentVoice.all.map { ($0.id, $0.label) } }
             current = AgentVoiceSelection.identifier(for: bot)
             if choices.count < 2 {
                 notice = "Der skal være to forskellige danske stemmer at lytte til. Forbind PC’en med dens stemmer, eller hent en anden dansk stemme på iPhone."
@@ -165,7 +166,9 @@ import UIKit
         notice = nil
         previewID = id
         let sample = LocalSpeechVoice.previewSentence(language: "da-DK")
-        if let pcVoice = AgentPCVoice(rawValue: id), let api {
+        if let local = DownloadedAgentVoice.selected(id) {
+            pcSpeech.playDownloaded(text: sample, voice: local, agentID: bot.id, rate: bot.voiceRate ?? 1)
+        } else if let pcVoice = AgentPCVoice(rawValue: id), let api {
             pcSpeech.playAgentVoice(text: sample, voice: pcVoice, agentID: bot.id, pc: api)
         } else if let voice = AgentVoiceSelection.resolve(identifier: id, language: "da-DK") {
             speech.play(LocalSpeechVoice.utterance(sample, voice: voice, rate: bot.voiceRate ?? 1),

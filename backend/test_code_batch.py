@@ -84,6 +84,68 @@ def test_queue_refuses_proposed_paths_outside_selection(tmp_path):
     assert batch.get(job)["status"] == "failed"
 
 
+def test_crash_after_generation_resumes_review_without_a_second_proposal(tmp_path):
+    import threading
+
+    snapshot = Snapshot(tmp_path, tmp_path / "index", None)
+    db = tmp_path / "jobs.sqlite"
+    calls = []
+    def generate(goal, files):
+        calls.append(goal)
+        return {"feasible": True, "files": {"a.py": "a = 2\n"}, "tests": ["Check result"]}
+
+    first, second = (CodeBatch(db, snapshot, generate) for _ in range(2))
+    key = first.enqueue("user/repo", "ret tallet", ["a.py"])
+    entered, release = threading.Event(), threading.Event()
+    def interrupt(*args):
+        entered.set()
+        assert release.wait(5)
+        raise KeyboardInterrupt
+
+    first._validate = interrupt
+    def work():
+        with pytest.raises(KeyboardInterrupt):
+            first.work_once()
+    worker = threading.Thread(target=work)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        assert not second.work_once()
+        assert first.get(key) == {"id": key, "repo": "user/repo", "status": "running", "result": None}
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert second.work_once()
+    assert second.get(key)["status"] == "review"
+    assert calls == ["ret tallet"]
+    assert not second.work_once()
+    with sqlite3.connect(db) as connection:
+        assert connection.execute("SELECT candidate FROM code_batch WHERE id=?", (key,)).fetchone() == (None,)
+
+
+def test_resume_never_uses_a_generated_proposal_on_a_changed_revision(tmp_path):
+    snapshot = Snapshot(tmp_path, tmp_path / "index", None)
+    db = tmp_path / "jobs.sqlite"
+    calls = []
+    def generate(*_):
+        calls.append(1)
+        return {"feasible": True, "files": {"a.py": "a = 2\n"}, "tests": ["Check result"]}
+    first = CodeBatch(db, snapshot, generate)
+    key = first.enqueue("user/repo", "ret tallet", ["a.py"])
+    def interrupt(*_):
+        raise KeyboardInterrupt
+    first._validate = interrupt
+    with pytest.raises(KeyboardInterrupt):
+        first.work_once()
+    snapshot._head = lambda _: (Path("repo"), "different-revision")
+    second = CodeBatch(db, snapshot, generate)
+    assert second.work_once()
+    assert second.get(key)["status"] == "declined"
+    assert "revision" in second.get(key)["result"]["reason"]
+    assert calls == [1]
+
+
 def test_approval_writes_only_new_branch_and_is_idempotent(tmp_path):
     source = tmp_path / "source"
     source.mkdir()

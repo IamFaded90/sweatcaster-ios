@@ -26,6 +26,8 @@ import UniformTypeIdentifiers
     @State private var draft: VillageBot
     @State private var draftLoaded = false
     @StateObject private var voicePreviewBox = SpeechBox()
+    @StateObject private var pcVoicePreview = ChristelPlayer()
+    @State private var pcVoices: [AgentPCVoice] = []
     @State private var importing = false
     @State private var showGrokTemplate = false
     @State private var confirmReplaceDraft = false
@@ -45,6 +47,7 @@ import UniformTypeIdentifiers
     private var testing: Bool { testTask != nil }
     private var testModel: String { PhoneModels.effectiveModelID(phoneModel) }
     private var canTest: Bool { PhoneModels.isReady(testModel) }
+    private var previewing: Bool { voicePreviewBox.playback == .preview || pcVoicePreview.playing || pcVoicePreview.loading }
 
     init(api: LiveAPI? = nil, bot: VillageBot? = nil, onBack: (() -> Void)? = nil) {
         self.api = api
@@ -221,10 +224,15 @@ import UniformTypeIdentifiers
     }
 
     private var voiceSettings: some View {
-        Section("Oplæsning på telefonen") {
+        Section("Agentens stemme") {
+            let selectedPC = AgentPCVoice(rawValue: draft.voice)
             Picker("Stemme", selection: $draft.voice) {
-                if let pcVoice = AgentPCVoice(rawValue: draft.voice) {
-                    Text(pcVoice.label).tag(pcVoice.id)
+                DownloadedVoiceOptions(selection: draft.voice)
+                if let selectedPC, !pcVoices.contains(selectedPC) {
+                    Text(selectedPC.label + " · utilgængelig").tag(selectedPC.id)
+                }
+                ForEach(pcVoices) { voice in
+                    Text(voice.label).tag(voice.id)
                 }
                 Text("Bedste danske stemme").tag("da-DK")
                 Text("Bedste engelske stemme").tag("en-US")
@@ -233,17 +241,28 @@ import UniformTypeIdentifiers
                     Text(LocalSpeechVoice.label(voice)).tag(voice.identifier)
                 }
             }
-            VStack(alignment: .leading) {
-                Text("Talehastighed · \((draft.voiceRate ?? 1).formatted(.number.precision(.fractionLength(1))))x")
-                Slider(value: Binding(get: { draft.voiceRate ?? 1 }, set: { draft.voiceRate = $0 }),
-                       in: 0.7...1.3, step: 0.1)
+            if selectedPC == nil {
+                VStack(alignment: .leading) {
+                    Text("Talehastighed · \((draft.voiceRate ?? 1).formatted(.number.precision(.fractionLength(1))))x")
+                    Slider(value: Binding(get: { draft.voiceRate ?? 1 }, set: { draft.voiceRate = $0 }),
+                           in: 0.7...1.3, step: 0.1)
+                }
             }
-            let playing = voicePreviewBox.playback == .preview
-            FadedSecondaryButton(playing ? "Stop stemmeprøve" : "Prøv stemme", icon: playing ? "stop.circle" : "play.circle") { speakPreview(draft.previewSentence) }
-                .disabled(AgentPCVoice(rawValue: draft.voice) != nil)
-            if AgentPCVoice(rawValue: draft.voice) != nil {
-                Text("Hør PC-stemmen fra agentens profil eller chat.").font(.footnote)
+            FadedSecondaryButton(previewing ? "Stop stemmeprøve" : "Prøv stemme", icon: previewing ? "stop.circle" : "play.circle") {
+                speakPreview(selectedPC.map { LocalSpeechVoice.previewSentence(language: $0.language) } ?? draft.previewSentence)
             }
+            .disabled(selectedPC.map { !pcVoices.contains($0) } ?? false)
+            if let detail = pcVoicePreview.notice { Text(detail).font(.footnote) }
+        }
+        .task(id: "\(draft.id):\(api?.queueTargetID ?? "")") {
+            pcVoices = []
+            guard let api else { return }
+            let result = (try? await api.agentPCVoices(for: draft.id)) ?? []
+            if !Task.isCancelled { pcVoices = result }
+        }
+        .onChange(of: draft.voice) { _, _ in
+            voicePreviewBox.stop()
+            pcVoicePreview.stop()
         }
     }
 
@@ -294,9 +313,10 @@ import UniformTypeIdentifiers
             if !testReply.isEmpty {
                 Label("Telefon", systemImage: "iphone")
                 Text(testReply).textSelection(.enabled)
-                Button(voicePreviewBox.playback == .preview ? "Stop oplæsning" : "Læs testsvar op",
-                       systemImage: voicePreviewBox.playback == .preview ? "stop.circle" : "speaker.wave.2") { speakPreview(testReply) }
+                Button(previewing ? "Stop oplæsning" : "Læs testsvar op",
+                       systemImage: previewing ? "stop.circle" : "speaker.wave.2") { speakPreview(testReply) }
                     .frame(minHeight: 44).disabled(testing)
+                if let detail = pcVoicePreview.notice { Text(detail).font(.footnote) }
             }
         }
     }
@@ -320,13 +340,23 @@ import UniformTypeIdentifiers
     }
 
     private func speakPreview(_ text: String) {
-        if voicePreviewBox.playback == .preview { voicePreviewBox.stop() }
-        else { voicePreviewBox.play(draft.utterance(text), as: .preview) }
+        if previewing {
+            voicePreviewBox.stop()
+            pcVoicePreview.stop()
+        } else if let local = DownloadedAgentVoice.selected(draft.voice) {
+            pcVoicePreview.playDownloaded(text: text, voice: local, agentID: draft.id, rate: draft.voiceRate ?? 1)
+        } else if let pcVoice = AgentPCVoice(rawValue: draft.voice) {
+            guard let api else { notice = "Forbind PC’en for at høre denne stemme."; return }
+            pcVoicePreview.playAgentVoice(text: text, voice: pcVoice, agentID: draft.id, pc: api)
+        } else {
+            voicePreviewBox.play(draft.utterance(text), as: .preview)
+        }
     }
 
     private func stopPreview() {
         testTask?.cancel()
         voicePreviewBox.stop()
+        pcVoicePreview.stop()
     }
 
     private func selectDraft(_ bot: VillageBot) {
@@ -408,7 +438,7 @@ import UniformTypeIdentifiers
                 bot.sprite = sprite
             }
             bot.id = UUID()
-            bot.chooseVillageFigure(bot.villageFigure)
+            bot.useAvailableVillageFigure(among: bots)
             if save(bot) {
                 if let template {
                     let options = PhoneModels.textOptions

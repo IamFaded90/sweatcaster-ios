@@ -4,14 +4,12 @@ import AVFAudio
 import PhotosUI
 import SwiftUI
 import UIKit
-
 /// Lumi's PC studio has dedicated routes and can open a private local image session.
 @MainActor struct LumiStudio: View {
     enum SceneSheet: String, Identifiable {
         case library, new, edit, saveAs
         var id: String { rawValue }
     }
-
     let api: LiveAPI?
     let videoOnly: Bool
     let onVideoActivity: () -> Void
@@ -26,6 +24,7 @@ import UIKit
     @State var useImageTaste = true
     @State var videoDraft = ""
     @State var language = "da-DK"
+    @AppStorage(AppStorageKeys.lumiReplyLanguage) private var defaultReplyLanguage = "da-DK"
     @State var dictation = ChatDictation()
     @StateObject var speech = SpeechBox()
     @StateObject var christel = ChristelPlayer()
@@ -36,12 +35,14 @@ import UIKit
     @State var showEverydayTools = false
     @State var christelReady = false
     @State var christelPCReady = false
+    @State private var lumiPCVoiceReady = false
     @Environment(\.scenePhase) var phase
     @State var messages: [LumiSceneMessage] = []
     @State var sceneCard: LumiSceneCard?
     @State var openedSceneExpiry: Date?
     @State var sceneRevision = UUID()
     @State var initiative: LumiInitiative = .together
+    @State var portraits = LumiPortraitInitiative()
     @State var scenes: [LumiSavedScene] = []
     @State var saveSceneTemporarily = false
     @State var libraryNotice: String?
@@ -52,8 +53,16 @@ import UIKit
     @State var picture: Data?
     @State var pictureFile: URL?
     @State var pictureReference: Data?
+    @State var sceneMedia = LumiSceneMedia()
+    @State var attachedPhoto: Data?
+    @State var secondChatPhoto: Data?
+    @State var loadingSecondChat = false
+    @State var loadingChatPhoto = false
+    @State var chatImagePending = false
     @State var referenceSelection: PhotosPickerItem?
     @State var imageReference: Data?
+    @State var secondImageReference: Data?
+    @State var loadingSecondImage = false
     @State var loadingReference = false
     @State private var videoReferenceSelection: PhotosPickerItem?
     @State var videoReference: Data?
@@ -71,18 +80,18 @@ import UIKit
     @State var studioRevision = UUID()
     @State var busy = false
     @State var notice: String?
-
-    init(api: LiveAPI?, videoOnly: Bool = false, initialVideoReference: Data? = nil,
+    init(api: LiveAPI?, videoOnly: Bool = false, initialVideoReference: Data? = nil, initialVideoPrompt: String = "",
          onVideoActivity: @escaping () -> Void = {}) {
         self.api = api
         self.videoOnly = videoOnly
         self.onVideoActivity = onVideoActivity
         _mode = State(initialValue: videoOnly ? 2 : 0)
+        _videoDraft = State(initialValue: initialVideoPrompt)
         _videoInputToPrepare = State(initialValue: initialVideoReference)
     }
-
-    var inheritedVoice: String {
-        VillageBot.list(from: MigratedAppData.shared.villageBots).first { $0.id == VillageBot.lumiID }?.voice ?? "da-DK"
+    var canReceivePortrait: Bool {
+        !videoOnly && mode == 0 && phase == .active && sceneSheet == nil && !confirmSceneSwitch
+            && !showEverydayTools && !showVoicePicker && !showChristelSettings && !showPhoneImageStudio
     }
 
     var pendingVideoJobID: String {
@@ -179,15 +188,16 @@ import UIKit
             }
             .task(id: "\(api?.queueTargetID ?? ""):\(phase == .active)") {
                 if !videoOnly && phase == .active {
-                    if let voices = try? await api?.agentPCVoices(for: VillageBot.lumiID), !Task.isCancelled {
-                        AgentVoiceSelection.adoptApprovedLumiVoiceIfAvailable(voices)
-                    }
-                    await refreshChristelPC()
+                    async let christelStatus: Void = refreshChristelPC()
+                    let voices = try? await api?.agentPCVoices(for: VillageBot.lumiID)
+                    if !Task.isCancelled { lumiPCVoiceReady = voices?.contains(.roestLumi) == true }
+                    await christelStatus
                 }
             }
             .task {
                 if !videoOnly {
-                    refreshChristel()
+                    if sceneCard == nil { language = defaultReplyLanguage }
+                    christelReady = ChristelConfiguration.load() != nil
                     loadScenes()
                 }
                 if let source = videoInputToPrepare {
@@ -197,19 +207,34 @@ import UIKit
                 await resumeVideoIfNeeded()
             }
             .task(id: nextSceneExpiry) { await waitForSceneExpiry() }
+            .task(id: "\(api?.queueTargetID ?? ""):\(pcImageRefresh)") {
+                guard !videoOnly, let api else { return }
+                pcImageCatalog = .checking
+                let catalog = await StudioPCImageCatalog.inspect(api)
+                if !Task.isCancelled { pcImageCatalog = catalog }
+            }
+            .onChange(of: defaultReplyLanguage) { _, preference in
+                if sceneCard == nil { language = preference }
+            }
             .sheet(isPresented: $showVoicePicker) {
                 AgentVoicePicker(botID: VillageBot.lumiID, name: "Lumi", inheritedVoice: inheritedVoice, rate: 1,
                                  api: api, selection: $voiceOverride, language: $voiceLanguage)
             }
             .onChange(of: mode) {
+                portraits.endSession()
                 composerFocused = false
                 stopAudio()
             }
+            .onChange(of: canReceivePortrait) { if !canReceivePortrait { portraits.interrupt() } }
+            .onChange(of: api?.queueTargetID) { portraits.endSession() }
             .onChange(of: phase) {
                 if phase == .active {
                     if !videoOnly { loadScenes() }
                 }
-                else { stopAudio() }
+                else {
+                    if phase == .background { portraits.setEnabled(false) } else { portraits.interrupt() }
+                    stopAudio(cancelDictation: phase == .background)
+                }
             }
             .onDisappear { discardStudioSession() }
             .onReceive(NotificationCenter.default.publisher(for: UIApplication.significantTimeChangeNotification)) { _ in
@@ -222,7 +247,7 @@ import UIKit
     var studioContent: some View {
         VStack(alignment: .leading, spacing: 12) {
             if mode == 0 {
-                AgentSpeakingStage(bot: .lumi(), listening: dictation.active)
+                AgentSpeakingStage(bot: .lumi(), listening: dictation.active, api: api)
                 sceneControls
                 voiceControls
                 LazyVStack(alignment: .leading, spacing: 12) {
@@ -289,7 +314,25 @@ import UIKit
             } else if api == nil {
                 FadedDetailText(mode == 1 ? "Forbind PC’en, eller vælg Lav billeder på iPhone." : "Forbind din PC for at fortsætte.")
             }
-            if busy { FadedThinkingIndicator(title: mode == 0 ? "Lumi svarer på PC’en…" : "Arbejder på PC’en…") }
+            if busy {
+                FadedThinkingIndicator(title: chatImagePending ? "Lumi laver billedet på PC’en…"
+                                        : mode == 0 ? "Lumi svarer på PC’en…" : "Arbejder på PC’en…")
+            }
+            if mode == 0 && !busy {
+                ChatPhotoPicker(photo: $attachedPhoto, loading: $loadingChatPhoto, onError: { notice = $0 })
+                    .id(sceneRevision)
+                    .onChange(of: attachedPhoto == nil) { _, empty in
+                        if empty { secondChatPhoto = nil; loadingSecondChat = false }
+                    }
+                if attachedPhoto != nil {
+                    if secondChatPhoto != nil || pcImageCatalog.pairModel(preferred: pcImageModel) != nil {
+                        ChatPhotoPicker(photo: $secondChatPhoto, loading: $loadingSecondChat, onError: { notice = $0 },
+                                        addTitle: "Tilføj foto 2 til FLUX på PC", replaceTitle: "Skift foto 2")
+                    }
+                    FadedDetailText(secondChatPhoto == nil ? "Spørg om fotoet, eller skriv fx »Gør baggrunden blå«. Din PC behandler det."
+                                    : "Beskriv det fælles billede. Send bruger begge fotos på din parrede PC.")
+                }
+            }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(placeholder, text: currentDraft, axis: .vertical)
                     .lineLimit(1...4)
@@ -307,10 +350,13 @@ import UIKit
                     .labelStyle(.iconOnly)
                     .frame(width: 44, height: 44)
                     .buttonStyle(FadedButtonStyle(kind: .primary))
-                    .disabled(busy || (mode == 1 && (loadingReference || !pcImageCatalog.allows(pcImageModel))) ||
+                    .disabled(busy || (mode == 1 && (loadingReference || loadingSecondImage || !pcImageCatalog.allows(pcImageModel))) ||
                               (mode == 2 && loadingVideoReference) ||
-                              dictation.active || api == nil ||
-                              !isValidPrompt(currentDraft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines), for: mode))
+                              dictation.active || api == nil || (mode == 0 && (loadingChatPhoto || loadingSecondChat ||
+                                (secondChatPhoto != nil && draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))) ||
+                              (mode == 0 && attachedPhoto != nil
+                               ? currentDraft.wrappedValue.count > 1_200
+                               : !isValidPrompt(currentDraft.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines), for: mode)))
             }
         }
         .padding(14)
@@ -331,6 +377,13 @@ import UIKit
                     FadedDetailText(blocker)
                 }
                 referencePicker
+                    .onChange(of: imageReference == nil) { _, empty in
+                        if empty { secondImageReference = nil; loadingSecondImage = false }
+                    }
+                if imageReference != nil && (pcImageModel.isFlux || secondImageReference != nil) {
+                    ChatPhotoPicker(photo: $secondImageReference, loading: $loadingSecondImage, onError: { notice = $0 },
+                                    addTitle: "Tilføj foto 2", replaceTitle: "Skift foto 2")
+                }
                 if let style = AgentImageTasteStyle.selected(for: VillageBot.lumiID) {
                     Toggle("Brug min billedstil · " + style.title, isOn: $useImageTaste).disabled(busy)
                 }
@@ -341,19 +394,24 @@ import UIKit
             }
             .disabled(busy)
         }
-        .task(id: "\(api?.queueTargetID ?? ""):\(pcImageRefresh)") {
-            guard let api else { return }
-            pcImageCatalog = .checking
-            let catalog = await StudioPCImageCatalog.inspect(api)
-            if !Task.isCancelled { pcImageCatalog = catalog }
-        }
     }
 
     func messageCard(_ message: LumiSceneMessage) -> some View {
         AgentChatBubble(user: message.role == .user,
                         title: message.role == .user ? "Dig" : "Lumi · PC", pc: true) {
+            if let photo = sceneMedia.sentPhotos[message.id] { ChatPhotoPreview(data: photo) }
             ChatTranscriptView(reply: message.text)
-            if message.role == .assistant { replyAudio(message.text, language: message.language) }
+            if let file = sceneMedia.pictures[message.id], let image = UIImage(contentsOfFile: file.path) {
+                Image(uiImage: image).resizable().scaledToFit()
+                    .clipShape(.rect(cornerRadius: 16)).accessibilityLabel("Billede lavet af Lumi")
+                ShareLink(item: file) {
+                    Label("Gem eller del billede", systemImage: "square.and.arrow.up").frame(minHeight: 44)
+                }
+                Button("Slet billede", systemImage: "trash", role: .destructive) { deleteChatPicture(message.id) }
+                    .frame(minHeight: 44).disabled(busy)
+            } else if message.role == .assistant {
+                replyAudio(message.text, language: message.language)
+            }
         }
     }
 
@@ -369,16 +427,22 @@ import UIKit
 
     func replyAudio(_ text: String, language: String) -> some View {
         let locale = LocalSpeechVoice.detectedReplyLanguage(text) ?? language
-        let identifier = voiceOverride.isEmpty ? inheritedVoice : voiceOverride
+        let identifier = AgentVoiceSelection.lumiIdentifier(profile: inheritedVoice, override: voiceOverride,
+                                                           pcVoiceAvailable: lumiPCVoiceReady)
         let pcVoice = AgentPCVoice(rawValue: identifier)
         let voice = AgentVoiceSelection.resolve(identifier: identifier, language: locale)
-        let name = pcVoice?.name ?? voice?.name
+        let local = DownloadedAgentVoice.selected(identifier)
+        let name = local?.name ?? pcVoice?.name ?? voice?.name
         return VStack(alignment: .leading, spacing: 2) {
             Button(name.map { "Læs med " + $0 } ?? "Vælg en stemme", systemImage: "speaker.wave.2") {
                 dictation.stop()
                 let text = LocalSpeechVoice.replyText(text)
+                speech.stop()
+                if let local {
+                    christel.playDownloaded(text: text, voice: local, agentID: VillageBot.lumiID, language: locale)
+                    return
+                }
                 if let pcVoice {
-                    speech.stop()
                     guard let api else { notice = "Forbind PC’en, eller vælg en iPhone-stemme."; return }
                     christel.playAgentVoice(text: text, voice: pcVoice, agentID: VillageBot.lumiID, pc: api)
                     return
@@ -403,7 +467,7 @@ import UIKit
     var voiceControls: some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Picker("Sprog", selection: $language) {
+                Picker("Svar på", selection: $language) {
                     Text("Dansk").tag("da-DK")
                     Text("English").tag("en-US")
                 }
@@ -411,16 +475,20 @@ import UIKit
                 Spacer()
                 Button(dictation.active ? "Stop" : "Diktér", systemImage: dictation.active ? "stop.circle" : "mic") {
                     if dictation.active {
-                        dictation.stop()
+                        dictation.finishInput()
                     } else {
                         speech.stop()
                         christel.stop()
                         let locale = language
-                        let prefix = draft.isEmpty ? "" : draft + " "
-                        Task { await dictation.start(language: locale) { draft = prefix + $0 } }
+                        let revision = sceneRevision
+                        Task {
+                            guard phase == .active, mode == 0, sceneRevision == revision else { return }
+                            await dictation.startInChat(language: locale, draft: { draft }) { if sceneRevision == revision { draft = $0 } }
+                        }
                     }
                 }
                 .frame(minHeight: 44)
+                .accessibilityLabel(dictation.microphoneLabel)
                 if speech.playback != nil || christel.loading || christel.playing {
                     Button("Stop oplæsning", systemImage: "speaker.slash") {
                         speech.stop()
@@ -442,23 +510,18 @@ import UIKit
             .font(.footnote)
             .frame(minHeight: 44)
             if christel.loading {
-                ProgressView("Christel gør oplæsningen klar…").font(.caption)
+                ProgressView("Gør oplæsningen klar…").font(.caption)
             }
             if let notice = christel.notice {
                 FadedDetailText(notice)
             }
-            if let problem = dictation.problem {
+            if let status = dictation.offlineStatus { FadedDetailText(status) }
+            else if let problem = dictation.problem {
                 Text(problem).font(.caption).foregroundStyle(palette.secondary)
             } else if dictation.hasTranscript {
                 Text("Du kan rette teksten, før du sender.").font(.caption).foregroundStyle(palette.secondary)
             }
         }
-    }
-
-    func stopAudio() {
-        dictation.stop()
-        speech.stop()
-        christel.stop()
     }
 
     private var videoReferenceControls: some View {

@@ -29,32 +29,49 @@ enum AgentComputerIntent {
 }
 
 extension AgentPhoneChat {
+    var agentActionShortcuts: some View {
+        Button("Giv mig en opgave", systemImage: "sparkle.magnifyingglass") {
+            composerFocused = false
+            showAgentShortcuts = true
+        }
+        .disabled(running != nil)
+    }
+
     @ViewBuilder var advancedAgentShortcuts: some View {
         ForEach(AgentMilestone.allCases) { kind in
-            Button(kind.title, systemImage: kind.icon) { startAgentAction(.milestone(kind), prompt: kind.title) }
+            agentShortcut(kind.title, icon: kind.icon) { startAgentAction(.milestone(kind), prompt: kind.title) }
         }
-        Button("Åbn agentens computer", systemImage: "desktopcomputer") {
-            startAgentAction(.agentComputer(""), prompt: "Åbn din egen computer")
-        }
-        Button("Ret en flyttet aftale", systemImage: "calendar.badge.clock") {
-            startAgentAction(.appointmentChange, prompt: "Ret en flyttet aftale")
-        }
-        Button("Ryd op i Gmail", systemImage: "tray.full") {
-            startAgentAction(.gmailCleanup, prompt: "Ryd op i Gmail")
-        }
-        Button("Tjek billedmotoren på PC", systemImage: "wrench.and.screwdriver") {
-            startAgentAction(.pcRepair, prompt: "Tjek billedmotoren på PC")
-        }
-        Button("Del min iPhone-skærm", systemImage: "iphone") {
-            startAgentAction(.phoneScreen, prompt: "Se lige min skærm")
-        }
-        Button("Sælg noget for mig", systemImage: "tag") {
+        agentShortcut("Sælg noget for mig", icon: "tag") {
             startAgentAction(.sales, prompt: "")
         }
-        Button("Skab noget til landsbyen", systemImage: "sparkles") {
+        agentShortcut("Skab noget til landsbyen", icon: "sparkles") {
             startAgentAction(.surprise, prompt: "")
         }
-        Button("Byg og brug værktøjer", systemImage: "hammer") {
+        agentShortcut("Lav Instagram-opslag", icon: "camera") {
+            startAgentAction(.action(.instagramPost), prompt: "Lav et Instagram-opslag")
+        }
+        agentShortcut("Planlagte Instagram-opslag", icon: "calendar.badge.clock") {
+            startAgentAction(.action(.instagramPlans), prompt: "Vis mine planlagte Instagram-opslag")
+        }
+        agentShortcut("Hold øje med en pris", icon: "tag") {
+            startAgentAction(.action(.traderaWatch), prompt: "Opret en prisvagt")
+        }
+    }
+
+    @ViewBuilder var agentComputerShortcuts: some View {
+        agentShortcut("Del min iPhone-skærm", icon: "iphone") {
+            startAgentAction(.phoneScreen, prompt: "Se lige min skærm")
+        }
+        agentShortcut("Se mit PC-vindue", icon: "macwindow") {
+            startAgentAction(.windowHelp, prompt: "Se lige min skærm")
+        }
+        agentShortcut("Åbn agentens computer", icon: "desktopcomputer") {
+            startAgentAction(.agentComputer(""), prompt: "Åbn din egen computer")
+        }
+        agentShortcut("Tjek billedmotoren på PC", icon: "wrench.and.screwdriver") {
+            startAgentAction(.pcRepair, prompt: "Tjek billedmotoren på PC")
+        }
+        agentShortcut("Byg og brug værktøjer", icon: "hammer") {
             startAgentAction(.builtTools, prompt: "vis agentværktøjer")
         }
     }

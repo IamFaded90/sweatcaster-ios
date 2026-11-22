@@ -27,3 +27,24 @@ def test_sources_distinguish_read_pages_from_search_snippets(monkeypatch):
         "Eksempel", search=lambda _: results, read=lambda url: article if url.endswith("org/") else "")
     assert [source["readPage"] for source in sources] == [True, False]
     assert "Sidens tekst" in context and "Søgeuddrag" in context
+
+
+def test_documentation_lookup_uses_attributed_excerpt_and_falls_back(monkeypatch):
+    query = "SwiftUI dokumentation om animationer"
+    source = {"title": "Animation", "url": "https://developer.apple.com/documentation/swiftui/animation",
+              "excerpt": "Animation example"}
+    monkeypatch.setattr(web_research, "documentation_excerpts", lambda value: [source] if value == query else [])
+    context, sources = web_research.collect_sources(query, search=lambda _: pytest.fail("unneeded search"))
+    assert "Dokumentationsuddrag via Context7" in context and source["excerpt"] in context and not sources[0]["readPage"]
+    monkeypatch.setattr(web_research, "documentation_excerpts", lambda _: [])
+    monkeypatch.setattr("sweatcaster.docs_gateway.lookup", lambda *_: [])
+    hits = [{"title": "SwiftUI", "url": source["url"], "snippet": "Offentlig vejledning"}]
+    context, sources = web_research.collect_sources(query, search=lambda _: hits, read=lambda _: "")
+    assert hits[0]["snippet"] in context and sources[0]["url"] == source["url"]
+
+
+def test_everyday_search_and_cancel_do_not_call_context7(monkeypatch):
+    monkeypatch.setattr(web_research, "documentation_excerpts", lambda _: pytest.fail("not a docs question"))
+    hits = [{"title": "Vejret", "url": "https://dmi.dk/", "snippet": "Sol"}]
+    assert web_research.collect_sources("Vejret i Farsø", search=lambda _: hits, read=lambda _: "")[1]
+    assert web_research.collect_sources("Context7", cancelled=lambda: True) == ("", [])

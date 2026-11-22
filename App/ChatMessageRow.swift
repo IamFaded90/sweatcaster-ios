@@ -252,12 +252,13 @@ extension ChatView {
 
     func transcriptRows(userBubbleWidth: CGFloat) -> some View {
         ForEach(filteredTurns) { turn in
-            let reading = speechBox.playback == .reply(turn.id)
+            let reading = activeChatPlayback == .reply(turn.id)
             ChatMessageRow(
                 turn: turn, userBubbleWidth: userBubbleWidth, accent: replyColor(turn.source),
                 attribution: replyAttribution(for: turn), icon: sourceIcon(turn.source),
                 showsTime: aiTimestamps, showsWordCount: aiWordCount,
-                readAlong: reading ? speechBox.wordProgress : nil, isSpeaking: reading && speechBox.isSpeaking,
+                readAlong: speechBox.playback == .reply(turn.id) ? speechBox.wordProgress : nil,
+                isSpeaking: reading && (speechBox.isSpeaking || chatPCSpeech.playing),
                 copyPrompt: { copyText(turn.prompt) },
                 replyActions: { replyActions(turn) }, noticeActions: { noticeActions(turn) }
             )
@@ -333,10 +334,10 @@ extension ChatView {
     }
 
     private func replyActions(_ turn: ChatTurn) -> some View {
-        let reading = speechBox.playback == .reply(turn.id)
+        let reading = activeChatPlayback == .reply(turn.id)
         return HStack(spacing: 4) {
             Button(reading ? "Stop oplæsning" : "Læs svaret op", systemImage: reading ? "stop.circle" : "speaker.wave.2") {
-                if reading { speechBox.stop() }
+                if reading { stopChatSpeech() }
                 else { speak(turn.reply, turnID: turn.id) }
             }.labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(dictation.active)
             Menu {

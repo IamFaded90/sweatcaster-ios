@@ -23,17 +23,20 @@ import SwiftUI
     private var notifications: [NSObjectProtocol] = []
     private var commands: [(MPRemoteCommand, Any)] = []
     private var sleep: Task<Void, Never>?
+    @Published private var playbackIntent = MusicPlaybackIntent.paused
+    var canPause: Bool { playbackIntent == .requested }
     var current: MusicTrack? { queue.indices.contains(index) ? queue[index] : nil }
 
     private init() {
+        player.audiovisualBackgroundPlaybackPolicy = .continuesIfPossible
         observer = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] time in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, let item = self.player.currentItem else { return }
                 let wasPlaying = self.playing
                 let previousDuration = self.duration
                 self.position = time.seconds.isFinite ? max(0, time.seconds) : 0
                 self.playing = self.player.rate > 0
-                let length = self.player.currentItem?.duration.seconds ?? 0
+                let length = item.duration.seconds
                 self.duration = length.isFinite ? max(0, length) : self.current?.duration ?? 0
                 if wasPlaying != self.playing || previousDuration != self.duration { self.updateNowPlaying() }
             }
@@ -48,7 +51,16 @@ import SwiftUI
         notifications.append(NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification,
                                                                      object: nil, queue: .main) { [weak self] note in
             let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt
-            if raw == AVAudioSession.InterruptionType.began.rawValue { Task { @MainActor in self?.pause() } }
+            let options = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
+            Task { @MainActor in
+                guard let self else { return }
+                if raw == AVAudioSession.InterruptionType.began.rawValue {
+                    if self.playbackIntent.beginInterruption() { self.suspendPlayback() }
+                } else if raw == AVAudioSession.InterruptionType.ended.rawValue {
+                    let allowed = AVAudioSession.InterruptionOptions(rawValue: options).contains(.shouldResume)
+                    if self.playbackIntent.endInterruption(allowed: allowed) { self.resume() }
+                }
+            }
         })
         notifications.append(NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification,
                                                                      object: nil, queue: .main) { [weak self] note in
@@ -79,7 +91,15 @@ import SwiftUI
         if selected < index { index -= 1 }
         if wasCurrent {
             if queue.isEmpty { stop() }
-            else { index = min(index, queue.count - 1); load() }
+            else {
+                index = min(index, queue.count - 1)
+                if canPause { load() }
+                else {
+                    clearPlaybackItem()
+                    duration = current?.duration ?? 0
+                    updateNowPlaying(showSelection: true)
+                }
+            }
         }
     }
     func shuffle() {
@@ -88,6 +108,11 @@ import SwiftUI
         index = 0
     }
     func pause() {
+        playbackIntent = .paused
+        suspendPlayback()
+    }
+
+    private func suspendPlayback() {
         operation?.cancel()
         operation = nil
         loading = false
@@ -95,14 +120,15 @@ import SwiftUI
         playing = false
         updateNowPlaying()
     }
-    func toggle() { if playing { pause() } else { resume() } }
+    func toggle() { if canPause { pause() } else { resume() } }
     func retry() { load() }
     func resume() {
-        guard current != nil else { return }
+        guard current != nil, !loading else { return }
         if player.currentItem == nil || player.currentItem?.status == .failed { load(); return }
         do {
             try activateAudio()
             player.play()
+            playbackIntent = .requested
             playing = true
             updateNowPlaying()
         } catch { notice = "Musikken kunne ikke starte. " + error.localizedDescription }
@@ -125,14 +151,21 @@ import SwiftUI
         updateNowPlaying()
     }
     func stop() {
+        playbackIntent = .paused
+        clearPlaybackItem()
+    }
+
+    private func clearPlaybackItem() {
         operation?.cancel()
         operation = nil
         status = nil
+        player.pause()
         player.replaceCurrentItem(with: nil)
         playing = false
         loading = false
         position = 0
         duration = 0
+        notice = nil
         MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
     }
     func setSleep(minutes: Int?) {
@@ -149,6 +182,7 @@ import SwiftUI
 
     private func load() {
         guard let track = current else { return }
+        playbackIntent = .requested
         operation?.cancel()
         player.pause()
         player.replaceCurrentItem(with: nil)
@@ -162,6 +196,7 @@ import SwiftUI
         operation = Task {
             defer { if !Task.isCancelled { loading = false } }
             do {
+                try Task.checkCancellation()
                 let source: URL
                 if let local = MusicLibrary.shared.localURL(track) { source = local }
                 else { source = try await MusicCatalog.audio(track) }
@@ -179,6 +214,7 @@ import SwiftUI
                             guard let self, self.player.currentItem === item else { return }
                             self.notice = "Sangen kunne ikke afspilles. Prøv en anden udgave eller en ny søgning."
                             self.playing = false
+                            self.playbackIntent = .paused
                         }
                     }
                 }
@@ -187,7 +223,11 @@ import SwiftUI
                 playing = true
                 updateNowPlaying()
             } catch is CancellationError { return }
-            catch { notice = error.localizedDescription }
+            catch {
+                guard !Task.isCancelled else { return }
+                playbackIntent = .paused
+                notice = error.localizedDescription
+            }
         }
     }
     private func activateAudio() throws {
@@ -196,8 +236,8 @@ import SwiftUI
         try audio.setCategory(.playback, mode: .default, policy: .longFormAudio)
         try audio.setActive(true)
     }
-    private func updateNowPlaying() {
-        guard let track = current, player.currentItem != nil else { return }
+    private func updateNowPlaying(showSelection: Bool = false) {
+        guard let track = current, showSelection || player.currentItem != nil else { return }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = [
             MPMediaItemPropertyTitle: track.title, MPMediaItemPropertyArtist: track.artist,
             MPMediaItemPropertyPlaybackDuration: duration,
@@ -226,5 +266,21 @@ import SwiftUI
             return .success
         }
         commands.append((seek, token))
+    }
+}
+
+enum MusicPlaybackIntent {
+    case paused, requested, interrupted
+
+    mutating func beginInterruption() -> Bool {
+        guard self == .requested else { return false }
+        self = .interrupted
+        return true
+    }
+
+    mutating func endInterruption(allowed: Bool) -> Bool {
+        guard self == .interrupted else { return false }
+        self = .paused
+        return allowed
     }
 }

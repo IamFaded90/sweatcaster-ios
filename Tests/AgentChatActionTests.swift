@@ -5,6 +5,60 @@ import XCTest
 @testable import SweatCaster
 
 final class AgentChatActionTests: XCTestCase {
+    func testSpokenDanishAlarmsUseTheRequestedTime() throws {
+        let format = BotPhoneAction.localFormatter()
+        let now = try XCTUnwrap(format.date(from: "2026-11-22T10:00"))
+        let examples = [
+            ("Sæt en alarm om et kvarter", "2026-11-22T10:15"),
+            ("Sæt en alarm om halvanden time", "2026-11-22T11:30"),
+            ("Væk mig i morgen klokken halv otte", "2026-11-23T07:30"),
+            ("Sæt en alarm til kvart i ni om aftenen", "2026-11-22T20:45"),
+            ("Sæt en alarm kl. 12.05", "2026-11-22T12:05"),
+        ]
+        for (input, expected) in examples {
+            XCTAssertEqual(AgentPhoneLanguage.action(.alarm, prompt: input, now: now).localDate, expected, input)
+        }
+        XCTAssertNil(AgentPhoneLanguage.action(.alarm, prompt: "Sæt en alarm kl. 25:75", now: now).localDate)
+    }
+
+    func testSharedContainerUsesOnlyFadedAIGroupForOriginalAndResignedApps() {
+        let base = FadedSharedContainer.identifier
+        let signed = base + ".ABCDE12345"
+        XCTAssertEqual(FadedSharedContainer.candidates(hostID: "dk.sweatcaster.ios", declaredGroups: []), [base])
+        XCTAssertEqual(FadedSharedContainer.candidates(hostID: "dk.sweatcaster.ios.ABCDE12345",
+            declaredGroups: []), [base, signed])
+        XCTAssertEqual(FadedSharedContainer.candidates(hostID: "dk.sweatcaster.ios.ABCDE12345",
+            declaredGroups: ["group.another.ABCDE12345", signed, base + ".invalid", signed]), [base, signed])
+    }
+
+    func testScreenHelpWaitsForALiveOrFrozenFrame() throws {
+        func status(_ json: String) throws -> PhoneScreenFrameStatus {
+            try JSONDecoder().decode(PhoneScreenFrameStatus.self, from: Data(json.utf8))
+        }
+        XCTAssertFalse(try status(#"{"frames":0,"age":null,"frozen":true}"#).canRead)
+        XCTAssertTrue(try status(#"{"frames":1,"age":15,"frozen":false}"#).canRead)
+        let stale = try status(#"{"frames":2,"age":15.1,"frozen":false}"#)
+        XCTAssertFalse(stale.canRead)
+        XCTAssertTrue(stale.message.contains("skærmbillede"))
+        XCTAssertTrue(try status(#"{"frames":2,"age":90,"frozen":true}"#).canRead)
+    }
+
+    func testAttachingScreenHelpToChatPreservesDraftAndAvoidsRepeatedQuestion() {
+        let question = "Hvad betyder advarslen?"
+        XCTAssertEqual(AgentScreenIntent.draftForScreenshot("  \(question) ", current: ""), question)
+        let existing = "Det var ved import."
+        XCTAssertEqual(AgentScreenIntent.draftForScreenshot(" ", current: existing), existing)
+        let handoff = AgentScreenIntent.draftForScreenshot(question, current: existing)
+        XCTAssertEqual(handoff, existing + "\n" + question)
+        XCTAssertEqual(AgentScreenIntent.draftForScreenshot(question, current: handoff), handoff)
+    }
+
+    func testAgentChatDisplaysToolFailuresInPlainDanish() {
+        let mailStatus = #"{"tool":"email_check","status":"ikke_bevist"}"#
+        XCTAssertTrue(AgentReplyDriver.displayText(mailStatus).contains("ikke gennemført"))
+        XCTAssertEqual(AgentReplyDriver.displayText("Her er svaret."), "Her er svaret.")
+    }
+
     @MainActor func testAgentMilestonesSelectAnActionInsteadOfAnOrdinaryReply() {
         guard case .milestone(.repair)? = AgentChatIntent.match("Find og ret en appfejl i FadedAI") else {
             return XCTFail("Projektfejl skal åbne appreparation")
@@ -227,7 +281,8 @@ final class AgentChatActionTests: XCTestCase {
     @MainActor func testNaturalTodayOverviewRequestsAndUnrelatedQuestions() {
         let requests = ["Kan du give mig et overblik over min dag?", "Hvad skal jeg huske i dag?",
                         "Hvilke planer har jeg i dag?", "Har jeg noget jeg skal i dag?",
-                        "Hvad har jeg på programmet i dag?", "Lav en dagsplan"]
+                        "Hvad har jeg på programmet i dag?", "Lav en dagsplan", "Morgenoverblik",
+                        "Vis mit morgenoverblik", "Godmorgen, giv mig et morgenoverblik."]
         for text in requests {
             guard case .action(.today)? = AgentChatIntent.match(text) else {
                 XCTFail("Dagens overblik blev ikke åbnet: \(text)")
@@ -235,7 +290,8 @@ final class AgentChatActionTests: XCTestCase {
             }
         }
         for text in ["Hvordan får jeg et overblik over min dag?", "Hvad sker der i verden i dag?",
-                     "Hvad skal jeg huske i morgen?", "Hvad er klokken i dag?"] {
+                     "Hvad skal jeg huske i morgen?", "Hvad er klokken i dag?", "Godmorgen!",
+                     "Slå morgenoverblik fra", "Skriv et morgenoverblik til fredag"] {
             XCTAssertNil(AgentChatIntent.match(text), text)
         }
     }
@@ -264,6 +320,29 @@ final class AgentChatActionTests: XCTestCase {
         XCTAssertEqual(VeoCloudVideo.videoURL(output)?.host, "example.org")
         XCTAssertNil(VeoCloudVideo.videoURL(["download_url": "file:///tmp/video.mp4"]))
         XCTAssertNil(VeoCloudVideo.videoURL(["download_url": "https://user:password@example.org/video.mp4"]))
+    }
+
+    func testVeoUsesOneSampleAndRenewsCompletedJobsWithoutResubmitting() throws {
+        var job = VeoCloudJob(id: UUID(), prompt: "A wave", model: "veo-test", createdAt: .now)
+        XCTAssertEqual(job.generationArguments["extras"] as? [String: Int], ["sampleCount": 1])
+        job.state = .working
+        job.operation = "models/veo-test/operations/sea"
+        job.updateStatus(["done": false])
+        XCTAssertEqual(job.state, .working)
+        job.updateStatus(["done": true, "response": ["generateVideoResponse": ["generatedSamples":
+            [["video": ["uri": "https://example.org/video.mp4"]]]]]])
+        XCTAssertEqual(job.state, .ready)
+        job.downloadURL = URL(string: "https://example.org/expired.mp4")
+        XCTAssertFalse(job.clearUnavailableLink(statusCode: 503))
+        XCTAssertTrue(job.clearUnavailableLink(statusCode: 403))
+        let restored = try JSONDecoder().decode(VeoCloudJob.self, from: JSONEncoder().encode(job))
+        XCTAssertEqual(restored.state, .ready)
+        XCTAssertEqual(restored.operation, "models/veo-test/operations/sea")
+        XCTAssertNil(restored.downloadURL)
+        job.updateStatus(["done": true, "response": ["generateVideoResponse": ["raiMediaFilteredCount": 1]]])
+        XCTAssertEqual(job.state, .failed)
+        job.updateStatus(["done": true, "error": ["code": 7]])
+        XCTAssertEqual(job.state, .failed)
     }
 
     @MainActor func testScannedPDFTextIsSavedOnTheSelectedPageAndLeavesOriginalIntact() throws {
@@ -408,6 +487,56 @@ final class AgentChatActionTests: XCTestCase {
         XCTAssertEqual(AgentSharedCalendar.dates(in: "25/11/2026 eller 2026-12-02, jf. 25.11.2026."),
                        ["2026-11-25", "2026-12-02"])
         XCTAssertTrue(AgentSharedCalendar.dates(in: "31.02.2026 eller 2026-04-31").isEmpty)
+    }
+
+    @MainActor func testDeadlineInScannedPDFOffersTheDateFromPageTwo() throws {
+        let rect = CGRect(x: 0, y: 0, width: 640, height: 280)
+        let pdf = UIGraphicsPDFRenderer(bounds: rect).pdfData { context in
+            for line in ["Fakturadato 12/11/2031", "Betalingsfrist: 25/11/2031 kl. 16:30"] {
+                let scan = UIGraphicsImageRenderer(bounds: rect).image { image in
+                    UIColor.white.setFill()
+                    image.fill(rect)
+                    (line as NSString).draw(at: CGPoint(x: 20, y: 80),
+                                            withAttributes: [.font: UIFont.systemFont(ofSize: 28),
+                                                             .foregroundColor: UIColor.black])
+                }
+                context.beginPage()
+                scan.draw(in: rect)
+            }
+        }
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pdf")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try pdf.write(to: file)
+        let document = try AgentDocumentIndex.ingest(file)
+        let sources = AgentDocumentDeadline.sources(in: document)
+        XCTAssertEqual(sources.count, 1)
+        XCTAssertEqual(sources.first?.page, 2)
+        XCTAssertEqual(sources.first?.name, file.lastPathComponent)
+        XCTAssertEqual(sources.first?.deadline?.localTime, "2031-11-25T16:30")
+    }
+
+    func testDocumentDeadlinesRespectPageBoundariesAndStableReminderIdentity() throws {
+        let doc = AgentDocument(id: UUID(), name: "Brev.pdf", model: nil, passages: [
+            .init(page: 1, text: "Betalingsfrist:", vector: nil),
+            .init(page: 2, text: "12/12/2031\nFakturadato: 01/11/2031\nFristen er den 25. november 2031", vector: nil),
+            .init(page: 2, text: "Svarfrist: 31/02/2031", vector: nil),
+            .init(page: 3, text: "Deadline:\n2031-12-05 kl. 09:15", vector: nil)
+        ])
+        let sources = AgentDocumentDeadline.sources(in: doc)
+        XCTAssertEqual(sources.map(\.page), [2, 3])
+        XCTAssertEqual(sources.compactMap { $0.deadline?.day }, ["2031-11-25", "2031-12-05"])
+        XCTAssertNil(sources.first?.deadline?.localTime)
+        let first = try XCTUnwrap(sources.first)
+        XCTAssertEqual(first.deadline?.reminder(for: first).needsDate, true)
+        XCTAssertEqual(sources.last?.citation, "Brev.pdf, side 3")
+        XCTAssertNotEqual(sources.first?.deadline?.reminderID, sources.last?.deadline?.reminderID)
+        XCTAssertEqual(sources.first?.deadline?.reminderID, AgentDocumentDeadline.sources(in: doc).first?.deadline?.reminderID)
+        let previous = try JSONDecoder().decode(AgentDocumentSource.self, from: Data(#"{"id":1,"name":"Brev","page":4}"#.utf8))
+        XCTAssertNil(previous.deadline)
+        XCTAssertTrue(AgentDocumentDeadline.isFollowUp("Mind mig om det."))
+        XCTAssertFalse(AgentDocumentDeadline.isFollowUp("Mind mig om at hente posten"))
+        XCTAssertTrue(AgentDocumentDeadline.requested(in: "Find fristen i mit brev"))
+        XCTAssertFalse(AgentDocumentDeadline.requested(in: "Oversæt afsnittet om fristen til engelsk"))
     }
 
     func testVoiceInboxKeepsListsAndBreaksAtNewActions() {

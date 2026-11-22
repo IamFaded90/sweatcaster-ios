@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor struct MusicPlayingView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
+    @Environment(\.dynamicTypeSize) private var typeSize
     @ObservedObject private var player = MusicPlayer.shared
     @State private var position = 0.0
     @State private var scrubbing = false
@@ -16,36 +17,44 @@ import SwiftUI
                         MusicCover(url: track.artwork)
                             .aspectRatio(1, contentMode: .fit)
                             .frame(maxWidth: 360)
-                            .clipShape(RoundedRectangle(cornerRadius: 24))
-                            .shadow(color: .black.opacity(0.3), radius: 18, y: 10)
+                            .clipShape(.rect(cornerRadius: 18))
+                            .padding(6)
+                            .background(MusicEdition.surface(palette), in: .rect(cornerRadius: 24))
+                            .shadow(color: MusicEdition.ink.opacity(0.24), radius: 12, y: 6)
                         VStack(spacing: 4) {
-                            Text(track.title).font(.title2.bold()).multilineTextAlignment(.center)
+                            Text(track.title).font(.system(.title, design: .serif, weight: .bold))
+                                .multilineTextAlignment(.center)
                             Text(track.artist).foregroundStyle(palette.secondary)
                         }
                         Slider(value: Binding(get: { scrubbing ? position : player.position }, set: { position = $0 }),
                                in: 0...max(1, player.duration)) { editing in
                             scrubbing = editing
                             if !editing { player.seek(position) }
-                        }.tint(palette.lime).accessibilityLabel("Hvor langt sangen er nået")
+                        }.accessibilityLabel("Hvor langt sangen er nået")
+                            .accessibilityValue(time(scrubbing ? position : player.position) + " af " + time(player.duration))
                         HStack {
-                            Text(time(player.position))
+                            Text(time(scrubbing ? position : player.position))
                             Spacer()
                             Text(time(player.duration))
                         }.font(.caption.monospacedDigit())
                         HStack(spacing: 28) {
-                            Button("Forrige", systemImage: "backward.end.fill") { player.previous() }
-                            Button(player.playing ? "Pause" : "Afspil", systemImage: player.playing ? "pause.circle.fill" : "play.circle.fill") {
+                            Button { player.previous() } label: {
+                                Label("Forrige", systemImage: "backward.end.fill").frame(minWidth: 44, minHeight: 44)
+                            }
+                            Button(player.canPause ? "Pause" : "Afspil", systemImage: player.canPause ? "pause.circle.fill" : "play.circle.fill") {
                                 player.toggle()
-                            }.font(.system(size: 52))
-                            Button("Næste", systemImage: "forward.end.fill") { player.next() }
+                            }.font(.system(size: 52)).foregroundStyle(MusicEdition.accent(palette))
+                            Button { player.next() } label: {
+                                Label("Næste", systemImage: "forward.end.fill").frame(minWidth: 44, minHeight: 44)
+                            }
                         }.labelStyle(.iconOnly).buttonStyle(.plain).font(.title).frame(minHeight: 60)
-                        HStack {
-                            Button("Bland", systemImage: "shuffle") { player.shuffle() }
-                            Spacer()
+                        let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout()) : AnyLayout(HStackLayout(spacing: 14))
+                        layout {
+                            Button("Bland", systemImage: "shuffle") { player.shuffle() }.frame(minHeight: 44)
                             Toggle("Gentag kø", isOn: $player.repeatAll)
-                            Spacer()
-                            MusicAirPlayPicker().frame(width: 44, height: 44)
-                        }
+                            MusicAirPlayPicker().frame(width: 44, height: 44).accessibilityLabel("Vælg lydudgang")
+                        }.padding(.horizontal, 12).padding(.vertical, 4)
+                            .fadedGlassSurface(radius: 16, tint: MusicEdition.surface(palette))
                         if let end = player.sleepUntil {
                             HStack {
                                 Text("Sovetimer til " + end.formatted(date: .omitted, time: .shortened))
@@ -57,7 +66,8 @@ import SwiftUI
                             Text(notice).foregroundStyle(.secondary)
                             Button("Prøv sangen igen", systemImage: "arrow.clockwise") { player.retry() }
                         }
-                        Text("Kø").font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                        Text("Kø").font(.system(.title2, design: .serif, weight: .bold))
+                            .frame(maxWidth: .infinity, alignment: .leading).accessibilityAddTraits(.isHeader)
                         ForEach(Array(player.queue.enumerated()), id: \.offset) { i, track in
                             HStack {
                                 Button { player.play(player.queue, at: i) } label: {
@@ -66,14 +76,17 @@ import SwiftUI
                                 }.buttonStyle(.plain)
                                 Button("Fjern fra kø", systemImage: "minus.circle") { player.remove(at: i) }
                                     .labelStyle(.iconOnly).frame(width: 44, height: 44)
-                            }.padding(10).fadedGlassSurface()
+                            }.padding(10).fadedGlassSurface(radius: 14, tint: MusicEdition.surface(palette))
                         }
+                    } else {
+                        ContentUnavailableView("Køen er tom", systemImage: "music.note.list",
+                                               description: Text("Vælg en sang i Musik for at starte afspilningen."))
                     }
                 }.frame(maxWidth: .infinity).padding(FadedSpacing.edge)
-            }.background { FadedBackground() }
+            }.foregroundStyle(palette.text).background { MusicBackdrop() }
                 .navigationTitle("Spiller nu").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { dismiss() } } }
-        }
+        }.tint(MusicEdition.accent(palette))
     }
 
     private func time(_ value: Double) -> String {

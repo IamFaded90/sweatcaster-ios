@@ -24,10 +24,8 @@ struct PhoneModelsView: View {
     @State private var downloadSuccess: String?
     @State private var storage: ModelDiskStorage.Snapshot?
     @State private var storageRevision = 0
-    @State private var benchmarkRunning = false
-    @State private var benchmarkResult: String?
+    @State private var benchmarkRun = PhoneBenchmarkRun()
     @State private var benchmarkChoice: String?
-    @State private var benchmarkNotice: String?
     @State private var deleteTarget: DeleteTarget?
     @State private var page: Page = .models
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -55,17 +53,19 @@ struct PhoneModelsView: View {
     }
     private var downloader: ModelDownloader { .shared }
     private var textDownloadBusy: Bool {
-        working || benchmarkRunning || requestedDownloadID != nil || downloader.isDownloading || PhoneModelDownloads.shared.preparingModelID != nil
+        working || benchmarkRun.isRunning || requestedDownloadID != nil || downloader.isDownloading ||
+            PhoneModelDownloads.shared.preparingModelID != nil || GGUFModelDownloads.shared.pending != nil
     }
     private var mutationBusy: Bool {
         textDownloadBusy || StudioImageDownloads.shared.activeModel != nil
     }
     private var favorites: Set<String> { Set(favoriteModels.split(separator: "|").map(String.init)) }
     private var orderedCatalog: [PhoneModels.Entry] {
-        let active = requestedDownloadID ?? PhoneModelDownloads.shared.preparingModelID ?? (downloader.isDownloading ? downloader.downloadingModelId : nil)
+        let coreModel = requestedDownloadID ?? PhoneModelDownloads.shared.preparingModelID ?? (downloader.isDownloading ? downloader.downloadingModelId : nil)
+        let active = GGUFModelDownloads.shared.pending?.file.isCatalogMiniCPM == true ? PhoneModels.miniCPMCatalogID : coreModel
         let catalog = PhoneModels.catalog
         let others = catalog.filter { $0.id != active }
-        return catalog.filter { $0.id == active } + others.filter { favorites.contains($0.id) } + others.filter { !favorites.contains($0.id) }
+        return catalog.filter { $0.id == active } + others.filter { favorites.contains($0.selectionID) } + others.filter { !favorites.contains($0.selectionID) }
     }
     var body: some View {
         NavigationStack { modelDialogs }
@@ -92,6 +92,9 @@ struct PhoneModelsView: View {
 
     private var modelLifecycle: some View {
         modelList
+            .onAppear { GGUFModelDownloads.shared.activate() }
+            .onDisappear { benchmarkRun.stop() }
+            .onChange(of: page) { _, newPage in if newPage != .performance { benchmarkRun.stop() } }
             .task(id: storageRevision) { await refreshStorage() }
             .onChange(of: downloader.isDownloading) { _, isDownloading in
                 if !isDownloading { storageRevision += 1 }
@@ -125,7 +128,7 @@ struct PhoneModelsView: View {
             ), presenting: downloadConfirmation) { entry in
                 Button("Hent modellen") { download(entry) }
             } message: { entry in
-                Text("\(entry.name) henter ca. \(ModelDiskStorage.gigabytes(entry.estimatedDownloadBytes)). Vælg PC til tunge opgaver eller ved lav arbejdshukommelse.")
+                Text("\(entry.name) mangler ca. \(ByteCountFormatter.string(fromByteCount: entry.downloadBudget().remaining, countStyle: .file)).")
             }
             .fileImporter(isPresented: $importing, allowedContentTypes: [.folder]) { result in
                 if case .success(let url) = result { importModel(url) }
@@ -150,7 +153,7 @@ struct PhoneModelsView: View {
             favoriteSection
             importSection
         case .images:
-            StudioImageDownloadsView(canStart: !working && !benchmarkRunning && StudioImageDownloads.shared.activeModel == nil)
+            StudioImageDownloadsView(canStart: !working && !benchmarkRun.isRunning && StudioImageDownloads.shared.activeModel == nil)
         case .storage:
             storageSection
             extraModelsLink
@@ -245,9 +248,20 @@ struct PhoneModelsView: View {
 
     private var catalogSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            FadedSectionHeader("Alle \(PhoneModels.catalog.count) iPhone-modeller",
-                               detail: "Hent én gang og brug offline. Lagerplads afgør, hvor mange modeller du kan gemme. Arbejdshukommelsen (RAM) afgør, hvor stor en model du kan køre.")
-            ForEach(orderedCatalog, content: modelCard)
+            let supported = PhoneModels.catalog.filter { $0.packageFormat == .gguf || PhoneModels.supportsLocalInference($0.id) }.count
+            FadedSectionHeader("Tekstmodeller til iPhone",
+                               detail: "\(supported) modeller kan hentes og bruges offline.")
+            if let pending = GGUFModelDownloads.shared.pending, !pending.file.isCatalogMiniCPM {
+                GGUFTransferStatus()
+            } else if let active = requestedDownloadID ?? PhoneModelDownloads.shared.preparingModelID ?? (downloader.isDownloading ? downloader.downloadingModelId : nil) {
+                FadedDetailText("Hentningen af \(PhoneModels.textModelName(active)) ligger øverst. Du kan stoppe den dér og hente en anden model.")
+            }
+            if let restored = PhoneModelDownloads.shared.restorationNotice { FadedDetailText(restored) }
+            ForEach(orderedCatalog) { entry in
+                if entry.packageFormat == .gguf {
+                    GGUFModelsView(featured: entry, canStart: !textDownloadBusy, showsModelLink: allowsImageDownloads)
+                } else { modelCard(entry) }
+            }
         }
     }
 
@@ -258,7 +272,8 @@ struct PhoneModelsView: View {
         let supported = PhoneModels.supportsLocalInference(entry.id)
         let ready = PhoneModels.isReady(entry.id)
         let onDisk = storage?.text[entry.id]
-        let status = catalogStatus(downloading, preparing, ready, supported, onDisk != nil)
+        let paused = downloading && !direct && downloader.isPaused
+        let status = paused ? FadedBadge("På pause", tone: .warning) : catalogStatus(downloading, preparing, ready, supported, onDisk != nil)
         return FadedCard(accent: selected == entry.id && ready ? palette.lime : nil) {
             VStack(alignment: .leading, spacing: 10) {
                 modelHeader(entry.name, icon: "cpu", id: entry.id, ready: ready)
@@ -284,8 +299,9 @@ struct PhoneModelsView: View {
                 } else if ready && selected != entry.id {
                     FadedSecondaryButton("Brug modellen", icon: "checkmark") { select(entry.id) }
                 } else if !ready, supported {
-                    FadedSecondaryButton(onDisk == nil ? "Hent og vælg" : "Reparér og vælg", icon: "arrow.down.circle") {
-                        if entry.recommendsPC { downloadConfirmation = entry }
+                    let action = onDisk == nil ? "Hent og vælg" : (entry.id == QwenPhoneRuntime.Variant.vision.modelID ? "Fortsæt hentning" : "Reparér og vælg")
+                    FadedSecondaryButton(action, icon: "arrow.down.circle") {
+                        if entry.downloadBudget().remaining > PhoneModels.Entry.largeDownloadBytes { downloadConfirmation = entry }
                         else { download(entry) }
                     }.disabled(textDownloadBusy)
                 }
@@ -313,9 +329,11 @@ struct PhoneModelsView: View {
         let progress = min(1, max(0, direct ? PhoneModelDownloads.shared.directProgress : downloader.progress))
         return VStack(alignment: .leading, spacing: 8) {
             FadedProgress(value: progress)
-            Text("Henter modellen · \(progress.formatted(.percent.precision(.fractionLength(0))))")
+            Text((!direct && downloader.isPaused ? "På pause · " : "Henter modellen · ") + progress.formatted(.percent.precision(.fractionLength(0))))
                 .font(.caption.monospacedDigit()).foregroundStyle(palette.secondary)
-            Text(direct ? "Hold appen åben. Færdige filer genbruges, hvis du afbryder." : "Download fortsætter normalt i baggrunden, når iOS tillader det.")
+            Text(direct ? "Hold appen åben. Færdige filer genbruges, hvis du afbryder." :
+                    downloader.isPaused ? "Fortsæt hentningen, eller annuller for at hente en anden model." :
+                    "Download fortsætter normalt i baggrunden, når iOS tillader det.")
                 .font(.caption).foregroundStyle(palette.secondary)
             if !direct && downloader.isPaused {
                 FadedSecondaryButton("Fortsæt download", icon: "play.fill") { downloader.resumeDownload() }
@@ -430,28 +448,32 @@ struct PhoneModelsView: View {
         let available = benchmarkModels
         let id = benchmarkModelID
         return VStack(alignment: .leading, spacing: 12) {
-            FadedSectionHeader("Benchmark", detail: "Mål en tekstmodel direkte på iPhone.")
+            FadedSectionHeader("Hastighedstest", detail: "Hver model får samme korte opgave på engelsk. Tiden inkluderer indlæsning.")
             if !available.isEmpty {
                 Picker("Model til testen", selection: Binding(
                     get: { benchmarkModelID ?? "" },
-                    set: { benchmarkChoice = $0; benchmarkResult = nil; benchmarkNotice = nil }
+                    set: { benchmarkChoice = $0 }
                 )) {
                     ForEach(available) { model in Text(model.name).tag(model.id) }
                 }
                 .disabled(benchmarkBusy)
             }
-            FadedPrimaryButton(benchmarkRunning ? "Måler…" : "Start benchmark", icon: "speedometer", action: benchmark)
-                .disabled(benchmarkBusy || id == nil)
+            if benchmarkRun.isRunning {
+                FadedSecondaryButton("Stop måling", icon: "stop.fill") { benchmarkRun.stop() }
+            } else {
+                FadedPrimaryButton("Start hastighedstest", icon: "speedometer", action: benchmark)
+                    .disabled(benchmarkBusy || id == nil)
+            }
             if id == nil {
                 Text("Hent en tekstmodel, eller slå Apple Intelligence til, før du kører testen.")
                     .font(.caption).foregroundStyle(palette.secondary)
                 Button("Se telefonmodeller", systemImage: "iphone") { page = .models }.frame(minHeight: 44)
             }
-            if let benchmarkNotice {
+            if benchmarkRun.modelID == id, let benchmarkNotice = benchmarkRun.notice {
                 Text(benchmarkNotice).font(.caption).foregroundStyle(palette.secondary)
                     .accessibilityAddTraits(.updatesFrequently)
             }
-            if let benchmarkResult {
+            if benchmarkRun.modelID == id, let benchmarkResult = benchmarkRun.result {
                 Text(benchmarkResult).font(.system(.headline, design: .monospaced)).foregroundStyle(palette.text)
                     .accessibilityAddTraits(.updatesFrequently)
             }
@@ -464,8 +486,8 @@ struct PhoneModelsView: View {
 
     private var benchmarkModels: [BenchmarkModel] {
         var models = [BenchmarkModel(id: "apple", name: "Apple Foundation Models")]
-        models += orderedCatalog.map { .init(id: $0.id, name: $0.name) }
-        models += GGUFPhoneModel.installed.map { .init(id: $0.id, name: $0.name) }
+        models += orderedCatalog.map { .init(id: $0.selectionID, name: $0.name) }
+        models += GGUFPhoneModel.installed.filter { $0.id != GGUFPhoneModel.miniCPMID }.map { .init(id: $0.id, name: $0.name) }
         models.append(.init(id: "imported", name: "Importeret model"))
         return models.filter { PhoneModels.isReady($0.id) }
     }
@@ -477,12 +499,11 @@ struct PhoneModelsView: View {
     }
 
     private var benchmarkBusy: Bool {
-        working || importing || benchmarkRunning || PhoneModelDownloads.shared.preparingModelID != nil
+        working || importing || benchmarkRun.isRunning
     }
     private func select(_ id: String) {
         guard PhoneModels.isReady(id) else { return }
         selected = id
-        benchmarkResult = nil
     }
 
     private func favoriteButton(_ id: String) -> some View {
@@ -499,8 +520,9 @@ struct PhoneModelsView: View {
     private func download(_ entry: PhoneModels.Entry) {
         guard let model = entry.model, PhoneModels.supportsLocalInference(model.id), !textDownloadBusy else { return }
         if PhoneModels.isReady(model.id) { select(model.id); return }
-        guard PhoneModels.hasDownloadSpace(bytes: entry.minimumFreeBytes) else {
-            notice = "Modellen kræver mindst \(ModelDiskStorage.gigabytes(entry.minimumFreeBytes)) fri lagerplads under installation. Frigør plads, og prøv igen."
+        let budget = entry.downloadBudget()
+        guard PhoneModels.hasDownloadSpace(bytes: budget.free) else {
+            notice = "Du skal bruge ca. \(ByteCountFormatter.string(fromByteCount: budget.free, countStyle: .file)) ledig plads til de resterende filer og installationen."
             return
         }
         requestedDownloadID = model.id
@@ -559,7 +581,7 @@ struct PhoneModelsView: View {
                         } else if let model = PhoneModels.catalog.first(where: { $0.id == id })?.model {
                             try downloader.delete(model)
                         }
-                        if selected == id { selected = "apple"; benchmarkResult = nil }
+                        if selected == id { selected = "apple" }
                     case .image(let file):
                         try ModelDiskStorage.delete(file, within: ModelDiskStorage.allowedImageRoots(MediaGenerationEnvironment.default.externalUrls))
                     }
@@ -572,20 +594,7 @@ struct PhoneModelsView: View {
 
     private func benchmark() {
         guard !benchmarkBusy, let id = benchmarkModelID else { return }
-        benchmarkRunning = true
-        benchmarkResult = nil
-        benchmarkNotice = nil
-        Task {
-            defer { benchmarkRunning = false }
-            do {
-                let result = try await PhoneModels.benchmark(modelID: id)
-                if benchmarkModelID == id { benchmarkResult = result }
-            } catch is CancellationError { }
-            catch LocalComputeError.busy { benchmarkNotice = "Vent til den lokale AI-opgave er færdig, og prøv igen." }
-            catch LocalComputeError.lowMemory { benchmarkNotice = "Der er for lidt fri hukommelse. Vælg en mindre model." }
-            catch PhoneModelError.unavailable { benchmarkNotice = "Modellen er ikke længere klar. Vælg en anden model." }
-            catch PhoneModelError.emptyResponse { benchmarkNotice = "Modellen gav intet svar på prøven. Prøv en anden model." }
-            catch { AppDiagnostics.record(error); benchmarkNotice = "Modellen kunne ikke gennemføre prøven. Vælg en anden model." }
-        }
+        benchmarkChoice = id
+        benchmarkRun.start(modelID: id)
     }
 }

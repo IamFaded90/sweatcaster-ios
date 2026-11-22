@@ -9,12 +9,54 @@ import SwiftUI
 import UIKit
 
 @MainActor enum StudioImageGeneration {
+    static var isHot: Bool {
+        let state = ProcessInfo.processInfo.thermalState
+        return state == .serious || state == .critical
+    }
+
+    static func checkBattery(protect: Bool) throws {
+        guard protect else { return }
+        let device = UIDevice.current
+        device.isBatteryMonitoringEnabled = true
+        let level = device.batteryLevel
+        if level >= 0, level < 0.15, device.batteryState == .unplugged {
+            throw StudioImageInterruption.battery
+        }
+    }
+
+    static func whileDeviceReady(model: StudioImageModel, protectBattery: Bool,
+                                 generate: @escaping @MainActor @Sendable () async throws -> Data?) async throws -> Data? {
+        try await LocalCompute.run(minimumMiB: model.minimumWorkingMemoryMiB) {
+            try checkBattery(protect: protectBattery)
+            guard !isHot else { throw StudioImageInterruption.heat }
+            return try await withThrowingTaskGroup(of: Optional<Data>.self) { group in
+                group.addTask { try await generate() }
+                group.addTask { try await monitorDevice(protectBattery: protectBattery) }
+                defer { group.cancelAll() }
+                guard let result = try await group.next() else { throw PhoneModelError.emptyResponse }
+                return result
+            }
+        }
+    }
+
+    private static func monitorDevice(protectBattery: Bool) async throws -> Data? {
+        while true {
+            try await Task.sleep(for: .seconds(1))
+            try checkBattery(protect: protectBattery)
+            if isHot { throw StudioImageInterruption.heat }
+        }
+    }
+
     static func render(model: StudioImageModel, prompt: String, negative: String = "", lora: String = "",
                        seed: UInt32, source: Data? = nil, variation: Bool = false, destination: URL? = nil,
                        referenceMode: StudioReferenceMode? = nil, referenceMask: StudioReferenceMask? = nil,
+                       secondReference: Data? = nil,
                        onLoaded: () throws -> Void = {}) async throws -> Data? {
         try Task.checkCancellation()
         guard model.isInstalled else { throw PhoneModelError.unavailable }
+        if secondReference != nil && (model != .fluxKlein || source == nil || referenceMask != nil) {
+            throw V2Failure.invalidInput
+        }
         LocalCompute.beginModelLoad()
         var pipeline = try await MediaGenerationPipeline.fromPretrained(model.id, backend: .local)
         LocalCompute.didLoadModel()
@@ -45,6 +87,10 @@ import UIKit
                     pipeline.configuration.faceRestoration = nil
                     pipeline.configuration.upscaler = nil
                 }
+            }
+            if let secondReference {
+                inputs.append(MediaGenerationPipeline.data(secondReference).moodboard())
+                pipeline.configuration.strength = 1
             }
         }
         let results = try await pipeline.generate(prompt: prompt, negativePrompt: negative, inputs: inputs)
@@ -102,7 +148,7 @@ enum StudioImageFiles {
         return header.elementsEqual([137, 80, 78, 71, 13, 10, 26, 10])
     }
 
-    static func deleteSavedImage(_ file: URL) throws {
+    @MainActor static func deleteSavedImage(_ file: URL) throws {
         let folder = library
         guard file.isFileURL,
               file.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
@@ -110,11 +156,17 @@ enum StudioImageFiles {
               file.pathExtension.lowercased() == "png" else { throw LocalFileStore.Failure.invalidPath }
         let store = LocalFileStore(root: folder)
         try store.delete(file)
+        StudioGalleryThumbnailCache.shared.remove(file)
         try? store.delete(file.appendingPathExtension("json"))
     }
 }
 
 extension OfflineStudio {
+    func stopStudioImageQueue() {
+        pendingImages.removeAll()
+        if generatingImages { task?.cancel() }
+    }
+
     var privatePCModelPicker: some View {
         StudioPCImageModelPicker(selection: $sessionPreferences.pcImageModel, catalog: pcImageCatalog) {
             pcImageRefresh += 1
@@ -169,20 +221,9 @@ extension OfflineStudio {
         StudioImageFiles.destination(in: folder)
     }
 
-    var isImageThermallyConstrained: Bool {
-        let state = ProcessInfo.processInfo.thermalState
-        return state == .serious || state == .critical
-    }
+    var isImageThermallyConstrained: Bool { StudioImageGeneration.isHot }
 
-    func checkImageBattery() throws {
-        guard imageBatteryProtection else { return }
-        let device = UIDevice.current
-        device.isBatteryMonitoringEnabled = true
-        let level = device.batteryLevel
-        if level >= 0, level < 0.15, device.batteryState == .unplugged {
-            throw StudioImageInterruption.battery
-        }
-    }
+    func checkImageBattery() throws { try StudioImageGeneration.checkBattery(protect: imageBatteryProtection) }
 
     func studioImageFailureMessage(_ error: Error, model: String) -> String? {
         let downloadHelp = "Hent billedmodellen under Lokale modeller → Billeder, og prøv igen."
@@ -229,17 +270,19 @@ extension OfflineStudio {
         var created: [URL] = []
         var photosDenied = false
         if !request.isPrivate { try prepareImageFolder(folder) }
-        for index in 0..<request.count {
+        for (index, seed) in request.suggestionSeeds.enumerated() {
             try Task.checkCancellation()
             let destination = imageDestination(in: folder)
-            let seed = request.seed.map { $0 &+ UInt32(index) } ?? UInt32.random(in: 1...UInt32.max)
-            let variation = request.referenceMask == nil && request.seed != nil && index > 0 ? created.first : nil
+            let variation = request.sourceImage == nil && request.seed != nil && index > 0 ? created.first : nil
             let source: String
             let metadata: StudioImageDetails
+            let pcProgress = request.count > 1 ? "Forslag \(index + 1) af \(request.count) · " : ""
             if request.isPrivate && request.route == .pc {
+                status = pcProgress + "\(request.pcModel.title) laver billede på PC’en…"
                 metadata = try await renderPrivateStudioImageOnPC(request, seed: seed, sessionID: sessionID, destination: destination)
                 source = "PC"
             } else if request.route == .pc {
+                status = pcProgress + "PC’en laver billede…"
                 metadata = try await renderStudioImageOnPC(request, to: destination, in: folder)
                 source = "PC"
             } else {
@@ -257,6 +300,7 @@ extension OfflineStudio {
                     try Task.checkCancellation()
                     guard canFallBack else { throw error }
                     AppDiagnostics.record(error)
+                    status = pcProgress + "PC’en overtager billedet…"
                     metadata = try await renderStudioImageOnPC(request, to: destination, in: folder)
                     source = "PC"
                 }
@@ -267,7 +311,7 @@ extension OfflineStudio {
             if request.isPrivate { created.removeAll { privateImages[$0] == nil } }
             if index == 0 {
                 if !imageOnly {
-                    let turn = PrivateChatTurn(prompt: request.prompt, reply: "Billede klar.",
+                    let turn = PrivateChatTurn(prompt: request.chatDraft ?? request.prompt, reply: "Billede klar.",
                                                imageName: destination.lastPathComponent, source: source, botID: request.botID)
                     batchTurnID = turn.id
                     turns.append(turn)
@@ -279,12 +323,21 @@ extension OfflineStudio {
                 imageComparisonSource?.results.insert(destination)
             }
             batchImageURLs = created
+            if imageURL == nil, let first = created.first { selectBatchImage(first) }
             savePrivateConversation()
             if request.autoSave && !request.isPrivate && autoSaveStudioPhotos && !privateSession {
                 if !(await saveStudioPhoto(destination)) { photosDenied = true }
             }
         }
-        status = request.count > 1 ? "Forslagene er klar. Vælg dit bedste billede." : "Billede klar."
+        if let original = request.chatDraft, !created.isEmpty, prompt == original { prompt = "" }
+        if request.chatDraft != nil, !created.isEmpty, request.sourceImage != nil,
+           attachedChatPhoto == request.sourceImage, secondChatPhoto == request.secondReference {
+            attachedChatPhoto = nil
+            secondChatPhoto = nil
+        }
+        if request.count == 1 { status = "Billede klar." }
+        else if created.count == request.count { status = "4 forslag klar. Vælg dit bedste billede." }
+        else { status = "\(created.count) af \(request.count) forslag tilbage i den private session." }
         if photosDenied { status += " Billedet er gemt i studiet. Tjek tilladelsen til Fotos." }
         offlineSuccessHaptic()
     }
@@ -301,7 +354,7 @@ extension OfflineStudio {
                                                destination: request.isPrivate ? nil : destination, within: folder,
                                                label: label, negativePrompt: request.negative,
                                                privateOutput: request.isPrivate, referenceMode: request.referenceMode,
-                                               referenceMask: request.referenceMask)
+                                               referenceMask: request.referenceMask, secondReference: request.secondReference)
         try Task.checkCancellation()
         if request.isPrivate {
             guard privateSession, sessionUnlocked, !sessionExpired, sessionID == temporaryImagesID else { throw CancellationError() }
@@ -319,12 +372,12 @@ extension OfflineStudio {
             let size = StudioImageGeneration.referenceSize(reference)
             mask = try selection.encoded(source: size, width: Int(size.width), height: Int(size.height), repaintValue: 255)
         }
-        status = "\(request.pcModel.title) laver dit billede på PC’en…"
         let mode = request.referenceMode
         let bytes = try await api.privateStudioImage(prompt: request.prompt, negative: request.negative,
                                                       reference: request.sourceImage, mask: mask,
                                                       strength: mask == nil ? mode?.strength : mode?.maskedStrength, seed: seed,
-                                                      engine: request.pcModel == .realvis ? nil : request.pcModel.rawValue)
+                                                      engine: request.pcModel == .realvis ? nil : request.pcModel.rawValue,
+                                                      secondReference: request.secondReference)
         try Task.checkCancellation()
         guard isCurrentPrivateSession(sessionID) else { throw CancellationError() }
         try storePrivateImage(bytes, for: destination)
@@ -334,7 +387,6 @@ extension OfflineStudio {
     private func renderStudioImageOnPC(_ request: StudioImageRequest, to destination: URL,
                                        in folder: URL) async throws -> StudioImageDetails {
         guard !privateSession, request.supportsPC, let api else { throw V2Failure.invalidInput }
-        status = "PC’en laver dit billede…"
         let png = try await api.v2GenerateImage(prompt: request.prompt)
         try Task.checkCancellation()
         try LocalFileStore.writeBytes(png, to: destination, within: folder)
@@ -370,7 +422,7 @@ extension OfflineStudio {
                                    sourceImage: Data?, variation: URL?, destination: URL?, within outputDirectory: URL,
                                    label: String, negativePrompt: String = "",
                                    privateOutput: Bool = false, referenceMode: StudioReferenceMode? = nil,
-                                   referenceMask: StudioReferenceMask? = nil) async throws -> Data? {
+                                   referenceMask: StudioReferenceMask? = nil, secondReference: Data? = nil) async throws -> Data? {
         if privateOutput, destination != nil { throw CocoaError(.fileWriteUnsupportedScheme) }
         let destination = try destination.map { try LocalFileStore.safeWriteURL($0, within: outputDirectory) }
         defer { imageCooling = false }
@@ -388,41 +440,27 @@ extension OfflineStudio {
             imageCooling = false
             status = label
             do {
-                let data: Data? = try await LocalCompute.run(minimumMiB: model.minimumWorkingMemoryMiB) {
-                    try await withThrowingTaskGroup(of: Optional<Data>.self) { group in
-                        group.addTask { @MainActor in
-                            try Task.checkCancellation()
-                            status = "Indlæser \(model.title) på telefonen…"
-                            let input: Data?
-                            let isVariation: Bool
-                            if let variation, let bytes = privateImages[variation] {
-                                input = bytes
-                                isVariation = true
-                            } else if let variation, variation.isFileURL, !privateOutput {
-                                input = try LocalFileStore.readBytes(from: variation, maximumBytes: 80_000_000)
-                                isVariation = true
-                            } else {
-                                input = sourceImage
-                                isVariation = false
-                            }
-                            return try await StudioImageGeneration.render(model: model, prompt: prompt, negative: negativePrompt,
-                                                                          lora: lora, seed: seed, source: input,
-                                                                          variation: isVariation, destination: destination,
-                                                                          referenceMode: referenceMode, referenceMask: referenceMask) {
-                                status = label
-                            }
-                        }
-                        group.addTask { @MainActor in
-                            while !Task.isCancelled {
-                                try self.checkImageBattery()
-                                if self.isImageThermallyConstrained { throw StudioImageInterruption.heat }
-                                try await Task.sleep(for: .seconds(1))
-                            }
-                            throw CancellationError()
-                        }
-                        defer { group.cancelAll() }
-                        guard let result = try await group.next() else { throw PhoneModelError.emptyResponse }
-                        return result
+                let data = try await StudioImageGeneration.whileDeviceReady(model: model, protectBattery: imageBatteryProtection) {
+                    try Task.checkCancellation()
+                    status = "Indlæser \(model.title) på telefonen…"
+                    let input: Data?
+                    let isVariation: Bool
+                    if let variation, let bytes = privateImages[variation] {
+                        input = bytes
+                        isVariation = true
+                    } else if let variation, variation.isFileURL, !privateOutput {
+                        input = try LocalFileStore.readBytes(from: variation, maximumBytes: 80_000_000)
+                        isVariation = true
+                    } else {
+                        input = sourceImage
+                        isVariation = false
+                    }
+                    return try await StudioImageGeneration.render(model: model, prompt: prompt, negative: negativePrompt,
+                                                                  lora: lora, seed: seed, source: input,
+                                                                  variation: isVariation, destination: destination,
+                                                                  referenceMode: referenceMode, referenceMask: referenceMask,
+                                                                  secondReference: secondReference) {
+                        status = label
                     }
                 }
                 try Task.checkCancellation()
@@ -435,30 +473,6 @@ extension OfflineStudio {
                 AppDiagnostics.record(error)
                 if let destination { try? FileManager.default.removeItem(at: destination) }
                 throw error
-            }
-        }
-    }
-
-    func benchmarkImageModel() {
-        guard let selected = StudioImageModel(rawValue: imageModel) else { return }
-        let privateOutput = privateSession
-        let directory = FileManager.default.temporaryDirectory
-        let destination = privateOutput ? nil : directory.appendingPathComponent("\(UUID()).png")
-        imageBenchmark = nil
-        run("Måler billedmodellens hastighed…") {
-            defer { if let destination { try? FileManager.default.removeItem(at: destination) } }
-            let start = ContinuousClock.now
-            do {
-                _ = try await renderStudioImage(model: selected, prompt: "A red apple on a light table", lora: "",
-                                                seed: 42, sourceImage: nil, variation: nil, destination: destination, within: directory,
-                                                label: "Måler billedmodellens hastighed…", privateOutput: privateOutput)
-                let time = start.duration(to: .now).components
-                let seconds = Double(time.seconds) + Double(time.attoseconds) / 1e18
-                imageBenchmark = "\(selected.title): \(seconds.formatted(.number.precision(.fractionLength(1)))) sek. pr. billede (\(selected.renderSize) px, \(selected.renderSteps) trin, inkl. indlæsning)."
-                status = "Benchmark færdig."
-            } catch StudioImageInterruption.battery {
-                AppDiagnostics.record(StudioImageInterruption.battery)
-                status = "Batteriet er lavt. Sæt telefonen til opladning for at fortsætte."
             }
         }
     }

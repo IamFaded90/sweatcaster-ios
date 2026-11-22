@@ -26,6 +26,8 @@ enum AgentChatIntent {
     @MainActor static func match(_ input: String) -> Self? {
         let text = normalize(input)
         guard !text.isEmpty, text.count <= 1_200 else { return nil }
+        if let shopping = AgentShoppingRequest.match(input) { return .action(.shopping(shopping)) }
+        if let result = AgentUnitPrice.answer(input) { return .action(.unitPrice(result)) }
         if let milestone = AgentMilestone.match(input) { return .milestone(milestone) }
         if AgentAppointmentChangeIntent.matches(input) { return .appointmentChange }
         if AgentGmailCleanupIntent.matches(input) { return .gmailCleanup }
@@ -83,6 +85,8 @@ enum AgentChatIntent {
     }
 
     static func matchesTodayOverview(_ text: String) -> Bool {
+        let morningRequest = #"^(?:godmorgen[,!.]?\s+)?(?:(?:vis(?: mig)?|giv mig) (?:mit |et )?)?morgenoverblik$"#
+        if text.range(of: morningRequest, options: .regularExpression) != nil { return true }
         let pattern = #"^(?:(?:kan|vil) du (?:lige )?)?(?:(?:vis(?:e)?(?: mig)?|giv(?:e)? mig|lav(?:e)?(?: mig)?) (?:mit |et |en )?(?:overblik over (?:min dag|hele dagen)|dagsoversigt|dagsplan)|hvad (?:skal jeg huske|har jeg på programmet|er der på min dagsplan) i dag|hvilke planer har jeg i dag|har jeg noget jeg skal i dag)$"#
         return text.range(of: pattern, options: .regularExpression) != nil
     }

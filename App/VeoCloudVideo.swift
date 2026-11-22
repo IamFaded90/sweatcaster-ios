@@ -11,6 +11,36 @@ struct VeoCloudJob: Codable, Identifiable {
     var downloadURL: URL?
     var notice: String?
     let createdAt: Date
+
+    var generationArguments: [String: Any] {
+        ["model": model, "prompt": prompt, "aspect_ratio": "16:9", "extras": ["sampleCount": 1]]
+    }
+
+    mutating func updateStatus(_ status: [String: Any]) {
+        if status["error"] is [String: Any] {
+            state = .failed
+            notice = "Google kunne ikke færdiggøre videoen."
+        } else if status["done"] as? Bool == true {
+            let response = status["response"] as? [String: Any] ?? [:]
+            let output = response["generateVideoResponse"] as? [String: Any] ?? response
+            if (output["raiMediaFilteredCount"] as? Int ?? 0) > 0,
+               (output["generatedSamples"] as? [Any] ?? []).isEmpty,
+               (output["generatedVideos"] as? [Any] ?? []).isEmpty {
+                state = .failed
+                notice = "Google standsede videoen med sit indholdsfilter."
+            } else {
+                state = .ready
+                notice = nil
+            }
+        }
+    }
+
+    mutating func clearUnavailableLink(statusCode: Int) -> Bool {
+        guard state == .ready, downloadURL != nil, [401, 403, 404, 410].contains(statusCode) else { return false }
+        downloadURL = nil
+        notice = "Downloadlinket er udløbet eller utilgængeligt. Hent et nyt link til det samme job."
+        return true
+    }
 }
 
 @MainActor final class VeoCloudLibrary: ObservableObject {
@@ -62,6 +92,7 @@ struct VeoCloudJob: Codable, Identifiable {
     @State private var models: [String] = []
     @State private var model = ""
     @State private var prompt = ""
+    @State private var catalogRead = false
     @State private var busy = false
     @State private var notice: String?
     @State private var checking = Set<UUID>()
@@ -94,6 +125,13 @@ struct VeoCloudJob: Codable, Identifiable {
                                       || prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || prompt.count > 1000)
                         if busy { ProgressView("Kontakter Veo…") }
                         if let notice { FadedDetailText(notice) }
+                        if catalogRead && models.isEmpty {
+                            NavigationLink {
+                                PCVideoGenerationView(api: api, initialPrompt: prompt, showsVeoLink: false)
+                            } label: {
+                                Label("Brug beskrivelsen i PC-studiet", systemImage: "desktopcomputer")
+                            }.frame(minHeight: 44)
+                        }
                     }
                 }
                 ForEach(library.jobs) { job in jobCard(job) }
@@ -131,21 +169,19 @@ struct VeoCloudJob: Codable, Identifiable {
                     ProgressView("Veo arbejder…")
                     Button("Tjek status") { Task { await check(job) } }.disabled(checking.contains(job.id))
                 case .ready:
-                    if let url = job.downloadURL {
-                        if library.hasVideo(job.id) {
-                            Button("Afspil video", systemImage: "play.circle") {
-                                player = AVPlayer(url: library.video(job.id))
-                                playing = true
-                            }.frame(minHeight: 44)
-                            ShareLink(item: library.video(job.id)) { Label("Gem eller del video", systemImage: "square.and.arrow.up") }
-                        } else {
-                            Button("Hent video til iPhone", systemImage: "arrow.down.circle") {
-                                Task { await fetchVideo(url, job: job) }
-                            }.disabled(downloading.contains(job.id)).frame(minHeight: 44)
-                            if downloading.contains(job.id) { ProgressView("Henter video…") }
-                        }
+                    if library.hasVideo(job.id) {
+                        Button("Afspil video", systemImage: "play.circle") {
+                            player = AVPlayer(url: library.video(job.id))
+                            playing = true
+                        }.frame(minHeight: 44)
+                        ShareLink(item: library.video(job.id)) { Label("Gem eller del video", systemImage: "square.and.arrow.up") }
+                    } else if let url = job.downloadURL {
+                        Button("Hent video til iPhone", systemImage: "arrow.down.circle") {
+                            Task { await fetchVideo(url, job: job) }
+                        }.disabled(downloading.contains(job.id)).frame(minHeight: 44)
+                        if downloading.contains(job.id) { ProgressView("Henter video…") }
                     } else {
-                        Button("Hent video igen", systemImage: "arrow.down.circle") { Task { await check(job) } }
+                        Button("Hent nyt videolink", systemImage: "arrow.down.circle") { Task { await check(job) } }
                             .disabled(checking.contains(job.id)).frame(minHeight: 44)
                     }
                 case .failed: FadedDetailText("Videoen kunne ikke laves.")
@@ -172,7 +208,13 @@ struct VeoCloudJob: Codable, Identifiable {
             let network = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
             defer { network.invalidateAndCancel() }
             let (bytes, response) = try await network.bytes(from: url)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+            guard let http = response as? HTTPURLResponse else { throw ComposioCloudError.invalidResponse }
+            var updated = job
+            if updated.clearUnavailableLink(statusCode: http.statusCode) {
+                if library.jobs.contains(where: { $0.id == job.id }) { try library.save(updated) }
+                return
+            }
+            guard http.statusCode == 200,
                   response.expectedContentLength <= 80_000_000 else { throw ComposioCloudError.invalidResponse }
             var data = Data()
             for try await byte in bytes {
@@ -201,15 +243,18 @@ struct VeoCloudJob: Codable, Identifiable {
             let names = rows + fallback
             models = Array(Set(names.compactMap { ($0["name"] ?? $0["id"]) as? String }
                 .map { $0.hasPrefix("models/") ? String($0.dropFirst(7)) : $0 }.filter { $0.hasPrefix("veo-") })).sorted()
-            if models.isEmpty || (result["raw"] as? [String: Any])?["nextPageToken"] is String {
+            let nextPage = result["nextPageToken"] as? String ?? (result["raw"] as? [String: Any])?["nextPageToken"] as? String
+            if models.isEmpty || !(nextPage ?? "").isEmpty {
                 models = try await Self.allModels(client, discovery: search)
             }
+            catalogRead = true
             if !models.contains(model) { model = models.first(where: { $0.contains("fast") }) ?? models.first ?? "" }
-            notice = models.isEmpty ? "Google viser ingen Veo-modeller for denne forbindelse lige nu. Prøv Opdatér modeller igen senere. Du kan også lave video på PC’en i Video Studio." : nil
+            notice = models.isEmpty ? "Denne forbindelse viser ingen Veo-modeller. Google lukkede Veo 3.1 Preview i Gemini API den 22. oktober 2026. Du kan bruge samme beskrivelse i dit PC-studie." : nil
         } catch {
             if !Task.isCancelled {
                 models = []
                 model = ""
+                catalogRead = false
                 notice = "Kunne ikke hente Veo-modeller. \(error.localizedDescription) Prøv Opdatér modeller igen."
             }
         }
@@ -265,9 +310,7 @@ struct VeoCloudJob: Codable, Identifiable {
                 let client = try await ComposioCloud.client()
                 let search = try await client.discover("Veo VEO_GENERATE_VIDEOS text to video generation.")
                 try library.save(job)
-                let result = try await client.execute("VEO_GENERATE_VIDEOS",
-                    arguments: ["model": model, "prompt": idea, "aspect_ratio": "16:9",
-                                "extras": ["numberOfVideos": 1]], discovery: search)
+                let result = try await client.execute("VEO_GENERATE_VIDEOS", arguments: job.generationArguments, discovery: search)
                 guard let operation = Self.operation(result), operation.count <= 512 else { throw ComposioCloudError.uncertain }
                 job.operation = operation
                 job.state = .working
@@ -300,13 +343,17 @@ struct VeoCloudJob: Codable, Identifiable {
             let result = try await client.execute("VEO_GET_VIDEOS_OPERATION",
                                                   arguments: ["operation_name": operation], discovery: search)
             var updated = job
-            if result["error"] is [String: Any] {
-                updated.state = .failed
-                updated.notice = "Veo kunne ikke færdiggøre videoen."
-            } else if result["done"] as? Bool == true {
-                updated.state = .ready
-                updated.downloadURL = try await download(result, job: job, client: client)
-                updated.notice = updated.downloadURL == nil ? "Veo er færdig. Downloadlinket kunne ikke læses. Tjek status igen." : nil
+            let status = result["operation"] as? [String: Any] ?? result
+            updated.updateStatus(status)
+            guard library.jobs.contains(where: { $0.id == job.id }) else { return }
+            if updated.state != job.state { try library.save(updated) }
+            guard updated.state == .ready else { return }
+            do {
+                updated.downloadURL = try await download(status, job: job, client: client)
+                updated.notice = updated.downloadURL == nil ? "Veo er færdig. Prøv at hente videolinket igen." : nil
+            } catch {
+                guard !Task.isCancelled else { return }
+                updated.notice = "Videoen er færdig. Linket kunne ikke hentes. \(error.localizedDescription)"
             }
             if library.jobs.contains(where: { $0.id == job.id }) { try library.save(updated) }
         } catch { if !Task.isCancelled { notice = error.localizedDescription } }

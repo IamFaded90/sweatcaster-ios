@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 from io import BytesIO
 import json
 import os
 from pathlib import Path
-import re
 import time
 import shutil
 import subprocess
@@ -21,6 +18,10 @@ from fastapi import APIRouter, Body, Depends, FastAPI, Request, Response
 from starlette.concurrency import run_in_threadpool
 
 from sweatcaster.dto import ApiError
+from sweatcaster.lumi_media_inputs import MAX_REFERENCE, normalize_reference, _edit_mask, _remove_private_image_files, discard_image_later
+from sweatcaster.lumi_dialogue import dialogue_reply, model_reply, reply_request
+from sweatcaster.lumi_recall import recall_reply
+from sweatcaster.lumi_units import conversion_reply
 from sweatcaster.lumi_video_files import discard_render, remove_video as remove_video_files, video_filename
 
 LUMI_ID = "ecba4ff7-69b2-5a9c-a028-d93ef6ec7983"
@@ -32,21 +33,24 @@ VIDEO_CLIP = "umt5_xxl_fp8_e4m3fn_scaled.safetensors"
 VIDEO_VAE = "wan_2.1_vae.safetensors"
 OLLAMA = "http://127.0.0.1:11434"
 COMFY = "http://127.0.0.1:8188"
-MAX_REFERENCE = 1_000_000
 MAX_VIDEO_UPLOAD = 1_360_000
 VIDEO_OUTPUT_FOLDER = "FadedAI_Lumi"
 _video_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lumi-video")
 _video_lock = Lock()
 _video_jobs: dict[str, dict] = {}
 INSTRUCTIONS = (
-    "You are Lumi, an adult, playful and flirtatious private companion. "
-    "Be warm, imaginative and direct. Understand Danish, imperfect English, "
-    "misspellings and mixed Danish/English. Infer intent from context. Never correct their "
-    "spelling or grammar unless asked. Do not claim to have taken real-world "
-    "actions or accessed accounts when you have not. "
-    "Respond to the user's latest message in the ongoing conversation. "
-    "Do not restart with a greeting or repeat your previous question after the user has answered it. "
-    "If a message is too unclear to understand, ask one short clarification about that message."
+    "You are Lumi. Reply in English. Answer the latest message directly. Use earlier turns when relevant. "
+    "Give short, concrete answers to practical questions. If unsure, ask one relevant question. "
+    "Keep names and details the user asks you to recall exact. Understand imperfect English and mixed Danish/English. "
+    "When invited into adult flirting or roleplay, be candid, playful and teasing. Follow the user's pace, "
+    "including a change of subject or a request to stop. Speak for yourself and only claim actions you really took."
+)
+DANISH_INSTRUCTIONS = (
+    "Du er Lumi. Svar på brugerens seneste besked på naturligt dansk, også når brugeren blander dansk og engelsk. "
+    "Brug tidligere beskeder, når de hjælper. Ved praktiske spørgsmål: giv et kort, konkret svar. "
+    "Er du i tvivl, så stil ét relevant spørgsmål. Gengiv navne og detaljer præcist, når brugeren spørger. "
+    "Ved voksenflirt eller rollespil: vær fræk, legesyg og følg brugerens tempo. "
+    "Når brugeren stopper eller skifter emne, følger du med. Tal for dig selv. Beskriv kun handlinger, du faktisk har udført."
 )
 SCENE_INITIATIVES = {
     "user": "Follow the user's lead. Wait for their next decision and do not steer the scene uninvited.",
@@ -56,7 +60,7 @@ SCENE_INITIATIVES = {
 SCENE_MOODS = {
     "playful": "Use playful adult flirting, teasing and warmth.",
     "romantic": "Use a romantic, affectionate tone with a slower buildup.",
-    "bold": "Use more confident and suggestive adult flirting, matching what the user brings to the scene.",
+    "bold": "Use candid adult dirty talk, playful confidence and fresh concrete dialogue. Match the user's pace.",
 }
 SCENE_FIELDS = {"title": 80, "lumiRole": 300, "userRole": 300, "setting": 800}
 
@@ -116,82 +120,48 @@ def chat(message: str, history: list[dict] | None = None, *, language: str = "da
         raise ApiError(422, "INVALID_INPUT", "Samtalen er for lang. Start en ny samtale.")
     if language not in ("da-DK", "en-US"):
         raise ApiError(422, "INVALID_INPUT", "Vælg dansk eller engelsk.")
-    reply_language = "Danish" if language == "da-DK" else "English"
-    instructions = INSTRUCTIONS + f" Reply in {reply_language} unless the user explicitly requests Danish or English."
+    instructions = DANISH_INSTRUCTIONS if language == "da-DK" else INSTRUCTIONS
     if scene_chat:
         instructions += " " + scene_instructions(scene, initiative, opening)
-    messages = [{"role": "system", "content": instructions}]
+    previous = []
     for item in history:
-        if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
+        if not isinstance(item, dict) or item.get("role") not in ("user", "assistant"):
             raise ApiError(422, "INVALID_INPUT", "Samtalens historik er ugyldig.")
-        messages.append({"role": item["role"], "content": _message(item.get("content"))})
-    messages.append({"role": "user", "content": message})
+        previous.append({"role": item["role"], "content": _message(item.get("content"))})
+    field, question = (None, message) if opening else reply_request(message)
+    if not opening:
+        answer = conversion_reply(message, previous, language=language) or recall_reply(
+            question, previous, language=language, value_only=field == "name")
+        if answer is not None:
+            return answer
+    messages = [{"role": "system", "content": instructions}, *previous, {"role": "user", "content": message}]
     owned = client is None
     client = client or _client()
+    has_previous = any(item["role"] == "assistant" for item in previous)
+
+    def generate(turns):
+        return model_reply(client, OLLAMA + "/api/chat", TEXT_MODEL, turns,
+                           read_timeout=85 if has_previous else 180, field=field, language=language)
+
     try:
-        response = client.post(OLLAMA + "/api/chat", json={"model": TEXT_MODEL, "messages": messages,
-                              "stream": False, "options": {"num_ctx": 4096}},
-                               timeout=(3, 180), allow_redirects=False)
-        response.raise_for_status()
-        answer = response.json()["message"]["content"]
-        if not isinstance(answer, str) or not answer.strip():
-            raise ValueError("empty response")
-        return answer.strip()
-    except (requests.RequestException, KeyError, TypeError, ValueError) as exc:
+        problem = ("Lumi couldn't answer your last message. Try sending it again."
+                   if language == "en-US" else "Lumi fik ikke svaret på din sidste besked. Prøv at sende den igen.")
+        practical_retry = (
+            "Use the names and details from the conversation that fit the question. Give the user a concrete first "
+            "step they can take. If you need more information, ask specifically for it. Leave small talk for later."
+            if language == "en-US" else
+            "Brug navne og detaljer fra samtalen, som passer til spørgsmålet. Giv brugeren et konkret første skridt, "
+            "som de selv kan tage. Hvis du mangler en oplysning, så spørg præcist efter den. Lad hyggesnakken vente."
+        )
+        return dialogue_reply(generate, messages, failure=ApiError(503, "NOT_READY", problem),
+                              practical_retry=None if opening else practical_retry)
+    except requests.RequestException as exc:
         raise ApiError(503, "NOT_READY", "Lumis tekstmodel svarer ikke på PC'en. Tjek Ollama.") from exc
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ApiError(503, "NOT_READY", problem) from exc
     finally:
         if owned:
             client.close()
-
-
-def normalize_reference(value):
-    if not isinstance(value, str) or not 1 <= len(value) <= 4 * ((MAX_REFERENCE + 2) // 3):
-        raise ApiError(422, "INVALID_INPUT", "Vælg ét referencebillede under 1 MB.")
-    try:
-        from PIL import Image, ImageOps
-    except ImportError as exc:
-        raise ApiError(503, "NOT_READY", "PC’en mangler billedbiblioteket Pillow.") from exc
-    try:
-        raw = base64.b64decode(value, validate=True)
-        if len(raw) > MAX_REFERENCE:
-            raise ValueError
-        with Image.open(BytesIO(raw), formats=("JPEG", "PNG")) as selected:
-            if not all(32 <= side <= 2048 for side in selected.size) or getattr(selected, "is_animated", False):
-                raise ValueError
-            image = ImageOps.exif_transpose(selected).convert("RGB")
-            image.thumbnail((768, 768), Image.Resampling.LANCZOS)
-            size = tuple(max(8, side - side % 8) for side in image.size)
-            image = image.resize(size, Image.Resampling.LANCZOS)
-            image.info.clear()
-            output = BytesIO()
-            image.save(output, "PNG")
-        return output.getvalue()
-    except (ValueError, OSError, binascii.Error, Image.DecompressionBombError) as exc:
-        raise ApiError(422, "INVALID_INPUT", "Referencebilledet kunne ikke læses som et foto.") from exc
-
-
-def _edit_mask(value, reference):
-    from PIL import Image
-
-    try:
-        if reference is None or not isinstance(value, str) or not 1 <= len(value) <= 350_000:
-            raise ValueError
-        raw = base64.b64decode(value, validate=True)
-        with Image.open(BytesIO(raw), formats=("PNG",)) as selected:
-            if not all(32 <= side <= 1024 for side in selected.size) or getattr(selected, "is_animated", False):
-                raise ValueError
-            with Image.open(BytesIO(reference)) as photo:
-                if abs(selected.width / selected.height - photo.width / photo.height) > 0.12:
-                    raise ValueError
-                mask = selected.convert("L").resize(photo.size, Image.Resampling.NEAREST)
-            mask = mask.point(lambda level: 255 if level >= 128 else 0)
-            if mask.getextrema()[1] == 0:
-                raise ValueError
-            output = BytesIO()
-            mask.save(output, "PNG")
-            return output.getvalue()
-    except (binascii.Error, OSError, ValueError, Image.DecompressionBombError) as exc:
-        raise ApiError(422, "INVALID_INPUT", "Markeringen passer ikke til referencefotoet. Prøv at tegne den igen.") from exc
 
 
 def _temp_upload(client, name, data):
@@ -202,19 +172,6 @@ def _temp_upload(client, name, data):
     if (not isinstance(receipt, dict) or receipt.get("type") != "temp"
             or receipt.get("name") != name or receipt.get("subfolder", "") != ""):
         raise ApiError(502, "NOT_READY", "PC’en kunne ikke klargøre referencebilledet.")
-
-
-def _remove_private_image_files(files):
-    root = Path(os.environ.get("FADEDAI_COMFY_TEMP_DIR", "F:/FadedAI/ComfyUI/temp")).resolve()
-    for name in files:
-        if not re.fullmatch(r"(?:fadedai-private-[a-f0-9]{32}|ComfyUI_temp_[A-Za-z0-9_]{1,80})\.png", name):
-            continue
-        path = root / name
-        try:
-            if path.is_file() and not path.is_symlink():
-                path.unlink()
-        except OSError:
-            pass
 
 
 def _flux_available(client, adult=False):
@@ -228,11 +185,17 @@ def _pony_available(client):
 
 
 def image(prompt: str, *, reference=None, client: requests.Session | None = None, timeout: float = 300,
-          private=False, mask=None, strength=None, seed=None, negative=None, engine=None) -> bytes:
+          private=False, mask=None, strength=None, seed=None, negative=None, engine=None, second_reference=None, pair_mode=None) -> bytes:
     prompt = _message(prompt, limit=1000)
     if engine not in (None, "realvis", "pony", "flux2", "flux2-adult"):
         raise ApiError(422, "INVALID_INPUT", "Vælg en af PC'ens billedmodeller.")
     reference = normalize_reference(reference) if reference is not None else None
+    if second_reference is not None:
+        if pair_mode not in (None, "references"):
+            raise ApiError(422, "INVALID_INPUT", "Ukendt valg for to referencebilleder.")
+        if not private or reference is None or mask is not None or engine not in ("flux2", "flux2-adult"):
+            raise ApiError(422, "INVALID_INPUT", "To figurer kræver to referencer og FLUX 2 på PC’en.")
+        second_reference = normalize_reference(second_reference)
     mask = _edit_mask(mask, reference) if mask is not None else None
     if strength is not None and (type(strength) not in (int, float) or not 0.1 <= strength <= 1):
         raise ApiError(422, "INVALID_INPUT", "Vælg hvor meget referencebilledet må ændres.")
@@ -286,7 +249,6 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
                 graph["7"]["inputs"]["images"] = ["11", 0]
         if engine in ("flux2", "flux2-adult"):
             from sweatcaster import lumi_flux
-            # Validate before submission; never fall back silently to a different model.
             if not _flux_available(client, adult=engine == "flux2-adult"):
                 raise ApiError(503, "NOT_READY", "FLUX 2 mangler på PC’en. Vælg RealVisXL eller hent modellen.")
             width, height = 768, 768
@@ -297,8 +259,19 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
                 with Image.open(BytesIO(reference)) as source:
                     width = max(16, source.width - source.width % 16)
                     height = max(16, source.height - source.height % 16)
+            other = None
+            if second_reference is not None:
+                other = f"fadedai-private-{uuid4().hex}.png"
+                temporary_files.append(other)
+                _temp_upload(client, other, second_reference)
+                prompt = ("Use both references as directed. Preserve each subject's distinct features. " + prompt
+                          if pair_mode == "references" else
+                          "One continuous scene, both fictional adults interacting in the same space, a single background. "
+                          "Person on left matches reference 1. Person on right matches reference 2. "
+                          "Keep their distinct faces, hair and eye colors. " + prompt)
+                width, height = 896, 640
             graph = lumi_flux.graph(prompt, seed if seed is not None else int(time.time_ns() % (2**53)),
-                                    width, height, reference_name, mask_name, adult=engine == "flux2-adult")
+                                    width, height, reference_name, mask_name, adult=engine == "flux2-adult", second_reference=other)
         queued = client.post(COMFY + "/prompt", json={"prompt": graph}, timeout=(3, 20), allow_redirects=False)
         queued.raise_for_status()
         prompt_id = str(queued.json()["prompt_id"])
@@ -347,6 +320,8 @@ def image(prompt: str, *, reference=None, client: requests.Session | None = None
                     client.post(COMFY + "/history", json={"delete": [prompt_id]}, timeout=(2, 3), allow_redirects=False)
                 except requests.RequestException:
                     pass
+        elif private and submitted:
+            discard_image_later(client, _client, COMFY, prompt_id, temporary_files, _remove_private_image_files)
         if submitted:
             try:
                 client.post(COMFY + "/free", json={"unload_models": True, "free_memory": True},
@@ -454,10 +429,14 @@ def _expire_private_video(job_id: str) -> None:
         _video_jobs.pop(job_id, None)
 
 
-def _render_video(job_id: str, prompt: str, reference: bytes | None = None, private: bool = False) -> None:
+def _render_video(job_id: str, prompt: str, reference: bytes | None = None, private: bool = False, previous=None) -> None:
     try:
         options = {"reference": reference, "private": private} if reference is not None or private else {}
-        payload = video(prompt, output_id=job_id, **options)
+        if previous is None:
+            payload = video(prompt, output_id=job_id, **options)
+        else:
+            from sweatcaster.lumi_continuation import continue_clip
+            payload = continue_clip(previous, lambda frame: video(prompt, output_id=job_id, reference=frame, private=True))
         result = {"status": "ready", "data": payload, "removable": True}
     except Exception as exc:
         message = str(exc) if isinstance(exc, ApiError) else "Videoen fejlede på PC'en."
@@ -473,16 +452,22 @@ def _render_video(job_id: str, prompt: str, reference: bytes | None = None, priv
         expiry.start()
 
 
-def _start_video(prompt: str, reference: bytes | None = None, *, private: bool = False):
+def _start_video(prompt: str, reference: bytes | None = None, *, private: bool = False, continue_id=None):
     with _video_lock:
         if any(job["status"] == "working" for job in _video_jobs.values()):
             raise ApiError(409, "CONFLICT", "Lumi laver allerede en video.")
+        source = None
+        if continue_id is not None:
+            parent = _video_jobs.get(continue_id)
+            if not private or not parent or not parent.get("private") or parent.get("status") != "ready":
+                raise ApiError(404, "NOT_FOUND", "Den private video er udløbet. Start en ny fra billedet.")
+            source = parent["data"]
         for previous_id, job in tuple(_video_jobs.items()):
-            if job.get("private", False) == private:
+            if job.get("private", False) == private and previous_id != continue_id:
                 del _video_jobs[previous_id]
         job_id = str(uuid4())
         _video_jobs[job_id] = {"status": "working", "private": private}
-    _video_executor.submit(_render_video, job_id, prompt, reference, private)
+    _video_executor.submit(_render_video, job_id, prompt, reference, private, source)
     return {"id": job_id, "status": "working"}
 
 
@@ -525,11 +510,15 @@ def register_lumi(app: FastAPI, settings, authorize) -> None:
                         headers={"Cache-Control": "no-store"})
 
     @router.post("/private-image")
-    def private_image_route(bot_id: str, body: dict = Body(...)):
+    @router.post("/private-image-pair")
+    def private_image_route(bot_id: str, request: Request, body: dict = Body(...)):
         _bot(bot_id)
+        pair = request.url.path.endswith("/private-image-pair")
+        if pair != (body.get("secondReference") is not None):
+            raise ApiError(422, "INVALID_INPUT", "Vælg to referencebilleder til figurerne.")
         data = image(body.get("prompt"), reference=body.get("reference"), private=True, mask=body.get("mask"),
                      seed=body.get("seed"), strength=body.get("strength"), negative=body.get("negative"),
-                     engine=body.get("engine"))
+                     engine=body.get("engine"), second_reference=body.get("secondReference"), pair_mode=body.get("pairMode"))
         return Response(data, media_type="image/png", headers={"Cache-Control": "no-store"})
 
     @router.post("/private-image-models")
@@ -557,6 +546,15 @@ def register_lumi(app: FastAPI, settings, authorize) -> None:
                 raise ApiError(413, "INVALID_INPUT", "Vælg et referencebillede på højst 1 MB.")
             raw.extend(chunk)
         return await run_in_threadpool(_start_reference_video, raw, request.url.path.endswith("/private-video"))
+
+    @router.post("/private-video-continue")
+    def continue_route(bot_id: str, body: dict = Body(...)):
+        _bot(bot_id)
+        try:
+            parent = str(UUID(str(body.get("previous"))))
+        except ValueError as exc:
+            raise ApiError(422, "INVALID_INPUT", "Vælg den private video, der skal fortsætte.") from exc
+        return _start_video(_message(body.get("prompt"), limit=1000), private=True, continue_id=parent)
 
     @router.get("/video/{job_id}")
     def video_status(bot_id: str, job_id: str):

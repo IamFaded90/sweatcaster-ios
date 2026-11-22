@@ -22,6 +22,7 @@ enum TeamActionPanel: String, Identifiable {
 @MainActor enum TeamTool {
     case inbox(AgentGmailCheck.Request)
     case phone(AgentPhoneActionCard.Request)
+    case shopping(AgentShoppingRequest), unitPrice(String)
     case reply, today, appointment, meeting, mailReminder, followups, unavailable
     case panel(TeamActionPanel)
 
@@ -45,6 +46,8 @@ enum TeamActionPanel: String, Identifiable {
             if case .action(let kind) = intent {
                 switch kind {
                 case .phone(let request): return .phone(request)
+                case .shopping(let request): return .shopping(request)
+                case .unitPrice(let result): return .unitPrice(result)
                 case .gmailReply, .bookingRequest: return .reply
                 case .today: return .today
                 case .appointmentCheck: return .appointment
@@ -104,6 +107,10 @@ enum TeamActionPanel: String, Identifiable {
         } else {
             Group {
                 switch tool {
+                case .shopping(let request):
+                    AgentShoppingCard(request: request, requestID: id) { finish(.init($0)) }
+                case .unitPrice(let result):
+                    Text(result).textSelection(.enabled)
                 case .inbox(let request):
                     AgentGmailCheck(request: request, bot: bot, api: api)
                         .task(id: request.id) { await request.run(bot: bot, api: api) }

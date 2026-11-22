@@ -84,7 +84,6 @@ import UniformTypeIdentifiers
 }
 
 private enum ShareInbox {
-    private static let group = "group.dk.sweatcaster.ios.share"
     private static let maxAttachmentSize = 10 * 1_024 * 1_024
 
     enum Failure: Error {
@@ -112,7 +111,7 @@ private enum ShareInbox {
 
     @MainActor static func save(_ items: [NSExtensionItem]) async throws {
         let manager = FileManager.default
-        guard let root = manager.containerURL(forSecurityApplicationGroupIdentifier: group) else {
+        guard let root = FadedSharedContainer.url else {
             throw Failure.unavailable
         }
         let (item, attachment) = try await load(items)

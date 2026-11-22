@@ -259,7 +259,8 @@ extension ChatView {
         guard persistCurrentSlot(opened) else { return false }
 
         dictation.stop()
-        speechBox.stop()
+        stopChatSpeech()
+        phonePromptCache = PhonePromptCache()
         sessionID = opened.id
         turns = opened.turns
         searchSteps = opened.toolSteps
@@ -339,6 +340,7 @@ extension ChatView {
         guard let data = MigratedAppData.shared.chatSession(storageKey),
               let session = ChatArchive.decodeSession(data) else { return }
         let recovered = recoverPending(session)
+        phonePromptCache = PhonePromptCache()
         sessionID = recovered.id
         turns = recovered.turns
         searchSteps = recovered.toolSteps

@@ -14,6 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from sweatcaster.repository_library import RepositoryError, RepositoryLibrary
+from sweatcaster import repository_routine
 
 
 class AgentWorkflows:
@@ -151,21 +152,27 @@ class AgentWorkflows:
             if hour > local.hour:
                 continue
             key = self._run_key(local, routine)
-            with closing(self._connect()) as db, db:
-                claimed = db.execute("INSERT OR IGNORE INTO routine_runs VALUES (?, 'running')", (key,)).rowcount
-            if not claimed:
+            with closing(self._connect()) as db:
+                prior = db.execute("SELECT status FROM routine_runs WHERE id=?", (key,)).fetchone()
+            if prior and prior[0] != "running":
                 continue
-            self.observe(key, "researcher", "Planlagt lokal indeksering", "running")
-            try:
-                if action == "refresh_repository":
-                    self.library.refresh(repo)
-                self.library.index(repo)
-                state = "completed"
-            except Exception:
-                state = "failed"
-            with closing(self._connect()) as db, db:
-                db.execute("UPDATE routine_runs SET status=? WHERE id=?", (state, key))
-            self.observe(key, "researcher", "Planlagt lokal indeksering", state)
+            with repository_routine.worker_lock(self.root) as acquired:
+                if not acquired:
+                    continue
+                with closing(self._connect()) as db, db:
+                    db.execute("INSERT OR IGNORE INTO routine_runs VALUES (?, 'running')", (key,))
+                    if db.execute("SELECT status FROM routine_runs WHERE id=?", (key,)).fetchone()[0] != "running":
+                        continue
+                self.observe(key, "researcher", "Planlagt lokal indeksering", "running")
+                try:
+                    repository_routine.run(self.root, key, self.library, repo, action)
+                    state = "completed"
+                except Exception:
+                    state = "failed"
+                with closing(self._connect()) as db, db:
+                    db.execute("UPDATE routine_runs SET status=? WHERE id=?", (state, key))
+                repository_routine.forget(self.root, key)
+                self.observe(key, "researcher", "Planlagt lokal indeksering", state)
 
 
 def configured_workflows(settings, workspace: Path):

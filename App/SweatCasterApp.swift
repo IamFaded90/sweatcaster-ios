@@ -69,6 +69,17 @@ struct OpenFadedAIHarperChat: AppIntent {
     }
 }
 
+struct OpenFadedAIMorningOverview: AppIntent {
+    static let title: LocalizedStringResource = "Vis mit morgenoverblik"
+    static let openAppWhenRun = true
+    static let destination = "morning-overview"
+
+    @MainActor func perform() async throws -> some IntentResult {
+        UserDefaults.standard.set(Self.destination, forKey: AppStorageKeys.spacesShortcut)
+        return .result()
+    }
+}
+
 struct SweatCasterShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(intent: OpenSweatCasterChat(), phrases: ["Åbn chat i \(.applicationName)"],
@@ -89,6 +100,8 @@ struct SweatCasterShortcuts: AppShortcutsProvider {
                     shortTitle: "Lav videokladde", systemImageName: "film")
         AppShortcut(intent: OpenFadedAICamera(), phrases: ["Åbn kamera i \(.applicationName)"],
                     shortTitle: "Åbn kamera", systemImageName: "video")
+        AppShortcut(intent: OpenFadedAIMorningOverview(), phrases: ["Vis mit morgenoverblik i \(.applicationName)"],
+                    shortTitle: "Morgenoverblik", systemImageName: "sunrise")
     }
 }
 
@@ -141,6 +154,7 @@ struct PromptExample: Identifiable {
                 .onChange(of: scenePhase, initial: true) { _, phase in
                     StudioImageDownloads.shared.setForeground(phase == .active)
                     if phase == .active {
+                        PrivateConversationSearch.cleanAbandoned()
                         _ = try? LumiSceneLibrary.load()
                         GGUFModelDownloads.shared.activate()
                         Task { await PhoneModelDownloads.shared.resumeInterruptedVisionDownload() }

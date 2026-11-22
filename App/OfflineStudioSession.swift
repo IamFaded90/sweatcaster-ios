@@ -7,34 +7,6 @@ import UIKit
 import UniformTypeIdentifiers
 
 extension OfflineStudio {
-    func privateImageModelMenu(current: String) -> some View {
-        let installed = StudioImageModel.allCases.filter { isImageModelReady($0.id) }
-        let onPC = sessionPreferences.imageRoute == .pc
-        return Menu {
-            ForEach(installed) { model in
-                Button {
-                    sessionPreferences.imageRoute = .phone
-                    sessionPreferences.imageModel = model.id
-                } label: {
-                    Label("iPhone · " + model.title, systemImage: !onPC && current == model.id ? "checkmark" : "iphone")
-                }
-            }
-            if privateImagePC != nil {
-                Button { sessionPreferences.imageRoute = .pc } label: {
-                    Label("Brug PC", systemImage: onPC ? "checkmark" : "desktopcomputer")
-                }
-            }
-            Button("Hent billedmodeller til iPhone", systemImage: "arrow.down.circle") {
-                imagePromptFocused = false
-                showImageDownloads = true
-            }
-        } label: {
-            Label(onPC ? "PC" : "iPhone · " + (StudioImageModel(rawValue: current)?.title ?? "Vælg model"),
-                  systemImage: "chevron.down")
-                .font(.caption.weight(.semibold)).frame(minHeight: 44)
-        }.disabled(task != nil)
-    }
-
     var canShowStudio: Bool {
         guard sessionUnlocked, studioPhase == .active else { return false }
         return !privateSession || !sessionExpired
@@ -61,14 +33,20 @@ extension OfflineStudio {
         let minutes = min(30, max(1, Int(setting)))
         do { try await Task.sleep(for: .seconds(minutes * 60)) } catch { return }
         guard sessionUnlocked, studioPhase == .active, task == nil else { return }
-        speech.stop()
+        stopStudioSpeech()
         idleAsleep = true
     }
 
     func handleStudioPhase(_ phase: ScenePhase) {
+        if phase != .active { conversationSearch.close() }
         if phase == .background {
+            if authenticating {
+                studioAuthentication?.invalidate()
+                studioAuthentication = nil
+                authenticating = false
+            }
             dictation.stop()
-            speech.stop()
+            stopStudioSpeech()
             if privateSession, loaded, sessionUnlocked {
                 let backgroundLimit = ContinuousClock.now.advanced(by: .seconds(300))
                 privateDeadline = min(privateDeadline ?? backgroundLimit, backgroundLimit)
@@ -177,10 +155,16 @@ extension OfflineStudio {
     }
 
     func newPrivateConversation() {
-        speech.stop()
+        conversationSearch.close()
+        stopStudioSpeech()
         imageComparisonSource = nil
         if privateSession {
             removeTemporaryStudioImages()
+            sentChatPhotos.removeAll()
+            attachedChatPhoto = nil
+            secondChatPhoto = nil
+            loadingSecondChatPhoto = false
+            secondBaseImage = nil
             sessionNote = ""
             turns = []
             privateReplyIssues.removeAll()
@@ -195,12 +179,14 @@ extension OfflineStudio {
     }
 
     func closeChatSession() {
+        conversationSearch.close()
+        if !privateSession { StudioGalleryThumbnailCache.shared.clear() }
         imageComparisonSource = nil
         studioAuthentication?.invalidate()
         studioAuthentication = nil
         authenticating = false
         dictation.stop()
-        speech.stop()
+        stopStudioSpeech()
         task?.cancel()
         if chatWorkID != nil {
             chatWorkID = nil
@@ -210,6 +196,11 @@ extension OfflineStudio {
         if privateSession {
             showPrivateVideo = false
             privateVideoSource = nil
+            privateVideoChatInput = nil
+            sentChatPhotos.removeAll()
+            attachedChatPhoto = nil
+            secondChatPhoto = nil
+            loadingSecondChatPhoto = false
             privateModelDownload?.cancel()
             privateModelProblem = nil
             removeTemporaryStudioImages()
@@ -236,7 +227,7 @@ extension OfflineStudio {
     }
 
     func authenticate() {
-        guard !privateSession, !imageOnly, !authenticating else { return }
+        guard !imageOnly, !sessionUnlocked, !authenticating, studioPhase == .active else { return }
         let context = LAContext()
         guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: nil) else {
             status = "Slå Face ID eller Touch ID til på telefonen for at åbne studiet."
@@ -359,6 +350,12 @@ extension OfflineStudio {
             privateTextModelSetup
             Link("Built with Llama · Model og licens", destination: DolphinPhoneRuntime.modelCardURL)
                 .font(.footnote).frame(minHeight: 44, alignment: .leading)
+            if usesLumiReplyLanguage {
+                Picker("Svar på", selection: $lumiReplyLanguage) {
+                    Text("Dansk").tag("da-DK")
+                    Text("Engelsk").tag("en-US")
+                }
+            }
             Picker("Oplæsningssprog", selection: $sessionPreferences.voiceLanguage) {
                 Text("Dansk").tag("da-DK")
                 Text("Engelsk (US)").tag("en-US")
@@ -475,50 +472,42 @@ extension OfflineStudio {
         else { backdropData = data }
     }
 
-    private var studioVoicePreviewTitle: String { speech.playback == .preview ? "Stop stemmeprøve" : "Afspil prøvesætning" }
-    private var studioVoicePreviewIcon: String { speech.playback == .preview ? "stop.circle" : "play.circle" }
+    private var studioVoicePreviewTitle: String {
+        if isStudioReading(.preview) { return "Stop stemmeprøve" }
+        if case .pc(let voice) = studioVoiceChoice(for: studioSpeaker()) { return "Hør " + voice.name + " på PC" }
+        return "Afspil prøvesætning"
+    }
+    private var studioVoicePreviewIcon: String { isStudioReading(.preview) ? "stop.circle" : "play.circle" }
 
     private func previewStudioVoice() {
-        if speech.playback == .preview { speech.stop(); return }
-        let language = privateSession ? sessionPreferences.voiceLanguage : previewLanguage
-        guard let voice = studioVoice(language: language, bot: selectedPrivateBot) else {
-            status = "Stemmen er ikke tilgængelig på telefonen."
-            return
-        }
-        resetIdleTimer()
-        dictation.stop()
-        let sample = LocalSpeechVoice.previewSentence(language: voice.language)
-        let utterance = LocalSpeechVoice.utterance(sample, voice: voice, rate: selectedPrivateBot?.voiceRate ?? 1)
-        speech.play(utterance, as: .preview)
+        playStudioSpeech(text: nil, bot: studioSpeaker(), slot: .preview)
     }
 
     private func studioVoicePicker(language: String, saved: Binding<String>) -> some View {
         let available = studioVoiceOptions(language: language)
-        let selection = Binding(get: { available.contains { $0.identifier == saved.wrappedValue } ? saved.wrappedValue : "" },
-                                set: { saved.wrappedValue = $0 })
+        let bot = studioSpeaker()
         return VStack(alignment: .leading, spacing: FadedSpacing.xs) {
-            Picker("Installeret stemme", selection: selection) {
-                Text("Bedste tilgængelige").tag("")
+            Picker("Oplæsningsstemme", selection: saved) {
+                Text(bot.map { "Brug stemmen fra " + $0.name } ?? "Automatisk").tag("")
+                Text("Automatisk iPhone-stemme").tag("auto")
+                DownloadedVoiceOptions(selection: saved.wrappedValue)
+                if !saved.wrappedValue.isEmpty, saved.wrappedValue != "auto", DownloadedAgentVoice.selected(saved.wrappedValue) == nil,
+                   !available.contains(where: { $0.identifier == saved.wrappedValue }) {
+                    Text(AgentVoiceSelection.resolve(identifier: saved.wrappedValue, language: language)?.name ?? "Valgt stemme utilgængelig")
+                        .tag(saved.wrappedValue)
+                }
                 ForEach(available, id: \.identifier) { voice in
                     Text(LocalSpeechVoice.label(voice)).tag(voice.identifier)
                 }
+            }
+            .onChange(of: saved.wrappedValue) { stopStudioSpeech() }
+            if case .pc(let voice) = studioVoiceChoice(for: bot) {
+                FadedDetailText("Når du trykker Læs med " + voice.name + " på PC, sendes svarets tekst til din parrede PC.")
             }
             if !available.contains(where: { $0.quality != .default }) {
                 FadedDetailText(LocalSpeechVoice.downloadHint)
             }
         }
-    }
-
-    func studioVoice(language: String, bot: VillageBot?) -> AVSpeechSynthesisVoice? {
-        let options = studioVoiceOptions(language: language)
-        let saved = if privateSession {
-            language == "da-DK" ? sessionPreferences.danishVoice : sessionPreferences.englishVoice
-        } else {
-            language == "da-DK" ? danishVoiceID : englishVoiceID
-        }
-        return options.first { $0.identifier == saved }
-            ?? options.first { $0.identifier == bot?.voice }
-            ?? LocalSpeechVoice.preferred(language: language)
     }
 
     private func studioVoiceOptions(language: String) -> [AVSpeechSynthesisVoice] {

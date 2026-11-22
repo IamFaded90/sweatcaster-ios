@@ -231,18 +231,59 @@ enum VillageCamera {
     static let zoomRange = 1.0...2.2
 
     static func clampZoom(_ value: Double) -> Double {
-        min(zoomRange.upperBound, max(zoomRange.lowerBound, value))
+        value.isFinite ? min(zoomRange.upperBound, max(zoomRange.lowerBound, value)) : 1
     }
 
-    /// Clamp pan so the scaled map never leaves the frame.
-    /// At zoom ≤ 1 the offset is always zero (centered).
-    static func clampOffset(_ proposed: CGSize, zoom: CGFloat, frame: CGSize) -> CGSize {
-        guard zoom > 1.001 else { return .zero }
-        let maxX = max(0, (frame.width * zoom - frame.width) / 2)
-        let maxY = max(0, (frame.height * zoom - frame.height) / 2)
+    static func clampOffset(_ proposed: CGSize, zoom: CGFloat, frame: CGSize, content: CGSize? = nil) -> CGSize {
+        guard zoom.isFinite, zoom > 1.001, frame.width > 0, frame.height > 0 else { return .zero }
+        let artwork = content ?? frame
+        let maxX = max(0, (artwork.width * zoom - frame.width) / 2)
+        let maxY = max(0, (artwork.height * zoom - frame.height) / 2)
         return CGSize(
             width: min(maxX, max(-maxX, proposed.width)),
             height: min(maxY, max(-maxY, proposed.height))
         )
+    }
+
+    /// The point on the artwork at the middle of the viewport, independent of display size.
+    struct Focus: RawRepresentable, Equatable {
+        static let storageKey = "village.map.focus.v1"
+        static let center = Focus(x: 0.5, y: 0.5)
+        let x: CGFloat
+        let y: CGFloat
+
+        private init(x: CGFloat, y: CGFloat) {
+            self.x = x
+            self.y = y
+        }
+
+        var rawValue: String { "\(x),\(y)" }
+
+        init?(rawValue: String) {
+            let components = rawValue.split(separator: ",", omittingEmptySubsequences: false)
+            guard components.count == 2, let x = Double(components[0]), let y = Double(components[1]),
+                  (0...1).contains(x), (0...1).contains(y) else { return nil }
+            self.init(x: CGFloat(x), y: CGFloat(y))
+        }
+
+        init(offset: CGSize, zoom: CGFloat, frame: CGSize) {
+            let artwork = VillageMapLayout.imageRect(in: frame).size
+            guard zoom.isFinite, zoom > 1.001, artwork.width > 0, artwork.height > 0 else {
+                self = .center
+                return
+            }
+            let bounded = VillageCamera.clampOffset(offset, zoom: zoom, frame: frame, content: artwork)
+            self.init(x: 0.5 - bounded.width / (artwork.width * zoom),
+                      y: 0.5 - bounded.height / (artwork.height * zoom))
+        }
+
+        func offset(zoom: CGFloat, frame: CGSize, adding translation: CGSize = .zero) -> CGSize {
+            let artwork = VillageMapLayout.imageRect(in: frame).size
+            let initial = CGSize(width: (0.5 - x) * artwork.width * zoom,
+                                 height: (0.5 - y) * artwork.height * zoom)
+            let visible = VillageCamera.clampOffset(initial, zoom: zoom, frame: frame, content: artwork)
+            let moved = CGSize(width: visible.width + translation.width, height: visible.height + translation.height)
+            return VillageCamera.clampOffset(moved, zoom: zoom, frame: frame, content: artwork)
+        }
     }
 }

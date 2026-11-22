@@ -97,7 +97,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
         guard let array = raw as? [Any] else {
             throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "Botlisten er ikke en liste"))
         }
-        return array.compactMap { element in
+        let profiles: [VillageBot] = array.compactMap { element in
             do {
                 let item = try JSONSerialization.data(withJSONObject: element)
                 return try JSONDecoder().decode(VillageBot.self, from: item)
@@ -106,6 +106,7 @@ struct VillageBot: Codable, Identifiable, Equatable {
                 return nil
             }
         }
+        return VillageCharacterCatalog.resolveRoster(profiles)
     }
 
     static func list(from data: Data) -> [VillageBot] {

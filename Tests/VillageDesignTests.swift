@@ -5,6 +5,138 @@ import AVFAudio
 @testable import SweatCaster
 
 final class VillageDesignTests: XCTestCase {
+    @MainActor func testPrivateChatStartsLockedEvenIfAnotherStudioWasUnlocked() {
+        let chat = OfflineStudio(api: nil, sessionUnlocked: .constant(true), ephemeralOnly: true)
+        XCTAssertFalse(chat.sessionUnlocked)
+        XCTAssertFalse(chat.canShowStudio)
+        let imageEditor = OfflineStudio(api: nil, sessionUnlocked: .constant(false),
+                                        initialPage: .images, ephemeralOnly: true, imageOnly: true)
+        XCTAssertTrue(imageEditor.sessionUnlocked)
+    }
+
+    func testLumiSendsWholeMessagesWhenTheHistoryBudgetEndsInsideAWord() {
+        func turn(_ role: LumiSceneMessage.Role, _ text: String) -> LumiSceneMessage {
+            LumiSceneMessage(role: role, text: text, language: "da-DK")
+        }
+        let early = turn(.user, String(repeating: "🙂", count: 1_900) + " Min cykel er petrolblå.")
+        let newer = [turn(.user, "Min nye jakke er mørkegrøn."), turn(.assistant, String(repeating: "æ", count: 730))]
+        XCTAssertEqual(LumiSceneMessage.chatHistory([early] + newer), newer.map(\.wire))
+        let overBudget = turn(.assistant, String(repeating: "🌙", count: 2_300))
+        XCTAssertEqual(LumiSceneMessage.chatHistory([early, overBudget]), [early.wire])
+        let window = (0..<20).map { turn($0.isMultiple(of: 2) ? .user : .assistant, "Replik \($0)") }
+        XCTAssertEqual(LumiSceneMessage.chatHistory(window), window.suffix(16).map(\.wire))
+        XCTAssertTrue(LumiSceneMessage.chatHistory([turn(.assistant, "Mit gæt er lilla.")]).isEmpty)
+    }
+
+    func testLumiLimitsRestoredMessagesOnTheWireAndKeepsLateCorrections() throws {
+        let correction = " Jeg mente fredag."
+        let reply = " Jeg husker fredag."
+        let promptText = "Min aftale. " + String(repeating: "x", count: 4_800) + correction
+        let replyText = "Din aftale. " + String(repeating: "e\u{301}", count: 60) + String(repeating: "y", count: 3_900) + reply
+        let turns = [
+            LumiSceneMessage(role: .user, text: promptText, language: "da-DK"),
+            LumiSceneMessage(role: .assistant, text: replyText, language: "da-DK")
+        ]
+        let saved = LumiSavedScene.snapshot(card: LumiSceneCard(title: "Aftalen"), initiative: .together,
+                                            language: "da-DK", messages: turns, draft: "")
+        let restored = try JSONDecoder().decode(LumiSavedScene.self, from: JSONEncoder().encode(saved))
+        let history = LumiSceneMessage.chatHistory(restored.messages)
+        XCTAssertEqual(restored.messages, turns)
+        XCTAssertEqual(history.compactMap { $0["role"] }, ["user", "assistant"])
+        let contents = history.compactMap { $0["content"] }
+        XCTAssertEqual(contents.map { $0.unicodeScalars.count }, [4_000, 4_000])
+        XCTAssertLessThanOrEqual(contents.reduce(0) { $0 + $1.utf8.count }, 9_000)
+        XCTAssertTrue(try XCTUnwrap(contents.first).hasPrefix("Min aftale."))
+        XCTAssertTrue(try XCTUnwrap(contents.first).hasSuffix(correction))
+        XCTAssertTrue(try XCTUnwrap(contents.last).hasPrefix("Din aftale."))
+        XCTAssertTrue(try XCTUnwrap(contents.last).hasSuffix(reply))
+    }
+
+    func testOnePhotoEditsAndQuestionsUseDifferentChatActions() {
+        for text in ["Gør baggrunden blå", "Kan du ændre farven på jakken?", "Erstat himlen med skyer",
+                     "Please replace the background", "Lav et billede med blå baggrund"] {
+            XCTAssertNotNil(LumiChatImageRequest.requestedWithPhoto(text), text)
+        }
+        for text in ["", "Hvad står der på billedet?", "Beskriv billedet", "Kan du se min jakke?",
+                     "What color is the jacket?", "Can you make out the writing?"] {
+            XCTAssertNil(LumiChatImageRequest.requestedWithPhoto(text), text)
+        }
+        XCTAssertNil(LumiChatImageRequest.parse("Gør baggrunden blå"))
+        XCTAssertEqual(LumiChatImageRequest.requestedWithPhoto("Tag en selfie")?.isSelfPortrait, true)
+    }
+
+    func testLumiSelfPortraitUsesHerBundledReference() throws {
+        let portrait = try XCTUnwrap(LumiChatImageRequest.parse("Send et billede af dig selv på en café"))
+        XCTAssertTrue(portrait.isSelfPortrait)
+        XCTAssertTrue(portrait.prompt.contains("på en café"))
+        XCTAssertEqual(LumiChatImageRequest.parse("Tag en selfie")?.isSelfPortrait, true)
+        XCTAssertEqual(LumiChatImageRequest.parse("Lav et billede af havet")?.isSelfPortrait, false)
+        XCTAssertNil(LumiChatImageRequest.parse("Jeg har et billede af Lumi"))
+        let reference = try XCTUnwrap(LumiChatImageRequest.referencePortrait())
+        let image = try XCTUnwrap(UIImage(data: reference)?.cgImage)
+        XCTAssertLessThanOrEqual(max(image.width, image.height), 768)
+        XCTAssertLessThanOrEqual(reference.count, 1_000_000)
+    }
+
+    @MainActor func testLumiPortraitRequiresOptInAndTwoRepliesAndRunsOnce() async throws {
+        let portraits = LumiPortraitInitiative()
+        var requests = 0
+        var received: [Data] = []
+        func reply(_ turn: UUID) -> Task<Void, Never>? {
+            portraits.completedReply(in: turn) {
+                requests += 1
+                return Data([42])
+            } publish: { received.append($0) } failure: { XCTFail(String(describing: $0)) }
+        }
+        let old = portraits.revision
+        XCTAssertNil(reply(old))
+        portraits.setEnabled(true)
+        XCTAssertNil(reply(old))
+        XCTAssertNil(reply(portraits.revision))
+        portraits.interrupt() // The next user message has its own revision.
+        let job = try XCTUnwrap(reply(portraits.revision))
+        XCTAssertTrue(portraits.isPreparing)
+        await job.value
+        XCTAssertFalse(portraits.isPreparing)
+        XCTAssertNil(reply(portraits.revision))
+        portraits.setEnabled(false)
+        portraits.setEnabled(true)
+        XCTAssertNil(reply(portraits.revision))
+        XCTAssertNil(reply(portraits.revision))
+        XCTAssertEqual(requests, 1)
+        XCTAssertEqual(received, [Data([42])])
+    }
+
+    @MainActor func testLumiDiscardsLatePortraitAfterStopInterruptionOrClosingChat() async throws {
+        for action in ["stop", "interrupt", "close"] {
+            let portraits = LumiPortraitInitiative()
+            portraits.setEnabled(true)
+            let turn = portraits.revision
+            let started = expectation(description: action)
+            var finish: CheckedContinuation<Data, Never>?
+            func reply() -> Task<Void, Never>? {
+                portraits.completedReply(in: turn) {
+                    await withCheckedContinuation { finish = $0; started.fulfill() }
+                } publish: { _ in XCTFail("A late portrait was displayed") } failure: { _ in XCTFail("A cancelled request surfaced") }
+            }
+            XCTAssertNil(reply())
+            let job = try XCTUnwrap(reply())
+            await fulfillment(of: [started], timeout: 2)
+            guard let finish else {
+                portraits.endSession()
+                return
+            }
+            if action == "stop" { portraits.setEnabled(false) }
+            else if action == "close" { portraits.endSession() }
+            else { portraits.interrupt() }
+            finish.resume(returning: Data([42]))
+            await job.value
+            XCTAssertFalse(portraits.isPreparing)
+            XCTAssertNotEqual(turn, portraits.revision)
+            if action != "interrupt" { XCTAssertFalse(portraits.enabled) }
+        }
+    }
+
     func testOfflineDictationWaitsForSpeechBeforeFinishing() {
         var detector = AgentVoiceSilence(pause: 2)
         XCTAssertFalse(detector.ended(at: 1, level: -80))
@@ -15,6 +147,59 @@ final class VillageDesignTests: XCTestCase {
         }
         XCTAssertFalse(detector.ended(at: 8, level: -75))
         XCTAssertTrue(detector.ended(at: 8.31, level: -75))
+    }
+
+    func testScannedWallPhotoFollowsPerspectiveAndThePhotographedFace() throws {
+        let focal = SIMD2<Float>(0.7, 0.7), principal = SIMD2<Float>(0.5, 0.5)
+        func wall(_ across: SIMD3<Float>, _ up: SIMD3<Float>) -> OfficeWallProjection {
+            .init(center: .init(0, 0, -3), across: across, up: up, focal: focal, principal: principal)
+        }
+        let tilted = wall(.init(2, 0, 0.8), .init(0, 1.5, 0))
+        var source = [UInt8](repeating: 255, count: 100 * 100 * 4)
+        for y in 0..<100 { for x in 0..<100 {
+            let i = (y * 100 + x) * 4
+            source[i] = UInt8(x); source[i + 1] = UInt8(y)
+        }}
+        let image = try XCTUnwrap(tilted.rectifiedBGRA(source: source, width: 100, height: 100,
+                                                       targetWidth: 4, targetHeight: 2))
+        for y in 0..<2 { for x in 0..<4 {
+            let wx = (Double(x) + 0.5) / 4 - 0.5, wy = 0.5 - (Double(y) + 0.5) / 2
+            let distance = 3 - 0.8 * wx
+            let i = (y * 4 + x) * 4
+            XCTAssertEqual(Int(image[i]), Int((0.5 + 1.4 * wx / distance) * 100))
+            XCTAssertEqual(Int(image[i + 1]), Int((0.5 - 1.05 * wy / distance) * 100))
+        }}
+        let back = wall(.init(-2, 0, 0), .init(0, 1.5, 0))
+        XCTAssertFalse(back.front)
+        XCTAssertLessThan(try XCTUnwrap(back.sample(.init(0, 0))).x, try XCTUnwrap(back.sample(.init(1, 0))).x)
+        let rolled = wall(.init(0, 2, 0), .init(-1.5, 0, 0))
+        XCTAssertGreaterThan(try XCTUnwrap(rolled.sample(.init(0, 0))).y, try XCTUnwrap(rolled.sample(.init(1, 0))).y)
+    }
+
+    func testScannedWallPhotoRejectsForegroundOutsideAndMissingGeometry() {
+        func wall(_ center: SIMD3<Float>, _ across: SIMD3<Float> = .init(2, 0, 0)) -> OfficeWallProjection {
+            .init(center: center, across: across, up: .init(0, 2, 0), focal: .init(repeating: 0.65),
+                  principal: .init(repeating: 0.5))
+        }
+        let good = wall(.init(0, 0, -2))
+        let depth = [Float](repeating: 2, count: 64 * 48)
+        XCTAssertNotNil(good.quality(depth: depth, columns: 64, rows: 48))
+        XCTAssertNil(wall(.init(2, 0, -2)).quality(depth: depth, columns: 64, rows: 48))
+        XCTAssertNil(wall(.init(0, 0, 2)).quality(depth: depth, columns: 64, rows: 48))
+        XCTAssertNil(wall(.init(0, 0, -2), .init(0.01, 0, 1)).quality(depth: depth, columns: 64, rows: 48))
+        XCTAssertNil(good.quality(depth: .init(repeating: 4, count: depth.count), columns: 64, rows: 48))
+        var occluded = depth
+        for row in 10..<20 { for col in 15..<27 { occluded[row * 64 + col] = 0.8 } }
+        XCTAssertNil(good.quality(depth: occluded, columns: 64, rows: 48))
+        XCTAssertNil(good.quality(depth: [], columns: 0, rows: 0))
+        var features: [SIMD3<Float>] = []
+        for row in 0..<6 { for col in 0..<8 {
+            if let p = good.sample(.init((Float(col) + 0.5) / 8, (Float(row) + 0.5) / 6)) { features.append(p) }
+        }}
+        XCTAssertNotNil(good.quality(depth: [], columns: 0, rows: 0, featurePoints: features))
+        XCTAssertNil(good.quality(depth: [], columns: 0, rows: 0, featurePoints: Array(features.prefix(24))))
+        features[2].z = 0.7
+        XCTAssertNil(good.quality(depth: [], columns: 0, rows: 0, featurePoints: features))
     }
 
     func testOldOfficeFurnitureDecodesAndKeepsNewDimensionsWhenMoved() throws {
@@ -253,6 +438,79 @@ final class VillageDesignTests: XCTestCase {
         manuallyPicked.chooseVillageFigure("luna")
         manuallyPicked.useAvailableVillageFigure(among: saved)
         XCTAssertEqual(manuallyPicked.villageFigure, "luna")
+    }
+
+    func testReloadRepairsAutomaticDuplicatesAndKeepsLaterChoices() throws {
+        var old = VillageBot(name: "Eva", sprite: Data([1, 2, 3]))
+        let other = VillageBot(name: "Luna")
+        let chosen = VillageBot(name: "Min bot", villageFigure: "eva")
+        let secondChosen = VillageBot(name: "Min anden bot", villageFigure: "eva")
+        var rows = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode([old, other, chosen, secondChosen, .lumi()])) as? [[String: Any]])
+        rows[0].removeValue(forKey: "villageFigure")
+        rows[4]["villageFigure"] = "eva"
+        let decoded = try VillageBot.listRecovering(from: JSONSerialization.data(withJSONObject: rows))
+        XCTAssertEqual(decoded.map(\.villageFigure), ["iris", "luna", "eva", "eva", "lumi"])
+        old.villageFigure = "iris"
+        XCTAssertEqual(decoded.first, old)
+        XCTAssertEqual(try VillageBot.listRecovering(from: JSONEncoder().encode(decoded)), decoded)
+    }
+
+    func testRoomFiguresUseSpaceAndStayInsideArtwork() {
+        let phone = CGSize(width: 330, height: 215)
+        XCTAssertGreaterThan(VillageRoomPlacement(index: 0, count: 1, in: phone).size, 144)
+        XCTAssertGreaterThan(VillageRoomPlacement(index: 0, count: 2, in: phone).size, 144)
+        for canvas in [phone, CGSize(width: 235, height: 165), CGSize(width: 92, height: 74)] {
+            for count in 1...10 {
+                for index in 0..<count {
+                    let place = VillageRoomPlacement(index: index, count: count, in: canvas)
+                    let half = place.size / 2
+                    XCTAssertGreaterThan(place.size, 0)
+                    XCTAssertGreaterThanOrEqual(place.center.x - half, -0.001)
+                    XCTAssertGreaterThanOrEqual(place.center.y - half, -0.001)
+                    XCTAssertLessThanOrEqual(place.center.x + half, canvas.width + 0.001)
+                    XCTAssertLessThanOrEqual(place.center.y + half, canvas.height + 0.001)
+                }
+            }
+        }
+    }
+
+    func testRoomSpeechPanFollowsTheDisplayedResident() {
+        for size in [CGSize(width: 330, height: 215), CGSize(width: 235, height: 165)] {
+            XCTAssertEqual(VillageRoomPlacement(index: 0, count: 1, in: size).pan, 0, accuracy: 0.0001)
+            let left = VillageRoomPlacement(index: 0, count: 2, in: size)
+            let right = VillageRoomPlacement(index: 1, count: 2, in: size)
+            XCTAssertLessThan(left.pan, -0.4)
+            XCTAssertGreaterThan(right.pan, 0.4)
+            for count in 1...10 {
+                for index in 0..<count {
+                    let seat = VillageRoomPlacement(index: index, count: count, in: size)
+                    XCTAssertEqual(seat.pan, Float(2 * seat.center.x / size.width - 1), accuracy: 0.0001)
+                    XCTAssertTrue((-1...1).contains(seat.pan))
+                }
+            }
+        }
+        XCTAssertEqual(VillageRoomPlacement(index: 0, count: 1, in: .zero).pan, 0)
+    }
+
+    func testRoomVoiceBufferCanBeDecodedForStereoPlayback() async throws {
+        let writer = VillageRoomSpeechFile()
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1))
+        let pcm = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 240))
+        pcm.frameLength = 240
+        let samples = try XCTUnwrap(pcm.floatChannelData)[0]
+        for index in 0..<240 { samples[index] = index.isMultiple(of: 2) ? 0.125 : -0.125 }
+        let end = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1))
+        end.frameLength = 0
+        let bytes: Data = try await withCheckedThrowingContinuation { continuation in
+            guard writer.start(continuation) else { return }
+            writer.receive(pcm)
+            writer.receive(end)
+            writer.receive(end)
+        }
+        let audio = try AVAudioPlayer(data: bytes)
+        XCTAssertEqual(audio.duration, 0.01, accuracy: 0.002)
+        XCTAssertEqual(audio.numberOfChannels, 1)
     }
 
     @MainActor func testTemplateKeepsFigureWithoutKeepingPersonalPhoto() {

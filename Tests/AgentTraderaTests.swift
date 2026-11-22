@@ -6,6 +6,7 @@ final class AgentTraderaTests: XCTestCase {
     func testWatchRequestsAndQuestions() {
         for phrase in ["hold øje med denne tradera-annonce", "kan du holde øje med prisen på tradera",
                        "giv mig besked, hvis tradera-prisen er under 450 dkk", "opret en prisvagt",
+                       "hold øje med https://shop.example/lampe og giv besked under 100 dkk",
                        "https://www.tradera.com/da/item/100/123456789/cykel?ref=mail"] {
             guard case .traderaWatch? = AgentTraderaIntent.match(phrase) else { return XCTFail(phrase) }
         }

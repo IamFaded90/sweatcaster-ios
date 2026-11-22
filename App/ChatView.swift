@@ -1,5 +1,3 @@
-// Chat screen state, navigation and the primary transcript layout.
-
 import AVFoundation
 import Foundation
 import SwiftUI
@@ -67,6 +65,7 @@ struct ChatView: View {
     @State var showChatSettings = false
     @State private var handledNewConversation: UUID?
     @State var sessionID = UUID()
+    @State var phonePromptCache = PhonePromptCache()
     @State var draft = ""
     @AppStorage var savedDraft: String
     @State var turns: [ChatTurn] = []
@@ -102,6 +101,8 @@ struct ChatView: View {
     @State var dictation = ChatDictation()
     @State private var wakeID = UUID()
     @StateObject var speechBox = SpeechBox()
+    @StateObject var chatPCSpeech = ChristelPlayer()
+    @State var chatPCPlayback: SpeechBox.Playback?
     @AppStorage(AppStorageKeys.chatVoiceMode) var voiceMode = false
     @AppStorage(AppStorageKeys.chatVoiceBot) var voiceBotID = ""
     @AppStorage(AppStorageKeys.chatVoiceLanguage) var preferredVoiceLanguage = "da-DK"
@@ -258,7 +259,6 @@ struct ChatView: View {
         .onChange(of: sessionID) { stagedPhoto = nil; messageJumpID = nil }
         .task(id: removedTurns.last?.turn.id) { await expireUndo() }
     }
-
     private var chatLayout: some View {
         GeometryReader { geometry in
             let wide = chatSizeClass == .regular && geometry.size.width >= 740
@@ -296,8 +296,7 @@ struct ChatView: View {
             }
         }
         .background {
-            if palette.theme == .faded { palette.background.ignoresSafeArea() }
-            else { FadedBackground() }
+            FadedBackground()
         }
     }
 
@@ -403,25 +402,27 @@ struct ChatView: View {
     private func observeChatEvents<Content: View>(_ content: Content, proxy: ScrollViewProxy) -> some View {
         let lifecycle = content
             .onChange(of: effectiveReplySource) {
+                phonePromptCache = PhonePromptCache()
                 if noteDestination != effectiveReplySource { attachedNote = nil }
                 if quoteDestination != effectiveReplySource { attachedQuote = nil }
             }
-            .onChange(of: draft) { _, value in
-                if loaded { savedDraft = value }
-            }
+            .onChange(of: phoneModel) { phonePromptCache = PhonePromptCache() }
+            .onChange(of: draft) { _, value in if loaded { savedDraft = value } }
             .onAppear {
                 prepareConversation()
                 consumeEntryRequests()
                 scrollChat(proxy)
             }
             .onDisappear {
+                phonePromptCache = PhonePromptCache()
                 ChatScreenWake.hold(wakeID, whileReplying: false)
                 onComposerFocusChange?(false)
                 stop()
                 dictation.stop()
-                speechBox.stop()
+                stopChatSpeech()
             }
         let notifications = lifecycle
+            .onReceive(chatPCSpeech.$notice.compactMap { $0 }) { chatNotice = $0 }
             .onReceive(NotificationCenter.default.publisher(for: UIDevice.batteryLevelDidChangeNotification)) { _ in
                 phoneBatteryLevel = UIDevice.current.batteryLevel
             }
@@ -433,7 +434,7 @@ struct ChatView: View {
             }
             .onChange(of: chatScenePhase) { _, phase in
                 ChatScreenWake.hold(wakeID, whileReplying: phase == .active && task != nil)
-                if phase == .background { speechBox.stop() }
+                if phase == .background { phonePromptCache = PhonePromptCache(); dictation.stop(); stopChatSpeech() }
             }
             .onReceive(NotificationCenter.default.publisher(for: PCChatOutbox.didChange)) { _ in reloadOutbox() }
         return notifications

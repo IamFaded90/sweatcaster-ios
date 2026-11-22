@@ -381,6 +381,45 @@ final class VillageLifeContractTests: XCTestCase {
         XCTAssertEqual(clamped.height, -maxY, accuracy: 0.001)
     }
 
+    func testVillageMapRestoresTheSamePlaceAfterReturningAtAnotherSize() throws {
+        let suite = "village.camera.test.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let frame = CGSize(width: 320, height: 520)
+        let pan = CGSize(width: 72, height: -85)
+        let focus = VillageCamera.Focus(offset: pan, zoom: 2, frame: frame)
+        defaults.set(focus.rawValue, forKey: VillageCamera.Focus.storageKey)
+        let reopened = try XCTUnwrap(UserDefaults(suiteName: suite)?.string(forKey: VillageCamera.Focus.storageKey))
+        let restored = try XCTUnwrap(VillageCamera.Focus(rawValue: reopened))
+        XCTAssertEqual(restored, focus)
+        let offset = restored.offset(zoom: 2, frame: CGSize(width: 240, height: 390))
+        XCTAssertEqual(offset.width, pan.width * 0.75, accuracy: 0.001)
+        XCTAssertEqual(offset.height, pan.height * 0.75, accuracy: 0.001)
+        XCTAssertEqual(restored.offset(zoom: 1, frame: frame), .zero)
+        for invalid in ["", "nan,0.5", "-1,2", "0.5,0.5,0.5", "0.5,"] {
+            XCTAssertNil(VillageCamera.Focus(rawValue: invalid))
+        }
+    }
+
+    func testVillageMapPanStopsAtPaintedEdgesAndMovesImmediatelyAfterResizing() {
+        let frame = CGSize(width: 320, height: 420)
+        let artwork = VillageMapLayout.imageRect(in: frame)
+        let corner = VillageCamera.Focus(offset: CGSize(width: 900, height: 900), zoom: 2, frame: frame)
+        let edge = corner.offset(zoom: 2, frame: frame)
+        XCTAssertEqual(edge.width, artwork.width - frame.width / 2, accuracy: 0.001)
+        XCTAssertEqual(edge.height, artwork.height - frame.height / 2, accuracy: 0.001)
+        let tall = CGSize(width: 320, height: 660)
+        let visible = corner.offset(zoom: 2, frame: tall)
+        let nudged = corner.offset(zoom: 2, frame: tall, adding: CGSize(width: 0, height: -5))
+        XCTAssertEqual(nudged.height, visible.height - 5, accuracy: 0.001)
+        let wide = CGSize(width: 844, height: 390)
+        let landscape = corner.offset(zoom: 2, frame: wide, adding: CGSize(width: 200, height: 0))
+        XCTAssertEqual(landscape.width, 0)
+        XCTAssertEqual(VillageCamera.Focus(offset: edge, zoom: 1, frame: frame), .center)
+        XCTAssertEqual(VillageCamera.Focus(offset: edge, zoom: 2, frame: .zero), .center)
+        XCTAssertEqual(VillageCamera.clampZoom(.infinity), 1)
+    }
+
     @MainActor
     func testDelBReduceMotionArrivesInstantly() {
         let life = VillageLifeSimulator()

@@ -30,6 +30,10 @@ GMAIL_ADDRESS = re.compile(r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.
 CONFIG_ID = re.compile(r"ac_[A-Za-z0-9_-]{1,128}")
 GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 GMAIL_CONFIG_NAME = "FadedAI Gmail read-only"
+GITHUB_ACTION_LOG = re.compile(
+    r"https://api\.github\.com/repos/[A-Za-z0-9-]+/[A-Za-z0-9_.-]+/actions/jobs/\d+(?:/steps/\d+)?/logs"
+)
+GITHUB_LOG_LIMIT = 16_000_000
 READ_ONLY_GOOGLE = {
     "gmail": (GMAIL_CONFIG_NAME, GMAIL_READ_SCOPE),
     "googlesheets": ("FadedAI Google Sheets read-only", "https://www.googleapis.com/auth/spreadsheets.readonly"),
@@ -78,7 +82,7 @@ class ComposioLibrary:
     def key(self):
         return os.environ.get("COMPOSIO_API_KEY", "").strip() or load().get("key", "")
 
-    def request(self, method, route, *, params=None, payload=None, version="v3"):
+    def request(self, method, route, *, params=None, payload=None, version="v3", maximum=1_000_000):
         key = self.key()
         if not key:
             raise ApiError(503, "NOT_READY", "Composio mangler en projektnøgle på PC’en.")
@@ -93,7 +97,7 @@ class ComposioLibrary:
                     chunks = bytearray()
                     for chunk in response.iter_content(65_536):
                         chunks.extend(chunk)
-                        if len(chunks) > 1_000_000:
+                        if len(chunks) > maximum:
                             raise ValueError("Composio response too large")
             result = json.loads(chunks)
             if not isinstance(result, dict):
@@ -261,7 +265,9 @@ class ComposioLibrary:
         }
         if search is not None:
             call["body"] = search
-        result = self.request("POST", "/tools/execute/proxy", payload=call, version="v3.1")
+        # Long Xcode logs are returned inside a JSON string by the authorized account proxy.
+        limits = {"maximum": GITHUB_LOG_LIMIT} if provider == "github" and GITHUB_ACTION_LOG.fullmatch(endpoint) else {}
+        result = self.request("POST", "/tools/execute/proxy", payload=call, version="v3.1", **limits)
         status = result.get("status")
         if not isinstance(status, int) or not 200 <= status < 300:
             raise ApiError(502, "NOT_READY", "Tjenesten afviste opslaget. Tjek dens læseadgang.")

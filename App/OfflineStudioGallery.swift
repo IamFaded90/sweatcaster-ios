@@ -11,11 +11,13 @@ import UniformTypeIdentifiers
 struct StudioGalleryIndex: Sendable {
     var files: [URL] = []
     var dates: [URL: Date] = [:]
+    var modified: [URL: Date] = [:]
     var details: [URL: StudioImageDetails] = [:]
 }
 
 private struct StudioGalleryThumbnail: View {
     let file: URL
+    let modified: Date?
     let fallback: Color
     @State private var image: UIImage?
 
@@ -27,27 +29,11 @@ private struct StudioGalleryThumbnail: View {
                 Image(systemName: "photo").foregroundStyle(fallback)
             }
         }
-        .task(id: file) {
-            let url = file
-            let reader = Task.detached(priority: .utility) { Self.readThumbnail(at: url) }
-            let thumbnail = await withTaskCancellationHandler {
-                await reader.value
-            } onCancel: {
-                reader.cancel()
-            }
+        .task(id: modified) {
+            let thumbnail = await StudioGalleryThumbnailCache.shared.image(for: file, in: StudioImageFiles.library)
             guard !Task.isCancelled else { return }
             image = thumbnail.map { UIImage(cgImage: $0) }
         }
-    }
-
-    nonisolated private static func readThumbnail(at file: URL) -> CGImage? {
-        guard !Task.isCancelled, (try? LocalFileStore.checkedFileSize(file, maximumBytes: 80_000_000)) != nil,
-              let source = CGImageSourceCreateWithURL(file as CFURL, nil) else { return nil }
-        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize: 384
-        ] as CFDictionary)
     }
 }
 
@@ -117,6 +103,7 @@ extension OfflineStudio {
     }
 
     func resetPublicGallery() {
+        StudioGalleryThumbnailCache.shared.clear()
         galleryLoadID = nil
         galleryHasLoaded = false
         galleryError = nil
@@ -128,7 +115,7 @@ extension OfflineStudio {
     }
 
     nonisolated private static func readGalleryIndex(at directory: URL) throws -> StudioGalleryIndex {
-        let keys: Set<URLResourceKey> = [.creationDateKey, .isRegularFileKey, .isSymbolicLinkKey]
+        let keys: Set<URLResourceKey> = [.creationDateKey, .contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey]
         let candidates: [URL]
         do {
             candidates = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: Array(keys))
@@ -142,6 +129,7 @@ extension OfflineStudio {
                   values.isRegularFile == true, values.isSymbolicLink != true else { continue }
             index.files.append(file)
             index.dates[file] = values.creationDate
+            index.modified[file] = values.contentModificationDate
             if let bytes = try? LocalFileStore.readBytes(from: metadataURL(file), maximumBytes: 32_768),
                let details = try? JSONDecoder().decode(StudioImageDetails.self, from: bytes) {
                 index.details[file] = details
@@ -167,6 +155,7 @@ extension OfflineStudio {
                 galleryMutation &+= 1
                 galleryIndex.files.removeAll { $0 == file }
                 galleryIndex.dates.removeValue(forKey: file)
+                galleryIndex.modified.removeValue(forKey: file)
                 galleryIndex.details.removeValue(forKey: file)
             }
             transientDetails.removeValue(forKey: file)
@@ -320,7 +309,7 @@ extension OfflineStudio {
                                 Image(systemName: "photo").foregroundStyle(palette.secondary)
                             }
                         } else {
-                            StudioGalleryThumbnail(file: file, fallback: palette.secondary)
+                            StudioGalleryThumbnail(file: file, modified: galleryIndex.modified[file], fallback: palette.secondary)
                         }
                     }
                     .clipShape(shape)
@@ -503,8 +492,6 @@ extension OfflineStudio {
         batchTurnID = nil
         negativeImagePrompt = ""
         studioSeed = nil
-        makeFourImages = false
-        imageBenchmark = nil
         tagsDraft = ""
         basePhoto = nil
         setReferenceImage(nil)

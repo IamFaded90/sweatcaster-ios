@@ -11,7 +11,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import APIRouter, Body, Depends, Request, Response
 
-from sweatcaster import tradera_api, tradera_mail
+from sweatcaster import public_price, tradera_api, tradera_mail
 from sweatcaster.agent_owner_notice import send_owner_notice
 from sweatcaster.dto import ApiError
 
@@ -69,12 +69,15 @@ class PriceWatches:
 
     def create(self, bot, identifier, body):
         bot, identifier = uuid_text(bot), uuid_text(identifier)
-        item, url = tradera_api.listing(body.get("url"))
+        source = body.get("source", "api")
+        if source == "publicPage":
+            item, url = None, public_price.listing(body.get("url"))
+        else:
+            item, url = tradera_api.listing(body.get("url"))
         amount = cents(body.get("threshold"))
         currency = body.get("currency")
         notify = body.get("notifyByEmail", False)
-        source = body.get("source", "api")
-        if source not in ("api", "traderaMail"):
+        if source not in ("api", "traderaMail", "publicPage"):
             raise ApiError(422, "INVALID_INPUT", "Vælg en priskilde.")
         if currency not in ("SEK", "DKK") or type(notify) is not bool:
             raise ApiError(422, "INVALID_INPUT", "Vælg SEK eller DKK og en gyldig beskedindstilling.")
@@ -84,7 +87,7 @@ class PriceWatches:
             db.execute("BEGIN IMMEDIATE")
             current = db.execute("SELECT * FROM watches WHERE bot=? AND id=?", (bot, identifier)).fetchone()
             if current:
-                if (current["state"] == "cancelled" or
+                if (current["state"] == "cancelled" or (source == "publicPage" and url != current["url"]) or
                     (current["item"], current["limitCents"], current["currency"], current["notify"], current["source"]) !=
                         (item, amount, currency, int(notify), source)):
                     raise ApiError(409, "REQUEST_REUSED", "Denne kladde bruges allerede. Start en ny prisvagt.")
@@ -103,7 +106,8 @@ class PriceWatches:
     def public(self, row):
         observed = row["priceAt"] if row["source"] == "traderaMail" else row["checked"]
         fresh = observed is not None and observed >= self.clock() - MAX_PRICE_AGE
-        return {"id": row["id"], "url": row["url"], "title": row["title"] if fresh and row["title"] else "Tradera-annonce",
+        default_title = "Offentlig vareside" if row["source"] == "publicPage" else "Tradera-annonce"
+        return {"id": row["id"], "url": row["url"], "title": row["title"] if fresh and row["title"] else default_title,
                 "threshold": row["limitCents"] / 100, "currency": row["currency"], "state": row["state"],
                 "source": row["source"], "priceAt": observed if row["price"] is not None and fresh else None,
                 "price": row["price"] if fresh else None,
@@ -117,10 +121,11 @@ class PriceWatches:
             row = db.execute("SELECT * FROM watches WHERE bot=? AND id=?", (bot, identifier)).fetchone()
         return self.public(row) if row else None
 
-    def list(self, bot):
+    def list(self, bot, include_web=False):
         bot = uuid_text(bot)
         with closing(self.db()) as db:
-            rows = db.execute("SELECT * FROM watches WHERE bot=? AND state<>'cancelled' ORDER BY created DESC", (bot,))
+            rows = db.execute("SELECT * FROM watches WHERE bot=? AND state<>'cancelled' "
+                              "AND (? OR source<>'publicPage') ORDER BY created DESC", (bot, include_web))
             return {"watches": [self.public(row) for row in rows]}
 
     def cancel(self, bot, identifier):
@@ -141,7 +146,9 @@ class PriceWatches:
                 return
             row = db.execute("SELECT * FROM watches WHERE bot=? AND id=?", (bot, identifier)).fetchone()
         try:
-            if row["source"] == "traderaMail":
+            if row["source"] == "publicPage":
+                quote = public_price.check(row["url"], row["currency"])
+            elif row["source"] == "traderaMail":
                 since = max(row["created"], now - MAX_PRICE_AGE, row["priceAt"] or 0)
                 quote = tradera_mail.check(self.library, row["mailAccount"], row["item"], since, now, row["currency"], self.source)
             else:
@@ -172,6 +179,8 @@ class PriceWatches:
         limit = Decimal(row["limitCents"]) / 100
         # Message remains identical across PC restarts, delayed delivery, and removal of old cached quotes.
         subject = "Din Tradera-prisvagt har fundet en pris under grænsen"
+        if row["source"] == "publicPage":
+            subject = "Din prisvagt har fundet en pris under grænsen"
         text = (f"Din prisvagt registrerede en annoncepris under {limit:.2f} {row['currency']} uden fragt. "
                 f"Åbn annoncen for den aktuelle pris.\n\n{row['url']}")
         if row["source"] == "traderaMail":
@@ -236,12 +245,13 @@ def register_tradera(app, settings, authorize, library):
     router = APIRouter(prefix="/api/modules/v1/tradera", dependencies=[Depends(paired)], include_in_schema=False)
 
     @router.get("/status")
-    def status():
+    def status(include_web: bool = False):
         try:
             mail_ready = bool(tradera_mail.account(library))
         except (ApiError, OSError, ValueError):
             mail_ready = False
-        return {"configured": tradera_api.credentials() is not None, "mailAvailable": mail_ready}
+        result = {"configured": tradera_api.credentials() is not None, "mailAvailable": mail_ready}
+        return result | {"publicPageAvailable": True} if include_web else result
 
     @router.put("/settings")
     def configure(body: dict = Body(...)):
@@ -253,8 +263,8 @@ def register_tradera(app, settings, authorize, library):
         return {"configured": True}
 
     @router.get("/watches")
-    def listing(bot_id: str):
-        return watches.list(bot_id)
+    def listing(bot_id: str, include_web: bool = False):
+        return watches.list(bot_id, include_web)
 
     @router.get("/watches/{identifier}")
     def lookup(identifier: str, bot_id: str):

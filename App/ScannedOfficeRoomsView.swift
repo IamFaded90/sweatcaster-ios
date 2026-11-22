@@ -133,7 +133,7 @@ import SwiftUI
                     }
                     .pickerStyle(.segmented)
                     if showScene {
-                        FadedDetailText("Drej rummet med én finger. Tryk på et møbel eller en bot for at flytte den.")
+                        FadedDetailText("Drej rummet med én finger. Vægfotos ses fra den side, du scannede. Tryk på et møbel eller en bot for at flytte den.")
                         ScannedOfficeScene(room: room, selection: $selection)
                             .frame(height: 360)
                             .clipShape(.rect(cornerRadius: FadedRadius.medium))
@@ -314,6 +314,11 @@ import SwiftUI
         let scene = SCNScene()
         let bounds = room.bounds
         let span = max(bounds.width, bounds.height)
+        context.coordinator.photos = ScannedOfficeStore.photos(room.id).compactMapValues { photo in
+            guard let image = UIImage(data: photo.jpeg), (1...512).contains(image.size.width),
+                  (1...512).contains(image.size.height) else { return nil }
+            return (photo.front, image)
+        }
         scene.rootNode.addChildNode(context.coordinator.layout)
         let camera = SCNNode()
         camera.camera = SCNCamera()
@@ -358,12 +363,24 @@ import SwiftUI
             shape.firstMaterial?.diffuse.contents = color
             if item.id == selection { shape.firstMaterial?.emission.contents = UIColor.systemYellow.withAlphaComponent(0.6) }
             if item.wall { shape.firstMaterial?.transparency = 0.42 }
+            if item.wall, let photo = coordinator.photos[item.id] {
+                let face = SCNPlane(width: item.width, height: height)
+                let material = SCNMaterial()
+                material.diffuse.contents = photo.image
+                material.lightingModel = .constant
+                face.materials = [material]
+                let interior = SCNNode(geometry: face)
+                interior.position.z = Float((item.depth / 2 + 0.001) * (photo.front ? 1 : -1))
+                if !photo.front { interior.eulerAngles.y = .pi }
+                node.addChildNode(interior)
+            }
             coordinator.layout.addChildNode(node)
         }
     }
 
     @MainActor final class Coordinator: NSObject {
         let layout = SCNNode()
+        var photos: [UUID: (front: Bool, image: UIImage)] = [:]
         var selection: Binding<UUID?>?
         var items: [ScannedOfficeRoom.Item]?
         var highlight: UUID?

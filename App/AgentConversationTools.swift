@@ -364,22 +364,30 @@ struct AgentReplyCard: Codable, Sendable {
 }
 
 enum AgentLocalTool {
-    struct Request: Decodable {
-        let tool: String
-        let input: String
-    }
-
     static let instructions = """
-        Du har to lokale værktøjer, calculator og date. Når et spørgsmål kræver dem,
+        Du kan regne med calculator og finde datoen med date. Når et spørgsmål kræver dem,
         kan du først svare med kun JSON, f.eks. {"tool":"calculator","input":"859*0.17"}
         eller {"tool":"date","input":"14"} for dato om 14 dage, og 0 for dato og klokkeslæt nu.
-        Brug et fortegn for dage før i dag. Brug ellers almindelig tekst.
+        Brug et fortegn for dage før i dag. Du kan bede om ét opslag ad gangen, hvis næste opslag afhænger af svaret.
+        Afslut med et almindeligt svar, når du har de oplysninger, brugeren bad om.
         """
 
+    static let calendarInstructions = """
+        calendar læser antal aftaler og deres tider på én dag. Brug {"tool":"calendar","input":"0"} for i dag,
+        1 for i morgen eller et andet helt antal dage fra i dag.
+        """
+
+    static func asksAboutOwnCalendar(_ text: String) -> Bool {
+        let pattern = #"\b(?:min kalender|mine (?:aftaler|møder)|(?:aftaler|møder) har jeg|my (?:calendar|appointments|meetings|schedule)|(?:meetings|appointments) do I have)\b"#
+        return text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
     static func answer(_ reply: String, now: Date = .now, calendar: Calendar = .current) -> String? {
-        let data = ModelJSON.payload(reply)
-        guard data.count <= 240,
-              let request = try? JSONDecoder().decode(Request.self, from: data) else { return nil }
+        guard let calls = requests(reply), calls.count == 1 else { return nil }
+        return answer(calls[0], now: now, calendar: calendar)
+    }
+
+    static func answer(_ request: Request, now: Date, calendar: Calendar) -> String? {
         switch request.tool {
         case "calculator":
             guard let value = calculate(request.input) else { return "Regnestykket kunne ikke beregnes." }
@@ -387,7 +395,9 @@ enum AgentLocalTool {
         case "date":
             guard let days = Int(request.input), (-3_650...3_650).contains(days),
                   let date = calendar.date(byAdding: .day, value: days, to: now) else { return "Datoen kunne ikke beregnes." }
-            return "Dato og klokkeslæt på iPhone: " + date.formatted(date: .complete, time: days == 0 ? .shortened : .omitted)
+            let style = Date.FormatStyle(date: .complete, time: days == 0 ? .shortened : .omitted,
+                                         locale: Locale(identifier: "da_DK"), calendar: calendar, timeZone: calendar.timeZone)
+            return "Dato og klokkeslæt på iPhone: " + date.formatted(style)
         default:
             return nil
         }

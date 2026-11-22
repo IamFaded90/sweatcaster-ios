@@ -109,26 +109,7 @@ struct FadedSearchIndex: Equatable, Sendable {
         let query = Self.boundedQuery(input).trimmingCharacters(in: .whitespacesAndNewlines)
         let candidates = records.filter { !existing.contains($0.id) }
         let texts = candidates.map { [$0.title, $0.detail, $0.keywords].joined(separator: " ") }
-        let lexical = try LocalTextRanking.lexicalOrder(query: query, texts: texts)
-        let shortlist = LocalTextRanking.fusedOrder(
-            [Array(lexical.prefix(28)), Array(candidates.indices.prefix(64))], limit: 64
-        )
-        var semantic: [(index: Int, score: Float)] = []
-        if let model = LocalTextRanking.installedEmbedding() {
-            defer { model.unload() }
-            if let queryVector = LocalTextRanking.vector(for: query, using: model) {
-                for index in shortlist {
-                    try Task.checkCancellation()
-                    guard let candidate = LocalTextRanking.vector(for: texts[index], using: model),
-                          let score = LocalTextRanking.similarity(queryVector, candidate), score >= 0.76 else { continue }
-                    semantic.append((index, score))
-                }
-            }
-        }
-        let byMeaning = semantic.sorted { $0.score == $1.score ? $0.index < $1.index : $0.score > $1.score }
-            .map(\.index)
-        return LocalTextRanking.fusedOrder([Array(lexical.prefix(16)), Array(byMeaning.prefix(16))], limit: 12)
-            .map { candidates[$0] }
+        return try LocalTextRanking.hybridOrder(query: query, texts: texts, limit: 12).map { candidates[$0] }
     }
 
     func cancellableMatches(_ input: String) throws -> [FadedSearchRecord] {

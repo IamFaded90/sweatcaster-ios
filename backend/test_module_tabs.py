@@ -643,6 +643,12 @@ def test_module_mcp_rejects_untrusted_clients_and_exposes_agent_tools(tmp_path, 
             "studio_video_models", "create_video", "studio_video_status",
         }
 
+        scoped = client.post(url, headers={**headers, "X-FadedAI-Tools": "repository"}, json=request)
+        assert {tool["name"] for tool in scoped.json()["result"]["tools"]} == {"read_repository_file", "search_repository"}
+        denied = client.post(url, headers={**headers, "X-FadedAI-Tools": "repository"}, json={
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": "generate_image", "arguments": {"prompt": "lamp"}}})
+        assert denied.json()["result"]["isError"]
+
         def tool(name, **arguments):
             result = client.post(url, headers=headers, json={"jsonrpc": "2.0", "id": 2,
                 "method": "tools/call", "params": {"name": name, "arguments": arguments}})

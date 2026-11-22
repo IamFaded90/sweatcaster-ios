@@ -36,3 +36,42 @@ final class FadedSearchTests: XCTestCase {
         XCTAssertEqual(matches.last?.id, "record-79")
     }
 }
+
+final class AgentDocumentSearchTests: XCTestCase {
+    func testDocumentOverviewAndFollowUpKeepPageEvidence() throws {
+        let texts = ["Prøveplan for november", "Adgangskoden er gråspurv.", "Første møde i Farsø",
+                     "Revision i marts", "Året afsluttes i Odense."]
+        let doc = AgentDocument(id: UUID(), name: "Plan.pdf", model: nil, passages: texts.enumerated().map {
+            .init(page: $0.offset + 1, text: $0.element, vector: nil)
+        })
+        for question in ["Opsummér dokumentet", "Kan du give mig et kort resumé af brevet?", "What is this about?"] {
+            let matches = try AgentDocumentIndex.matches(question, document: doc)
+            let packet = AgentDocumentMatch.request(question: question, matches: matches, limit: 2_000)
+            XCTAssertEqual(packet.sources.compactMap(\.page), [1, 3, 5])
+            for source in packet.sources {
+                let excerpt = try XCTUnwrap(source.excerpt)
+                XCTAssertTrue(packet.prompt.contains("[\(source.id)] " + excerpt))
+                XCTAssertEqual(excerpt, texts[try XCTUnwrap(source.page) - 1])
+            }
+        }
+        let targeted = try AgentDocumentIndex.matches("Opsummér afsnittet om adgangskoden", document: doc)
+        XCTAssertEqual(targeted.map(\.source.page), [2])
+        XCTAssertTrue(try AgentDocumentIndex.matches("Vandtemperatur?", document: doc).isEmpty)
+    }
+
+    func testDocumentCitationsUseWholeExcerptsWithinTheComputerLimit() throws {
+        let evidence = String(repeating: "ø", count: 463) + " kode 781"
+        let doc = AgentDocument(id: UUID(), name: "Notat.txt", model: nil, passages: [
+            .init(page: nil, text: evidence, vector: nil), .init(page: nil, text: evidence + "B", vector: nil)
+        ])
+        let question = "kode " + String(repeating: "å", count: 1_195)
+        let matches = try AgentDocumentIndex.matches(question, document: doc)
+        let packet = AgentDocumentMatch.request(question: question, matches: matches, limit: 2_000)
+        XCTAssertEqual(packet.sources.count, 1)
+        XCTAssertEqual(packet.sources.first?.excerpt, evidence)
+        XCTAssertTrue(packet.prompt.hasSuffix(evidence))
+        XCTAssertLessThanOrEqual(packet.prompt.unicodeScalars.count, 2_000)
+        let legacy = try JSONDecoder().decode(AgentDocumentSource.self, from: Data(#"{"id":1,"name":"Brev","page":1}"#.utf8))
+        XCTAssertNil(legacy.excerpt)
+    }
+}

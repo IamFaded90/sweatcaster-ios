@@ -91,8 +91,8 @@ def install(root: Path, *, apply: bool = True) -> list[Path]:
             if original is not None:
                 (staged_package / name).write_bytes(original)
 
-        install_modules(staged_root)
         install_commentary(staged_root, apply=True)
+        install_modules(staged_root)
         install_voice(staged_root, apply=True)
         install_review(staged_root)
         install_launcher_status(staged_package)

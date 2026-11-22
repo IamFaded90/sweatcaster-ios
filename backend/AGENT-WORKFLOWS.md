@@ -2,6 +2,10 @@
 
 Install with `install_module_tabs.py` and restart the PC server. Existing Code Bot batch submissions run through local research, code generation and static checks. The checks parse Python and JSON without executing proposed code. The existing Manager, Researcher and File Explorer histories show the work. Approval stays in the existing batch review screen.
 
+For the paired Windows runtime, install `requirements-agent-tools.txt` with the checkpoint Python. Run `install_document_reader.py` for the separate Office conversion runtime. Playwright uses the installed Edge browser on Windows. The public price reader accepts a single advertised product price in the selected currency. Scheduled repository refreshes can resume indexing after process interruption with LangGraph's SQLite checkpoints.
+
+The documentation fallback uses a dedicated Docker MCP profile. To reproduce the profile on a new PC, run `docker mcp profile create --id fadedai-docs --name "FadedAI dokumentation" --server catalog://mcp/docker-mcp-catalog/context7`. The client invokes only the two documentation tools. To run the local Ollama model browser, use `docker compose -f backend/compose.agent-lab.yaml up -d` from the repository, then open `http://127.0.0.1:3077` on the PC.
+
 Manage explicit memories with authenticated `GET/PUT /api/modules/v1/agent-memory` and `DELETE /api/modules/v1/agent-memory/{id}`. A PUT body can be `{"scope":"global","kind":"preference","text":"Use Danish labels"}`. For architecture notes, set `scope` to `owner/repo` and `kind` to `architecture`. Batch research searches matching notes locally.
 
 For daily local snapshot reindexing, create `agent-workflows/routines.json` under the configured output directory. Example: `[{"action":"reindex_repository","repo":"owner/project","hour":2}]`. The worker attempts a routine once per Copenhagen calendar day at or after the given hour while the PC service runs. This indexes local Git snapshots without fetching or pushing remote changes.

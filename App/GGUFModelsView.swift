@@ -2,6 +2,14 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 @MainActor struct GGUFModelsView: View {
+    private let featured: PhoneModels.Entry?
+    private let canStart: Bool
+    private let showsModelLink: Bool
+    init(featured: PhoneModels.Entry? = nil, canStart: Bool = true, showsModelLink: Bool = true) {
+        self.featured = featured
+        self.canStart = canStart
+        self.showsModelLink = showsModelLink
+    }
     @AppStorage(AppStorageKeys.phoneModel) private var selected = "apple"
     @AppStorage(AppStorageKeys.phoneModelFavorites) private var savedFavorites = ""
     @Environment(\.fadedPalette) private var palette
@@ -25,6 +33,52 @@ import UniformTypeIdentifiers
     }
 
     var body: some View {
+        Group {
+            if let featured { catalogCard(featured) }
+            else { browser }
+        }
+        .onAppear { reload(); downloads.activate() }
+        .onChange(of: downloads.revision) { reload() }
+        .confirmationDialog("Slet model?", isPresented: Binding(
+            get: { deletionChoice != nil }, set: { if !$0 { deletionChoice = nil } }
+        ), presenting: deletionChoice) { model in
+            deletionActions(model)
+        } message: { model in
+            deletionMessage(model)
+        }
+    }
+
+    private func catalogCard(_ entry: PhoneModels.Entry) -> some View {
+        FadedCard(accent: selected == entry.selectionID ? palette.lime : nil) {
+            VStack(alignment: .leading, spacing: 10) {
+                if let model = models.first(where: { $0.id == entry.selectionID }) {
+                    installedRow(model)
+                } else {
+                    HStack {
+                        Label(entry.name, systemImage: "cpu").font(.headline)
+                        Spacer()
+                        Button("Favorit", systemImage: favorites.contains(entry.selectionID) ? "star.fill" : "star") { toggleFavorite(entry.selectionID) }
+                            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                            .accessibilityValue(favorites.contains(entry.selectionID) ? "Valgt" : "Ikke valgt")
+                    }
+                    FadedDetailText(entry.description)
+                    if downloads.pending?.file.isCatalogMiniCPM == true {
+                        GGUFTransferStatus()
+                    } else {
+                        FadedSecondaryButton("Hent MiniCPM5 · 688 MB", icon: "arrow.down.circle") { downloads.start(GGUFHub.miniCPM) }
+                            .disabled(!canStart || downloads.pending != nil)
+                        if downloads.noticeFile?.isCatalogMiniCPM == true, let message = downloads.notice, downloads.pending == nil {
+                            FadedDetailText(message)
+                        }
+                    }
+                }
+                if let notice { FadedDetailText(notice) }
+                if showsModelLink, let source = entry.modelCardURL { Link("Modelkort på Hugging Face", destination: source).font(.footnote) }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var browser: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: FadedSpacing.action) {
                 installedSection
@@ -39,8 +93,6 @@ import UniformTypeIdentifiers
         .foregroundStyle(palette.text)
         .navigationTitle("Ekstra iPhone-modeller")
         .navigationBarTitleDisplayMode(.inline)
-        .onAppear { reload(); downloads.activate() }
-        .onChange(of: downloads.revision) { reload() }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let first = urls.first { importFile(first) }
         }
@@ -50,13 +102,6 @@ import UniformTypeIdentifiers
             Button("Hent modellen") { downloads.start(file) }
         } message: { file in
             Text("\(file.name) fylder \(ModelDiskStorage.gigabytes(file.bytes)).")
-        }
-        .confirmationDialog("Slet model?", isPresented: Binding(
-            get: { deletionChoice != nil }, set: { if !$0 { deletionChoice = nil } }
-        ), presenting: deletionChoice) { model in
-            deletionActions(model)
-        } message: { model in
-            deletionMessage(model)
         }
         .sheet(isPresented: $showKey, onDismiss: { keyDraft = "" }) { keySheet }
     }
@@ -121,7 +166,7 @@ import UniformTypeIdentifiers
                         .frame(minHeight: 44, alignment: .leading)
                         .disabled(lookingUp)
                 }
-                downloadStatus
+                GGUFTransferStatus()
                 ForEach(files) { file in
                     Button {
                         downloadChoice = file
@@ -137,19 +182,6 @@ import UniformTypeIdentifiers
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    @ViewBuilder private var downloadStatus: some View {
-        if let entry = downloads.pending {
-            if let progress = downloads.progress { ProgressView(entry.file.name, value: progress) }
-            else if !downloads.interrupted { ProgressView("Klargør \(entry.file.name)…") }
-            if downloads.interrupted {
-                Button("Fortsæt download", systemImage: "arrow.clockwise") { downloads.resume() }
-                    .frame(minHeight: 44)
-            }
-            Button("Stop download", role: .cancel) { downloads.cancel() }.frame(minHeight: 44)
-        }
-        if let message = downloads.notice { FadedDetailText(message) }
     }
 
     private var keySheet: some View {
@@ -171,7 +203,12 @@ import UniformTypeIdentifiers
         }
     }
 
-    private func reload() { models = GGUFPhoneModel.installed }
+    private func reload() {
+        models = GGUFPhoneModel.installed
+        if let featured, featured.id != featured.selectionID, favorites.contains(featured.id) {
+            savedFavorites = favorites.subtracting([featured.id]).union([featured.selectionID]).sorted().joined(separator: "|")
+        }
+    }
 
     private func search() {
         let value = String(query.trimmingCharacters(in: .whitespacesAndNewlines).prefix(120))
@@ -272,6 +309,26 @@ import UniformTypeIdentifiers
             } catch {
                 notice = "Modellen kunne ikke slettes. Prøv igen, når enheden er klar."
             }
+        }
+    }
+}
+
+@MainActor struct GGUFTransferStatus: View {
+    private var downloads: GGUFModelDownloads { .shared }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let entry = downloads.pending {
+                if downloads.interrupted {
+                    Text("Afbrudt hentning · \(entry.file.name)").font(.subheadline)
+                    Button("Fortsæt download", systemImage: "arrow.clockwise") { downloads.resume() }
+                        .frame(minHeight: 44)
+                } else if let progress = downloads.progress {
+                    ProgressView(entry.file.name, value: progress)
+                } else { ProgressView("Klargør \(entry.file.name)…") }
+                Button("Stop download", role: .cancel) { downloads.cancel() }.frame(minHeight: 44)
+            }
+            if let message = downloads.notice { FadedDetailText(message) }
         }
     }
 }

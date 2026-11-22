@@ -18,11 +18,13 @@ from chatterbox.models.tokenizers.tokenizer import ChineseCangjieConverter
 
 def main():
     model_dir, output, speaker = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
-    if speaker not in {"mic", "nic", "lumi"}:
+    if speaker not in {"mic", "nic", "lumi", "synthetic"}:
         raise ValueError("Unknown speaker")
     text = json.load(sys.stdin)["text"]
     sample_dir = model_dir / "audio_samples"
-    if speaker == "lumi":
+    if speaker == "synthetic":
+        reference = Path(sys.argv[4])
+    elif speaker == "lumi":
         reference = sample_dir / "00_lumi_00_reference.wav"
         if not reference.is_file():
             raise FileNotFoundError("Missing Lumi voice example")

@@ -19,7 +19,7 @@ from sweatcaster.dto import ApiError
 
 PREFIX = "/api/modules/v1/cast-relay"
 HLS = {"application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl"}
-MEDIA = HLS | {"video/mp4", "video/mp2t", "video/webm", "audio/aac", "audio/mp4", "audio/mpeg",
+MEDIA = HLS | {"video/mp4", "video/iso.segment", "video/mp2t", "video/webm", "audio/aac", "audio/mp4", "audio/mpeg",
                "audio/ac3", "audio/eac3", "text/vtt", "application/octet-stream"}
 RANGE = re.compile(r"bytes=(?:\d{1,19}-\d{0,19}|-\d{1,19})\Z")
 URI = re.compile(r'\bURI="([^"]+)"')

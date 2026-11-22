@@ -92,7 +92,7 @@ struct FadedPalette {
     var border: Color { theme == .faded ? FadedBrand.border : isDark ? FadedColors.border : FadedColors.dayBorder }
     var text: Color { theme == .faded ? FadedBrand.text : isDark ? FadedColors.text : FadedColors.deep }
     var secondary: Color { theme == .faded ? FadedBrand.secondary : isDark ? FadedColors.secondary : FadedColors.daySecondary }
-    var muted: Color { FadedColors.muted }
+    var muted: Color { theme == .faded ? FadedBrand.secondary : theme == .day ? FadedColors.daySecondary : FadedColors.secondary }
     var lime: Color { theme == .faded ? FadedBrand.mint : FadedColors.lime }
     var cyan: Color { theme == .faded ? FadedBrand.pc : FadedColors.cyan }
     var purple: Color { FadedColors.purple }
@@ -102,12 +102,12 @@ struct FadedPalette {
 }
 
 enum FadedBrand {
-    static let canvas = Color(red: 8 / 255, green: 9 / 255, blue: 9 / 255)
-    static let panel = Color(red: 21 / 255, green: 23 / 255, blue: 23 / 255)
-    static let raised = Color(red: 34 / 255, green: 37 / 255, blue: 38 / 255)
+    static let canvas = Color(red: 28 / 255, green: 47 / 255, blue: 51 / 255)
+    static let panel = Color(red: 34 / 255, green: 55 / 255, blue: 60 / 255)
+    static let raised = Color(red: 47 / 255, green: 69 / 255, blue: 75 / 255)
     static let border = Color(red: 212 / 255, green: 240 / 255, blue: 236 / 255, opacity: 0.1)
     static let text = Color(red: 245 / 255, green: 247 / 255, blue: 247 / 255)
-    static let secondary = Color(red: 160 / 255, green: 172 / 255, blue: 173 / 255)
+    static let secondary = Color(red: 192 / 255, green: 209 / 255, blue: 210 / 255)
     static let actionText = Color(red: 6 / 255, green: 28 / 255, blue: 36 / 255)
     static let mint = Color(red: 87 / 255, green: 242 / 255, blue: 204 / 255)
     static let blue = Color(red: 69 / 255, green: 150 / 255, blue: 251 / 255)
@@ -178,28 +178,21 @@ struct FadedBackground: View {
     @Environment(\.fadedPalette) private var palette
     @Environment(\.fadedLookPreset) private var lookPreset
 
-    private var colors: [Color] {
-        if !palette.isDark {
-            return [palette.background, variant == .privateChat ? palette.purple.opacity(0.12) : palette.raised]
-        }
-        if palette.theme == .oled { return [palette.background, palette.background] }
-        switch variant {
-        case .standard: return [FadedBrand.canvas, Color(red: 0.105, green: 0.15, blue: 0.145)]
-        case .privateChat: return [FadedColors.deep, FadedColors.privateGlow]
-        case .village: return [FadedColors.sunset, FadedColors.deep]
-        case .terminal: return [FadedColors.deep, FadedColors.terminal]
+    private var surface: Color {
+        switch (palette.theme, variant) {
+        case (.oled, _): .black
+        case (.day, .village): Color(red: 0.97, green: 0.93, blue: 0.85)
+        case (.day, .privateChat): Color(red: 0.95, green: 0.92, blue: 0.96)
+        case (.day, _): Color(red: 0.93, green: 0.95, blue: 0.92)
+        case (.faded, .standard): palette.background
+        case (.faded, .privateChat): Color(red: 0.19, green: 0.15, blue: 0.23)
+        case (.faded, .village): Color(red: 0.21, green: 0.18, blue: 0.16)
+        case (.faded, .terminal): Color(red: 0.11, green: 0.16, blue: 0.23)
         }
     }
 
     var body: some View {
-        LinearGradient(colors: colors, startPoint: .top, endPoint: .bottom)
-            .overlay(alignment: .top) {
-                if palette.theme == .faded && variant == .standard {
-                    LinearGradient(colors: [FadedBrand.mint.opacity(0.05), .clear],
-                                   startPoint: .top, endPoint: .bottom)
-                        .frame(height: 240)
-                }
-            }
+        surface
             .overlay { if palette.theme != .oled && variant != .standard { texture } }
             .overlay {
                 if palette.theme == .faded && variant == .standard && lookPreset == nil {

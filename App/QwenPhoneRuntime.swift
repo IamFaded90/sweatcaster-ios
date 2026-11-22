@@ -88,6 +88,23 @@ enum QwenPhoneRuntime {
 
     static let visionWeightsBytes = visionAssets?.reduce(Int64(0)) { $0 + $1.bytes } ?? 0
 
+    static func downloadBudget(for variant: Variant, in folder: URL, weightsReady: Bool) -> (remaining: Int64, free: Int64)? {
+        var assets = variant.tokenizerFiles.map { (path: "hf_model/" + $0.name, bytes: Int64($0.bytes)) }
+        if !weightsReady {
+            // The SDK controls compact weight downloads. Only our direct installer reuses individual files.
+            guard case .vision = variant, let visionAssets else { return nil }
+            assets += visionAssets
+        }
+        let root = folder.deletingLastPathComponent().resolvingSymlinksInPath().appending(path: folder.lastPathComponent)
+        let missing = assets.filter { asset in
+            let file = root.appending(path: asset.path)
+            return file.path != file.resolvingSymlinksInPath().path || !matchesFile(file, bytes: asset.bytes)
+        }
+        let remaining = missing.reduce(Int64(0)) { $0 + $1.bytes }
+        // Allow the largest remaining file to coexist with its temporary download during installation.
+        return (remaining, remaining + (missing.map(\.bytes).max() ?? 0))
+    }
+
     // The Hub redirects pinned files to its own Xet and LFS hosts.
     private final class HubRedirectPolicy: NSObject, URLSessionTaskDelegate {
         func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,

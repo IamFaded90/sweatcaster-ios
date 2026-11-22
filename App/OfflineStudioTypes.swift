@@ -94,7 +94,7 @@ enum StudioImageModel: String, CaseIterable, Identifiable, Sendable {
         case .fluxKlein:
             [StudioImageDownloadFile(name: id, bytes: 4_039_196_672, sha256: "430ba0f94ee0851a7f95c1383527f931afa6219898a51c5aa8e37979e9e4c86a"),
              StudioImageDownloadFile(name: "qwen_3_4b_q8p.ckpt", bytes: 4_535_328_768, sha256: "a24e3f832917aafe7f6186e6dfb96ab19a4a0729cdf60a875b5da20024333350"),
-             StudioImageDownloadFile(name: "flux_2_vae_f16.ckpt", bytes: 168_534_016, sha256: nil)]
+             StudioImageDownloadFile(name: "flux_2_vae_f16.ckpt", bytes: 168_534_016, sha256: "48369d4b1495aec3df0579591f4bf9c199a73cc288130df2359c4a173c5ae864")]
         }
     }
 
@@ -121,11 +121,15 @@ struct StudioImageDownloadsView: View {
                         Label(model.title, systemImage: "photo").font(.headline)
                         FadedDetailText(model == .stableDiffusion
                                         ? "Ca. 2,1 GB at hente. Afsæt 3,2 GB, første gang du henter den."
-                                        : "Ca. 8,7 GB at hente. Afsæt 9,8 GB, første gang du henter den. Generering kræver også ledig arbejdshukommelse.")
+                                        : "Ca. 8,7 GB at hente. Afsæt 9,8 GB lagerplads. For at prøve modellen skal FadedAI også have mindst 4 GiB ledig arbejdshukommelse.")
+                        if model == .fluxKlein, !downloads.isInstalled(model), LocalCompute.headroom < model.minimumWorkingMemoryMiB * 1_048_576 {
+                            FadedDetailText("Lige nu er der for lidt ledig arbejdshukommelse til at lave et FLUX-billede på denne iPhone.")
+                        }
                         if downloads.activeModel == model {
                             StudioImageDownloadProgress()
                         } else if downloads.isInstalled(model) {
                             Label("Gemt på telefonen", systemImage: "checkmark.circle")
+                            StudioImageTestButton(model: model).disabled(!canStart)
                         } else {
                             FadedSecondaryButton("Hent billedmodel", icon: "arrow.down.circle") { downloads.start(model) }
                                 .accessibilityLabel("Hent \(model.title)").disabled(!canStart)
@@ -158,29 +162,6 @@ struct StudioImageModelDeleteButton: View {
                     Text("Lokale modelfiler fjernes fra telefonen.")
                 }
         }
-    }
-}
-
-struct StudioImageDownloadProgress: View {
-    var body: some View {
-        let downloads = StudioImageDownloads.shared
-        if downloads.isInterrupted {
-            if let notice = downloads.notice { FadedDetailText(notice) }
-            FadedSecondaryButton(downloads.isWaitingForModelCheck ? "Fortsæt modelkontrol" : "Fortsæt download",
-                                 icon: "arrow.down.circle") { downloads.resume() }
-        } else if let progress = downloads.progress, progress < 1 {
-            ProgressView(value: progress) { Text("Henter · \(Int(progress * 100)) %") }
-        } else {
-            ProgressView(progressLabel(downloads.progress))
-        }
-        FadedSecondaryButton("Stop download", icon: "stop.fill") { downloads.cancel() }
-    }
-
-    private func progressLabel(_ progress: Double?) -> String {
-        if progress == 1 {
-            return "Kontrollerer billedmodellen…"
-        }
-        return "Henter billedmodellen…"
     }
 }
 
@@ -308,9 +289,11 @@ struct StudioImageRequest {
     let prompt: String
     let negative: String
     let lora: String
-    let count: Int
+    var count: Int
     let seed: UInt32?
     let sourceImage: Data?
+    var secondReference: Data? = nil
+    var chatDraft: String? = nil
     let referenceMode: StudioReferenceMode?
     let referenceMask: StudioReferenceMask?
     let isPrivate: Bool
@@ -318,9 +301,30 @@ struct StudioImageRequest {
     let botID: UUID?
     let allowPCFallback: Bool
 
+    var suggestionSeeds: [UInt32] {
+        let first = seed ?? UInt32.random(in: 1...UInt32.max)
+        return (0..<count).map { first &+ UInt32($0) }
+    }
+
     var supportsPC: Bool {
-        !isPrivate && sourceImage == nil && seed == nil && count == 1
+        !isPrivate && sourceImage == nil && seed == nil && [1, 4].contains(count)
             && prompt.count <= 1_000 && negative.isEmpty && lora.isEmpty
+    }
+
+    var supportsReferencePair: Bool {
+        guard isPrivate else { return false }
+        switch route {
+        case .phone: return model == StudioImageModel.fluxKlein.id
+        case .pc: return pcModel.isFlux
+        case .automatic: return false
+        }
+    }
+
+    var referencePairBlocker: String? {
+        guard secondReference != nil else { return nil }
+        guard sourceImage != nil else { return "Vælg foto 1 først." }
+        guard referenceMask == nil else { return "Fjern markeringen for at bruge to fotos sammen." }
+        return supportsReferencePair ? nil : "Vælg FLUX.2 Klein på iPhone eller FLUX 2 på PC for at bruge begge fotos."
     }
 }
 

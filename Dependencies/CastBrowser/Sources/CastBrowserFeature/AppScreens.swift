@@ -321,6 +321,15 @@ struct RemoteScreen: View {
                     Text(model.screenOffMessage)
                         .font(Style.meta).foregroundStyle(Style.muted)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                    if let target = model.pcSwitchTarget {
+                        Button { Task { await model.switchPlaybackToPC() } } label: {
+                            Label(model.pcSwitchID == nil ? "Prøv via PC" : "Tjekker filmen på PC…", systemImage: "desktopcomputer")
+                        }.buttonStyle(.bordered).controlSize(.large).disabled(model.pcSwitchID != nil)
+                        if model.pcSwitchFailure == target.frame.source {
+                            Text("PC’en kunne ikke klargøre filmen. Du kan fortsætte via iPhone og prøve igen.")
+                                .font(Style.meta).foregroundStyle(Style.muted)
+                        }
+                    }
                     if model.hasSubtitleTracks {
                         Button { model.toggleSubtitles() } label: {
                             Label("Slå undertekster til / fra", systemImage: "captions.bubble")

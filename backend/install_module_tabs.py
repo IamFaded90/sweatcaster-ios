@@ -6,21 +6,21 @@ from pathlib import Path
 
 def collect_modules(source: Path) -> dict[str, str]:
     modules = {}
-    for name in (source.name, "lumi_companion.py", "lumi_flux.py", "code_batch.py", "crew_proposals.py", "repository_library.py", "agent_workflows.py",
-                 "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py", "bot_task_models.py",
+    for name in (source.name, "document_routes.py", "document_reader.py", "lumi_companion.py", "lumi_flux.py", "code_batch.py", "crew_proposals.py", "repository_library.py", "agent_workflows.py",
+                 "aio_runtime.py", "bot_computers.py", "bot_computer_routes.py", "bot_task_models.py", "repository_routine.py",
                  "emby_library.py", "emby_settings.py", "composio_library.py", "composio_settings.py", "composio_gmail.py",
                  "composio_routes.py", "instagram_publishing.py", "instagram_photo.py", "instagram_scheduling.py",
-                 "tradera_watch.py", "tradera_api.py", "tradera_mail.py", "agent_owner_notice.py",
+                 "tradera_watch.py", "tradera_api.py", "tradera_mail.py", "public_price.py", "price_render.py", "agent_owner_notice.py",
                  "agentmail_inboxes.py", "agent_email.py", "addons.py", "github_addons.py", "grok_templates.py", "mail_appointments.py", "mail_evidence.py",
                  "mail_reschedule.py", "gmail_cleanup.py", "gmail_cleanup_provider.py", "pc_repair.py", "pc_image_engine.py", "pc_repair_images.py",
                  "microsoft_voice.py", "roest_worker.py", "kokoro_voice.py", "pc_metrics.py", "video_review.py", "video_quality.py",
                  "studio_video.py", "studio_video_workflows.py", "studio_meshes.py", "cast_relay.py",
-                 "lumi_video_files.py", "window_capture.py", "window_help.py", "window_automation.py", "window_operator.py",
-                 "phone_screen.py", "film_companion.py", "film_media.py", "film_reasoning.py", "film_speech_install.py", "agent_tool_builder.py", "agent_tool_runtime.py",
+                 "lumi_video_files.py", "lumi_media_inputs.py", "lumi_continuation.py", "lumi_dialogue.py", "lumi_units.py", "lumi_recall.py", "window_capture.py", "window_help.py", "window_automation.py", "window_operator.py",
+                 "phone_screen.py", "film_companion.py", "film_media.py", "film_reasoning.py", "film_speech_install.py", "agent_recording.py", "agent_tool_builder.py", "agent_tool_runtime.py",
                  "sales_models.py", "sales_provider.py", "sales_service.py", "sales_mail.py", "sales_draft.py", "village_surprises.py",
-                 "agent_rooms.py", "agent_room_scene.py", "agent_room_art.py",
+                 "agent_rooms.py", "agent_room_scene.py", "agent_room_art.py", "agent_conversation.py",
                  "agent_repair.py", "agent_repair_store.py", "agent_repair_runner.py", "agent_repair_evidence.py",
-                 "agent_cases.py", "agent_case_gmail.py", "agent_case_models.py",
+                 "agent_cases.py", "agent_case_gmail.py", "agent_case_models.py", "github_build_report.py", "docs_gateway.py",
                  "searxng_search.py", "web_research.py", "google_desktop.py", "youtube_connection.py", "google_drive.py"):
         path = source.parent / name
         module = path.read_text(encoding="utf-8")
@@ -31,6 +31,42 @@ def collect_modules(source: Path) -> dict[str, str]:
     compile(module, str(generator), "exec")
     modules[generator.name] = module
     return modules
+
+
+def stage_vision_support(package, staged):
+    """Extend the existing v2 image contract and its model catalogue in one staged update."""
+    edits = {
+        "model_ids.py": [
+            ("MODEL_TAGS = {\n", 'MODEL_TAGS = {\n    "qwen3-vl-4b": "qwen3-vl:4b",\n'),
+            ("MODEL_LABELS = {\n", 'MODEL_LABELS = {\n    "qwen3-vl-4b": "Qwen3-VL 4B",\n'),
+            ("MODEL_CAPABILITIES = {\n", 'MODEL_CAPABILITIES = {\n    "qwen3-vl-4b": ["chat", "vision"],\n'),
+        ],
+        "vision.py": [
+            ("return model_id == VISION_ID", 'return model_id in (VISION_ID, "qwen3-vl-4b")'),
+            ("    session = requests.Session()", '    if tag == "qwen3-vl:4b":\n'
+             '        payload["options"]["num_predict"] = max(768, payload["options"]["num_predict"])\n'
+             '    session = requests.Session()'),
+        ],
+        "v2_api.py": [
+            ("if names is None or not _has_tag(names, VISION_TAG):",
+             "if names is None or not _has_tag(names, tag_for(raw_model)):"),
+            ("coord, body, tag, lease, VISION_ID, iter_vision_text, vision_prompt)",
+             "coord, body, tag, lease, raw_model, iter_vision_text, vision_prompt)"),
+        ],
+    }
+    for filename, replacements in edits.items():
+        path = package / filename
+        original = path.read_text(encoding="utf-8")
+        source = staged.get(path, (original, original))[1]
+        for old, new in replacements:
+            if new in source:
+                continue
+            if source.count(old) != 1:
+                raise ValueError(f"Unexpected vision catalogue or handler in {filename}; update not applied.")
+            source = source.replace(old, new, 1)
+        if source != original:
+            compile(source, str(path), "exec")
+            staged[path] = (original, source)
 
 
 def install(root: Path) -> None:
@@ -168,6 +204,7 @@ def install(root: Path) -> None:
         updated = current.replace(anchor, unavailable_job + anchor)
         compile(updated, str(cleanup), "exec")
         staged[cleanup] = (original, updated)
+    stage_vision_support(package, staged)
     modules = collect_modules(source)
     for path, (original, _) in staged.items():
         backup = path.with_suffix(".py.before-module-tabs")

@@ -62,6 +62,9 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
         .onReceive(timer) { _ in
             if phase == .active { model.refreshRemote() }
         }
+        .onChange(of: phase) { _, value in
+            if value == .active { model.refreshAfterReconnect() }
+        }
         .tint(Style.accent)
         .environment(\.colorScheme, appearance == "System" ? hostColorScheme : (appearance == "Lys" ? .light : .dark))
         .alert("Fortsæt afspilning?", isPresented: Binding(
@@ -169,6 +172,8 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
             }
         }
         .onChange(of: pcRelayID) { _, _ in
+            model?.pcSwitchID = nil
+            model?.pcSwitchFailure = nil
             model?.pcRelay = pcRelay
             model?.pcRelayWithContext = pcRelayWithContext
             model?.filmAnalysis = filmAnalysis
@@ -262,12 +267,12 @@ enum Style {
     })
     static let canvas = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.045, green: 0.055, blue: 0.09, alpha: 1)
+            ? UIColor(red: 0.12, green: 0.17, blue: 0.23, alpha: 1)
             : UIColor(red: 0.975, green: 0.965, blue: 0.95, alpha: 1)
     })
     static let card = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.105, green: 0.115, blue: 0.16, alpha: 1)
+            ? UIColor(red: 0.18, green: 0.24, blue: 0.31, alpha: 1)
             : UIColor.white
     })
     static let muted = Color(uiColor: .secondaryLabel)

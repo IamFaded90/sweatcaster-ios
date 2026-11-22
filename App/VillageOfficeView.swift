@@ -169,9 +169,14 @@ struct VillageMemorial: Codable, Identifiable, Equatable {
     private func officeBotRow(_ bot: VillageLifeBot) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
-                VillagePixelImage(name: "room-" + VillageAssets.newArtName(name: bot.displayName, id: bot.id),
-                                  folder: "new", width: 92, height: 74)
-                    .clipShape(.rect(cornerRadius: 10))
+                let figure = VillageAssets.newArtName(name: bot.displayName, id: bot.id)
+                if VillageAssets.image(named: "room-" + figure, subdirectory: "new") != nil {
+                    VillagePixelImage(name: "room-" + figure, folder: "new", width: 92, height: 74)
+                        .clipShape(.rect(cornerRadius: 10))
+                } else {
+                    VillageInteriorArtwork(name: "personal-office", label: bot.displayName, residents: [bot])
+                        .frame(width: 92, height: 74)
+                }
                 VStack(alignment: .leading, spacing: 2) {
                     if let id = UUID(uuidString: bot.id) {
                         Text(VillageHistory.shared.ageLabel(for: id))
@@ -464,13 +469,7 @@ private struct VillageCreationScene: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 Text(description).font(.subheadline).foregroundStyle(palette.secondary)
-                VillageInteriorArtwork(name: imageName, label: zone.title,
-                                       residents: residents, animateResidents: !life.paused)
-                    .frame(height: 230)
-                    .frame(maxWidth: .infinity)
-                    .background(palette.card, in: RoundedRectangle(cornerRadius: 18))
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-                    .accessibilityLabel(zone.title)
+                VillageSpeakingRoom(artwork: imageName, zone: zone, residents: residents, animated: !life.paused)
                 Text("Her lige nu").font(.headline)
                 if residents.isEmpty {
                     FadedCard {
@@ -541,6 +540,7 @@ struct VillageZoomSlider: View {
     @Binding var showNames: Bool
     @Binding var reduceMotion: Bool
     @Binding var zoom: Double
+    @AppStorage(VillageCamera.Focus.storageKey) private var focus = VillageCamera.Focus.center
     @Environment(\.fadedPalette) private var palette
 
     var body: some View {
@@ -566,7 +566,13 @@ struct VillageZoomSlider: View {
                         Toggle("Reducer bevægelse", isOn: $reduceMotion)
                         VStack(alignment: .leading, spacing: 8) {
                             VillageZoomSlider(zoom: $zoom)
-                            Button("Nulstil zoom og placering") { zoom = 1 }
+                                .onChange(of: zoom) { _, value in
+                                    if VillageCamera.clampZoom(value) <= 1.001, focus != .center { focus = .center }
+                                }
+                            Button("Nulstil zoom og placering") {
+                                zoom = 1
+                                focus = .center
+                            }
                                 .frame(minHeight: 44)
                         }
                         Text("Telefonens egen indstilling for reduceret bevægelse gælder også.")
@@ -576,7 +582,7 @@ struct VillageZoomSlider: View {
                 FadedCard {
                     VStack(alignment: .leading, spacing: 6) {
                         Text("Lyd i landsbyen").font(.headline)
-                        Text("Landsbyen har endnu ingen egen lydafspiller.")
+                        Text("Tryk på højttaleren ved en agent i et rum for at høre dens status. I stereo følger stemmen figurens placering.")
                             .font(.caption).foregroundStyle(palette.secondary)
                     }
                 }

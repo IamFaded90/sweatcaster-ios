@@ -3,6 +3,45 @@ import XCTest
 @testable import SweatCaster
 
 final class MusicCatalogTests: XCTestCase {
+    @MainActor func testEditingPausedQueueKeepsNextSongSilentAndCanCancelPendingPlayback() async {
+        let player = MusicPlayer.shared
+        let first = MusicTrack(id: "aaaaaaaaaaa", title: "Første", artist: "Test")
+        let next = MusicTrack(id: "bbbbbbbbbbb", title: "Næste", artist: "Test", duration: 90)
+        player.play([first, next])
+        defer { while !player.queue.isEmpty { player.remove(at: 0) } }
+        XCTAssertTrue(player.loading)
+        XCTAssertTrue(player.canPause)
+        player.toggle()
+        XCTAssertFalse(player.loading)
+        XCTAssertFalse(player.canPause)
+        player.remove(at: 0)
+        XCTAssertEqual(player.current, next)
+        XCTAssertEqual(player.duration, 90)
+        XCTAssertFalse(player.loading)
+        XCTAssertFalse(player.canPause)
+        player.toggle()
+        XCTAssertTrue(player.loading)
+        XCTAssertTrue(player.canPause)
+    }
+
+    func testInterruptionResumesOnlyIfMusicWasRequestedAndSystemAllowsIt() {
+        var intent = MusicPlaybackIntent.paused
+        XCTAssertFalse(intent.beginInterruption())
+        XCTAssertFalse(intent.endInterruption(allowed: true))
+        intent = .requested
+        XCTAssertTrue(intent.beginInterruption())
+        XCTAssertFalse(intent.beginInterruption())
+        XCTAssertTrue(intent.endInterruption(allowed: true))
+        XCTAssertFalse(intent.endInterruption(allowed: true))
+        intent = .requested
+        XCTAssertTrue(intent.beginInterruption())
+        XCTAssertFalse(intent.endInterruption(allowed: false))
+        intent = .requested
+        XCTAssertTrue(intent.beginInterruption())
+        intent = .paused
+        XCTAssertFalse(intent.endInterruption(allowed: true))
+    }
+
     func testPublicMusicResultsPreserveTitlesAndAvoidDuplicates() throws {
         let source = #"""
         <script>var ytInitialData = {"contents":[

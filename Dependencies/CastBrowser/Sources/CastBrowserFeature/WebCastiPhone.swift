@@ -75,6 +75,8 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
     var receiverErrorLogged = false
     @Published var castFeedback: String?
     @Published var canRetryCast = false
+    @Published var pcSwitchID: UUID?
+    @Published var pcSwitchFailure: FilmReceiverFrame.Source?
     private var observingCast = false
     var retryTarget: (video: VideoCandidate, position: Double)?
     var mediaRoute = CastMediaRoute.direct
@@ -97,7 +99,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
 
     func sessionManager(_ manager: GCKSessionManager, didResume session: GCKCastSession) {
         DispatchQueue.main.async {
-            self.refreshRemote()
+            self.refreshAfterReconnect()
             if let state = session.remoteMediaClient?.mediaStatus?.playerState,
                state == .playing || state == .paused || state == .buffering {
                 self.status = "Fortsat på TV"
@@ -105,7 +107,15 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
         }
     }
 
+    func refreshAfterReconnect() {
+        // The receiver can be playing while iOS has suspended the sender's 45-second load timer.
+        if loadStarted != nil { loadStarted = Date() }
+        refreshRemote()
+    }
+
     private func prepareRoutes(for video: VideoCandidate) {
+        pcSwitchID = nil
+        pcSwitchFailure = nil
         retryCount = 0
         let routes = CastMediaRoute.order(page: URL(string: video.pageURL), browserPage: browser.webView.url,
                                          hasPC: pcRelay != nil || pcRelayWithContext != nil)
@@ -150,6 +160,8 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
     }
 
     func cancelCastRecovery() {
+        pcSwitchID = nil
+        pcSwitchFailure = nil
         attemptID = UUID()
         retryTarget = nil
         pendingAutoCast = nil
@@ -157,6 +169,24 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
         loadStarted = nil
         castFeedback = nil
         canRetryCast = false
+    }
+
+    func videoConfirmed(by receiverAttempt: UUID) -> VideoCandidate? {
+        if receiverAttempt == attemptID, let retryTarget { return retryTarget.video }
+        return recentCasts.first { $0.receiverAttempt == receiverAttempt }?.video
+    }
+
+    func commitPCSwitch(video: VideoCandidate, relay: URL, session: GCKCastSession, formats: HLSFormats?,
+                        position: Double, playing: Bool) {
+        attemptID = UUID()
+        retryTarget = (video, position)
+        remainingRoutes = [.phone]
+        retryCount = 0
+        receiverErrorLogged = false
+        mediaRoute = .pc
+        castFeedback = "Skifter til PC…"
+        load(video, from: relay, on: session, hlsFormats: formats, initialPosition: position,
+             autoplay: playing, keepVolume: true)
     }
 
     override init() {
@@ -325,7 +355,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
             }
             receiverVolume = Double(session.currentDeviceVolume)
             receiverMuted = session.currentDeviceMuted
-            if let media = session.remoteMediaClient?.mediaStatus {
+            if let client = session.remoteMediaClient, let media = client.mediaStatus {
                 hasSubtitleTracks = media.mediaInformation?.mediaTracks?.contains(where: { $0.type == .text }) ?? false
                 let receivedAttempt = (media.mediaInformation?.customData as? [String: String])?["fadedaiAttempt"]
                 let matchesAttempt = retryTarget == nil || receivedAttempt == attemptID.uuidString
@@ -334,16 +364,16 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
                    media.mediaInformation?.metadata?.string(forKey: kGCKMetadataKeyTitle) == target.video.title {
                     rememberSuccessfulCast()
                 }
-                playbackPosition = max(0, media.streamPosition)
-                playbackDuration = max(0, media.mediaInformation?.streamDuration ?? 0)
+                let title = media.mediaInformation?.metadata?.string(forKey: kGCKMetadataKeyTitle)
+                let confirmedTarget = matchesAttempt && (isPlaying || media.playerState == .paused)
+                    && retryTarget?.video.title == title
+                recordPlaybackPosition(reported: media.streamPosition,
+                                       estimate: isPlaying ? client.approximateStreamPosition() : nil,
+                                       duration: media.mediaInformation?.streamDuration ?? 0,
+                                       confirmedTarget: confirmedTarget)
                 if matchesAttempt && (media.playerState == .playing || media.playerState == .paused) {
                     if loadStarted != nil || castFeedback == "Bufferer…" || castFeedback == "Forbinder til TV…" { castFeedback = nil }
                     loadStarted = nil
-                    if let target = retryTarget,
-                       media.mediaInformation?.metadata?.string(forKey: kGCKMetadataKeyTitle) == target.video.title,
-                       playbackPosition > target.position {
-                        retryTarget = (target.video, playbackPosition)
-                    }
                 } else if media.playerState == .buffering {
                     castFeedback = "Bufferer…"
                 }
@@ -381,6 +411,17 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
             isPlaying = false
             playbackPosition = 0
             playbackDuration = 0
+        }
+    }
+
+    func recordPlaybackPosition(reported: Double, estimate: Double?, duration: Double, confirmedTarget: Bool) {
+        playbackDuration = duration.isFinite ? max(0, duration) : 0
+        let advancing = estimate.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        let time = advancing ?? reported
+        guard time.isFinite, time >= 0 else { return }
+        playbackPosition = playbackDuration > 0 ? min(time, playbackDuration) : time
+        if confirmedTarget, let target = retryTarget {
+            retryTarget = (target.video, playbackPosition)
         }
     }
 

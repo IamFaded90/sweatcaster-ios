@@ -14,6 +14,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from sweatcaster.repository_library import RepositoryError, RepositoryInUse, RepositoryLibrary
+from sweatcaster.repository_routine import worker_lock
 
 
 class CodeBatch:
@@ -32,6 +33,8 @@ class CodeBatch:
             columns = {row["name"] for row in db.execute("PRAGMA table_info(code_batch)")}
             if "priority" not in columns:
                 db.execute("ALTER TABLE code_batch ADD COLUMN priority INTEGER NOT NULL DEFAULT 0")
+            if "candidate" not in columns:
+                db.execute("ALTER TABLE code_batch ADD COLUMN candidate TEXT")
 
     def _connect(self):
         db = sqlite3.connect(self.database, timeout=10)
@@ -145,10 +148,10 @@ class CodeBatch:
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             now = time.time()
-            db.execute("UPDATE code_batch SET status='failed', result=?, updated=? WHERE status='running' AND updated < ?",
-                       (json.dumps({"reason": "Arbejdet blev afbrudt. Opret et nyt job."}), now, now - 900))
-            if db.execute("SELECT 1 FROM code_batch WHERE status='running'").fetchone():
-                return None
+            # The caller owns the worker lock. A running row therefore survived an interrupted process.
+            interrupted = db.execute("SELECT * FROM code_batch WHERE status='running' ORDER BY updated, id LIMIT 1").fetchone()
+            if interrupted:
+                return interrupted
             # Older jobs eventually get the same priority, to keep regular work moving.
             job = db.execute("""SELECT * FROM code_batch WHERE status='queued'
                 ORDER BY CASE WHEN created <= ? THEN 1 ELSE priority END DESC, created, id LIMIT 1""",
@@ -158,9 +161,16 @@ class CodeBatch:
             return job
 
     def work_once(self) -> bool:
-        job = self._claim()
-        if job is None:
-            return False
+        with worker_lock(self.database.parent, self.database.name + ".worker.sqlite3") as acquired:
+            if not acquired:
+                return False
+            job = self._claim()
+            if job is None:
+                return False
+            self._work(job)
+            return True
+
+    def _work(self, job):
         try:
             result = self._proposal(job)
             status = "review" if result.get("requires_approval") else "declined"
@@ -175,9 +185,8 @@ class CodeBatch:
             self.workflows.observe(job["id"], "file_explorer", "Code: afsluttet", stage)
             self.workflows.observe(job["id"], "manager", "Master: Research → Code → Test", stage)
         with closing(self._connect()) as db, db:
-            db.execute("UPDATE code_batch SET status=?, result=?, updated=? WHERE id=? AND status='running'",
+            db.execute("UPDATE code_batch SET status=?, result=?, updated=?, candidate=NULL WHERE id=? AND status='running'",
                        (status, json.dumps(result) if result is not None else None, time.time(), job["id"]))
-        return True
 
     def _proposal(self, job) -> dict:
         repo, revision = self.repository._head(job["repo"])
@@ -188,19 +197,35 @@ class CodeBatch:
         old = {path: self.repository._git(repo, "cat-file", "blob", blobs[path]).decode("utf-8") for path in paths}
         if sum(map(len, old.values())) > 6000 or any(len(text.splitlines()) > 500 for text in old.values()):
             return {"reason": "Opgaven er for stor til en sikker omskrivning. Vælg færre eller mindre filer."}
+        if job["candidate"] is None:
+            response = self._generate(job, old)
+            encoded = json.dumps([revision, response], ensure_ascii=False)
+            if len(encoded) > 128_000:
+                raise ValueError("proposal too large")
+            with closing(self._connect()) as db, db:
+                db.execute("UPDATE code_batch SET candidate=? WHERE id=? AND status='running'", (encoded, job["id"]))
+        else:
+            previous_revision, response = json.loads(job["candidate"])
+            if previous_revision != revision:
+                return {"reason": "Projektet blev ændret, mens PC’en var afbrudt. Start et nyt forslag på den nye revision."}
+        return self._validate(job, old, response, revision)
+
+    def _generate(self, job, old):
         context = None
         if self.workflows:
             self.workflows.observe(job["id"], "manager", "Master: Research → Code → Test", "running")
             context = self.workflows.research(job["id"], job["repo"], job["goal"])
             self.workflows.observe(job["id"], "file_explorer", "Code: forbereder samlet forslag", "running")
         try:
-            response = self.generate(job["goal"], old, context) if self.workflows else self.generate(job["goal"], old)
+            return self.generate(job["goal"], old, context) if self.workflows else self.generate(job["goal"], old)
         except Exception as exc:
             if self.workflows:
                 state = "queued" if isinstance(exc, ModelBusy) else "failed"
                 self.workflows.observe(job["id"], "file_explorer", "Code: forbereder samlet forslag", state)
                 self.workflows.observe(job["id"], "manager", "Master: Research → Code → Test", state)
             raise
+
+    def _validate(self, job, old, response, revision):
         if not isinstance(response, dict) or type(response.get("feasible")) is not bool:
             raise ValueError("invalid feasibility")
         if response["feasible"] is False:

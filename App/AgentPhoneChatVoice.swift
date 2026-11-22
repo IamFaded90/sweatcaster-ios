@@ -1,6 +1,7 @@
 import AVFAudio
 import FadedAIWhisperRuntime
 import SwiftUI
+import UniformTypeIdentifiers
 
 extension AgentPhoneChat {
     func selectRequestedAdamVoiceIfAvailable() async {
@@ -51,6 +52,11 @@ extension AgentPhoneChat {
                 Button("Vælg og hør stemme") { stopVoice(); showVoice = true }
                 if !whisper.segments.isEmpty {
                     Button("Se seneste diktering med tider") { showTranscript = true }
+                }
+                if api != nil, keepHistory {
+                    Button("Transskribér en optagelse på PC", systemImage: "waveform") {
+                        showRecordingTranscript = true
+                    }
                 }
                 ForEach(installedModels, id: \.rawValue) { model in
                     Button("Slet \(model.title)", systemImage: "trash", role: .destructive) {
@@ -275,6 +281,14 @@ extension AgentPhoneChat {
         }
         let text = LocalSpeechVoice.replyText(turn.reply)
         let identifier = voiceOverride.isEmpty ? bot.voice : voiceOverride
+        if let local = DownloadedAgentVoice.selected(identifier) {
+            speech.stop()
+            pcVoiceReplyID = turn.id
+            kokoro.playDownloaded(text: text, voice: local, agentID: bot.id,
+                                  language: LocalSpeechVoice.detectedReplyLanguage(text) ?? "da-DK", rate: bot.voiceRate ?? 1)
+            notice = kokoro.notice ?? "Læser med " + local.label
+            return
+        }
         if let voice = AgentPCVoice(rawValue: identifier) {
             guard let api, !handsFreeOffline else {
                 stopVoice()
@@ -330,7 +344,7 @@ struct AgentDictationTranscript: View {
             List {
                 ForEach(Array(segments.enumerated()), id: \.offset) { _, segment in
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("\(stamp(segment.started)) – \(stamp(segment.ended))")
+                        Text("\(Self.stamp(segment.started)) – \(Self.stamp(segment.ended))")
                             .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                         Text(verbatim: segment.text.trimmingCharacters(in: .whitespacesAndNewlines))
                             .textSelection(.enabled)
@@ -346,8 +360,118 @@ struct AgentDictationTranscript: View {
         }
     }
 
-    private func stamp(_ seconds: Double) -> String {
-        let rounded = Int(max(0, seconds).rounded(.down))
-        return String(format: "%d:%02d", rounded / 60, rounded % 60)
+    static func stamp(_ seconds: Double) -> String {
+        let tenths = Int((max(0, seconds) * 10).rounded())
+        return String(format: "%d:%02d,%d", tenths / 600, (tenths / 10) % 60, tenths % 10)
+    }
+}
+
+struct AgentRecordingTranscript: View {
+    struct Recording: Decodable {
+        struct Cue: Decodable {
+            let start, end: Double
+            let text: String
+            let channel: Int?
+        }
+        let separateChannels: Bool
+        let cues: [Cue]
+    }
+    let api: LiveAPI
+    let language: String
+    @Environment(\.dismiss) private var dismiss
+    @State private var showPicker = false
+    @State private var separate = false
+    @State private var selection: URL?
+    @State private var busy = false
+    @State private var recording: Recording?
+    @State private var notice: String?
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    Toggle("Én mikrofon på hver lydkanal", isOn: $separate)
+                    Button("Vælg optagelse", systemImage: "waveform") { showPicker = true }
+                } footer: {
+                    Text("Vælg en WAV- eller M4A-fil på højst 45 sekunder. Din parrede PC genkender talen på \(language == "en" ? "engelsk" : "dansk"). Slå kanalvalg til, hvis mikrofonerne blev optaget hver for sig.")
+                }
+                .disabled(busy)
+                if busy { ProgressView("PC’en lytter til optagelsen…") }
+                if let notice { Text(verbatim: notice) }
+                if let recording {
+                    Section(recording.separateChannels ? "Separate lydkanaler" : "Samlet lyd") {
+                        if recording.cues.isEmpty { Text("Ingen tydelig tale i optagelsen.") }
+                        ForEach(Array(recording.cues.enumerated()), id: \.offset) { _, cue in
+                            VStack(alignment: .leading, spacing: 4) {
+                                let time = "\(AgentDictationTranscript.stamp(cue.start)) – \(AgentDictationTranscript.stamp(cue.end))"
+                                Text(verbatim: cue.channel.map { "Kanal \($0) · " + time } ?? time)
+                                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                Text(verbatim: cue.text).textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background { FadedBackground() }
+            .navigationTitle("Lyd til tekst")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Luk") { dismiss() } } }
+            .fileImporter(isPresented: $showPicker, allowedContentTypes: ["wav", "m4a"].compactMap { UTType(filenameExtension: $0) }) { result in
+                switch result {
+                case .success(let url): selection = url
+                case .failure(let error):
+                    if (error as NSError).code != NSUserCancelledError { notice = "Filen kunne ikke åbnes." }
+                }
+            }
+            .task(id: selection) {
+                guard let url = selection else { return }
+                busy = true
+                recording = nil
+                notice = nil
+                defer { busy = false; selection = nil }
+                do {
+                    let result = try await transcribe(url)
+                    try Task.checkCancellation()
+                    recording = result
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    if case APIError.http(404, _) = error { notice = "Opdatér FadedAI på PC’en for at læse optagelser." }
+                    else if case let APIError.http(_, problem) = error, let message = problem?.message { notice = message }
+                    else if case LocalFileStore.Failure.tooLarge = error { notice = "Vælg en optagelse på højst 18 MB." }
+                    else { notice = AppErrorPresentation(error).title }
+                }
+            }
+            .privacySensitive()
+        }
+    }
+
+    private func transcribe(_ url: URL) async throws -> Recording {
+        let kind = url.pathExtension.lowercased()
+        guard ["wav", "m4a"].contains(kind) else { throw APIError.input }
+        let content = try await Task.detached(priority: .userInitiated) {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            return try LocalFileStore.readBytes(from: url, maximumBytes: 18_000_000)
+        }.value
+        try Task.checkCancellation()
+        let endpoint = api.server.origin.appending(path: "api/modules/v1/agent-recording/" + kind)
+        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
+        components?.queryItems = [.init(name: "language", value: language),
+                                  .init(name: "separate", value: separate ? "true" : "false")]
+        guard let target = components?.url else { throw APIError.input }
+        var request = api.request(target, method: "POST")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.httpBody = content
+        request.timeoutInterval = 175
+        let (body, response) = try await api.loggedData(for: request)
+        try api.checked(response, expected: 200, data: body)
+        guard body.count < 192_000 else { throw APIError.malformed }
+        let result = try JSONDecoder().decode(Recording.self, from: body)
+        guard result.cues.allSatisfy({ cue in
+            let validChannel = result.separateChannels ? (cue.channel == 1 || cue.channel == 2) : cue.channel == nil
+            return validChannel && cue.start >= 0 && cue.start < cue.end && cue.end <= 45
+        }) else { throw APIError.malformed }
+        return result
     }
 }

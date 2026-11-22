@@ -8,6 +8,52 @@ import XCTest
 final class PairingQRCodeTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_893_456_000)
 
+    func testScannerUsesTheDisplayedFrameInPortraitAndLandscape() throws {
+        let pairing = try qr(expiry: now.addingTimeInterval(90))
+        for size in [CGSize(width: 390, height: 700), CGSize(width: 700, height: 320), CGSize(width: 180, height: 240)] {
+            let screen = CGRect(origin: .zero, size: size)
+            let target = PairingQRTarget.frame(in: screen)
+            XCTAssertEqual(target.midX, screen.midX)
+            XCTAssertEqual(target.midY, screen.midY)
+            XCTAssertEqual(target.width, target.height)
+            XCTAssertTrue(screen.contains(target))
+            let centered = CGRect(x: target.midX - 20, y: target.midY - 20, width: 40, height: 40)
+            let clipped = centered.offsetBy(dx: target.minX - centered.minX - 3, dy: 0)
+            XCTAssertEqual(PairingQRTarget.select(in: target, from: [(pairing, clipped)]), .searching)
+            XCTAssertEqual(PairingQRTarget.select(in: target, from: [("https://example.org", centered)]), .unrelated)
+            XCTAssertEqual(PairingQRTarget.select(in: target, from: [("https://example.org", centered), (pairing, centered)]),
+                           .match(pairing))
+        }
+        XCTAssertEqual(PairingQRTarget.select(in: .zero, from: [(pairing, .zero)]), .searching)
+    }
+
+    func testTwoPairingCodesRequireOneAtTheCenterRegardlessOfDetectionOrder() throws {
+        let one = try qr(address: "192.168.1.40", expiry: now.addingTimeInterval(90))
+        let two = try qr(address: "192.168.1.41", expiry: now.addingTimeInterval(90))
+        let target = CGRect(x: 0, y: 0, width: 224, height: 224)
+        let left = CGRect(x: 10, y: 85, width: 50, height: 50)
+        let right = left.offsetBy(dx: 150, dy: 0)
+        let center = left.offsetBy(dx: 80, dy: 0)
+        XCTAssertEqual(PairingQRTarget.select(in: target, from: [(one, left), (two, right)]), .ambiguous)
+        XCTAssertEqual(PairingQRTarget.select(in: target, from: [(one, center), (two, right)]), .match(one))
+        XCTAssertEqual(PairingQRTarget.select(in: target, from: [(two, right), (one, center)]), .match(one))
+    }
+
+    @MainActor func testSelectionLeavesExpiryAndNonceChecksForFinalAcceptance() throws {
+        let target = CGRect(x: 0, y: 0, width: 180, height: 180)
+        let stale = try qr(expiry: now)
+        let fresh = try qr(expiry: now.addingTimeInterval(20), nonce: UUID().uuidString)
+        XCTAssertEqual(PairingQRTarget.select(in: target, from: [(stale, target)]), .match(stale))
+        XCTAssertThrowsError(try PairingQRSession.accept(stale, now: now)) { error in
+            guard case .pairingExpired? = error as? APIError else { return XCTFail("Expected expiry feedback") }
+        }
+        for _ in 0..<2 { XCTAssertEqual(PairingQRTarget.select(in: target, from: [(fresh, target)]), .match(fresh)) }
+        XCTAssertNoThrow(try PairingQRSession.accept(fresh, now: now))
+        XCTAssertThrowsError(try PairingQRSession.accept(fresh, now: now)) { error in
+            guard case .replay? = error as? PairingQRSession.Failure else { return XCTFail("Expected nonce replay") }
+        }
+    }
+
     @MainActor func testCastUsesTheHomePairingWhenChatUsesTailscale() throws {
         let remote = try LiveAPI(server: Server("100.64.1.42"), token: "remote-fixture")
         let pairing = try XCTUnwrap(CastHomePairing(active: remote, savedHomeAddress: "192.168.1.20"))

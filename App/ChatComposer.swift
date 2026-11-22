@@ -43,13 +43,16 @@ extension ChatView {
                         composerIconButton("Skjul tastatur", icon: "keyboard.chevron.compact.down") {
                             composerFocused = false
                         }
-                        if !demo { imageControl }
+                        if dictation.active { dictationAction }
+                        else if !demo { imageControl }
                         sendControl
                     } else {
                         composerActions
                     }
                 }
-                if !compact, let problem = dictation.problem {
+                if let status = dictation.offlineStatus {
+                    Text(status).font(.caption).foregroundStyle(palette.secondary).accessibilityAddTraits(.updatesFrequently)
+                } else if !compact, let problem = dictation.problem {
                     Text(problem).font(.caption).foregroundStyle(palette.secondary)
                 } else if !compact && dictation.hasTranscript && !dictation.active && !draft.isEmpty {
                     Text("Ret teksten, før du sender.").font(.caption).foregroundStyle(palette.secondary)
@@ -64,17 +67,18 @@ extension ChatView {
     @ViewBuilder private var composerNotices: some View {
         if let deleted = removedTurns.last, deleted.expiresAt > ContinuousClock.now { undoBar }
         if let chatNotice { Text(chatNotice).font(.caption).foregroundStyle(palette.secondary) }
-        if case .reply(_)? = speechBox.playback {
+        if case .reply(_)? = activeChatPlayback {
             HStack(spacing: FadedSpacing.s) {
-                if speechBox.isSpeaking {
+                if speechBox.isSpeaking || chatPCSpeech.playing {
                     AgentToolWave(status: "Læser op").accessibilityHidden(true)
                 }
-                Text(speechBox.voiceName.map { "Oplæsning · \($0)" } ?? "Oplæsning på iPhone")
+                Text((chatPCSpeech.loading || chatPCSpeech.playing ? (selectedOfflineVoice?.name ?? selectedPCVoice?.name) : speechBox.voiceName)
+                    .map { "Oplæsning · \($0)" } ?? "Oplæsning")
                     .font(.subheadline)
                     .foregroundStyle(palette.secondary)
                     .lineLimit(2)
                 Spacer(minLength: FadedSpacing.s)
-                Button("Stop oplæsning", systemImage: "stop.circle") { speechBox.stop() }
+                Button("Stop oplæsning", systemImage: "stop.circle") { stopChatSpeech() }
                     .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
             }
         }
@@ -245,11 +249,14 @@ extension ChatView {
 
     private var dictationAction: some View {
         Button {
-            if dictation.active { dictation.stop() }
+            if dictation.active { dictation.finishInput() }
             else {
-                speechBox.stop()
-                let prefix = draft.isEmpty ? "" : draft + " "
-                Task { await dictation.start { draft = prefix + $0 } }
+                stopChatSpeech()
+                let session = sessionID
+                Task {
+                    guard chatScenePhase == .active, sessionID == session else { return }
+                    await dictation.startInChat(draft: { draft }) { if sessionID == session { draft = $0 } }
+                }
             }
         } label: {
             Image(systemName: dictation.active ? "stop.circle" : "mic")
@@ -259,7 +266,7 @@ extension ChatView {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(dictation.active ? "Stop diktering" : "Dikter chatbesked")
+        .accessibilityLabel(dictation.microphoneLabel)
     }
 
     private var voiceBots: [VillageBot] {
@@ -271,7 +278,7 @@ extension ChatView {
         let hasBotVoice = bots.contains { $0.id.uuidString == voiceBotID }
         let selectedVoice = chatSpeechVoice.0
         let effectiveVoice = chatPlaybackVoice(language: configuredReplySpeechLanguage)
-        return DisclosureGroup("Oplæsning på telefonen") {
+        return DisclosureGroup("Oplæsning") {
             Toggle("Læs færdige svar op", isOn: $voiceMode)
             if !bots.isEmpty {
                 Picker("Botstemme", selection: $voiceBotID) {
@@ -299,7 +306,11 @@ extension ChatView {
                 Slider(value: $preferredVoiceRate, in: 0.7...1.3, step: 0.05).accessibilityLabel("Talehastighed")
                 FadedDetailText("Tempo · \(preferredVoiceRate.formatted(.number.precision(.fractionLength(2))))×")
             }
-            if let selectedVoice, let effectiveVoice, selectedVoice.identifier != effectiveVoice.identifier {
+            if let local = selectedOfflineVoice {
+                FadedDetailText(local.label)
+            } else if let pcVoice = selectedPCVoice {
+                FadedDetailText(pcVoice.label)
+            } else if let selectedVoice, let effectiveVoice, selectedVoice.identifier != effectiveVoice.identifier {
                 FadedDetailText("Svar på \(effectiveVoice.language.hasPrefix("da") ? "dansk" : "engelsk") læses op med \(effectiveVoice.name).")
             } else if let effectiveVoice {
                 FadedDetailText("Oplæsningsstemme · \(LocalSpeechVoice.label(effectiveVoice))")
@@ -319,15 +330,15 @@ extension ChatView {
                 Label("Personlig stemme", systemImage: "person.wave.2")
                     .frame(minHeight: 44)
             }
-            Button(speechBox.playback == .preview ? "Stop stemmeprøve" : "Prøv oplæsningen",
-                   systemImage: speechBox.playback == .preview ? "stop.circle" : "play.circle", action: toggleVoicePreview)
+            Button(activeChatPlayback == .preview ? "Stop stemmeprøve" : "Prøv oplæsningen",
+                   systemImage: activeChatPlayback == .preview ? "stop.circle" : "play.circle", action: toggleVoicePreview)
                 .frame(minHeight: 44)
-            if case .reply(_)? = speechBox.playback {
-                Button("Stop oplæsning", systemImage: "stop.circle") { speechBox.stop() }.frame(minHeight: 44)
+            if case .reply(_)? = activeChatPlayback {
+                Button("Stop oplæsning", systemImage: "stop.circle") { stopChatSpeech() }.frame(minHeight: 44)
             }
         }
         .onChange(of: preferredVoiceID) { stopVoicePreview() }
-        .onChange(of: voiceBotID) { stopVoicePreview() }
+        .onChange(of: voiceBotID) { stopChatSpeech() }
         .onDisappear(perform: stopVoicePreview)
     }
 
@@ -337,7 +348,8 @@ extension ChatView {
         let selected = Binding(get: { preferredVoiceID }, set: { preferredVoiceID = $0 })
         return Picker("Telefonstemme", selection: selected) {
             Text("Bedste tilgængelige").tag("")
-            if !preferredVoiceID.isEmpty, !(personal + system).contains(where: { $0.identifier == preferredVoiceID }) {
+            DownloadedVoiceOptions(selection: preferredVoiceID)
+            if !preferredVoiceID.isEmpty, DownloadedAgentVoice.selected(preferredVoiceID) == nil, !(personal + system).contains(where: { $0.identifier == preferredVoiceID }) {
                 Text("Din gemte stemme mangler på telefonen").tag(preferredVoiceID)
             }
             if !personal.isEmpty {
@@ -361,15 +373,35 @@ extension ChatView {
         playChatSpeech(spoken, voice: playbackVoice, rate: rate, as: .reply(turnID))
     }
 
+    private var selectedVoiceBot: VillageBot? { voiceBots.first { $0.id.uuidString == voiceBotID } }
+
+    private var selectedOfflineVoice: DownloadedAgentVoice? {
+        DownloadedAgentVoice.selected(selectedVoiceBot.map { AgentVoiceSelection.identifier(for: $0) } ?? preferredVoiceID)
+    }
+
+    private var selectedPCVoice: AgentPCVoice? {
+        selectedVoiceBot.flatMap { AgentPCVoice(rawValue: AgentVoiceSelection.identifier(for: $0)) }
+    }
+
+    var activeChatPlayback: SpeechBox.Playback? {
+        chatPCSpeech.playing || chatPCSpeech.loading ? chatPCPlayback : speechBox.playback
+    }
+
+    func stopChatSpeech() {
+        chatPCPlayback = nil
+        chatPCSpeech.stop()
+        speechBox.stop()
+    }
+
     private var chatSpeechVoice: (AVSpeechSynthesisVoice?, Double) {
-        let bot = voiceBots.first { $0.id.uuidString == voiceBotID }
+        let bot = selectedVoiceBot
         let voice = chatPlaybackVoice(language: nil)
         return (voice, bot.map { $0.voiceRate ?? 1 } ?? preferredVoiceRate)
     }
 
     private func chatPlaybackVoice(language: String?) -> AVSpeechSynthesisVoice? {
-        let bot = voiceBots.first { $0.id.uuidString == voiceBotID }
-        let identifier = bot.map(AgentVoiceSelection.identifier) ?? preferredVoiceID
+        let bot = selectedVoiceBot
+        let identifier = bot.map { AgentVoiceSelection.identifier(for: $0) } ?? preferredVoiceID
         return AgentVoiceSelection.resolve(identifier: identifier,
                                            language: language ?? bot?.language ?? preferredVoiceLanguage)
     }
@@ -383,23 +415,36 @@ extension ChatView {
     }
 
     private func toggleVoicePreview() {
-        if speechBox.playback == .preview { speechBox.stop(); return }
+        if activeChatPlayback == .preview { stopChatSpeech(); return }
         dictation.stop()
         let (_, rate) = chatSpeechVoice
         let playbackVoice = chatPlaybackVoice(language: configuredReplySpeechLanguage)
-        let sampleLanguage = playbackVoice?.language ?? configuredReplySpeechLanguage ?? preferredVoiceLanguage
+        let sampleLanguage = selectedPCVoice?.language ?? playbackVoice?.language ?? configuredReplySpeechLanguage ?? preferredVoiceLanguage
         let sample = LocalSpeechVoice.previewSentence(language: sampleLanguage)
         playChatSpeech(sample, voice: playbackVoice, rate: rate, as: .preview)
     }
 
     private func stopVoicePreview() {
-        if speechBox.playback == .preview { speechBox.stop() }
+        if activeChatPlayback == .preview { stopChatSpeech() }
     }
 
     private func playChatSpeech(_ text: String, voice: AVSpeechSynthesisVoice?, rate: Double, as playback: SpeechBox.Playback) {
+        stopChatSpeech()
+        if let local = selectedOfflineVoice {
+            chatPCPlayback = playback
+            chatPCSpeech.playDownloaded(text: text, voice: local, agentID: selectedVoiceBot?.id,
+                                       language: configuredReplySpeechLanguage ?? LocalSpeechVoice.detectedReplyLanguage(text) ?? "da-DK", rate: rate)
+            return
+        }
+        if let bot = selectedVoiceBot, let pcVoice = selectedPCVoice {
+            guard let pc = api as? LiveAPI else { chatNotice = "Forbind PC’en for at høre agentens valgte stemme."; return }
+            chatPCPlayback = playback
+            chatPCSpeech.playAgentVoice(text: text, voice: pcVoice, agentID: bot.id, pc: pc)
+            return
+        }
         guard let voice else { chatNotice = AgentVoiceSelection.unavailable; return }
         let agentID: UUID?
-        if case .reply = playback { agentID = voiceBots.first { $0.id.uuidString == voiceBotID }?.id }
+        if case .reply = playback { agentID = selectedVoiceBot?.id }
         else { agentID = nil }
         speechBox.play(LocalSpeechVoice.utterance(text, voice: voice, rate: rate), as: playback, agentID: agentID)
     }

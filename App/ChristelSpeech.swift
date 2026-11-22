@@ -104,12 +104,55 @@ enum ChristelSpeech {
     }
 }
 
+enum PCSpeechPassages {
+    // The paired Python service counts Unicode code points in each request.
+    static func split(_ text: String) -> [String] {
+        pieces(text, maximumScalars: 500).compactMap {
+            let trimmed = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+    }
+
+    // Keep boundary whitespace so a translated passage can be put back into its paragraph.
+    static func pieces(_ text: String, maximumScalars: Int) -> [String] {
+        precondition(maximumScalars > 0)
+        let scalars = text.unicodeScalars
+        var remaining = scalars[...]
+        var parts: [String] = []
+        while !remaining.isEmpty {
+            let limit = remaining.index(remaining.startIndex, offsetBy: maximumScalars, limitedBy: remaining.endIndex) ?? remaining.endIndex
+            var end = limit
+            if limit < remaining.endIndex {
+                let window = remaining[..<limit]
+                let sentence = window.indices.reversed().first { i in
+                    let c = remaining[i]
+                    return c == "\n" || c == "\r" || ("!.?…".unicodeScalars.contains(c)
+                        && remaining[remaining.index(after: i)].properties.isWhitespace)
+                }
+                if let split = sentence ?? window.lastIndex(where: { $0.properties.isWhitespace }) {
+                    end = remaining.index(after: split)
+                } else {
+                    var boundary = limit
+                    while boundary > remaining.startIndex, boundary.samePosition(in: text) == nil {
+                        boundary = remaining.index(before: boundary)
+                    }
+                    if boundary > remaining.startIndex { end = boundary }
+                }
+            }
+            parts.append(String(remaining[..<end]))
+            remaining = remaining[end...]
+        }
+        return parts
+    }
+}
+
 @MainActor final class ChristelPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published private(set) var loading = false
     @Published private(set) var playing = false
     @Published private(set) var notice: String?
     private var player: AVAudioPlayer?
     private var pending: Task<Void, Never>?
+    private var endOfPassage: CheckedContinuation<Void, Never>?
     private var run = UUID()
     private var sessionActive = false
     private var motionOwner: UUID?
@@ -126,7 +169,7 @@ enum ChristelSpeech {
             notice = "Vælg oplæsning på iPhone til dette lange svar."
             return
         }
-        start(agentID: VillageBot.lumiID, failure: "Christel kunne ikke læse op. Tjek forbindelsen til Microsoft Speech.") {
+        start(parts: [text], agentID: VillageBot.lumiID, failure: "Christel kunne ikke læse op. Tjek forbindelsen til Microsoft Speech.") { text in
             if let configuration {
                 return try await ChristelSpeech.audio(for: text, configuration: configuration)
             }
@@ -137,60 +180,72 @@ enum ChristelSpeech {
 
     func playKokoro(text: String, voice: String, agentID: UUID, pc: LiveAPI) {
         stop()
-        guard (1...500).contains(text.count) else {
-            notice = "Vælg et svar på højst 500 tegn til Kokoro."
-            return
-        }
-        start(agentID: agentID, failure: "Kokoro kunne ikke læse op på den parrede PC.") {
-            try await pc.kokoroAudio(text, voice: voice)
+        start(parts: PCSpeechPassages.split(text), agentID: agentID, failure: "Kokoro kunne ikke læse op på den parrede PC.") { part in
+            try await pc.kokoroAudio(part, voice: voice)
         }
     }
 
-    func playAgentVoice(text: String, voice: AgentPCVoice, agentID: UUID, pc: LiveAPI) {
+    func playAgentVoice(text: String, voice: AgentPCVoice, agentID: UUID, pc: LiveAPI, pan: Float = 0) {
         stop()
-        guard (1...500).contains(text.count) else {
-            notice = "PC-stemmen kan læse op til 500 tegn ad gangen. Vælg en iPhone-stemme til længere svar."
-            return
-        }
-        start(agentID: agentID, failure: "\(voice.name) kunne ikke læse op på den parrede PC.") {
-            try await pc.agentPCVoiceAudio(text, voice: voice)
+        start(parts: PCSpeechPassages.split(text), agentID: agentID, pan: pan, failure: "\(voice.name) kunne ikke læse op på den parrede PC.") { part in
+            try await pc.agentPCVoiceAudio(part, voice: voice)
         }
     }
 
-    private func start(agentID: UUID, failure: String, audio: @escaping @MainActor () async throws -> Data) {
+    func playDownloaded(text: String, voice: DownloadedAgentVoice, agentID: UUID?, language: String = "da-DK",
+                        rate: Double = 1, pan: Float = 0) {
+        stop()
+        guard AgentVoiceDownload.shared.installed else {
+            notice = "Hent stemmepakken under Vælg og hør stemmer."
+            return
+        }
+        let parts = PCSpeechPassages.pieces(text, maximumScalars: 180)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        start(parts: parts, agentID: agentID, pan: pan, failure: "Telefonen kunne ikke læse op med " + voice.name + ".") { part in
+            try await AgentVoiceDownload.audio(part, voice: voice, language: language, rate: rate)
+        }
+    }
+
+    func playRoomVoice(_ utterance: AVSpeechUtterance, agentID: UUID?, pan: Float) {
+        stop()
+        start(parts: [utterance], agentID: agentID, pan: pan, failure: "Din valgte iPhone-stemme kunne ikke læse op i rummet.") { utterance in
+            try await VillageRoomSpeechAudio.render(utterance)
+        }
+    }
+
+    private var requestedPan: Float = 0
+
+    func updatePan(_ value: Float) {
+        requestedPan = min(1, max(-1, value))
+        player?.pan = requestedPan
+    }
+
+    private func start<Part>(parts: [Part], agentID: UUID?, pan: Float = 0, failure: String,
+                             audio: @escaping @MainActor (Part) async throws -> Data) {
+        guard !parts.isEmpty else { notice = "Der er ingen tekst at læse op."; return }
         let current = run
+        updatePan(pan)
         loading = true
         pending = Task {
-            defer {
-                if current == run {
-                    loading = false
-                    pending = nil
-                }
-            }
             do {
-                let bytes = try await audio()
-                try Task.checkCancellation()
-                guard current == run else { return }
-                let audioPlayer = try AVAudioPlayer(data: bytes)
-                MusicPlayer.shared.pause()
-                motionOwner = VillageSpeechMotion.shared.begin(agentID: agentID) { [weak self] in self?.stop() }
-                let session = AVAudioSession.sharedInstance()
-                try session.setCategory(.playback, mode: .spokenAudio)
-                try session.setActive(true)
-                sessionActive = true
-                audioPlayer.delegate = self
-                audioPlayer.isMeteringEnabled = true
-                player = audioPlayer
-                guard audioPlayer.play() else { throw APIError.malformed }
-                playing = true
-                metering = Task { [weak self] in
-                    while !Task.isCancelled {
-                        guard let self, self.playing, self.player === audioPlayer, let owner = self.motionOwner else { return }
-                        audioPlayer.updateMeters()
-                        VillageSpeechMotion.shared.audio(decibels: Double(audioPlayer.averagePower(forChannel: 0)), owner: owner)
-                        do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
+                for part in parts {
+                    try Task.checkCancellation()
+                    let bytes: Data
+                    do { bytes = try await audio(part) }
+                    catch {
+                        if !Task.isCancelled, current == run { await waitForPassage() }
+                        throw error
                     }
+                    try Task.checkCancellation()
+                    guard current == run else { return }
+                    // Prepare only the next passage while the previous one plays.
+                    await waitForPassage()
+                    try Task.checkCancellation()
+                    guard current == run else { return }
+                    try playPassage(bytes, agentID: agentID)
                 }
+                await waitForPassage()
+                if current == run { stop() }
             } catch {
                 guard !Task.isCancelled, current == run else { return }
                 stop()
@@ -201,6 +256,44 @@ enum ChristelSpeech {
                 }
             }
         }
+    }
+
+    private func waitForPassage() async {
+        guard player != nil else { return }
+        await withCheckedContinuation { endOfPassage = $0 }
+    }
+
+    private func playPassage(_ bytes: Data, agentID: UUID?) throws {
+        let audioPlayer = try AVAudioPlayer(data: bytes)
+        if !sessionActive {
+            MusicPlayer.shared.pause()
+            motionOwner = VillageSpeechMotion.shared.begin(agentID: agentID) { [weak self] in self?.stop() }
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio)
+            try session.setActive(true)
+            sessionActive = true
+        }
+        audioPlayer.delegate = self
+        audioPlayer.isMeteringEnabled = true
+        audioPlayer.pan = requestedPan
+        player = audioPlayer
+        guard audioPlayer.play() else { throw APIError.malformed }
+        playing = true
+        loading = false
+        metering = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.player === audioPlayer, let owner = self.motionOwner else { return }
+                audioPlayer.updateMeters()
+                VillageSpeechMotion.shared.audio(decibels: Double(audioPlayer.averagePower(forChannel: 0)), owner: owner)
+                do { try await Task.sleep(for: .milliseconds(80)) } catch { return }
+            }
+        }
+    }
+
+    private func resumeAfterPassage() {
+        let completion = endOfPassage
+        endOfPassage = nil
+        completion?.resume()
     }
 
     func stop() {
@@ -216,6 +309,7 @@ enum ChristelSpeech {
         notice = nil
         player?.stop()
         player = nil
+        resumeAfterPassage()
         if sessionActive {
             sessionActive = false
             if !MusicPlayer.shared.playing && !MusicPlayer.shared.loading {
@@ -228,8 +322,18 @@ enum ChristelSpeech {
         let identity = ObjectIdentifier(player)
         Task { @MainActor [weak self] in
             guard let self, let current = self.player, ObjectIdentifier(current) == identity else { return }
-            self.stop()
+            guard flag else { self.stop(); self.notice = "Lyden kunne ikke afspilles færdig."; return }
+            self.metering?.cancel()
+            self.metering = nil
+            self.player = nil
+            if let owner = self.motionOwner { VillageSpeechMotion.shared.setSpeaking(false, owner: owner) }
+            self.loading = self.endOfPassage == nil
+            self.resumeAfterPassage()
         }
+    }
+
+    nonisolated func audioPlayerDecodeErrorDidOccur(_ player: AVAudioPlayer, error: Error?) {
+        audioPlayerDidFinishPlaying(player, successfully: false)
     }
 }
 

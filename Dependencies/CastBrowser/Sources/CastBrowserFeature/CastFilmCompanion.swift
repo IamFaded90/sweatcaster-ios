@@ -73,7 +73,7 @@ extension CastAppModel {
         return FilmReceiverFrame(source: source, position: media.streamPosition)
     }
 
-    private func confirmedFilmFrame() async throws -> FilmReceiverFrame {
+    func confirmedFilmFrame() async throws -> FilmReceiverFrame {
         guard let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession,
               let client = session.remoteMediaClient else { throw FilmCompanionError.noPosition }
         try await FilmStatusCheck().verify(client)
@@ -98,14 +98,9 @@ extension CastAppModel {
         guard let info = GCKCastContext.sharedInstance().sessionManager.currentCastSession?
             .remoteMediaClient?.mediaStatus?.mediaInformation else { return nil }
         let cast = info.customData as? [String: String]
-        if let video = retryTarget?.video, cast?["fadedaiAttempt"] == attemptID.uuidString,
-           let url = URL(string: video.url) {
-            return (url, video.pageURL)
-        }
         if let tag = cast?["fadedaiAttempt"], let attempt = UUID(uuidString: tag),
-           let recorded = recentCasts.first(where: { $0.receiverAttempt == attempt }),
-           let url = URL(string: recorded.video.url) {
-            return (url, recorded.video.pageURL)
+           let video = videoConfirmed(by: attempt), let url = URL(string: video.url) {
+            return (url, video.pageURL)
         }
         guard cast?["fadedaiRoute"] == "direct", let url = info.contentURL else { return nil }
         return (url, nil)

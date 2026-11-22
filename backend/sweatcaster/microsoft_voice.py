@@ -1,6 +1,7 @@
 """Use a provisioned Windows Speech resource without sharing its key with iOS."""
 
 from base64 import b64encode
+from functools import lru_cache
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,9 @@ from sweatcaster.emby_settings import _protect
 
 VOICE = "da-DK-ChristelNeural"
 ROEST_VOICES = {"roest-mic": "mic", "roest-nic": "nic", "roest-lumi": "lumi"}
+# Røst speaks Danish using a short synthetic reference from the local Kokoro
+# voice pack. No recording from the user or an agent conversation is used.
+ROEST_SYNTHETIC = {"roest-freja": "af_bella", "roest-storm": "am_fenrir"}
 REGION = re.compile(r"[a-z0-9]{2,30}")
 KEY = re.compile(r"[!-~]{1,512}")
 MAX_AUDIO = 1_400_000
@@ -133,7 +137,7 @@ def register_christel(app, settings, authorize):
 
     @app.get("/api/modules/v1/agent-local-voices", include_in_schema=False)
     def local_voices(request: Request, response: Response):
-        from sweatcaster.kokoro_voice import kokoro_ready
+        from sweatcaster.kokoro_voice import AGENT_VOICE_PRESETS, kokoro_ready
 
         authorize(request, settings)
         response.headers["Cache-Control"] = "no-store"
@@ -144,21 +148,23 @@ def register_christel(app, settings, authorize):
             if roest_lumi_installed(installation[1]):
                 voices.append("roest-lumi")
         if kokoro_ready()[0]:
-            voices += ["kokoro-heart", "kokoro-michael"]
+            if installation:
+                voices.extend(ROEST_SYNTHETIC)
+            voices.extend(AGENT_VOICE_PRESETS)
         return {"voices": voices}
 
     @app.put("/api/modules/v1/agent-local-voices", include_in_schema=False)
     def local_agent_speech(request: Request, response: Response, body: dict = Body(...)):
+        from sweatcaster.kokoro_voice import AGENT_VOICE_PRESETS
+
         authorize(request, settings)
         response.headers["Cache-Control"] = "no-store"
         voice = body.get("voice")
         if voice == "piper-da":
             return synthesize_danish(body.get("text"), settings)
-        if isinstance(voice, str) and voice in ROEST_VOICES:
+        if isinstance(voice, str) and (voice in ROEST_VOICES or voice in ROEST_SYNTHETIC):
             return synthesize_roest(body.get("text"), voice)
-        kokoro_voice = {"kokoro-heart": "af_heart", "kokoro-michael": "am_michael"}.get(
-            voice if isinstance(voice, str) else ""
-        )
+        kokoro_voice = AGENT_VOICE_PRESETS.get(voice) if isinstance(voice, str) else None
         if kokoro_voice is None:
             raise ApiError(422, "INVALID_INPUT", "Vælg en dansk eller engelsk PC-stemme.")
         return synthesize_local(body.get("text"), kokoro_voice)
@@ -189,6 +195,20 @@ def roest_lumi_installed(model):
     return (model / "audio_samples" / "00_lumi_00_reference.wav").is_file()
 
 
+@lru_cache(maxsize=len(ROEST_SYNTHETIC))
+def synthetic_reference(voice):
+    from sweatcaster.kokoro_voice import KokoroSynthesisError, synthesize_kokoro
+
+    sample = "There's a little time before we leave. We could look at the map and decide where to go next."
+    try:
+        with TemporaryDirectory(prefix="fadedai-reference-") as directory:
+            path = Path(directory) / "reference.wav"
+            synthesize_kokoro(sample, path, voice=ROEST_SYNTHETIC[voice])
+            return path.read_bytes()
+    except (OSError, KokoroSynthesisError) as exc:
+        raise ApiError(503, "NOT_READY", "Den valgte stemme kræver Kokoro-stemmepakken på PC’en.") from exc
+
+
 def synthesize_roest(text, voice):
     if not isinstance(text, str) or not 1 <= len(text.strip()) <= 500:
         raise ApiError(422, "INVALID_INPUT", "Vælg op til 500 tegn dansk tekst.")
@@ -201,8 +221,14 @@ def synthesize_roest(text, voice):
     try:
         with TemporaryDirectory(prefix="fadedai-roest-") as directory:
             audio = Path(directory) / "reply.wav"
-            result = subprocess.run([str(python), str(Path(__file__).with_name("roest_worker.py")),
-                                     str(model), str(audio), ROEST_VOICES[voice]],
+            command = [str(python), str(Path(__file__).with_name("roest_worker.py")), str(model), str(audio)]
+            if voice in ROEST_SYNTHETIC:
+                reference = Path(directory) / "reference.wav"
+                reference.write_bytes(synthetic_reference(voice))
+                command.extend(["synthetic", str(reference)])
+            else:
+                command.append(ROEST_VOICES[voice])
+            result = subprocess.run(command,
                                     input=json.dumps({"text": text.strip()}, ensure_ascii=True).encode("utf-8"),
                                     capture_output=True, check=False, timeout=180,
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

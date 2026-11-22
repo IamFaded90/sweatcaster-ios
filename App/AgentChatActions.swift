@@ -5,6 +5,8 @@ struct AgentChatAction: Codable {
         case gmailReply
         case bookingRequest
         case phone(AgentPhoneActionCard.Request)
+        case shopping(AgentShoppingRequest)
+        case unitPrice(String)
         case today
         case preference
         case workflow(String)
@@ -31,6 +33,8 @@ struct AgentChatAction: Codable {
         case .gmailReply: "Svar på mail"
         case .bookingRequest: "Bed om en tid"
         case .phone: "Handling på iPhone"
+        case .shopping: "Indkøbsliste"
+        case .unitPrice: "Sammenlign tilbud"
         case .today: "Dagens overblik"
         case .preference: "Dine præferencer"
         case .workflow(let title): title
@@ -42,7 +46,7 @@ struct AgentChatAction: Codable {
         case .instagramPost: "Instagram-opslag"
         case .instagramAccount: "Instagram-konto"
         case .instagramPlans: "Planlagte Instagram-opslag"
-        case .traderaWatch: "Prisvagt på Tradera"
+        case .traderaWatch: "Hold øje med prisen"
         case .traderaWatches: "Mine prisvagter"
         }
     }
@@ -51,7 +55,8 @@ struct AgentChatAction: Codable {
         switch kind {
         case .gmailReply, .bookingRequest, .phone, .mailReminder, .agentEmail, .instagramPost, .instagramAccount,
              .instagramPlans, .traderaWatch, .traderaWatches: true
-        case .today, .preference, .workflow, .appointmentCheck, .meetingPrep, .followups: false
+        case .today, .preference, .workflow, .appointmentCheck, .meetingPrep, .followups, .unitPrice: false
+        case .shopping: true
         }
     }
 }
@@ -118,53 +123,107 @@ extension AgentPhoneChat {
     }
 
     @ViewBuilder func agentChatEntry(_ turn: PrivateChatTurn) -> some View {
-        if turn.agentAction == nil { turnCard(turn) }
+        if turn.agentAction == nil {
+            let displayTurn = agentChatDisplayTurn(turn)
+            turnCard(displayTurn)
+        }
         else { agentActionCard(turn).id(turn.id) }
     }
 
-    var agentActionShortcuts: some View {
-        Menu("Giv mig en opgave", systemImage: "sparkle.magnifyingglass") {
-            advancedAgentShortcuts
-            Button("Se mit PC-vindue", systemImage: "macwindow") {
-                startAgentAction(.windowHelp, prompt: "Se lige min skærm")
+    private func agentChatDisplayTurn(_ turn: PrivateChatTurn) -> PrivateChatTurn {
+        guard turn.replyCard == nil, turn.documentSources == nil else { return turn }
+        var displayTurn = turn
+        displayTurn.reply = AgentReplyDriver.displayText(turn.reply)
+        return displayTurn
+    }
+
+    var agentShortcutsSheet: some View {
+        NavigationStack {
+            List {
+                Section("Mail og aftaler") { agentEverydayShortcuts }
+                Section("Indkøb") {
+                    agentShortcut("Se indkøbslisten", icon: "cart") { startAgentAction(.action(.shopping(.view)), prompt: "Vis indkøbslisten") }
+                    agentShortcut("Tilføj varer", icon: "cart.badge.plus") { startActionDraft("Lav en indkøbsliste med ") }
+                    agentShortcut("Sammenlign to tilbud", icon: "tag") { startActionDraft("Hvad er billigst: ") }
+                }
+                Section("Skærmhjælp og PC") { agentComputerShortcuts }
+                Section("Projekter og salg") { advancedAgentShortcuts }
+                Section("Prøv to og vælg") {
+                    agentShortcut("Stemme", icon: "waveform") { startTasteTest(.voice) }
+                    agentShortcut("Billedstil", icon: "photo") { startTasteTest(.imageStyle) }
+                    agentShortcut("Landsbyfigur", icon: "person.crop.square") { startTasteTest(.figure) }
+                }
             }
-            Menu("Prøv to og vælg", systemImage: "slider.horizontal.3") {
-                tasteChoices
+            .scrollContentBackground(.hidden)
+            .background { FadedBackground() }
+            .navigationTitle("Giv mig en opgave")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Luk") { showAgentShortcuts = false } }
             }
-            Button("Hvad husker du om mig?", systemImage: "person.text.rectangle") {
-                startAgentAction(.showPreferences, prompt: "Hvad husker du om mig?")
-            }
-            Button("Dagens overblik", systemImage: "sun.max") {
+        }
+        .presentationDragIndicator(.visible)
+    }
+
+    private var agentEverydayShortcuts: some View {
+        Group {
+            agentShortcut("Dagens overblik", icon: "sun.max") {
                 startAgentAction(.action(.today), prompt: "Hvad skal jeg nå i dag?")
             }
-            Button("Forbered næste aftale", systemImage: "calendar.badge.clock") {
+            agentShortcut("Forbered næste aftale", icon: "calendar.badge.clock") {
                 startAgentAction(.action(.meetingPrep), prompt: "Forbered min næste aftale")
             }
-            Button("Følg op på mails", systemImage: "envelope.badge") {
+            agentShortcut("Ret en flyttet aftale", icon: "calendar.badge.clock") {
+                startAgentAction(.appointmentChange, prompt: "Ret en flyttet aftale")
+            }
+            agentShortcut("Følg op på mails", icon: "envelope.badge") {
                 startAgentAction(.action(.followups), prompt: "Hvad venter jeg svar på?")
             }
-            Button("Svar på mail", systemImage: "envelope") { startActionDraft("Svar ") }
-            Button("Agentens e-mail", systemImage: "at") {
+            agentShortcut("Ryd op i Gmail", icon: "tray.full") {
+                startAgentAction(.gmailCleanup, prompt: "Ryd op i Gmail")
+            }
+            agentShortcut("Svar på mail", icon: "envelope") { startActionDraft("Svar ") }
+            agentShortcut("Agentens e-mail", icon: "at") {
                 startAgentAction(.action(.agentEmail(.address)), prompt: "Opret din egen e-mail")
             }
-            Button("Lav Instagram-opslag", systemImage: "camera") {
-                startAgentAction(.action(.instagramPost), prompt: "Lav et Instagram-opslag")
+            agentShortcut("Find tid i kalenderen", icon: "calendar") { startActionDraft("Find en ledig time ") }
+            agentShortcut("Lav en påmindelse", icon: "checklist") { startActionDraft("Mind mig om at ") }
+            agentShortcut("Sæt en alarm", icon: "alarm") { startActionDraft("Sæt en alarm ") }
+            agentShortcut("Hvad husker du om mig?", icon: "person.text.rectangle") {
+                startAgentAction(.showPreferences, prompt: "Hvad husker du om mig?")
             }
-            Button("Planlagte Instagram-opslag", systemImage: "calendar.badge.clock") {
-                startAgentAction(.action(.instagramPlans), prompt: "Vis mine planlagte Instagram-opslag")
-            }
-            Button("Hold øje med en pris", systemImage: "tag") {
-                startAgentAction(.action(.traderaWatch), prompt: "Hold øje med en pris på Tradera")
-            }
-            Button("Find tid i kalenderen", systemImage: "calendar") { startActionDraft("Find en ledig time ") }
-            Button("Lav en påmindelse", systemImage: "checklist") { startActionDraft("Mind mig om at ") }
-            Button("Sæt en alarm", systemImage: "alarm") { startActionDraft("Sæt en alarm ") }
         }
-        .disabled(running != nil || !cleanDraft.isEmpty)
+    }
+
+    func agentShortcut(_ title: String, icon: String, action: @escaping () -> Void) -> some View {
+        Button {
+            guard selectedAgentShortcut == nil else { return }
+            selectedAgentShortcut = action
+            showAgentShortcuts = false
+        } label: {
+            Label(title, systemImage: icon)
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    func runSelectedAgentShortcut() {
+        let action = selectedAgentShortcut
+        selectedAgentShortcut = nil
+        action?()
     }
 
     private func startActionDraft(_ text: String) {
-        draft = text
+        if cleanDraft.isEmpty {
+            draft = text
+        } else if !draft.lowercased().hasPrefix(text.lowercased()) {
+            if text.count + draft.count <= (web ? 500 : 1_200) {
+                draft = text + draft
+            } else {
+                notice = "Din kladde er bevaret. Forkort den for at tilføje genvejen."
+            }
+        }
         composerFocused = true
     }
 
@@ -229,6 +288,8 @@ extension AgentPhoneChat {
             showTasteChoices = true
         case .taste(let request):
             presentTasteTest(request)
+        case .action(.unitPrice(let result)):
+            addAgentAction(prompt, kind: .unitPrice(result), receipt: result)
         case .action(let kind):
             addAgentAction(prompt, kind: kind, receipt: nil)
         case .scheduleInstagram(let timing):
@@ -393,6 +454,10 @@ extension AgentPhoneChat {
 
     @ViewBuilder private func agentActionContent(_ turn: PrivateChatTurn, action: AgentChatAction) -> some View {
         switch action.kind {
+        case .shopping(let request):
+            AgentShoppingCard(request: request, requestID: turn.id) { finishAgentAction(turn.id, receipt: $0) }
+        case .unitPrice(let result):
+            Text(result).textSelection(.enabled)
         case .gmailReply, .bookingRequest:
             if let api {
                 AgentGmailReply(api: api, prompt: turn.prompt, requestID: turn.id, botID: bot.id, storedDraft: action.mailDraft,
@@ -469,6 +534,11 @@ extension AgentPhoneChat {
     }
 
     func send() {
+        guard !loadingPhoto else { return }
+        if let attachedPhoto {
+            sendPhoto(attachedPhoto)
+            return
+        }
         send(message: cleanDraft, source: source, model: currentModel, useWeb: web, asCard: answerAsCard)
     }
 }
@@ -476,6 +546,10 @@ extension AgentPhoneChat {
 private struct AgentPreferenceList: View {
     let bot: VillageBot
     @State private var entries: [AgentChatPreferences.Entry] = []
+    @State private var editing: AgentChatPreferences.Entry?
+    @State private var draft = ""
+    @State private var showEditor = false
+    @State private var editNotice: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -488,6 +562,14 @@ private struct AgentPreferenceList: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button {
+                        editing = entry
+                        draft = entry.value
+                        editNotice = nil
+                        showEditor = true
+                    } label: {
+                        Image(systemName: "pencil").frame(minWidth: 44, minHeight: 44)
+                    }.accessibilityLabel("Redigér " + entry.value)
                     Button(role: .destructive) {
                         AgentChatPreferences.remove(entry)
                         entries = AgentChatPreferences.entries(for: bot.id)
@@ -496,7 +578,20 @@ private struct AgentPreferenceList: View {
                     }.accessibilityLabel("Glem " + entry.value)
                 }
             }
+            if let editNotice { Text(editNotice).font(.footnote).foregroundStyle(.secondary) }
             FadedDetailText("Skriv fx “Svar mig fremover kort”. Skriv “Til alle agenter: Husk, at jeg foretrækker aftaler efter kl. 10” for at dele et ønske. Relevante ønsker følger med til den model, du vælger.")
+        }
+        .alert("Redigér ønske", isPresented: $showEditor) {
+            TextField("Dit ønske", text: $draft)
+            Button("Annuller", role: .cancel) {}
+            Button("Gem") {
+                if let editing, !AgentChatPreferences.replace(editing, with: draft) {
+                    editNotice = "Ønsket blev ændret et andet sted. Åbn det igen."
+                }
+                entries = AgentChatPreferences.entries(for: bot.id)
+            }.disabled(!(1...240).contains(draft.trimmingCharacters(in: .whitespacesAndNewlines).count))
+        } message: {
+            Text(editing?.bot == nil ? "Gælder for alle dine agenter. Højst 240 tegn." : "Gælder kun for \(bot.name). Højst 240 tegn.")
         }
         .onAppear { entries = AgentChatPreferences.entries(for: bot.id) }
     }

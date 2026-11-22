@@ -4,6 +4,99 @@ import RoomPlan
 import UniformTypeIdentifiers
 import simd
 
+struct OfficeWallPhoto: Codable {
+    let front: Bool
+    let jpeg: Data
+}
+
+/// Rectified texture coordinates start at the top left of the photographed side.
+/// Camera coordinates follow ARKit: up is +Y and points in front have negative Z.
+struct OfficeWallProjection {
+    let center, across, up: SIMD3<Float>
+    let focal, principal: SIMD2<Float> // Normalized to the native landscape sensor image.
+
+    private func dot(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> Float {
+        a.x * b.x + a.y * b.y + a.z * b.z
+    }
+    private var normal: SIMD3<Float> {
+        .init(across.y * up.z - across.z * up.y, across.z * up.x - across.x * up.z,
+              across.x * up.y - across.y * up.x)
+    }
+    var front: Bool { dot(normal, -center) > 0 }
+
+    func sample(_ uv: SIMD2<Float>) -> SIMD3<Float>? {
+        let point = center + across * ((uv.x - 0.5) * (front ? 1 : -1)) + up * (0.5 - uv.y)
+        let z = -point.z
+        guard (0.15...5.5).contains(z) else { return nil }
+        let pixel = principal + SIMD2(point.x, -point.y) * focal / z
+        guard (0.005...0.995).contains(pixel.x), (0.005...0.995).contains(pixel.y) else { return nil }
+        return SIMD3(pixel.x, pixel.y, z)
+    }
+
+    func quality(depth: [Float], columns: Int, rows: Int, featurePoints: [SIMD3<Float>] = []) -> Float? {
+        let incidence = abs(dot(normal, center)) / (dot(normal, normal) * dot(center, center)).squareRoot()
+        guard incidence > 0.45, focal.x > 0, focal.y > 0 else { return nil }
+        let corners = [SIMD2<Float>(0, 0), .init(1, 0), .init(1, 1), .init(0, 1)].compactMap(sample)
+        guard corners.count == 4 else { return nil }
+        var area: Float = 0
+        for i in corners.indices {
+            let a = corners[i], b = corners[(i + 1) % 4]
+            area += a.x * b.y - a.y * b.x
+        }
+        area = abs(area) * 0.5
+        guard area > 0.035 else { return nil }
+        if depth.isEmpty {
+            // Some RoomPlan configurations expose tracked 3D points instead of a depth map.
+            // Require independent measurements across the wall, including its edges.
+            var bins = [Int](repeating: 0, count: 12)
+            for point in featurePoints {
+                let ray = SIMD3((point.x - principal.x) / focal.x, (principal.y - point.y) / focal.y, -1)
+                let z = dot(normal, center) / dot(normal, ray)
+                guard (0.15...5.5).contains(z) else { continue }
+                let local = ray * z - center
+                let x = dot(local, across) / dot(across, across) + 0.5
+                let y = dot(local, up) / dot(up, up) + 0.5
+                guard x >= 0, x < 1, y >= 0, y < 1 else { continue }
+                guard abs(point.z - z) <= max(0.10, z * 0.045) else { return nil }
+                bins[Int(y * 3) * 4 + Int(x * 4)] += 1
+            }
+            return bins.allSatisfy { $0 >= 2 } ? area * incidence * 0.6 : nil
+        }
+        guard columns > 0, rows > 0, columns <= 512, rows <= 512, columns * rows == depth.count else { return nil }
+        var matches = 0
+        for row in 0..<8 {
+            for col in 0..<8 {
+                guard let p = sample(.init((Float(col) + 0.5) / 8, (Float(row) + 0.5) / 8)) else { return nil }
+                let d = depth[Int(p.y * Float(rows)) * columns + Int(p.x * Float(columns))]
+                if !d.isFinite || d <= 0 { continue }
+                // Depth from this camera must agree with the measured plane (no foreground furniture).
+                guard abs(d - p.z) <= max(0.12, p.z * 0.065) else { return nil }
+                matches += 1
+            }
+        }
+        guard matches >= 56 else { return nil }
+        return area * incidence * Float(matches) / 64
+    }
+
+    func rectifiedBGRA(source: [UInt8], width: Int, height: Int, targetWidth: Int, targetHeight: Int) -> Data? {
+        guard (1...640).contains(width), (1...640).contains(height), source.count == width * height * 4,
+              (1...512).contains(targetWidth), (1...512).contains(targetHeight) else { return nil }
+        var output = [UInt8](repeating: 255, count: targetWidth * targetHeight * 4)
+        for y in 0..<targetHeight {
+            for x in 0..<targetWidth {
+                let uv = SIMD2((Float(x) + 0.5) / Float(targetWidth), (Float(y) + 0.5) / Float(targetHeight))
+                guard let p = sample(uv) else { return nil }
+                let from = (Int(p.y * Float(height)) * width + Int(p.x * Float(width))) * 4
+                let to = (y * targetWidth + x) * 4
+                output[to] = source[from]
+                output[to + 1] = source[from + 1]
+                output[to + 2] = source[from + 2]
+            }
+        }
+        return Data(output)
+    }
+}
+
 struct ScannedOfficeRoom: Codable, Identifiable {
     struct Item: Codable, Identifiable, Equatable {
         let id: UUID
@@ -143,6 +236,15 @@ struct ScannedOfficePCExport: Encodable, Transferable {
     private static func folder(_ id: UUID) -> URL { root.appending(path: id.uuidString.lowercased(), directoryHint: .isDirectory) }
     private static func layoutURL(_ id: UUID) -> URL { folder(id).appending(path: "layout.json") }
     static func modelURL(_ id: UUID) -> URL { folder(id).appending(path: "room.usdz") }
+    private static func photosURL(_ id: UUID) -> URL { folder(id).appending(path: "wall-photos.plist") }
+
+    static func photos(_ id: UUID) -> [UUID: OfficeWallPhoto] {
+        guard let url = try? LocalFileStore.safeWriteURL(photosURL(id), within: folder(id)),
+              let data = try? LocalFileStore.readBytes(from: url, maximumBytes: 2_100_000),
+              let photos = try? PropertyListDecoder().decode([UUID: OfficeWallPhoto].self, from: data),
+              photos.count <= 16, photos.values.allSatisfy({ $0.jpeg.count <= 120_000 }) else { return [:] }
+        return photos
+    }
 
     static func rooms() throws -> [ScannedOfficeRoom] {
         do {
@@ -158,7 +260,7 @@ struct ScannedOfficePCExport: Encodable, Transferable {
         }
     }
 
-    static func capture(_ room: CapturedRoom) throws -> ScannedOfficeRoom {
+    static func capture(_ room: CapturedRoom, photos: [UUID: OfficeWallPhoto] = [:]) throws -> ScannedOfficeRoom {
         guard try rooms().count < limit else { throw LocalFileStore.Failure.tooLarge }
         let id = UUID()
         let layout = ScannedOfficeRoom.layout(room, id: id)
@@ -175,6 +277,14 @@ struct ScannedOfficePCExport: Encodable, Transferable {
             let destination = try LocalFileStore.safeWriteURL(modelURL(id), within: root)
             try room.export(to: destination)
             try LocalFileStore.protectFile(destination)
+            if !photos.isEmpty {
+                let ids = Set(layout.walls.map(\.id))
+                let valid = photos.filter { ids.contains($0.key) && $0.value.jpeg.count <= 120_000 }
+                guard valid.count <= 16 else { throw LocalFileStore.Failure.tooLarge }
+                let data = try PropertyListEncoder().encode(valid)
+                guard data.count <= 2_100_000 else { throw LocalFileStore.Failure.tooLarge }
+                try LocalFileStore.writeBytes(data, to: photosURL(id), within: folder(id))
+            }
             try save(layout)
             return layout
         } catch {
@@ -189,8 +299,10 @@ struct ScannedOfficePCExport: Encodable, Transferable {
     }
 
     static func remove(_ id: UUID) throws {
-        // Only remove the two files this store owns. Never follow links or recursively remove a directory.
+        // Remove only the scan files this store owns.
         let directory = folder(id)
+        let files = LocalFileStore(root: directory)
+        try files.delete(photosURL(id))
         try files.delete(modelURL(id))
         try files.delete(layoutURL(id))
         if let contents = try? FileManager.default.contentsOfDirectory(atPath: directory.path), contents.isEmpty {

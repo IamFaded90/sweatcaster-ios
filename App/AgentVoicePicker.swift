@@ -7,8 +7,14 @@ enum AgentPCVoice: String, Codable, CaseIterable, Identifiable {
     case roestMic = "roest-mic"
     case roestNic = "roest-nic"
     case roestLumi = "roest-lumi"
+    case roestFreja = "roest-freja"
+    case roestStorm = "roest-storm"
     case heart = "kokoro-heart"
     case michael = "kokoro-michael"
+    case bella = "kokoro-bella"
+    case nicole = "kokoro-nicole"
+    case fenrir = "kokoro-fenrir"
+    case puck = "kokoro-puck"
 
     var id: String { rawValue }
     var name: String {
@@ -17,20 +23,30 @@ enum AgentPCVoice: String, Codable, CaseIterable, Identifiable {
         case .roestMic: "Mic"
         case .roestNic: "Nic"
         case .roestLumi: "Lumi"
+        case .roestFreja: "Freja"
+        case .roestStorm: "Storm"
         case .heart: "Heart"
         case .michael: "Michael"
+        case .bella: "Bella"
+        case .nicole: "Nicole"
+        case .fenrir: "Fenrir"
+        case .puck: "Puck"
         }
     }
-    var language: String { [.danish, .roestMic, .roestNic, .roestLumi].contains(self) ? "da-DK" : "en-US" }
+    var language: String {
+        switch self {
+        case .danish, .roestMic, .roestNic, .roestLumi, .roestFreja, .roestStorm: "da-DK"
+        case .heart, .michael, .bella, .nicole, .fenrir, .puck: "en-US"
+        }
+    }
     var label: String { name + " · " + (language == "da-DK" ? "Dansk PC-stemme" : "Engelsk PC-stemme") }
 }
 
 extension LiveAPI {
-    func agentPCVoices(for botID: UUID? = nil) async throws -> [AgentPCVoice] {
+    func agentPCVoices(for _: UUID? = nil) async throws -> [AgentPCVoice] {
         struct Catalog: Decodable { let voices: [String] }
         let catalog: Catalog = try await moduleJSON("agent-local-voices", timeout: 8)
         return catalog.voices.compactMap(AgentPCVoice.init(rawValue:))
-            .filter { $0 != .roestLumi || botID == VillageBot.lumiID }
     }
 
     func agentPCVoiceAudio(_ text: String, voice: AgentPCVoice) async throws -> Data {
@@ -43,13 +59,10 @@ extension LiveAPI {
 }
 
 enum AgentVoiceSelection {
-    enum SaveFailure: Error { case unknownBot, voiceUnavailableForBot }
+    enum SaveFailure: Error { case unknownBot }
 
     @MainActor static func save(_ identifier: String, for botID: UUID, store: MigratedAppData,
                                 defaults: UserDefaults = .standard) throws {
-        guard identifier != AgentPCVoice.roestLumi.rawValue || botID == VillageBot.lumiID else {
-            throw SaveFailure.voiceUnavailableForBot
-        }
         let data = store.villageBots
         var bots = data.isEmpty && botID == VillageBot.lumiID ? [] : try JSONDecoder().decode([VillageBot].self, from: data)
         if let index = bots.firstIndex(where: { $0.id == botID }) {
@@ -62,8 +75,8 @@ enum AgentVoiceSelection {
         defaults.set(identifier, forKey: PhoneModels.agentVoiceKey(botID))
     }
 
-    static func identifier(for bot: VillageBot) -> String {
-        let override = UserDefaults.standard.string(forKey: PhoneModels.agentVoiceKey(bot.id)) ?? ""
+    static func identifier(for bot: VillageBot, defaults: UserDefaults = .standard) -> String {
+        let override = defaults.string(forKey: PhoneModels.agentVoiceKey(bot.id)) ?? ""
         return override.isEmpty ? bot.voice : override
     }
 
@@ -71,14 +84,6 @@ enum AgentVoiceSelection {
         if !override.isEmpty { return override }
         if pcVoiceAvailable && profile == "da-DK" { return AgentPCVoice.roestLumi.rawValue }
         return profile
-    }
-
-    @MainActor static func adoptApprovedLumiVoiceIfAvailable(_ voices: [AgentPCVoice],
-                                                            defaults: UserDefaults = .standard) {
-        let appliedKey = "fadedai.lumi.approvedReferenceVoice.v1"
-        guard voices.contains(.roestLumi), !defaults.bool(forKey: appliedKey) else { return }
-        defaults.set(AgentPCVoice.roestLumi.rawValue, forKey: PhoneModels.agentVoiceKey(VillageBot.lumiID))
-        defaults.set(true, forKey: appliedKey)
     }
 
     /// Explicit voices keep their identity; a missing voice never silently becomes another one.
@@ -93,6 +98,85 @@ enum AgentVoiceSelection {
     }
 
     static let unavailable = "Den valgte stemme er ikke tilgængelig på denne iPhone. Vælg en anden stemme eller hent den igen."
+}
+
+enum StudioVoiceChoice: Equatable {
+    case phone(String)
+    case pc(AgentPCVoice)
+
+    init(studio: String, profile: String) {
+        let id = studio.isEmpty ? profile : studio
+        if let voice = AgentPCVoice(rawValue: id) { self = .pc(voice) }
+        else { self = .phone(id) }
+    }
+}
+
+extension OfflineStudio {
+    var studioSpeechLanguage: String { privateSession ? sessionPreferences.voiceLanguage : previewLanguage }
+
+    func studioSpeaker(for turn: PrivateChatTurn? = nil) -> VillageBot? {
+        if let id = turn?.botID { return privateBots.first { $0.id == id } }
+        if privateSession { return privateBots.first { $0.id == VillageBot.lumiID } ?? .lumi() }
+        return selectedPrivateBot
+    }
+
+    func studioVoiceChoice(for bot: VillageBot?) -> StudioVoiceChoice {
+        let danish = studioSpeechLanguage == "da-DK"
+        let saved = privateSession ? (danish ? sessionPreferences.danishVoice : sessionPreferences.englishVoice)
+                                   : (danish ? danishVoiceID : englishVoiceID)
+        return StudioVoiceChoice(studio: saved, profile: bot.map { AgentVoiceSelection.identifier(for: $0) } ?? "")
+    }
+
+    func isStudioReading(_ slot: SpeechBox.Playback) -> Bool {
+        speech.playback == slot || (studioPCSlot == slot && (studioPCSpeech.loading || studioPCSpeech.playing))
+    }
+
+    func stopStudioSpeech() {
+        speech.stop()
+        studioPCSlot = nil
+        studioPCSpeech.stop()
+    }
+
+    func studioReadTitle(_ turn: PrivateChatTurn) -> String {
+        if isStudioReading(.reply(turn.id)) { return "Stop oplæsning" }
+        if case .pc(let voice) = studioVoiceChoice(for: studioSpeaker(for: turn)) { return "Læs med " + voice.name + " på PC" }
+        return "Læs svar op"
+    }
+
+    func playStudioSpeech(text: String?, bot: VillageBot?, slot: SpeechBox.Playback) {
+        let wasReading = isStudioReading(slot)
+        stopStudioSpeech()
+        guard !wasReading else { status = "Oplæsning stoppet."; return }
+        guard canShowStudio, !sessionExpired else { return }
+        dictation.stop()
+        resetIdleTimer()
+        switch studioVoiceChoice(for: bot) {
+        case .phone(let id):
+            if let local = DownloadedAgentVoice.selected(id) {
+                studioPCSlot = slot
+                let spoken = text.map(LocalSpeechVoice.replyText) ?? LocalSpeechVoice.previewSentence(language: studioSpeechLanguage)
+                studioPCSpeech.playDownloaded(text: spoken, voice: local, agentID: bot?.id, language: studioSpeechLanguage, rate: bot?.voiceRate ?? 1)
+                status = studioPCSpeech.notice ?? "Læser med " + local.name + "."
+                return
+            }
+            guard let voice = AgentVoiceSelection.resolve(identifier: id, language: studioSpeechLanguage) else {
+                status = AgentVoiceSelection.unavailable
+                return
+            }
+            let spoken = text.map(LocalSpeechVoice.replyText) ?? LocalSpeechVoice.previewSentence(language: voice.language)
+            speech.play(LocalSpeechVoice.utterance(spoken, voice: voice, rate: bot?.voiceRate ?? 1), as: slot, agentID: bot?.id)
+            status = "Læser med " + voice.name + "."
+        case .pc(let voice):
+            guard let pc = privateSession ? privateImagePC : api, let id = bot?.id else {
+                status = voice.name + " kræver din parrede PC. Du kan vælge en iPhone-stemme under oplæsning."
+                return
+            }
+            studioPCSlot = slot
+            let spoken = text.map(LocalSpeechVoice.replyText) ?? LocalSpeechVoice.previewSentence(language: voice.language)
+            studioPCSpeech.playAgentVoice(text: spoken, voice: voice, agentID: id, pc: pc)
+            status = studioPCSpeech.notice ?? ("Læser med " + voice.name + " på PC’en.")
+        }
+    }
 }
 
 struct AgentVoicePicker: View {
@@ -112,6 +196,7 @@ struct AgentVoicePicker: View {
     @State private var pcVoiceConnectionFailed = false
     @State private var refreshPC = 0
     @State private var englishPage = 0
+    @ObservedObject private var offline = AgentVoiceDownload.shared
     @State private var previewID: String?
     @State private var saveNotice: String?
 
@@ -131,7 +216,10 @@ struct AgentVoicePicker: View {
         NavigationStack {
             List {
                 Section("\(name)s stemme") {
-                    if let selectedPCVoice {
+                    if let local = DownloadedAgentVoice.selected(selectedID) {
+                        Label(local.label, systemImage: "iphone")
+                        if !offline.installed { Text("Hent stemmepakken for at bruge dit valg.").font(.footnote) }
+                    } else if let selectedPCVoice {
                         Label(selectedPCVoice.label, systemImage: "desktopcomputer")
                         if !pcVoices.contains(selectedPCVoice) {
                             Text("Den valgte PC-stemme er ikke tilgængelig lige nu.").font(.footnote)
@@ -153,6 +241,8 @@ struct AgentVoicePicker: View {
                 if language == "en-US" {
                     englishVoiceSection
                 } else {
+                    AgentVoicePackSection(selected: selectedID, previewing: pcSpeech.playing || pcSpeech.loading ? previewID : nil,
+                                          choose: choose, preview: previewLocal, stop: stopPreview)
                     pcVoiceSection
                     Section("Apple-stemmer på din iPhone · \(voices.count)") {
                         ForEach(voices, id: \.identifier) { voice in
@@ -186,9 +276,6 @@ struct AgentVoicePicker: View {
                     if !Task.isCancelled {
                         pcVoices = result
                         pcVoiceConnectionFailed = false
-                        if botID == VillageBot.lumiID {
-                            AgentVoiceSelection.adoptApprovedLumiVoiceIfAvailable(result)
-                        }
                     }
                 } catch {
                     if !Task.isCancelled {
@@ -365,6 +452,13 @@ struct AgentVoicePicker: View {
                                                voice: voice, rate: rate), as: .preview)
     }
 
+    private func previewLocal(_ voice: DownloadedAgentVoice) {
+        if previewID == voice.id, pcSpeech.loading || pcSpeech.playing { stopPreview(); return }
+        stopPreview()
+        previewID = voice.id
+        pcSpeech.playDownloaded(text: LocalSpeechVoice.previewSentence(language: "da-DK"), voice: voice, agentID: botID, rate: rate)
+    }
+
     private func previewPC(_ voice: AgentPCVoice) {
         guard let api else { return }
         if previewID == voice.id, pcSpeech.playing || pcSpeech.loading { stopPreview(); return }
@@ -404,7 +498,7 @@ struct AgentVoiceProfileCard: View {
                     ? AgentVoiceSelection.lumiIdentifier(profile: bot.voice, override: voice, pcVoiceAvailable: lumiPCVoiceAvailable)
                     : voice.isEmpty ? bot.voice : voice
                 let selected = AgentVoiceSelection.resolve(identifier: identifier, language: bot.language ?? "da-DK")
-                Text(AgentPCVoice(rawValue: identifier)?.label
+                Text(DownloadedAgentVoice.selected(identifier)?.label ?? AgentPCVoice(rawValue: identifier)?.label
                      ?? selected.map(LocalSpeechVoice.label) ?? AgentVoiceSelection.unavailable).font(.subheadline)
                 FadedSecondaryButton("Vælg og hør stemmer", icon: "person.wave.2") { showPicker = true }
                 FadedSecondaryButton("Sammenlign to danske stemmer", icon: "headphones") { showTasteTest = true }
@@ -415,7 +509,6 @@ struct AgentVoiceProfileCard: View {
             let voices = try? await api?.agentPCVoices(for: bot.id)
             if !Task.isCancelled {
                 lumiPCVoiceAvailable = voices?.contains(.roestLumi) == true
-                AgentVoiceSelection.adoptApprovedLumiVoiceIfAvailable(voices ?? [])
             }
         }
         .sheet(isPresented: $showPicker) {

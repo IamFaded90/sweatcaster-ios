@@ -59,10 +59,11 @@ extension AgentPhoneChat {
     func turnCard(_ turn: PrivateChatTurn) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             AgentChatBubble(user: true, title: "Dig", pc: false) {
+                if let photo = sentPhotos[turn.id] { ChatPhotoPreview(data: photo) }
                 Text(turn.prompt).textSelection(.enabled)
                     .contextMenu {
                         Button("Redigér besked", systemImage: "pencil") { edit(turn) }.disabled(running != nil)
-                        if !turn.reply.isEmpty { retryMenu(turn) }
+                        if !turn.reply.isEmpty && sentPhotos[turn.id] == nil && turn.documentSources == nil { retryMenu(turn) }
                     }
             }
             if !turn.reply.isEmpty {
@@ -70,9 +71,9 @@ extension AgentPhoneChat {
                                 title: [bot.name, turn.source, turn.replyModelName].compactMap { $0 }.joined(separator: " · "),
                                 pc: turn.source == "PC") {
                     if let card = turn.replyCard {
-                        Text(card.title).font(.headline)
+                        Text(ChatTranscriptView.inlineText(card.title, allowsLinks: keepHistory)).font(.headline)
                         ForEach(Array(card.items.enumerated()), id: \.offset) { _, item in
-                            Label(item, systemImage: "circle.fill").labelStyle(.titleOnly)
+                            Text(ChatTranscriptView.inlineText(item, allowsLinks: keepHistory))
                         }
                     } else {
                         ChatTranscriptView(reply: turn.reply)
@@ -91,12 +92,22 @@ extension AgentPhoneChat {
                             }
                         }
                     }
-                    if let sources = turn.documentSources, !sources.isEmpty {
+                    if let sources = turn.documentSources, sources.contains(where: { $0.deadline != nil }) {
+                        ForEach(sources) { source in
+                            if let deadline = source.deadline {
+                                AgentDocumentReminderButton(source: source, deadline: deadline, botName: bot.name,
+                                                            showsEvidence: sources.count > 1)
+                            }
+                        }
+                    } else if let sources = turn.documentSources, !sources.isEmpty {
                         DisclosureGroup("Dokumentkilder") {
                             ForEach(sources) { source in
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(verbatim: "[\(source.id)] \(source.name)")
                                     if let page = source.page { Text("Side \(page)").font(.caption) }
+                                    if let excerpt = source.excerpt {
+                                        Text(verbatim: excerpt).font(.subheadline).textSelection(.enabled)
+                                    }
                                 }
                                 .padding(.vertical, 3)
                             }
@@ -134,7 +145,11 @@ extension AgentPhoneChat {
             if running != nil { FadedThinkingIndicator(title: "\(bot.name) svarer…") }
             if running == nil {
                 voiceActions
-                if keepHistory && source == .phone {
+                ChatPhotoPicker(photo: $attachedPhoto, loading: $loadingPhoto, onError: { notice = $0 })
+                if attachedPhoto != nil {
+                    FadedDetailText(source == .pc ? "Fotoet sendes til den parrede PC." : "Fotoet analyseres på iPhone.")
+                }
+                if keepHistory && source != .composio {
                     HStack {
                         Button("Dokumenter", systemImage: "doc.text") { showDocuments = true }
                             .frame(minHeight: 44)
@@ -177,10 +192,11 @@ extension AgentPhoneChat {
                     Button("Send", systemImage: "arrow.up") { send() }
                         .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                         .buttonStyle(FadedButtonStyle(kind: .primary))
-                        .disabled(cleanDraft.isEmpty || cleanDraft.count > (web ? 500 : 1_200) ||
+                        .disabled((attachedPhoto == nil && (cleanDraft.isEmpty || cleanDraft.count > (web ? 500 : 1_200) ||
                                   (currentModel.isEmpty && !shouldCheckGmail(cleanDraft) && chatIntent(cleanDraft) == nil &&
-                                   !canAskAboutSharedCalendar(cleanDraft)) ||
-                                  whisper.active || whisper.processing)
+                                   !canAskAboutSharedCalendar(cleanDraft) && !canAskAboutDocumentDeadline(cleanDraft)))) ||
+                                  (attachedPhoto != nil && cleanDraft.count > 1_200) ||
+                                  loadingPhoto || whisper.active || whisper.processing)
                 }
             }
         }

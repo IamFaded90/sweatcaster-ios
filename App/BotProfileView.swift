@@ -15,6 +15,7 @@ import SwiftUI
     @Environment(\.fadedPalette) private var palette
     private var savedBots: Data { MigratedAppData.shared.villageBots }
     @AppStorage(AppStorageKeys.phoneModel) private var phoneModel = "apple"
+    @AppStorage(AppStorageKeys.lumiReplyLanguage) private var lumiReplyLanguage = "da-DK"
     @State private var editingBot: VillageBot?
     @State private var showPrivateChat = false
     @State private var showPhoneChat = false
@@ -57,6 +58,17 @@ import SwiftUI
                     }
                     .buttonStyle(.plain)
                     voiceCard(bot)
+                    if bot.id == VillageBot.lumiID {
+                        FadedCard {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Picker("Lumi svarer på", selection: $lumiReplyLanguage) {
+                                    Text("Dansk").tag("da-DK")
+                                    Text("Engelsk").tag("en-US")
+                                }.frame(minHeight: 44)
+                                FadedDetailText("Her vælger du sproget for Lumis svar. Hukommelse er til notater.")
+                            }
+                        }
+                    }
                     personalityCard(bot)
                     relationsCard(bot, roster: localBots)
                     if bot.id != VillageBot.lumiID { testCard(bot) }

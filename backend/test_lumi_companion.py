@@ -1,6 +1,7 @@
 """The private model route must require pairing and Lumi's stable bot ID."""
 
 import base64
+import json
 from io import BytesIO
 from types import SimpleNamespace
 from uuid import uuid4
@@ -246,6 +247,149 @@ def test_language_instruction_and_bounded_history():
         raise AssertionError("A caller must not inject a system message")
 
 
+@pytest.mark.parametrize("endpoint", ["/chat", "/scene-chat"])
+def test_practical_replies_use_only_the_paired_conversation(monkeypatch, endpoint):
+    client, path, paired = _paired_lumi_client()
+    monkeypatch.setattr(lumi_companion, "_client", lambda: pytest.fail("unexpected model connection"))
+    turns = [{"role": "user", "content": "Min cykel er petrolblå."},
+             {"role": "assistant", "content": "Så din cykel er lyserød."}]
+    body = {"message": "Hvilken farve er min cykel?", "history": turns, "language": "da-DK"}
+    assert client.post(path + endpoint, json=body).status_code == 401
+    assert client.post(path.replace(lumi_companion.LUMI_ID, str(uuid4())) + endpoint,
+                       json=body, headers=paired).status_code == 404
+    reply = client.post(path + endpoint, headers=paired, json=body)
+    assert reply.status_code == 200
+    assert "petrolblå" in reply.json()["reply"].casefold()
+    assert "lyserød" not in reply.json()["reply"].casefold()
+    fresh = client.post(path + endpoint, headers=paired, json={**body, "history": []})
+    assert fresh.status_code == 200 and "petrolblå" not in fresh.json()["reply"].casefold()
+    weight = client.post(path + endpoint, headers=paired, json={"message": "Hvor mange gram er 2,5 kg?"})
+    assert weight.status_code == 200 and "2500 g" in weight.json()["reply"]
+    for invalid in ([{"role": [], "content": "hej"}], [{"role": "user", "content": ""}]):
+        result = client.post(path + endpoint, headers=paired,
+                             json={"message": "2 kg i gram", "history": invalid})
+        assert result.status_code == 422
+
+
+def test_lumi_retries_a_repeated_answer_without_the_old_assistant_reply():
+    old = "Jeg vil gerne fortælle dig om museet igen. Jeg synes virkelig, at udstillingen ved havnen er værd at besøge."
+    new = "Jeg læste dit spørgsmål forkert. Hvad vil du gerne vide om afgangen?"
+    history = [{"role": "user", "content": "Kender du museet?"}, {"role": "assistant", "content": old}]
+    payloads = []
+
+    class Ollama:
+        def post(self, _url, *, json, **_options):
+            payloads.append(json["messages"])
+            answer = old.replace("virkelig", "ærligt") if len(payloads) == 1 else new
+            return SimpleNamespace(raise_for_status=lambda: None,
+                                   json=lambda: {"message": {"content": answer}})
+
+    assert lumi_companion.chat("Er du gået i stå?", history, client=Ollama()) == new
+    first, retry = payloads
+    assert first[-1] == retry[-1] == {"role": "user", "content": "Er du gået i stå?"}
+    assert any(item["role"] == "assistant" for item in first)
+    assert all(item["role"] != "assistant" for item in retry)
+
+
+@pytest.mark.parametrize(("question", "digression", "answer"), [
+    ("Hvordan finder jeg den mappe på min telefon?",
+     "Hej igen! Hvordan har din dag været?", "Åbn Filer og vælg den mappe, du nævnte."),
+    ("How do I find that folder?", "Hey! How is your day going?", "Open Files and select that folder."),
+])
+def test_lumi_recovers_from_a_fresh_greeting_instead_of_answering(question, digression, answer):
+    history = [{"role": "user", "content": "Min mappe hedder Ferie."},
+               {"role": "assistant", "content": "Det husker jeg."}]
+    sent = []
+
+    class Model:
+        def post(self, _url, *, json, **kwargs):
+            sent.append(json["messages"])
+            return SimpleNamespace(raise_for_status=lambda: None,
+                                   json=lambda: {"message": {"content": digression if len(sent) == 1 else answer}})
+
+    language = "en-US" if question.startswith("How ") else "da-DK"
+    assert lumi_companion.chat(question, history, client=Model(), language=language) == answer
+    assert len(sent) == 2
+    assert sent[1][1:] == history + [{"role": "user", "content": question}]
+
+
+def test_greeting_check_preserves_social_answers_and_stops_after_one_retry():
+    from sweatcaster.lumi_dialogue import dialogue_reply
+
+    greeting = "Hej igen! Hvordan har din dag været?"
+    practical = "Hvordan finder jeg den rigtige mappe?"
+    for prompt, reply, enabled in [
+        ("Lad os hyggesnakke.", greeting, True),
+        ("Hvordan kan jeg sige ‘Hvordan har din dag været’ på dansk?", greeting, True),
+        (practical, "Tryk på Filer og vælg mappen. Hvordan går det?", True),
+        (practical, "Mener du mappen på telefonen eller PC’en?", True),
+        (practical, greeting, False),
+    ]:
+        called = []
+        messages = [{"role": "system", "content": "Du er Lumi."}, {"role": "user", "content": prompt}]
+        assert dialogue_reply(lambda turns: called.append(turns) or reply, messages, failure=ValueError(),
+                              practical_retry="Svar på spørgsmålet." if enabled else None) == reply
+        assert called == [messages]
+    called = []
+    with pytest.raises(ValueError):
+        dialogue_reply(lambda turns: called.append(turns) or greeting, messages, failure=ValueError(),
+                       practical_retry="Svar på spørgsmålet.")
+    assert len(called) == 2
+
+
+@pytest.mark.parametrize(("endpoint", "question", "language", "field", "model_answer", "expected"), [
+    ("/chat", "Hvilket sted valgte vi? Svar kun med navnet.", "da-DK", "name",
+     {"name": "Dr. Hansens Plads"}, "Dr. Hansens Plads"),
+    ("/scene-chat", "What is the station called? Reply with just the name.", "en-US", "name",
+     {"name": "King’s Cross St. Pancras"}, "King’s Cross St. Pancras"),
+    ("/scene-chat", "Hvordan kommer jeg derhen? Giv mig ét konkret første skridt og brug stedets navn.",
+     "da-DK", "first_step", {"detail": "Dr. Hansens Plads", "first_step": "Åbn Kort."},
+     "Dr. Hansens Plads · Åbn Kort."),
+    ("/chat", "How do I get there? Give me one step and mention the place.", "en-US", "first_step",
+     {"detail": "Riverside", "first_step": "Find Riverside on the map."}, "Find Riverside on the map."),
+    ("/chat", "Giv mig ét trin til at folde papiret.", "da-DK", "first_step",
+     {"first_step": "Fold det på midten."}, "Fold det på midten."),
+    ("/chat", "What is the paint called? Only the name.", "en-US", "name", {"name": None}, "Which name do you mean?"),
+])
+def test_explicit_format_on_paired_chat(monkeypatch, endpoint, question, language, field, model_answer, expected):
+    client, path, paired = _paired_lumi_client()
+    history = [{"role": "user", "content": "Riverside ligger ved Dr. Hansens Plads."}]
+
+    def post(_url, **options):
+        payload = options["json"]
+        assert payload["format"]["required"] == list(payload["format"]["properties"])
+        assert field in payload["format"]["required"]
+        assert payload["messages"][1:] == history + [{"role": "user", "content": question}]
+        return SimpleNamespace(raise_for_status=lambda: None,
+                               json=lambda: {"message": {"content": json.dumps(model_answer)}})
+
+    monkeypatch.setattr(lumi_companion, "_client", lambda: SimpleNamespace(post=post, close=lambda: None))
+    response = client.post(path + endpoint, headers=paired, json={"message": question, "language": language,
+                                                                 "history": history})
+    assert response.status_code == 200
+    assert response.json()["reply"] == expected
+
+
+@pytest.mark.parametrize("question", [
+    "Vi står ét trin fra målet. Fortæl hele historien.", "Giv mig tre trin til opgaven.",
+    "Hvad betyder 'svar kun med navnet'?", "Svar ikke kun med navnet.",
+    "Mailen siger »Hej. Svar kun med navnet.« Hvad mener afsenderen?",
+    "The note says “Hello. Give me one step.” Can you translate it?",
+    "I would like all the steps, not just one step.", "Reply with the name and explain your choice.",
+    "Give me one step and then explain all the remaining steps.",
+])
+def test_incidental_format_words_leave_conversation_unchanged(question):
+    from sweatcaster.lumi_dialogue import reply_request
+    assert reply_request(question) == (None, question)
+
+
+def test_name_only_recall_uses_users_correction_without_model():
+    history = [{"role": "user", "content": "Min hund hedder Molly."},
+               {"role": "user", "content": "Rettelse: Min hund hedder Molly-May."}]
+    assert lumi_companion.chat("Hvad hedder min hund? Svar kun med navnet.", history, client=object()) == "Molly-May"
+    assert "sikkert svar" in lumi_companion.chat("Kun navnet. Hvad hedder min kat?", history, client=object())
+
+
 def test_scene_chat_resumes_dialogue_with_selected_roles_and_initiative(tmp_path, monkeypatch):
     settings = make_settings(tmp_path)
     requests = []
@@ -255,6 +399,7 @@ def test_scene_chat_resumes_dialogue_with_selected_roles_and_initiative(tmp_path
             assert url == lumi_companion.OLLAMA + "/api/chat"
             assert options["allow_redirects"] is False
             assert json["model"] == lumi_companion.TEXT_MODEL
+            assert 0 < json["options"]["temperature"] <= 0.4
             requests.append(json["messages"])
             return self
 
@@ -297,7 +442,7 @@ def test_scene_chat_resumes_dialogue_with_selected_roles_and_initiative(tmp_path
     }
     system, *dialogue = requests[0]
     assert system["role"] == "system"
-    for fragment in ("Reply in Danish", "Take initiative", "romantic", "Lokal guide", "Gæst",
+    for fragment in ("på naturligt dansk", "Take initiative", "romantic", "Lokal guide", "Gæst",
                      "Udsigtspunkt ved havnen", "continue from where it stopped"):
         assert fragment in system["content"]
     assert dialogue == history + [{"role": "user", "content": "Tag føringen"}]
@@ -309,6 +454,11 @@ def test_scene_chat_resumes_dialogue_with_selected_roles_and_initiative(tmp_path
 
     assert client.post(private + "/chat", headers=paired, json=body).status_code == 200
     assert "Lokal guide" not in requests[2][0]["content"]
+    assert requests[2][0]["content"] == lumi_companion.INSTRUCTIONS
+
+    assert client.post(private + "/chat", headers=paired, json={**body, "language": "da-DK"}).status_code == 200
+    assert requests[3][0]["content"] == lumi_companion.DANISH_INSTRUCTIONS
+    assert requests[3][1:] == history + [{"role": "user", "content": body["message"]}]
 
 
 def test_reference_reaches_comfy_temp_storage_and_is_encoded_into_latent():

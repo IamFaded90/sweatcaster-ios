@@ -2,27 +2,7 @@ import AVKit
 import PhotosUI
 import QuickLook
 import SwiftUI
-private struct PCStudioVideoCatalog: Decodable {
-    struct Mode: Decodable, Identifiable {
-        let id, title: String
-        let photos: Int
-        let ready: Bool
-        let missing: [String]
-    }
-    let modes: [Mode]
-    let lastJob, message: String?
-}
 
-private struct PCStudioVideoJob: Decodable {
-    enum State: String, Decodable { case working, ready, failed }
-    let id, mode: String
-    let state: State
-}
-
-private struct PCStudioVideoInput: Encodable {
-    let id, mode, prompt: String
-    let photos: [Data]
-}
 @MainActor private struct PCStudioDeleteControls: View {
     let name: String
     let hasLocal: Bool
@@ -47,6 +27,7 @@ private struct PCStudioVideoInput: Encodable {
 @MainActor struct PCVideoGenerationView: View {
     let api: LiveAPI?
     let initialPrompt: String
+    var showsVeoLink = true
     @Environment(\.scenePhase) private var scenePhase
     @State private var prompt = ""
     @State private var selected = ""
@@ -85,19 +66,21 @@ private struct PCStudioVideoInput: Encodable {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: FadedSpacing.m) {
-                NavigationLink { VeoCloudVideo(api: api, initialPrompt: prompt) } label: {
-                    FadedCard(accent: FadedBrand.pc) {
-                        HStack(spacing: 12) {
-                            ComposioLogo(slug: "veo")
-                            VStack(alignment: .leading) {
-                                Text("Veo · Composio").font(.headline)
-                                FadedDetailText("Video over internet · Kan bruges med PC’en slukket")
+                if showsVeoLink {
+                    NavigationLink { VeoCloudVideo(api: api, initialPrompt: prompt) } label: {
+                        FadedCard(accent: FadedBrand.pc) {
+                            HStack(spacing: 12) {
+                                ComposioLogo(slug: "veo")
+                                VStack(alignment: .leading) {
+                                    Text("Veo · Composio").font(.headline)
+                                    FadedDetailText("Vis Googles tilgængelige modeller og tidligere job")
+                                }
+                                Spacer()
+                                Image(systemName: "chevron.right")
                             }
-                            Spacer()
-                            Image(systemName: "chevron.right")
                         }
-                    }
-                }.buttonStyle(.plain)
+                    }.buttonStyle(.plain)
+                }
                 if api == nil {
                     FadedEmptyState(icon: "desktopcomputer", title: "Forbind til din PC",
                                     detail: "Åbn Forbindelser, og par din iPhone med FadedAI på PC’en.")

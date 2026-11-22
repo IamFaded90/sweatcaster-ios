@@ -90,18 +90,7 @@ extension CastAppModel {
     private func startPCRelay(_ video: VideoCandidate, url: URL, id: UUID, position: Double) {
         Task { @MainActor in
             do {
-                let page = URL(string: video.pageURL)
-                let relayURL: URL
-                if let pcRelayWithContext {
-                    let context = await browser.relayPageContext(for: url, page: page)
-                    guard attemptID == id else { return }
-                    relayURL = try await pcRelayWithContext(url, context.page, context.userAgent)
-                } else if let pcRelay {
-                    relayURL = try await pcRelay(url, page)
-                } else {
-                    recoverCast(id)
-                    return
-                }
+                let relayURL = try await preparePCRelay(video, source: url) { self.attemptID == id }
                 guard attemptID == id, let session = GCKCastContext.sharedInstance().sessionManager.currentCastSession else { return }
                 let isHLS = video.isHLSMaster == true || video.mime.localizedCaseInsensitiveContains("mpegurl")
                     || url.pathExtension.lowercased() == "m3u8"
@@ -123,8 +112,20 @@ extension CastAppModel {
         }
     }
 
-    func load(_ video: VideoCandidate, from mediaURL: URL, on session: GCKCastSession, hlsFormats: HLSFormats?, initialPosition: Double = 0) {
-        if session.currentDeviceVolume < 0.01 {
+    func preparePCRelay(_ video: VideoCandidate, source: URL, current: () -> Bool) async throws -> URL {
+        let page = URL(string: video.pageURL)
+        if let pcRelayWithContext {
+            let context = await browser.relayPageContext(for: source, page: page)
+            guard current() else { throw CancellationError() }
+            return try await pcRelayWithContext(source, context.page, context.userAgent)
+        }
+        guard let pcRelay, current() else { throw URLError(.notConnectedToInternet) }
+        return try await pcRelay(source, page)
+    }
+
+    func load(_ video: VideoCandidate, from mediaURL: URL, on session: GCKCastSession, hlsFormats: HLSFormats?,
+              initialPosition: Double = 0, autoplay: Bool = true, keepVolume: Bool = false) {
+        if !keepVolume, session.currentDeviceVolume < 0.01 {
             _ = session.setDeviceVolume(0.5)
             receiverVolume = 0.5
             status = "Chromecast var lydløs — skruer lydstyrken op til 50 %."
@@ -176,7 +177,7 @@ extension CastAppModel {
         addDiagnostic(initialPosition > 0 ? "Genoptager fra \(initialPosition.clockString)." : "Starter fra begyndelsen.")
         let id = attemptID
         loadStarted = Date()
-        let request = client.loadMedia(mediaInformation, autoplay: true, playPosition: initialPosition)
+        let request = client.loadMedia(mediaInformation, autoplay: autoplay, playPosition: initialPosition)
         let delegate = CastRequestStatus()
         loadDelegate = delegate
         delegate.onComplete = { [weak self] in
