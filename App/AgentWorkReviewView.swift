@@ -6,6 +6,7 @@ import SwiftUI
     let storage: AgentWorkspace
     let jobID: UUID
     var resume: ((UUID) -> Void)?
+    var useFile: ((AgentWorkspace.File) -> Void)? = nil
     @State private var snapshot = AgentWorkspace.Snapshot()
     @State private var working = false
     @State private var operation: Task<Void, Never>?
@@ -29,6 +30,9 @@ import SwiftUI
                     else if job.inputFileID != nil { Text("Denne ældre opgave har ingen gemt kopi af den anvendte filversion. Den aktuelle fil er ikke bevis for det oprindelige input.").foregroundStyle(.secondary) }
                     else { Text("Opgavens tekst er inputkilden.").foregroundStyle(.secondary) }
                     if let input = job.localInput { DisclosureGroup("Kodeværktøjets faktiske input") { Text(input).font(.system(.footnote, design: .monospaced)).textSelection(.enabled) } }
+                    ForEach(job.localFiles ?? []) { file in
+                        DisclosureGroup(file.name) { Text(file.text).textSelection(.enabled) }
+                    }
                     if let code = job.localCode { DisclosureGroup("Koden der blev kørt") { Text(code).font(.system(.footnote, design: .monospaced)).textSelection(.enabled) } }
                     if let id = job.inputFileID, let current = snapshot.files.first(where: { $0.id == id }) { Text("Valgt fil-ID: \(id.uuidString) · aktuelt navn: \(current.name)").font(.caption) }
                 }
@@ -73,7 +77,7 @@ import SwiftUI
                 if job.state != .completed && job.state != .cancelled {
                     Section("Fortsæt arbejdet") {
                         if job.kind == .localCode, let code = job.localCode {
-                            NavigationLink("Åbn script og input igen") { AgentLocalCodeView(bot: bot, model: model, initial: job.prompt, initialRecipe: .init(name: "Lokalt værktøj", code: code), initialInput: job.localInput, initialJob: job.id) }
+                            NavigationLink("Åbn script og input igen") { AgentLocalCodeView(bot: bot, model: model, initial: job.prompt, initialRecipe: .init(name: String(job.prompt.dropFirst("Lokal kode: ".count)), code: code), initialInput: job.localInput, initialJob: job.id, linux: job.runsLinux == true, initialFiles: job.localFiles ?? [], onResult: useFile) }
                         } else if job.kind != .shortcut, let resume {
                             Button(job.submitted ? "Kontrollér den eksisterende PC-opgave" : "Fortsæt den gemte opgave", systemImage: "arrow.clockwise") { resume(job.id); dismiss() }.frame(minHeight: 44).disabled(working)
                         } else { Text("Genveje genstartes fra arbejdsrummet efter gennemgang af deres kvittering.").font(.caption) }

@@ -11,7 +11,9 @@ import WebKit
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready = true }
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { ready = false; web.loadHTMLString(LocalCode.page, baseURL: URL(string: "https://fadedai.invalid")) }
-    func stop() { web.evaluateJavaScript("window.cancelRun && window.cancelRun()", completionHandler: nil) }
+    func stop() {
+        web.evaluateJavaScript("window.cancelRun?.(); window.cancelLinux?.()", completionHandler: nil)
+    }
     func execute(_ recipe: LocalCode.Recipe, input: String) async throws -> String {
         guard ready, recipe.code.utf8.count <= 8_000, input.utf8.count <= 160_000 else { throw LocalCode.Failure.invalid }
         return try await withTaskCancellationHandler {

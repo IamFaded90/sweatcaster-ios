@@ -25,6 +25,9 @@ enum AgentWorkReview {
         var value = "Opgave: " + job.prompt
         if let saved = job.inputSnapshot { value += "\nGemte inputkilder:\n" + saved }
         if let input = job.localInput { value += "\nKodeværktøjets input:\n" + input }
+        for (i, file) in (job.localFiles ?? []).enumerated() {
+            value += "\nfile-\(i + 1).txt · \(file.name)\n" + file.text
+        }
         if let code = job.localCode { value += "\nKørt kode:\n" + code }
         return value
     }

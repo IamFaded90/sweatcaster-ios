@@ -105,7 +105,7 @@ import SwiftUI
                     refresh(); if let pendingChat { chat = pendingChat; self.pendingChat = nil }
                 }) { bot in
                     AgentWorkspaceView(bot: bot, api: api,
-                        model: UserDefaults.standard.string(forKey: PhoneModels.agentModelKey(bot.id)) ?? "apple", useFile: { document in
+                        model: PhoneModels.readyTextModel(for: bot.id), useFile: { document in
                             attachment = .init(document: document, onUse: { attachment = nil })
                             pendingChat = bot; workspace = nil
                         })

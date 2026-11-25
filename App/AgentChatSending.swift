@@ -89,6 +89,9 @@ extension AgentPhoneChat {
         if running == nil, keepHistory, nextDocument == nil, !asCard, !useWeb, AgentMemory.command(message) {
             composerFocused = false; interactiveTool = .memory([]); return
         }
+        if running == nil, keepHistory, nextDocument == nil, !asCard, !useWeb, let query = LocalCode.linuxCommand(message) {
+            composerFocused = false; interactiveTool = .linux(query); return
+        }
         if running == nil, keepHistory, nextDocument == nil, !asCard, !useWeb, let query = LocalCode.command(message) {
             composerFocused = false; interactiveTool = .localCode(query); return
         }

@@ -35,6 +35,19 @@ final class AgentWorkspaceTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         try test(AgentWorkspace(botID: UUID(), root: root))
     }
+    func testHandingOffCodeResultUsesSavedFileEvenAfterRepeatedCompletion() throws {
+        try withStore { store in
+            let job = try store.enqueue("Læg beløb sammen", kind: .localCode)
+            let saved = try XCTUnwrap(store.complete(job.id, text: "42", name: "Sum.txt"))
+            let repeated = try store.complete(job.id, text: "0", name: "Forkert.txt")
+            XCTAssertEqual(saved.text, "42")
+            XCTAssertEqual(repeated, saved)
+            XCTAssertEqual(try store.load().files, [saved])
+            let stopped = try store.enqueue("Ny beregning", kind: .localCode)
+            try store.update(stopped.id) { $0.state = .cancelled }
+            XCTAssertNil(try store.complete(stopped.id, text: "For sent", name: "Svar.txt"))
+        }
+    }
     func testAgentsNeverShareFilesOrJobs() throws {
         try withStore { store in
             _ = try store.addFile(name: "../../note.txt", text: "Kun Adam")
@@ -112,6 +125,25 @@ final class AgentWorkspaceTests: XCTestCase {
         XCTAssertNotNil(AgentWorkspace.command("vis dine filer"))
         XCTAssertNil(AgentWorkspace.command("Hvad er et dokument?"))
         XCTAssertNil(AgentWorkspace.command("lav et dokument: "))
+    }
+    func testLinuxSourcesSurviveRestartAndRetryAndKeepCompletedFile() throws {
+        try withStore { store in
+            let source = AgentWorkspace.CodeFile(id: UUID(), name: "../andet navn", text: "æbler")
+            let id = try store.beginCode(resuming: nil, name: "Frugt", code: "cat file-1.txt", input: "", linux: true, files: [source])
+            XCTAssertThrowsError(try store.beginCode(resuming: id, name: "Samtidig", code: "true", input: "", linux: true, files: []))
+            try store.recover()
+            let saved = try XCTUnwrap(store.load().jobs.first)
+            XCTAssertEqual(saved.state, .paused)
+            XCTAssertEqual(saved.localFiles, [source])
+            XCTAssertTrue(AgentWorkReview.input(saved).contains(source.text))
+            XCTAssertThrowsError(try store.beginCode(resuming: id, name: "Skift", code: "true", input: "", linux: false, files: []))
+            XCTAssertEqual(try store.beginCode(resuming: id, name: "Nyt navn", code: "cat", input: "pærer", linux: true, files: []), id)
+            _ = try store.complete(id, text: "pærer", name: "Frugt.txt")
+            XCTAssertNotEqual(try store.beginCode(resuming: id, name: "Frugt", code: "cat", input: "", linux: true, files: []), id)
+            XCTAssertThrowsError(try store.beginCode(resuming: nil, name: "Stor", code: "cat", input: String(repeating: "ø", count: 80000), linux: true, files: [source]))
+            XCTAssertEqual(try store.load().jobs.count, 2)
+            XCTAssertEqual(try store.load().files.first?.text, "pærer")
+        }
     }
     func testFileContextFitsPCByteLimitAndCannotBorrowAnotherAgentsFile() throws {
         let text = String(repeating: "🇩🇰 Æble ", count: 2_000)

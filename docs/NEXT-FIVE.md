@@ -1,19 +1,23 @@
 # FadedAI · De næste fem oplevelser
 
 Godkendt 24. november 2026. Arbejdes igennem i denne rækkefølge.
+Alle aftalte kodepunkter skal være færdige, før den samlede fejlgennemgang
+og de lokale test køres. Først når de fundne fejl er rettet og prøvet igen,
+må et push starte et IPA-build. En fejl i et tidligere GitHub-build ændrer
+ikke rækkefølgen. Brugeren følger selv kørslen på GitHub.
 Nedenstående tidsstemplede noter er historiske. Build 94 blev startet efter
 kodegennemgangen og fejlede under Apple-kompilering; rettelserne og den nye
 faktiske PC-prøve er beskrevet i starten af SONG-STUDIO.md. En efterfølgende
 Apple-kompilering og de fysiske iPhone-/TV-prøver er stadig nødvendige.
 
-1. **I gang:** Egne sange, favorit som inspiration, remix fra lydfil og
+1. **Kodet, afventer lytteprøve på iPhone.** Egne sange, favorit som inspiration, remix fra lydfil og
    særskilt prøve med brugerens egen optagede stemme. Apple Personlig stemme
    er en oplæsningsstemme, ikke en dokumenteret eksportérbar sangmodel.
    Kræver også ægte lokal generation på iPhone med PC’en slukket.
    Korte genreønsker udvides med musikdetaljer, som kan ses og slås fra.
    ACE-Step 1.5 er beholdt, også som native 2B-kandidat. PC har lavet rigtig
-   sang og remix. iPhone-koden og modelhentning er tilføjet, men Apple-build,
-   enhedsprøve og egen sangstemme mangler. Se SONG-STUDIO.md.
+   sang og remix. iPhone-vejen har modelhentning og valg af egen stemmeoptagelse.
+   Reel lyd, lighed og RAM skal måles på telefonen. Se SONG-STUDIO.md.
 2. **Kodet og lokalt kontrolleret:** Foto med markering, billedmodel/OCR-skelnen,
    netopslag fra telefon eller PC, mulige produktfund, Product/Offer-priser fra
    forhandleren, sammenligning pr. valuta og gemte favoritter pr. agent.
@@ -165,7 +169,7 @@ ikke udført af PC-prøver. Ingen nye builds/push startes automatisk.
 | C3 | Agentbrowser på iPhone, Gepetto-adapter og faktisk resultatkontrol | Kodet med fastlåst kompatibel Gepetto, eksisterende telefonmodeller, pause/overtag/stop, særskilt kontrol og kilde. 74 lokale logikprøver og projektkoblingen består. Apple-kompilering og fuldt WKWebView-/modelforløb afventer iPhone. Se AGENT-BROWSER.md. |
 | C4 | Egne lokale stemmer fra optagelse, ChatterboxCoreML og individuelle valg | Kodet med særskilt modelhentning, mikrofon/lydfil, prøvestemme, individuelle valg og eksisterende afspillere. Swift 6.2.1 afhængighedsopløsning og 77 lokale Swift-logikprøver bestået. Dansk kvalitet/lighed/RAM og Apple-kompilering afventer fysisk prøve. Se CLONED-VOICES.md. |
 | C5 | Sammenhængende native telefonværktøjer og importérbare Skills, PhoneClaw-inspiration | Kodet: native kontaktopslag, valgt kilde til næste opgave, agentafgrænsning/udløb, SKILL.md-import/aktivering/relevans. Kalender/Påmindelser beholdt. 80 lokale logikprøver bestået; native kontakter/tilladelser afventer iPhone. Se PHONE-SKILLS.md. |
-| C6 | Mere kapabelt lokalt agentarbejdsrum, afgrænset OpenMinis/iSH-integration | Eksisterende arbejdsrum beholdt og udbygget med reel lokal kodekørsel/filresultater/genoptagelse. 82 logikprøver, syv Worker-prøver samt faktisk Chromium-beregning/CSP/timeout/genopretning bestået. Fuld iSH/Alpine er ikke integreret; native iPhone-host afventer Apple-prøve. Se LOCAL-CODE.md. |
+| C6 | Agentens lokale computer | JavaScript og valgfri Linux med BusyBox og Lua. Valgte filer, gemt resultat, Stop og genoptagelse pr. agent. Seks browserprøver kørte den faktiske Linux-motor på PC’en. WebKit og hastighed afventer iPhone. Se LOCAL-CODE.md. |
 | C7 | Udbyg eksisterende Wax til almindelig, kildebundet agenthukommelse | Kodet: egne noter/gemte brugerbeskeder, kildekopier, modeluafhængighed, valg/sletning og separat vedvarende Wax. 84 logikprøver og ni rigtige Wax-prøver bestået inkl. manglende indeks og privat oprydning. Fælles pakkeversioner opløst. Native chat/filbeskyttelse afventer iPhone. Se AGENT-MEMORY.md. |
 | C8 | Lokalt dokumentbibliotek og relevante RAG-dele fra Railtracks | Kodet: JSON/CSV-loadere, række-/stikilder, lokal søgning på tværs af filer. 88 portable logikprøver består; native PDF/OCR og to native kildeprøver afventer Apple. Eksisterende læser/embeddings beholdt. Se DOCUMENT-LIBRARY.md. |
 | C9 | Tekst/foto/lyd til gennemgåelige fakta, noter og opfølgning, Memex-arbejdsgang | Kodet i hjem/chat/deling: citatkontrollerede forslag, danske optagelser, foto-OCR, notehukommelse og native handlingsgennemgang. 92 lokale logikprøver består. Native model-/lyd-/EventKit-flow afventer iPhone. Se CAPTURE-AND-FOLLOWUP.md. |

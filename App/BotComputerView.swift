@@ -26,6 +26,9 @@ import UniformTypeIdentifiers
     @State var showWebSearch = false
     @State var showEverydayTools = false
     @State var showMailbox = false
+    @State var showPhoneWorkspace = false
+    @State var pendingWorkspaceDocument: AgentDocument?
+    @State var chatDocument: AgentDocument?
     @State var taskContext: String?
     @State var phoneKind: BotPhoneActionKind?
     @State var webSearch = false
@@ -91,6 +94,20 @@ import UniformTypeIdentifiers
         }
         .onDisappear { store.leaveDesktop() }
         .fileImporter(isPresented: $importFile, allowedContentTypes: [.plainText], onCompletion: importText)
+        .sheet(isPresented: $showPhoneWorkspace, onDismiss: {
+            chatDocument = pendingWorkspaceDocument
+            pendingWorkspaceDocument = nil
+        }) {
+            AgentWorkspaceView(bot: bot, api: api, model: PhoneModels.readyTextModel(for: bot.id),
+                              initialPrompt: prompt) { document in
+                pendingWorkspaceDocument = document
+                showPhoneWorkspace = false
+            }
+        }
+        .sheet(item: $chatDocument) { document in
+            AgentPhoneChat(bot: bot, api: api, startsOnPhone: true,
+                           sharedAttachment: .init(document: document, onUse: {}))
+        }
         .sheet(item: $openedFile) { file in
             if let client { BotComputerFileView(file: file, client: client) }
         }
@@ -248,11 +265,15 @@ import UniformTypeIdentifiers
                     Text(status.status.title).font(.subheadline.weight(.semibold))
                     if let message = status.message { Text(message).foregroundStyle(palette.secondary) }
                 } else if client == nil {
-                    Text("Par din iPhone med FadedAI på PC’en.").foregroundStyle(palette.secondary)
+                    Text("PC’en er ikke tilsluttet. Du kan arbejde videre på din iPhone.").foregroundStyle(palette.secondary)
                 } else if store.connectionError == nil {
                     ProgressView("Tjekker PC’en…")
                 }
                 if let message = store.connectionError { Text(message).foregroundStyle(palette.secondary) }
+                Button("Åbn arbejdsrum på iPhone", systemImage: "iphone") {
+                    showPhoneWorkspace = true
+                }
+                .frame(minHeight: 44)
                 if client == nil || store.connectionError != nil || store.status?.status == .unavailable {
                     NavigationLink {
                         AgentPhoneChat(bot: bot)

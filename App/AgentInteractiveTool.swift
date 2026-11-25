@@ -13,6 +13,7 @@ enum AgentInteractiveTool: Identifiable {
     case skills
     case contacts(String)
     case localCode(String)
+    case linux(String)
     case memory([UUID])
     case capture
     case audioJournal
@@ -50,6 +51,7 @@ enum AgentInteractiveTool: Identifiable {
         case .skills: return "agent-skills"
         case .contacts: return "agent-contacts"
         case .localCode: return "local-code"
+        case .linux: return "local-linux"
         case .memory: return "agent-memory"
         case .capture: return "capture-review"
         case .audioJournal: return "audio-journal"

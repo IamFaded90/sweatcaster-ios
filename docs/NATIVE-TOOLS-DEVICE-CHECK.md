@@ -19,7 +19,9 @@ ikke prøvet på iPhone i denne omgang. Der er ikke startet build eller push.
    kontaktadgang og fjern kilden igen. En Skill giver ikke nye iOS-rettigheder.
 6. **Lokalt arbejdsrum:** Lav et lille værktøj, fx sammenlægning af en JSON-liste.
    Gennemgå koden, kør, afbryd en uendelig løkke og kør en ny prøve bagefter.
-   Åbn det gemte resultat. Dette er afgrænset JavaScript, ikke fuld iSH/Linux.
+   Åbn det gemte resultat. Skriv derefter “Åbn terminalen” til agenten, og hent
+   Linux-pakken. Slå nettet fra og kør den viste optælling. Tjek, at æble
+   forekommer to gange og pære én gang. Brug resultatet i chatten.
 7. **Hukommelse:** Gem en egen besked fra dens menu. Spørg om samme emne,
    åbn kilderne, skift model og prøv igen. Slet/afbryd hukommelse og kontrollér,
    at glemte kilder ikke bruges. Privat sessionshukommelse har fortsat eget liv.

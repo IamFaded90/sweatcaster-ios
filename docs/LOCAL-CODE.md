@@ -1,5 +1,31 @@
 # Lokal kode i agentens arbejdsrum
 
+## Linux på telefonen
+
+Skriv “Åbn terminalen” i agentchatten, eller vælg **Arbejd i Linux på iPhone**
+i agentens arbejdsrum. Hent de 12,6 MB én gang. Hver kørsel starter en ny
+Buildroot Linux med BusyBox og Lua 5.4. Kør det viste eksempel eller beskriv
+opgaven, og lad din lokale chatmodel skrive scriptet.
+
+Hovedteksten er tilgængelig som standardinput og som `input.txt`. Op til fem
+ekstra valgte tekstfiler hedder `file-1.txt` til `file-5.txt`. I `files.json`
+står de oprindelige navne. Standardoutput gemmes som en ny fil hos agenten.
+Script og kopier af de valgte input følger opgaven, også hvis originalerne
+senere ændres. Øvrige filer i Linux slettes, når kørslen afsluttes.
+
+Pakken hentes fra [v86](https://github.com/copy/v86), med firmware fra en
+fast revision og udgiverens Buildroot-image. Appen kontrollerer fem SHA-256-
+summer ved installation og før start. Den isolerede Worker kan stoppes under
+opstart eller under en kommando. Telefonens almindelige agentbrowser håndterer
+webopgaver. XFCE-skrivebordet og Windows-programmerne kræver den parrede PC.
+
+De seks offline-browserprøver dækker Unix-værktøjer og Lua, exitkode og stderr,
+en for stor resultatfil, timeout, Stop og behandling af flere kildefiler efter
+en afbrydelse. Enhedsprøven skal kontrollere opstart, kørsel og filoverførsel
+til chatten i iOS WebKit.
+
+## JavaScript
+
 Arbejdsrummet bevares. “Lav et lokalt værktøj” åbner en rigtig JavaScript-motor
 på iPhone til tekst, JSON, CSV og beregninger. Den valgte telefonmodel kan skrive
 koden; brugeren kan gennemgå/rette den og køre den på en kopi af valgt input.

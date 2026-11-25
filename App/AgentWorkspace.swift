@@ -10,6 +10,11 @@ struct AgentWorkspace {
         var previous: [String] = []
     }
     enum Kind: String, Codable, CaseIterable { case document, research, computer, shortcut, localCode }
+    struct CodeFile: Codable, Equatable, Identifiable {
+        let id: UUID
+        let name: String
+        let text: String
+    }
     enum State: String, Codable {
         case queued, running, paused, waitingForPC, checking, completed, failed, cancelled
         var title: String {
@@ -41,6 +46,8 @@ struct AgentWorkspace {
         var shortcutName: String?
         var shortcutInput: String?
         var localCode: String?
+        var runsLinux: Bool?
+        var localFiles: [CodeFile]?
         var localInput: String?
         var inputSnapshot: String?
         var review: AgentWorkReview.Report?
@@ -132,9 +139,34 @@ struct AgentWorkspace {
         }
     }
 
-    /// Output and completion commit together; a repeated receipt cannot create a second file.
-    func complete(_ id: UUID, text: String, name: String) throws {
+    /// Persist the complete input before execution so a stopped job can be reopened offline.
+    func beginCode(resuming id: UUID?, name: String, code: String, input: String,
+                   linux: Bool, files: [CodeFile]) throws -> UUID {
+        guard !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, name.count <= 100,
+              !code.isEmpty, code.utf8.count <= 8_000, files.count <= 5,
+              Set(files.map(\.id)).count == files.count, files.isEmpty || linux,
+              files.reduce(input.utf8.count, { $0 + $1.text.utf8.count }) <= 160_000 else { throw Failure.invalid }
+        var result = UUID()
         try edit { snapshot in
+            var job = Job(id: result, kind: .localCode, prompt: "Lokal kode: " + name, created: .now)
+            if let id, let index = snapshot.jobs.firstIndex(where: { $0.id == id }) {
+                let old = snapshot.jobs[index]
+                guard old.kind == .localCode, (old.runsLinux == true) == linux, old.state != .running else { throw Failure.invalid }
+                if old.state != .completed && old.state != .cancelled {
+                    job = Job(id: id, kind: .localCode, prompt: job.prompt, created: old.created)
+                    snapshot.jobs.remove(at: index)
+                }
+            }
+            job.state = .running; job.localCode = code; job.localInput = input; job.runsLinux = linux
+            job.localFiles = files.isEmpty ? nil : files
+            snapshot.jobs.append(job); result = job.id
+        }
+        return result
+    }
+
+    /// Output and completion commit together; a repeated receipt cannot create a second file.
+    @discardableResult func complete(_ id: UUID, text: String, name: String) throws -> File? {
+        let snapshot = try edit { snapshot in
             guard let i = snapshot.jobs.firstIndex(where: { $0.id == id }) else { throw Failure.missing }
             guard snapshot.jobs[i].state != .completed, snapshot.jobs[i].state != .cancelled else { return }
             let file = File(id: id, name: String(name.prefix(160)), text: text, updated: .now)
@@ -145,6 +177,9 @@ struct AgentWorkspace {
             snapshot.jobs[i].result = "Resultatet er gemt i arbejdsrummet."
             snapshot.jobs[i].review = nil
         }
+        guard let finished = snapshot.jobs.first(where: { $0.id == id && $0.state == .completed }),
+              let fileID = finished.fileID else { return nil }
+        return snapshot.files.first { $0.id == fileID }
     }
 
     func recover() throws {

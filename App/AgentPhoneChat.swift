@@ -249,8 +249,16 @@ import UIKit
         case .audioJournal: AudioJournalView(bot: bot, model: selectedModel)
         case .capture: CaptureReviewView(bot: bot, model: selectedModel) { receipt in addAgentAction("Fang og følg op", kind: .workflow("Kilde og opfølgning"), receipt: receipt, source: "iPhone") }
         case .memory(let sources): AgentMemoryView(bot: bot, highlighted: sources)
+        case .linux(let query):
+            AgentLocalCodeView(bot: bot, model: selectedModel, initial: query, linux: true) { file in
+                addAgentAction("Linux", kind: .workflow("Linux på iPhone"),
+                               receipt: file.name + "\n\n" + String(file.text.prefix(6_000)), source: "iPhone")
+            }
         case .localCode(let query):
-            AgentLocalCodeView(bot: bot, model: selectedModel, initial: query) { receipt in addAgentAction("Lokal kode", kind: .workflow("Lokalt værktøj"), receipt: receipt, source: "iPhone") }
+            AgentLocalCodeView(bot: bot, model: selectedModel, initial: query) { file in
+                addAgentAction("Lokal kode", kind: .workflow("Lokalt værktøj"),
+                               receipt: "Lokal kodekørsel · \(file.name)\n\n" + String(file.text.prefix(6_000)), source: "iPhone")
+            }
         case .skills:
             AgentSkillsView(bot: bot) { receipt in addAgentAction("Valgt kontakt", kind: .workflow("Telefonværktøjer"), receipt: receipt, source: "iPhone") }
         case .contacts(let query):

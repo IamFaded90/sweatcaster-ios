@@ -33,6 +33,14 @@ enum LocalCode {
         for prefix in ["lav et lokalt værktøj:", "lav lokal kode:", "kør lokal kode:"] where clean.lowercased().hasPrefix(prefix) { return String(clean.dropFirst(prefix.count)).trimmingCharacters(in: .whitespaces) }
         return nil
     }
+    static func linuxCommand(_ text: String) -> String? {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ["åbn linux", "åbn terminalen"].contains(clean.lowercased()) { return "" }
+        for prefix in ["kør linux:", "brug terminalen:", "kør i terminalen:"] where clean.lowercased().hasPrefix(prefix) {
+            return String(clean.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return nil
+    }
     static let worker = #"""
     self.onmessage = async (event) => {
       try {

@@ -14,6 +14,14 @@ enum OfflineAgentModels {
 }
 
 extension PhoneModels {
+    @MainActor static func readyTextModel(for agentID: UUID) -> String {
+        let defaults = UserDefaults.standard
+        for key in [agentModelKey(agentID), selectionKey] {
+            if let id = defaults.string(forKey: key), !id.isEmpty, isReady(id) { return id }
+        }
+        return textOptions.first { isReady($0.id) }?.id ?? ""
+    }
+
     @MainActor static func preferredVisionModel(preferred: String? = nil) -> String? {
         OfflineAgentPolicy.visionModel(preferred: preferred, candidates: readyVisionModelIDs.map {
             .init(id: $0, requiredMiB: minimumMemory(for: $0))

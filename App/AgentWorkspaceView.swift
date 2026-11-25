@@ -39,7 +39,8 @@ import UniformTypeIdentifiers
                 }
                 if let notice = runner.notice { Section { Text(notice).foregroundStyle(.orange) } }
                 Section("Ny opgave") {
-                    NavigationLink { AgentLocalCodeView(bot: bot, model: model) } label: { Label("Lav eller kør et lokalt værktøj", systemImage: "curlybraces") }
+                    NavigationLink { AgentLocalCodeView(bot: bot, model: model, onResult: openFileInChat) } label: { Label("Lav eller kør et lokalt værktøj", systemImage: "curlybraces") }
+                    NavigationLink { AgentLocalCodeView(bot: bot, model: model, linux: true, onResult: openFileInChat) } label: { Label("Arbejd i Linux på iPhone", systemImage: "terminal") }
                     Picker("Arbejd med", selection: $kind) {
                         Text("Skriv dokument · iPhone").tag(AgentWorkspace.Kind.document)
                         Text("Undersøg og gem · internet").tag(AgentWorkspace.Kind.research)
@@ -55,6 +56,9 @@ import UniformTypeIdentifiers
                         }
                     }
                     TextField("Hvad skal \(bot.name) lave?", text: $prompt, axis: .vertical).lineLimit(2...6)
+                    if prompt.count > 1_200 {
+                        Text("Forkort opgaven til 1.200 tegn. Den fylder \(prompt.count) tegn.").font(.caption)
+                    }
                     Button("Start opgaven", systemImage: "play.fill") { start() }
                         .disabled(prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || prompt.count > 1_200 || runner.active != nil)
                     Text("Du kan også skrive ‘lav et dokument: …’ eller ‘undersøg og gem: …’ i chatten.").font(.caption).foregroundStyle(.secondary)
@@ -67,11 +71,7 @@ import UniformTypeIdentifiers
                     }
                     ForEach(runner.snapshot.files.reversed()) { file in
                         NavigationLink {
-                            AgentWorkspaceFileView(file: file, storage: runner.storage) { updated in
-                                useFile(AgentDocument(id: updated.id, name: updated.name, model: nil,
-                                    passages: [.init(page: nil, text: updated.text, vector: nil)]))
-                                dismiss()
-                            }
+                            AgentWorkspaceFileView(file: file, storage: runner.storage, use: openFileInChat)
                         } label: { Label(file.name, systemImage: "doc.text") }
                         .swipeActions { Button("Slet", role: .destructive) {
                             runner.change { try runner.storage.edit { $0.files.removeAll { $0.id == file.id } } }
@@ -134,7 +134,7 @@ import UniformTypeIdentifiers
             ForEach(runner.snapshot.jobs.reversed()) { job in
                 DisclosureGroup {
                     NavigationLink("Gennemgå kilder, status og resultat") {
-                        AgentWorkReviewView(bot: bot, model: model, storage: runner.storage, jobID: job.id, resume: { id in runner.run(id, bot: bot, api: api, model: model) })
+                        AgentWorkReviewView(bot: bot, model: model, storage: runner.storage, jobID: job.id, resume: { id in runner.run(id, bot: bot, api: api, model: model) }, useFile: openFileInChat)
                     }
                     Text(job.result.isEmpty ? "Opgaven er gemt." : job.result).textSelection(.enabled)
                     if runner.active == job.id { Button("Pause", systemImage: "pause") { runner.pause() } }
@@ -148,7 +148,7 @@ import UniformTypeIdentifiers
                     }
                     if job.kind == .localCode, let code = job.localCode {
                         NavigationLink("Åbn det lokale værktøj") {
-                            AgentLocalCodeView(bot: bot, model: model, initialRecipe: .init(name: String(job.prompt.dropFirst("Lokal kode: ".count)), code: code), initialInput: job.localInput, initialJob: job.id)
+                            AgentLocalCodeView(bot: bot, model: model, initialRecipe: .init(name: String(job.prompt.dropFirst("Lokal kode: ".count)), code: code), initialInput: job.localInput, initialJob: job.id, linux: job.runsLinux == true, initialFiles: job.localFiles ?? [], onResult: openFileInChat)
                         }
                     }
                 } label: {
@@ -190,6 +190,11 @@ import UniformTypeIdentifiers
             }
             Text("Fra chatten: ‘kør genvej: Navn | tekst’. Du ser handlingen, før den starter.").font(.caption).foregroundStyle(.secondary)
         }
+    }
+    private func openFileInChat(_ file: AgentWorkspace.File) {
+        useFile(AgentDocument(id: file.id, name: file.name, model: nil,
+                              passages: [.init(page: nil, text: file.text, vector: nil)]))
+        dismiss()
     }
     private func start() {
         runner.change {

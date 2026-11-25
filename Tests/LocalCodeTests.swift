@@ -14,6 +14,9 @@ final class LocalCodeTests: XCTestCase {
         XCTAssertThrowsError(try LocalCode.Recipe.decode(String(decoding: data, as: UTF8.self)))
         XCTAssertEqual(LocalCode.command("Lav et lokalt værktøj: læg beløb sammen"), "læg beløb sammen")
         XCTAssertNil(LocalCode.command("Forklar kode"))
+        XCTAssertEqual(LocalCode.linuxCommand("Åbn terminalen"), "")
+        XCTAssertEqual(LocalCode.linuxCommand(" KØR LINUX: Sortér æbler "), "Sortér æbler")
+        XCTAssertNil(LocalCode.linuxCommand("Hvad er Linux?"))
         XCTAssertTrue(LocalCode.page.contains("connect-src 'none'")); XCTAssertTrue(LocalCode.page.contains("worker.terminate()"))
     }
 }
