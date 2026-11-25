@@ -44,7 +44,14 @@ final class AgentWorkReviewTests: XCTestCase {
         let file = root.appendingPathComponent(store.botID.uuidString.lowercased() + ".json")
         let old = Date(timeIntervalSince1970: 1_000)
         try FileManager.default.setAttributes([.modificationDate: old], ofItemAtPath: file.path)
+        let original = try Data(contentsOf: file)
+        // URL resource values can retain metadata cached before setAttributes on Darwin.
+        func modificationDate() throws -> Date? {
+            try FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date
+        }
+        XCTAssertEqual(try modificationDate(), old)
         try store.recover()
-        XCTAssertEqual(try file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate, old)
+        XCTAssertEqual(try modificationDate(), old)
+        XCTAssertEqual(try Data(contentsOf: file), original)
     }
 }

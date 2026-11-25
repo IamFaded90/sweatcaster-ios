@@ -222,7 +222,7 @@ enum PCSpeechPassages {
         player?.pan = requestedPan
     }
 
-    private func start<Part>(parts: [Part], agentID: UUID?, pan: Float = 0, failure: String,
+    func start<Part>(parts: [Part], agentID: UUID?, pan: Float = 0, failure: String,
                              audio: @escaping @MainActor (Part) async throws -> Data) {
         guard !parts.isEmpty else { notice = "Der er ingen tekst at læse op."; return }
         let current = run

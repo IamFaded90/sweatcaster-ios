@@ -1,29 +1,36 @@
 /* Renderer for the village's unmasked, normal-blend portrait models. */
-(async function () {
+(async function startPortrait(attempt = 0) {
     const notify = state => window.webkit?.messageHandlers.cubism?.postMessage(state);
+    class GraphicsFailure extends Error {}
+    let moc, model, gl;
     try {
         const { mocData, images } = window.portraitModel;
         const bytes = Uint8Array.from(atob(mocData), value => value.charCodeAt(0));
-        let moc;
         const coreDeadline = Date.now() + 12000;
         while (!moc && Date.now() < coreDeadline) {
             try { moc = Live2DCubismCore.Moc.fromArrayBuffer(bytes.buffer); } catch (_) {}
             if (!moc) await new Promise(resolve => setTimeout(resolve, 25));
         }
         if (!moc) throw new Error("Cubism kunne ikke læse modellen");
-        const model = Live2DCubismCore.Model.fromMoc(moc);
+        model = Live2DCubismCore.Model.fromMoc(moc);
         if (!model || model.drawables.maskCounts.some(count => count !== 0) || model.offscreens?.count) {
             throw new Error("Modellen bruger et lag, denne afspiller ikke understøtter");
         }
         const canvas = document.querySelector("canvas");
-        const gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: true });
-        if (!gl) throw new Error("WebGL kunne ikke startes");
+        gl = canvas.getContext("webgl", { alpha: true, premultipliedAlpha: true });
+        if (!gl) throw new GraphicsFailure("WebGL kunne ikke startes");
         const program = gl.createProgram();
+        if (!program) throw new GraphicsFailure("WebGL-programmet kunne ikke oprettes");
         function attach(type, source) {
             const shader = gl.createShader(type);
+            if (!shader) throw new GraphicsFailure("WebGL-shaderen kunne ikke oprettes");
             gl.shaderSource(shader, source);
             gl.compileShader(shader);
-            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(shader));
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                const detail = gl.getShaderInfoLog(shader);
+                if (!detail || gl.isContextLost()) throw new GraphicsFailure("WebGL blev afbrudt under shaderstart");
+                throw new Error("Portrættets shader kunne ikke kompileres: " + detail);
+            }
             gl.attachShader(program, shader);
         }
         attach(gl.VERTEX_SHADER, `
@@ -46,22 +53,30 @@
             }
         `);
         gl.linkProgram(program);
-        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            const detail = gl.getProgramInfoLog(program);
+            if (!detail || gl.isContextLost()) throw new GraphicsFailure("WebGL blev afbrudt under programstart");
+            throw new Error("Portrættets grafikprogram kunne ikke samles: " + detail);
+        }
         gl.useProgram(program);
         gl.enable(gl.BLEND);
         gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
         const textures = await Promise.all(images.map(source => new Promise((resolve, reject) => {
             const image = new Image();
-            image.onerror = reject;
+            image.onerror = () => reject(new Error("Portrættets tekstur kunne ikke åbnes"));
             image.onload = () => {
-                const texture = gl.createTexture();
-                gl.bindTexture(gl.TEXTURE_2D, texture);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
-                resolve(texture);
+                try {
+                    const texture = gl.createTexture();
+                    if (!texture) throw new GraphicsFailure("WebGL-teksturen kunne ikke oprettes");
+                    gl.bindTexture(gl.TEXTURE_2D, texture);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+                    if (gl.isContextLost()) throw new GraphicsFailure("WebGL blev afbrudt under teksturstart");
+                    resolve(texture);
+                } catch (error) { reject(error); }
             };
             image.src = source;
         })));
@@ -114,10 +129,21 @@
             }
         };
         window.renderPortrait(1, 0);
+        if (gl.isContextLost()) throw new GraphicsFailure("WebGL blev afbrudt inden første billede");
         new ResizeObserver(() => window.renderPortrait(...lastFrame)).observe(canvas);
         canvas.addEventListener("webglcontextlost", () => notify("failed"));
         notify("ready");
     } catch (error) {
+        model?.release();
+        moc?._release();
+        delete window.renderPortrait;
+        if (error instanceof GraphicsFailure && attempt < 2) {
+            gl?.getExtension("WEBGL_lose_context")?.loseContext();
+            const canvas = document.querySelector("canvas");
+            canvas.replaceWith(canvas.cloneNode());
+            await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+            return startPortrait(attempt + 1);
+        }
         window.portraitStartupError = String(error);
         console.error(error);
         notify("failed");

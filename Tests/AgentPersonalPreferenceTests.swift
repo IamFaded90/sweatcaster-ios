@@ -160,13 +160,18 @@ final class AgentPersonalPreferenceTests: XCTestCase {
         XCTAssertEqual(AgentChatPreferences.instructions(for: UUID(), question: "Instagram", defaults: defaults), "")
     }
 
-    func testPCReceivesLatePreferencesWithinActualInstructionLimit() {
+    func testPCPreservesLatePreferencesAndKeepsHistoryWholeWithinInstructionLimit() {
         let profile = String(repeating: "x", count: 2_000) + "Brug korte svar"
         let previous = String(repeating: "🎗️abcdef", count: 300) + "Seneste sætning"
         let result = AgentReplyDriver.computerInstructions(profile, previous: previous)
         XCTAssertTrue(result.hasPrefix(profile))
-        XCTAssertTrue(result.hasSuffix("Seneste sætning"))
-        XCTAssertEqual(result.unicodeScalars.count, 3_000)
+        XCTAssertEqual(result, profile)
+        XCTAssertTrue(result.hasSuffix("Brug korte svar"))
+        XCTAssertLessThanOrEqual(result.unicodeScalars.count, 3_000)
+        let recentPair = "Dig: Hej\nAgent: Seneste sætning"
+        let withHistory = AgentReplyDriver.computerInstructions(profile, previous: recentPair)
+        XCTAssertTrue(withHistory.hasPrefix(profile))
+        XCTAssertTrue(withHistory.hasSuffix(recentPair))
         XCTAssertEqual(AgentReplyDriver.computerInstructions("Kort", previous: ""), "Kort")
     }
 }

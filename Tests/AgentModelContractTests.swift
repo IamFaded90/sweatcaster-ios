@@ -28,5 +28,10 @@ final class AgentModelContractTests: XCTestCase {
         let profile = String(repeating: "x", count: 2_990)
         XCTAssertEqual(AgentModelContract.legacyHistory(instructions: profile, previous: "mail a@example.com"), profile)
         XCTAssertTrue(AgentModelContract.legacyHistory(instructions: "rules", previous: "complete previous pair").hasSuffix("complete previous pair"))
+        let preferences = String(repeating: "x", count: 2_000) + "Brug korte svar"
+        let oversized = String(repeating: "🎗️abcdef", count: 300) + "Seneste sætning"
+        XCTAssertEqual(AgentModelContract.legacyHistory(instructions: preferences, previous: oversized), preferences)
+        let pair = "Dig: Hej\nAgent: Seneste sætning"
+        XCTAssertTrue(AgentModelContract.legacyHistory(instructions: preferences, previous: pair).hasSuffix(pair))
     }
 }

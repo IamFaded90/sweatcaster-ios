@@ -245,7 +245,7 @@ final class VillageDesignTests: XCTestCase {
         let host = UIViewController()
         let window = UIWindow(windowScene: scene)
         window.rootViewController = host
-        window.isHidden = false
+        window.makeKeyAndVisible()
         defer { window.isHidden = true }
 
         for name in ["harper", "lumi"] {
@@ -256,7 +256,7 @@ final class VillageDesignTests: XCTestCase {
             defer { view.removeFromSuperview() }
             view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
             var loaded = false
-            let deadline = Date.now.addingTimeInterval(25)
+            let deadline = Date.now.addingTimeInterval(40)
             while Date.now < deadline {
                 if let failure = try? await view.evaluateJavaScript("window.portraitStartupError ?? null") as? String {
                     XCTFail("\(name) could not start Cubism: \(failure)")
@@ -297,17 +297,19 @@ final class VillageDesignTests: XCTestCase {
     @MainActor private func checkSpokenPortrait(name: String, in view: WKWebView) async throws {
         let agent = name == "lumi" ? VillageBot.lumiID : UUID()
         let id = agent.uuidString
-        let speech = SpeechBox()
+        let speech = ChristelPlayer()
         let motion = VillageSpeechMotion.shared
-        let utterance = AVSpeechUtterance(string: "Hej. Nu læser jeg en kort tekst op. Mens jeg taler, kan du se mine øjne og min mund bevæge sig. Vi har tid til at se et blink, og derefter slutter jeg med at sige tak for i dag.")
-        utterance.voice = AVSpeechSynthesisVoice(language: "da-DK") ?? AVSpeechSynthesisVoice(language: "en-US")
-        utterance.rate = AVSpeechUtteranceDefaultSpeechRate
+        // A fixed Danish eSpeak-ng clip exercises the same decoded-audio player and
+        // metering used by downloaded voices, without depending on simulator voice downloads.
+        let clip = try XCTUnwrap(Bundle(for: VillageDesignTests.self).url(forResource: "portrait-speech",
+            withExtension: "wav", subdirectory: "Fixtures"))
+        let audio = try Data(contentsOf: clip)
         defer { speech.stop() }
-        speech.play(utterance, as: .reply(UUID()), agentID: agent)
+        speech.start(parts: [audio], agentID: agent, failure: "Fixture speech could not play.") { $0 }
 
         var sampledOpenness: Double?
         let deadline = Date().addingTimeInterval(25)
-        while Date() < deadline, speech.playback != nil {
+        while Date() < deadline, speech.loading || speech.playing {
             let now = Date()
             let mouth = motion.mouth(for: id, at: now)
             if mouth > 0.15, VillageBlink.closed(id: id, at: now), sampledOpenness == nil {
@@ -334,7 +336,8 @@ final class VillageDesignTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(20))
         }
         XCTAssertNotNil(sampledOpenness, "\(name) did not blink during a mouth pulse from actual speech")
-        XCTAssertNil(speech.playback, "\(name) did not finish speaking")
+        XCTAssertFalse(speech.loading || speech.playing, "\(name) did not finish speaking")
+        XCTAssertNil(speech.notice, "\(name) could not play the speech fixture")
         XCTAssertEqual(motion.mouth(for: id, at: .now), 0)
     }
 
