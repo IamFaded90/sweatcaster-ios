@@ -45,7 +45,8 @@ import UIKit
             let engine = AVAudioEngine(), player = AVAudioPlayerNode()
             engine.attach(player); engine.connect(player, to: engine.mainMixerNode, format: format)
             engine.mainMixerNode.outputVolume = Float(settings.volume)
-            player.scheduleBuffer(buffer, at: nil, options: [.loops])
+            // Queue the loop synchronously before starting and retaining the audio engine.
+            player.scheduleBuffer(buffer, at: nil, options: [.loops], completionHandler: nil)
             try engine.start(); player.play(); self.engine = engine; node = player
         } catch { if generation == ticket { notice = "Stemningens lyd kunne ikke startes. Dit valg er stadig gemt."; stopAll() } }
     }
