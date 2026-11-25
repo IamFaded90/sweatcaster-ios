@@ -4,7 +4,8 @@ import PackageDescription
 let package = Package(
     name: "OfflineSongRuntime",
     platforms: [.iOS("18.0"), .macOS(.v14)],
-    products: [.library(name: "OfflineSongRuntime", targets: ["OfflineSongRuntime"])],
+    // MLX and Draw Things both define metal-cpp globals. Give MLX its own Mach-O image.
+    products: [.library(name: "OfflineSongRuntime", type: .dynamic, targets: ["OfflineSongRuntime"])],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", exact: "0.31.4")
     ],

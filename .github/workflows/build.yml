@@ -72,7 +72,7 @@ jobs:
           workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
           directory = Path(sys.argv[1])
           diagnostics = re.compile(r"^(.+?\.swift):(\d+)(?::\d+)?:\s+(?:fatal )?error:\s+(.*)$")
-          summary = re.compile(r"^(?:xcodebuild: )?(?:fatal )?error:|^Undefined symbols for architecture")
+          summary = re.compile(r"^(?:(?:xcodebuild|clang(?:\+\+)?): )?(?:fatal )?error:|^Undefined symbols for architecture|^ld: ")
           secrets = re.compile(r"https?://[^/\s@]+@|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+")
           seen = set()
           for log in (directory / "FadedAI-XCTest.log", directory / "FadedAI-Device.log"):
