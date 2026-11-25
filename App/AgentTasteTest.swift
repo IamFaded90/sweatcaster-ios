@@ -129,7 +129,7 @@ import UIKit
                 where voice.language.hasPrefix("da") && namesSeen.insert(voice.name.lowercased()).inserted {
                 choices.append((voice.identifier, LocalSpeechVoice.label(voice)))
             }
-            if AgentVoiceDownload.shared.installed { choices += DownloadedAgentVoice.all.map { ($0.id, $0.label) } }
+            choices += DownloadedAgentVoice.playable.map { ($0.id, $0.label) }
             current = AgentVoiceSelection.identifier(for: bot)
             if choices.count < 2 {
                 notice = "Der skal være to forskellige danske stemmer at lytte til. Forbind PC’en med dens stemmer, eller hent en anden dansk stemme på iPhone."

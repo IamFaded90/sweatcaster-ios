@@ -6,6 +6,7 @@ struct FilmCompanionView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
     @State private var question = ""
+    @State private var showPhoneHelp = false
     @State private var result: (FilmReceiverFrame, String, [FilmCue], String?)?
     @State private var notice: String?
     @State private var job: Task<Void, Never>?
@@ -22,7 +23,11 @@ struct FilmCompanionView: View {
                         Label("På TV · \(frame.position.clockString)", systemImage: "play.tv")
                             .font(.subheadline.monospacedDigit()).foregroundStyle(Style.muted)
                     }
-                    Text("Filmvennen følger tidspunktet på TV’et. Din PC kan lytte til de sidste 45 sekunder og kigge på to billeder fra scenen.")
+                    Text("Lyt med iPhone for hjælp uden PC og uden synlige undertekster. Med din PC kan knapperne nedenfor læse de seneste replikker og billeder frem til TV’ets tidspunkt.")
+                    if model.phoneFilmHelp != nil {
+                        Button("Lyt med iPhone · uden PC", systemImage: "ear") { showPhoneHelp = true }
+                            .buttonStyle(.borderedProminent).frame(minHeight: 44)
+                    }
                     Button { ask(nil) } label: {
                         Label("Hvad blev der lige sagt?", systemImage: "captions.bubble")
                     }.buttonStyle(.bordered).disabled(job != nil)
@@ -77,6 +82,7 @@ struct FilmCompanionView: View {
                 }
             }
             .onDisappear { job?.cancel(); stopVoice() }
+            .sheet(isPresented: $showPhoneHelp) { model.phoneFilmHelp?() }
             .onChange(of: phase) { _, newPhase in
                 if newPhase != .active {
                     job?.cancel()

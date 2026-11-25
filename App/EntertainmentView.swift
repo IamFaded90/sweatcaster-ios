@@ -59,7 +59,7 @@ struct CastHomePairing {
                         onPhoneCastWake: { ChatScreenWake.hold(castWakeID, whileReplying: $0) },
                         pcRelayID: relayID, pcRelay: relay, pcRelayWithContext: relayWithContext,
                         filmAnalysis: filmAnalysis,
-                        filmSpeech: filmSpeech, content: content)
+                        filmSpeech: filmSpeech, phoneFilmHelp: { AnyView(PhoneFilmCompanionView()) }, content: content)
             .alert("Oplæsning", isPresented: Binding(get: { filmVoice.notice != nil }, set: { if !$0 { filmVoice.notice = nil } })) {
                 Button("Luk") { filmVoice.notice = nil }
             } message: { Text(filmVoice.notice ?? "") }

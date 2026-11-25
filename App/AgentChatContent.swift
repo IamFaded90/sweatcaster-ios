@@ -47,6 +47,9 @@ extension AgentPhoneChat {
                     showModels = true
                 }
                     .disabled(running != nil)
+                FadedSecondaryButton("Klar uden PC · chat, billeder og stemmer", icon: "iphone") {
+                    stopVoice(); showOfflineSetup = true
+                }.disabled(running != nil)
                 if keepHistory {
                     ComposioCloudSetup(api: api).disabled(running != nil)
                     NvidiaCloudSetup(api: api).disabled(running != nil)
@@ -62,6 +65,12 @@ extension AgentPhoneChat {
                 if let photo = sentPhotos[turn.id] { ChatPhotoPreview(data: photo) }
                 Text(turn.prompt).textSelection(.enabled)
                     .contextMenu {
+                        if keepHistory, turn.agentAction == nil, turn.imageName == nil, sentPhotos[turn.id] == nil, turn.documentSources == nil {
+                            Button("Husk det, jeg skrev", systemImage: "brain") {
+                                do { let item = try AgentMemory.Store(botID: bot.id).remember(turn.prompt, sourceTurnID: turn.id); interactiveTool = .memory([item.id]) }
+                                catch { notice = error.localizedDescription }
+                            }.disabled(running != nil)
+                        }
                         Button("Redigér besked", systemImage: "pencil") { edit(turn) }.disabled(running != nil)
                         if !turn.reply.isEmpty && sentPhotos[turn.id] == nil && turn.documentSources == nil { retryMenu(turn) }
                     }
@@ -70,6 +79,7 @@ extension AgentPhoneChat {
                 AgentChatBubble(user: false,
                                 title: [bot.name, turn.source, turn.replyModelName].compactMap { $0 }.joined(separator: " · "),
                                 pc: turn.source == "PC") {
+                    if turn.imageName != nil { generatedImage(turn) }
                     if let card = turn.replyCard {
                         Text(ChatTranscriptView.inlineText(card.title, allowsLinks: keepHistory)).font(.headline)
                         ForEach(Array(card.items.enumerated()), id: \.offset) { _, item in
@@ -113,6 +123,9 @@ extension AgentPhoneChat {
                             }
                         }
                     }
+                    if keepHistory, running == nil, turn.documentSources != nil || sentPhotos[turn.id] != nil {
+                        AgentResultActions(text: turn.reply, contextID: turn.id, botName: bot.name)
+                    }
                     if running == nil || turns.last?.id != turn.id { HStack {
                         let playing = speech.playback == .reply(turn.id) ||
                             (pcVoiceReplyID == turn.id && (kokoro.playing || kokoro.loading))
@@ -130,6 +143,9 @@ extension AgentPhoneChat {
                                 .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                         }
                     } }
+                    if keepHistory, let sources = turn.memorySources, !sources.isEmpty {
+                        Button("Hukommelse · \(sources.count) kilder", systemImage: "brain") { interactiveTool = .memory(sources) }.font(.caption).frame(minHeight: 44)
+                    }
                 }
             } else if running != nil {
                 AgentChatBubble(user: false, title: bot.name, pc: turn.source == "PC") {
@@ -143,11 +159,23 @@ extension AgentPhoneChat {
         VStack(alignment: .leading, spacing: 4) {
             if let notice { FadedDetailText(notice) }
             if running != nil { FadedThinkingIndicator(title: "\(bot.name) svarer…") }
-            if running == nil {
+            if running == nil || handsFree {
                 voiceActions
+                handsFreeStatus
+            }
+            if running == nil {
+                personalFollowUp
                 ChatPhotoPicker(photo: $attachedPhoto, loading: $loadingPhoto, onError: { notice = $0 })
                 if attachedPhoto != nil {
-                    FadedDetailText(source == .pc ? "Fotoet sendes til den parrede PC." : "Fotoet analyseres på iPhone.")
+                    if source == .pc { FadedDetailText("Fotoet sendes til den parrede PC.") }
+                    else if let id = PhoneModels.preferredVisionModel(preferred: selectedModel) {
+                        FadedDetailText("Billedanalyse på iPhone · " + PhoneModels.textModelName(id))
+                    } else {
+                        FadedDetailText(PhoneModels.readyVisionModelIDs.isEmpty
+                            ? "Billedtekst på iPhone · hent en billedmodel for at spørge om motivet."
+                            : "Billedmodellen mangler fri hukommelse lige nu.")
+                        Button("Offlineopsætning") { showOfflineSetup = true }
+                    }
                 }
                 if keepHistory && source != .composio {
                     HStack {
@@ -162,17 +190,21 @@ extension AgentPhoneChat {
                     .font(.caption)
                 }
                 HStack {
-                    if api != nil {
-                        Button(web ? "Nettet er valgt" : "Brug nettet", systemImage: "globe") {
+                    Button(web ? "Nettet er valgt" : "Brug nettet", systemImage: "globe") {
+                        if api == nil && !composioCloud.enabled { showPhoneConnections = true }
+                        else {
                             web.toggle()
                             if web { nextDocument = nil }
                         }
-                            .tint(web ? palette.cyan : palette.secondary)
                     }
+                        .tint(web ? palette.cyan : palette.secondary)
                     Button(answerAsCard ? "Kort valgt" : "Svar som kort", systemImage: "rectangle.on.rectangle") { answerAsCard.toggle() }
                         .tint(answerAsCard ? palette.cyan : palette.secondary)
                 }
                 .font(.caption)
+                if web {
+                    FadedDetailText("Bruger Wi-Fi eller mobildata. Uden PC bruges Composio og tjenestens eventuelle saldo.")
+                }
             }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField("Skriv til \(bot.name)…", text: $draft, axis: .vertical)
@@ -193,7 +225,7 @@ extension AgentPhoneChat {
                         .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                         .buttonStyle(FadedButtonStyle(kind: .primary))
                         .disabled((attachedPhoto == nil && (cleanDraft.isEmpty || cleanDraft.count > (web ? 500 : 1_200) ||
-                                  (currentModel.isEmpty && !shouldCheckGmail(cleanDraft) && chatIntent(cleanDraft) == nil &&
+                                  (currentModel.isEmpty && !hasStandaloneAgentCommand && !shouldCheckGmail(cleanDraft) && chatIntent(cleanDraft) == nil &&
                                    !canAskAboutSharedCalendar(cleanDraft) && !canAskAboutDocumentDeadline(cleanDraft)))) ||
                                   (attachedPhoto != nil && cleanDraft.count > 1_200) ||
                                   loadingPhoto || whisper.active || whisper.processing)

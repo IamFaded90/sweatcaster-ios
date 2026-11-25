@@ -351,7 +351,7 @@ extension AgentPhoneChat {
         }
     }
 
-    private func finishAgentAction(_ id: UUID, receipt: String, link: URL? = nil) {
+    func finishAgentAction(_ id: UUID, receipt: String, link: URL? = nil) {
         guard let index = turns.firstIndex(where: { $0.id == id }) else { return }
         turns[index].agentAction?.receipt = receipt
         turns[index].agentAction?.receiptLink = link
@@ -361,7 +361,7 @@ extension AgentPhoneChat {
         persistAgentAction(turns[index])
     }
 
-    private func updateAgentDraft(_ id: UUID, draft: AgentGmailReply.StoredDraft?) {
+    func updateAgentDraft(_ id: UUID, draft: AgentGmailReply.StoredDraft?) {
         guard let index = turns.firstIndex(where: { $0.id == id }), let action = turns[index].agentAction,
               action.receipt == nil, action.mailDraft != draft else { return }
         turns[index].agentAction?.mailDraft = draft
@@ -430,14 +430,19 @@ extension AgentPhoneChat {
                 AgentChatBubble(user: false, title: bot.name + " · " + action.title, pc: turn.source == "PC") {
                     if let receipt = action.receipt {
                         Text(receipt).textSelection(.enabled)
+                        if action.kind.isMailReply {
+                            AgentResultActions(text: turn.prompt, contextID: turn.id, botName: bot.name)
+                        }
                         if let link = action.receiptLink {
                             Link("Åbn samtalen i Gmail", destination: link).frame(minHeight: 44)
-                            if let api, openAgentAction == turn.id {
-                                AgentGmailThreadStatus(api: api, requestID: turn.id, automaticallyChecks: true)
-                                    .id(agentActionRefresh)
-                            } else if api != nil {
-                                Button("Tjek om der er kommet svar", systemImage: "envelope.badge") { openAgentAction = turn.id }
-                                    .frame(minHeight: 44)
+                            if (try? AgentPhoneMail.Store().load(turn.id)) == nil {
+                                if let api, openAgentAction == turn.id {
+                                    AgentGmailThreadStatus(api: api, requestID: turn.id, automaticallyChecks: true)
+                                        .id(agentActionRefresh)
+                                } else if api != nil {
+                                    Button("Tjek om der er kommet svar", systemImage: "envelope.badge") { openAgentAction = turn.id }
+                                        .frame(minHeight: 44)
+                                }
                             }
                         }
                     } else if openAgentAction == turn.id {
@@ -459,23 +464,7 @@ extension AgentPhoneChat {
         case .unitPrice(let result):
             Text(result).textSelection(.enabled)
         case .gmailReply, .bookingRequest:
-            if let api {
-                AgentGmailReply(api: api, prompt: turn.prompt, requestID: turn.id, botID: bot.id, storedDraft: action.mailDraft,
-                               onDraftChanged: { updateAgentDraft(turn.id, draft: $0) }) { address in
-                    guard let link = URL(string: address), link.scheme == "https", link.host == "mail.google.com" else {
-                        notice = "Gmail-kvitteringen kunne ikke verificeres. Tjek Sendt før du prøver igen."
-                        return
-                    }
-                    let receipt: String
-                    if case .bookingRequest = action.kind { receipt = "Forespørgslen er sendt via Gmail." }
-                    else { receipt = "Svar sendt via Gmail." }
-                    finishAgentAction(turn.id, receipt: receipt, link: link)
-                }
-                .id(api.queueTargetID)
-            } else {
-                FadedDetailText("Opgaven er gemt. Forbind PC’en for at bruge Gmail.")
-                if let draft = action.mailDraft { Text(draft.body).textSelection(.enabled) }
-            }
+            gmailReplyCard(turn, action: action)
         case .phone(let request):
             AgentPhoneActionCard(request: request, botName: bot.name, botID: bot.id) { receipt in
                 finishAgentAction(turn.id, receipt: receipt)

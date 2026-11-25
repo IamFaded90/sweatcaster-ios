@@ -47,37 +47,16 @@ struct DashboardVideoCard: View {
     }
 }
 
-private struct FadedDashboardHero: View {
-    let openAssistant: () -> Void
-    let openVillage: () -> Void
-    @Environment(\.fadedPalette) private var palette
-
-    var body: some View {
-        VStack(spacing: FadedSpacing.m) {
-            FadedWorldArtwork()
-            VStack(spacing: FadedSpacing.xs) {
-                Text("Store idéer.").foregroundStyle(palette.text)
-                Text("Dit lille univers.").foregroundStyle(FadedBrand.gradient)
-            }
-            .font(.largeTitle.weight(.semibold))
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
-            FadedPrimaryButton("Assistent og opgaver", icon: "sparkle.magnifyingglass", action: openAssistant)
-            FadedSecondaryButton("Åbn landsbyen", icon: "arrow.up.right", action: openVillage)
-        }
-        .multilineTextAlignment(.center)
-        .padding(FadedSpacing.l)
-        .frame(maxWidth: 480)
-        .frame(maxWidth: .infinity)
-        .fadedGlassSurface(radius: FadedRadius.hero)
-    }
-}
-
 extension Home {
     @ViewBuilder var header: some View {
-        FadedDashboardHero(openAssistant: { showAgentAssistant = true }, openVillage: openDashboardVillage)
-        dashboardMainActions
-        quickActions
+        FadedDashboardHero(openAssistant: { showAgentAssistant = true }, openVillage: openDashboardVillage,
+                           openEvening: { showEvening = true }, openContinue: { selectSpace(.resume) })
+        FadedSecondaryButton("Spil et mysterium i landsbyen", icon: "moon.stars") { showMystery = true }
+        FadedSecondaryButton("Skab noget med dit kreative hold", icon: "paintbrush.pointed") { showCreativeHub = true }
+        DisclosureGroup("Værktøjer og genveje") {
+            dashboardMainActions
+            quickActions
+        }
         if !model.isDemo {
             FadedSecondaryButton("Afventer dig", icon: "tray.full") { showAttentionQueue = true }
         }
@@ -91,9 +70,9 @@ extension Home {
             FadedCard {
                 VStack(alignment: .leading, spacing: 8) {
                     heading("Kom godt i gang")
-                    Label("1. Forbind til PC", systemImage: "desktopcomputer")
-                    Label("2. Vælg klip", systemImage: "film")
-                    Label("3. Chat med din AI", systemImage: "bubble.left")
+                    Label("1. Vælg en agent eller en oplevelse", systemImage: "sparkles")
+                    Label("2. Hent en model til brug uden internet", systemImage: "iphone")
+                    Label("3. Fortsæt igen fra Fortsæt-fanen", systemImage: "play.circle")
                     FadedSecondaryButton("Klar") { onboarded = true }
                 }
             }

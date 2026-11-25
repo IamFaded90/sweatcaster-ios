@@ -7,6 +7,8 @@ struct AgentRoomCanvas: View {
     var selectedFigure: UUID? = nil
     var onSelectFigure: (UUID) -> Void = { _ in }
     var onSelectHotspot: (AgentRoom.Hotspot) -> Void = { _ in }
+    var ambienceScene: String? = nil
+    @ObservedObject private var ambience = VillageAmbienceHub.shared
     @State private var zoom = 1.0
     @State private var pan = CGSize.zero
     @GestureState private var magnification = 1.0
@@ -56,9 +58,12 @@ struct AgentRoomCanvas: View {
 
     private func room(size: CGSize) -> some View {
         ZStack {
-            if let artwork {
-                Image(uiImage: artwork).resizable().scaledToFill()
+            if let image = ambienceScene.flatMap({ ambience.image($0) }) ?? artwork {
+                Image(uiImage: image).resizable().scaledToFill()
                     .frame(width: size.width, height: size.height).clipped()
+                    .brightness(ambienceScene.map { ambience.settings($0).brightness } ?? 0)
+                    .saturation(ambienceScene.map { ambience.settings($0).saturation } ?? 1)
+                    .overlay { if let ambienceScene { VillageAmbienceLight(settings: ambience.settings(ambienceScene)) } }
                     .allowsHitTesting(false).accessibilityHidden(true)
             } else {
                 Rectangle().fill(.black.opacity(0.18)).overlay { ProgressView("Henter rummet…") }
@@ -73,6 +78,7 @@ struct AgentRoomCanvas: View {
             }
         }
         .frame(width: size.width, height: size.height)
+        .overlay { if let ambienceScene { RoomWorksOverlay(scene: ambienceScene) } }
         .background(.black.opacity(0.18))
     }
 
@@ -93,6 +99,7 @@ struct AgentRoomCanvas: View {
                 if zoom > 1.001 { current = value.translation }
             }
             .onEnded { value in
+                if let ambienceScene, RoomWorkHub.shared.editing.contains(ambienceScene) { return }
                 let distance = hypot(value.translation.width, value.translation.height)
                 if distance > 8 {
                     pan = AgentRoomCamera.pan(CGSize(width: pan.width + value.translation.width,
@@ -107,6 +114,9 @@ struct AgentRoomCanvas: View {
 
     private func select(_ point: CGPoint, size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
+        if let ambienceScene, (RoomWorkHub.shared.layouts[ambienceScene]?.items ?? []).contains(where: {
+            CGRect(x: $0.x * size.width - 24, y: $0.y * size.height - 24, width: 48, height: 48).contains(point)
+        }) { return }
         for figure in figures.reversed() {
             let width = AgentRoomCamera.figureWidth(figure, size: size)
             let height = AgentRoomCamera.figureHeight(figure, size: size)
@@ -188,7 +198,7 @@ struct AgentRoomFullScreen: View {
         NavigationStack {
             ScrollView {
                 AgentRoomCanvas(version: version, artwork: artwork, selectedFigure: selectedFigure,
-                                onSelectFigure: selectFigure, onSelectHotspot: selectHotspot)
+                                onSelectFigure: selectFigure, onSelectHotspot: selectHotspot, ambienceScene: VillageAmbience.room(room.id))
                     .padding(FadedSpacing.edge)
                 ForEach(version.figures) { figure in
                     Button {
@@ -206,6 +216,7 @@ struct AgentRoomFullScreen: View {
             }
             .background { FadedBackground(variant: .village) }
             .navigationTitle(room.title)
+            .modifier(VillageAmbienceLifecycle(scene: VillageAmbience.room(room.id)))
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { dismiss() } } }
             .alert(hotspot?.title ?? "I rummet", isPresented: Binding(
                 get: { hotspot != nil }, set: { if !$0 { hotspot = nil } }

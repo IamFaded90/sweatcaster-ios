@@ -1,0 +1,206 @@
+import Foundation
+
+/// What a music prompt says about its own length, tempo, key and meter.
+///
+/// The prompt is the control. Someone who writes "a 1 minute 21 second
+/// underscore at 120 BPM in C minor" has already said how long it runs, so
+/// there is no separate length control to disagree with it; a prompt that
+/// names no length gets a stated default.
+struct PromptMetadata: Equatable {
+    var seconds: Int?
+    var bpm: Int?
+    /// As the planner writes it: "C minor", "F# major".
+    var keyscale: String?
+    /// Beats per bar: 2, 3, 4 or 6.
+    var timeSignature: Int?
+
+    /// 6:24 is the longest the Neural Engine transformer was built for: a
+    /// piece is rendered 20% past its length and cut, and 6:24 plus that
+    /// fills its largest size. A longer request is made at 6:24, and the
+    /// summary under the prompt shows it.
+    static let secondsRange = 5 ... 384
+
+    /// A timeline the prompt lays out, "0:16–0:34 a second voice enters",
+    /// in order; empty when it gives none.
+    var sections: [Section] = []
+    /// The prompt without its timeline: the style of the whole piece.
+    var style: String
+
+    struct Section: Equatable {
+        var start: Int
+        var end: Int
+        var description: String
+    }
+
+    init(parsing prompt: String) {
+        (sections, style) = Self.timeline(in: prompt)
+        // Timestamps in a timeline are not the length; the length named
+        // outside it is, or else where the timeline ends.
+        seconds = Self.duration(in: style) ?? sections.last.map {
+            min(max($0.end, Self.secondsRange.lowerBound), Self.secondsRange.upperBound)
+        }
+        bpm = Self.firstInt(in: prompt, patterns: [#"(\d{2,3})\s*-?\s*bpm\b"#, #"\bbpm\s*[:=]?\s*(\d{2,3})\b"#])
+            .flatMap { (30 ... 300).contains($0) ? $0 : nil }
+        keyscale = Self.key(in: prompt)
+        timeSignature = Self.meter(in: prompt)
+    }
+
+    /// Whether anything was found, for showing what the prompt set.
+    var isEmpty: Bool { seconds == nil && bpm == nil && keyscale == nil && timeSignature == nil && sections.isEmpty }
+
+    // MARK: - Length
+
+    /// The first length named, clamped to what the models can make. The
+    /// first, because a prompt describing "a 90-second spot with a 10 second
+    /// intro" means the whole piece before its parts.
+    static func duration(in text: String) -> Int? {
+        let lowered = text.lowercased()
+        var found: [(position: Int, seconds: Double)] = []
+        func scan(_ pattern: String, _ value: ([Double?]) -> Double?) {
+            guard let regex = PromptRegex.cached(pattern) else { return }
+            let range = NSRange(lowered.startIndex ..< lowered.endIndex, in: lowered)
+            for match in regex.matches(in: lowered, range: range) {
+                let groups: [Double?] = (1 ..< match.numberOfRanges).map { index in
+                    Range(match.range(at: index), in: lowered).flatMap { Double(lowered[$0]) }
+                }
+                if let seconds = value(groups) { found.append((match.range.location, seconds)) }
+            }
+        }
+        // 1:21
+        scan(#"(?<![\d:/.])(\d{1,2}):([0-5]\d)(?![\d:])"#) { g in
+            guard let m = g[0], let s = g[1] else { return nil }
+            return m * 60 + s
+        }
+        // 1 minute 21 seconds, 1-min 21-sec, 1m21s, 2 minutes, 1.5 min
+        scan(#"(\d+(?:\.\d+)?)\s*-?\s*(?:minutes?|mins?|m)(?:\b|(?=\d))(?:\s*(?:and\s*)?(\d+)\s*-?\s*(?:seconds?|secs?|s)\b)?"#) { g in
+            guard let m = g[0] else { return nil }
+            return m * 60 + (g.count > 1 ? g[1] ?? 0 : 0)
+        }
+        // 81 seconds, 81-second, 81 sec — but not a drum machine's "808s".
+        scan(#"(?<![\d.])(\d+(?:\.\d+)?)\s*-?\s*(seconds?|secs?)\b"#) { g in g[0] }
+        scan(#"(?<![\d.:])(\d{1,3})s\b"#) { g in
+            guard let s = g[0], ![303, 606, 707, 808, 909].contains(Int(s)) else { return nil }
+            return s
+        }
+        // 1分21秒, 2分钟, 81秒
+        scan(#"(\d+)\s*分(?:钟|鐘)?\s*(?:(\d+)\s*秒)?"#) { g in
+            guard let m = g[0] else { return nil }
+            return m * 60 + (g.count > 1 ? g[1] ?? 0 : 0)
+        }
+        scan(#"(?<!分)(?<!\d)(\d+)\s*秒"#) { g in g[0] }
+
+        // A "1 minute 21 seconds" also contains a bare "21 seconds"; the
+        // earliest match is the whole phrase.
+        guard let first = found.min(by: { $0.position < $1.position }) else { return nil }
+        let rounded = Int(first.seconds.rounded())
+        return min(max(rounded, secondsRange.lowerBound), secondsRange.upperBound)
+    }
+
+    // MARK: - Timeline
+
+    /// "0:00–0:16 sparse opening; 0:16–0:34 …", one range per line or
+    /// separated by semicolons. A range needs two m:ss times joined by a
+    /// dash or "to"; its description runs to the end of the line or the
+    /// next semicolon. Two or more ranges make a timeline — one is just a
+    /// phrase. A heading line ending in a colon right before it goes too.
+    static func timeline(in prompt: String) -> ([Section], String) {
+        let pattern = #"(\d{1,2}):([0-5]\d)\s*(?:–|—|-|to)\s*(\d{1,2}):([0-5]\d)\s*[:,.–—-]?\s*([^;\n]*)"#
+        guard let regex = PromptRegex.cached(pattern, .caseInsensitive) else {
+            return ([], prompt)
+        }
+        let whole = NSRange(prompt.startIndex ..< prompt.endIndex, in: prompt)
+        let matches = regex.matches(in: prompt, range: whole)
+        guard matches.count >= 2 else { return ([], prompt) }
+        func number(_ match: NSTextCheckingResult, _ group: Int) -> Int {
+            Range(match.range(at: group), in: prompt).flatMap { Int(prompt[$0]) } ?? 0
+        }
+        var sections: [Section] = matches.compactMap { match in
+            let start = number(match, 1) * 60 + number(match, 2)
+            let end = number(match, 3) * 60 + number(match, 4)
+            guard end > start, let range = Range(match.range(at: 5), in: prompt) else { return nil }
+            let description = prompt[range].trimmingCharacters(in: CharacterSet(charactersIn: " .;,\t"))
+            return Section(start: start, end: end, description: description)
+        }
+        sections.sort { $0.start < $1.start }
+        guard sections.count >= 2 else { return ([], prompt) }
+
+        // What is left: every range removed, then any heading that
+        // introduced them, then empty lines.
+        var style = prompt
+        for match in matches.reversed() {
+            guard let range = Range(match.range, in: style) else { continue }
+            style.removeSubrange(range)
+        }
+        let lines = style.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: " ;\t")) }
+        var kept: [String] = []
+        for (index, line) in lines.enumerated() {
+            let isHeading = line.hasSuffix(":") && line.count < 60
+                && lines[(index + 1)...].first(where: { !$0.isEmpty }) == nil
+            if !line.isEmpty, !isHeading { kept.append(line) }
+        }
+        return (sections, kept.joined(separator: "\n"))
+    }
+
+    // MARK: - Tempo, key, meter
+
+    private static func firstInt(in text: String, patterns: [String]) -> Int? {
+        for pattern in patterns {
+            guard let regex = PromptRegex.cached(pattern, .caseInsensitive),
+                  let match = regex.firstMatch(in: text, range: NSRange(text.startIndex ..< text.endIndex, in: text)),
+                  let range = Range(match.range(at: 1), in: text),
+                  let value = Int(text[range]) else { continue }
+            return value
+        }
+        return nil
+    }
+
+    /// "C minor", "F# major", "B flat minor", "Ebm"-style shorthand is left
+    /// alone. The note must be a capital: "a minor detail" is not a key.
+    private static func key(in text: String) -> String? {
+        let pattern = #"\b([A-G])\s?(#|♯|b|♭|-?sharp|-?flat)?\s+(major|minor|maj|min)\b"#
+        guard let regex = PromptRegex.cached(pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex ..< text.endIndex, in: text)),
+              let note = Range(match.range(at: 1), in: text).map({ String(text[$0]) }),
+              let mode = Range(match.range(at: 3), in: text).map({ String(text[$0]) })
+        else { return nil }
+        let accidental = Range(match.range(at: 2), in: text).map { String(text[$0]) } ?? ""
+        let symbol: String
+        switch accidental {
+        case "#", "♯", "sharp", "-sharp": symbol = "#"
+        case "b", "♭", "flat", "-flat":   symbol = "b"
+        default:                          symbol = ""
+        }
+        return "\(note)\(symbol) \(mode.hasPrefix("maj") ? "major" : "minor")"
+    }
+
+    private static func meter(in text: String) -> Int? {
+        guard let regex = PromptRegex.cached(#"(?<![\d/])([2346])/(4|8)(?![\d/])"#),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex ..< text.endIndex, in: text)),
+              let beats = Range(match.range(at: 1), in: text).flatMap({ Int(text[$0]) }),
+              let unit = Range(match.range(at: 2), in: text).map({ String(text[$0]) })
+        else { return nil }
+        // The planner knows 2, 3, 4 and 6 beats; 6/8 is the only eighth-note
+        // meter it has a slot for.
+        if unit == "8" { return beats == 6 ? 6 : nil }
+        return beats
+    }
+}
+
+
+/// Compiled patterns, kept: the prompt is parsed again on every keystroke,
+/// and compiling a regular expression costs more than running it.
+enum PromptRegex {
+    private static var compiled: [String: NSRegularExpression] = [:]
+    private static let lock = NSLock()
+
+    static func cached(_ pattern: String, _ options: NSRegularExpression.Options = []) -> NSRegularExpression? {
+        let key = "\(options.rawValue)|\(pattern)"
+        return lock.withLock {
+            if let hit = compiled[key] { return hit }
+            let regex = try? NSRegularExpression(pattern: pattern, options: options)
+            compiled[key] = regex
+            return regex
+        }
+    }
+}

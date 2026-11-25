@@ -169,7 +169,7 @@ import UniformTypeIdentifiers
         current.versions.first { $0.revision == revision } ?? current.current ?? current.published
     }
     private var figure: AgentRoom.Figure? { version?.figures.first { $0.id == figureID } }
-    private var online: Bool { api != nil && !store.offline }
+    private var online: Bool { (api != nil && !store.offline) || AgentPhoneRoomEditor.isLocal(current) }
 
     var body: some View {
         ScrollView {
@@ -177,6 +177,8 @@ import UniformTypeIdentifiers
                 status
                 if let version {
                     preview(version)
+                    VillageAmbienceButton(scene: VillageAmbience.room(current.id), title: current.title)
+                    RoomWorksPanel(scene: VillageAmbience.room(current.id))
                     versions
                     figures(version)
                     if online { editing(version) }
@@ -197,6 +199,7 @@ import UniformTypeIdentifiers
         .background { FadedBackground(variant: .village) }
         .foregroundStyle(palette.text)
         .navigationTitle(current.title).navigationBarTitleDisplayMode(.inline)
+        .modifier(VillageAmbienceLifecycle(scene: VillageAmbience.room(current.id)))
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { dismiss() } } }
         .task(id: api?.queueTargetID) {
             await store.load(api: api, botID: room.botID)
@@ -241,7 +244,7 @@ import UniformTypeIdentifiers
                 FadedDetailText("Du kan lukke siden. PC’en arbejder videre på rummet.")
             }
             if let notice = current.notice { FadedDetailText(notice) }
-            if store.offline { FadedDetailText("Gemt rum på telefonen. Forbind til PC’en for at ændre det.") }
+            if store.offline { FadedDetailText(AgentPhoneRoomEditor.isLocal(current) ? "Rum på telefonen. Du kan justere figurerne her; motivet ændres i det kreative forløb." : "Gemt rum på telefonen. Forbind til PC’en for at ændre det.") }
             if current.state == .failed && online {
                 FadedSecondaryButton("Prøv igen", icon: "arrow.clockwise") { Task { await store.retry(api: api) } }
                     .disabled(store.busy)
@@ -255,7 +258,7 @@ import UniformTypeIdentifiers
         } else { figureID }
         return VStack(spacing: 8) {
             AgentRoomCanvas(version: version, artwork: store.images[version.artwork], selectedFigure: selection,
-                            onSelectFigure: { figureID = $0 }, onSelectHotspot: { hotspot = $0 })
+                            onSelectFigure: { figureID = $0 }, onSelectHotspot: { hotspot = $0 }, ambienceScene: VillageAmbience.room(current.id))
             FadedSecondaryButton("Prøv i fuld størrelse", icon: "arrow.up.left.and.arrow.down.right") { expanded = true }
         }
     }

@@ -1,0 +1,15 @@
+{
+  "purpose": "Locally derived SHA-256 values for the complete original safetensors headers (8-byte length prefix plus JSON). Research only.",
+  "range_manifest_sha256": "77942a5081635d52e6ff788693b5798516510a4d9e19a9edf64e6747a3307ba3",
+  "provenance": "Derived on 2026-11-25 by reading each complete local source checkpoint, confirming its size and whole-file SHA-256 against official-range-manifest.json, then hashing its header prefix. These header digests are not independently published official hashes.",
+  "components": {
+    "vae_audio_encoder": {
+      "header_bytes_including_length": 40536,
+      "header_sha256": "ee65a4b1609150f6be18b8b164c77f340a326c3a5912acc686ea5227f60c9528"
+    },
+    "audio_fsq_tokenizer": {
+      "header_bytes_including_length": 80568,
+      "header_sha256": "1b5ffdcb5660c9ca5bf91ad3867afc266b2697ba962e6580fd5675f82ca344f1"
+    }
+  }
+}

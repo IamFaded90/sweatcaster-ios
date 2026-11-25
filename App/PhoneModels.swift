@@ -285,6 +285,8 @@ enum PhoneModels {
 
     @MainActor static func analyzeImage(modelID: String, image: CGImage, prompt: String) async throws -> String {
         guard readyVisionModelIDs.contains(modelID) else { throw PhoneModelError.unavailable }
+        await AgentVoiceDownload.releaseSynthesisResources()
+        try Task.checkCancellation()
         return try await LocalCompute.run(minimumMiB: minimumMemory(for: modelID)) {
             guard let folder = installedDirectory(modelID) else { throw PhoneModelError.unavailable }
             if let variant = QwenPhoneRuntime.Variant(modelID: modelID) {

@@ -171,6 +171,8 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
     surprises = register_village_surprises(app, settings, authorize, ollama_reports(settings, add_on=True),
                                            is_idle=lambda: computers.active_jobs() == 0)
     rooms = register_agent_rooms(app, settings, authorize, is_idle=lambda: computers.active_jobs() == 0)
+    from sweatcaster.song_routes import register_song_studio
+    songs = register_song_studio(app, settings, authorize, idle=lambda: computers.active_jobs() == 0)
     register_agent_repair(app, settings, authorize, batch=batch)
     library = register_composio(app, settings, authorize)
     from sweatcaster.github_build_report import register_build_report
@@ -337,6 +339,8 @@ def register_modules(app: FastAPI, settings, authorize) -> None:
             surprises.start()
             stack.callback(surprises.stop)
             rooms.start()
+            songs.start()
+            stack.callback(songs.stop)
             stack.callback(rooms.stop)
             cases.start()
             stack.callback(cases.stop)

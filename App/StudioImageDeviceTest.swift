@@ -34,6 +34,7 @@ import UIKit
     @State private var showingPair = false
     @State private var pairVerified = false
     @State private var pairSeed: UInt32 = 42
+    @State private var memoryReading: StudioImageMemoryReading?
 
     var body: some View {
         NavigationStack {
@@ -48,6 +49,11 @@ import UIKit
                         ProgressView(testingPair ? "Telefonen kombinerer to testbilleder…" : "Telefonen laver et prøvebillede af et rødt æble…")
                     }
                     if !message.isEmpty { Text(message).accessibilityAddTraits(.updatesFrequently) }
+                    if let memoryReading {
+                        StudioImageMemoryDetails(reading: memoryReading) {
+                            self.memoryReading = StudioImageMemoryReading(model: model)
+                        }
+                    }
                     if model == .fluxKlein, result != nil {
                         FadedDetailText("Prøven leder efter en rød cirkel fra det første foto til venstre og en blå firkant fra det andet til højre.")
                         if attempt == nil && !pairVerified {
@@ -86,6 +92,7 @@ import UIKit
         let pair = testingPair
         let seed = pairSeed
         guard !Task.isCancelled, attempt == id, phase != .background else { return }
+        memoryReading = nil
         defer { if attempt == id { attempt = nil } }
         let history = StudioImageProbeHistory.shared
         history.begin(id, model: model.id, pair: pair)
@@ -120,7 +127,9 @@ import UIKit
         } catch {
             guard !Task.isCancelled, attempt == id else { return }
             switch error {
-            case LocalComputeError.lowMemory: message = "Telefonen har for lidt ledig arbejdshukommelse til denne model lige nu."
+            case LocalComputeError.lowMemory:
+                memoryReading = StudioImageMemoryReading(model: model)
+                message = "Prøven blev stoppet, fordi FadedAI havde for lidt ledig RAM til modellen."
             case LocalComputeError.busy: message = "En anden lokal opgave kører. Prøv igen, når den er færdig."
             case StudioImageInterruption.battery: message = "Sæt telefonen til opladning, og prøv igen."
             case StudioImageInterruption.heat: message = "Lad telefonen køle af, og prøv igen."
@@ -142,6 +151,47 @@ import UIKit
             let bounds = CGRect(x: 56, y: 56, width: 144, height: 144)
             canvas.setFillColor(circle ? UIColor.red.cgColor : UIColor.blue.cgColor)
             if circle { canvas.fillEllipse(in: bounds) } else { canvas.fill(bounds) }
+        }
+    }
+}
+
+private struct StudioImageMemoryReading {
+    let required: UInt64
+    let available: UInt64
+    let footprint: UInt64?
+
+    @MainActor init(model: StudioImageModel) {
+        required = model.minimumWorkingMemoryMiB * 1_048_576
+        available = LocalCompute.headroom
+        footprint = LocalCompute.footprint()
+    }
+
+    func label(_ bytes: UInt64) -> String {
+        (Double(bytes) / 1_000_000_000).formatted(.number.precision(.fractionLength(2))) + " GB"
+    }
+}
+
+private struct StudioImageMemoryDetails: View {
+    let reading: StudioImageMemoryReading
+    let refresh: () -> Void
+
+    var body: some View {
+        FadedCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("RAM på denne iPhone").font(.headline)
+                LabeledContent("Ledigt til FadedAI", value: reading.label(reading.available))
+                LabeledContent("Prøvens minimum", value: reading.label(reading.required))
+                if let footprint = reading.footprint {
+                    LabeledContent("FadedAI bruger", value: reading.label(footprint))
+                }
+                FadedDetailText("RAM er arbejdshukommelse. iOS bestemmer, hvor meget én app må bruge, også selv om telefonen har mere RAM i alt.")
+                if reading.available >= reading.required {
+                    FadedDetailText("Der er nu nok ledig RAM til at starte prøven. Tryk Prøv igen for at teste modellen.")
+                } else {
+                    FadedDetailText("Prøv testen direkte efter en genstart af iPhone. Hvis den stadig stopper, skal appens RAM-grænse undersøges.")
+                }
+                FadedSecondaryButton("Opdatér RAM-tal", icon: "memorychip", action: refresh)
+            }
         }
     }
 }

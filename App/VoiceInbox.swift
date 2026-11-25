@@ -65,8 +65,8 @@ struct AssistantCaptureStrip: View {
     var body: some View {
         FadedCard(size: .compact, accent: FadedBrand.mint) {
             ViewThatFits(in: .horizontal) {
-                HStack(spacing: 10) { VoiceInboxEntry(); AssistantPDFEntry() }
-                VStack(alignment: .leading, spacing: 8) { VoiceInboxEntry(); AssistantPDFEntry() }
+                HStack(spacing: 10) { CaptureReviewEntry(); DocumentScanEntry(); VoiceInboxEntry(); AssistantPDFEntry() }
+                VStack(alignment: .leading, spacing: 8) { CaptureReviewEntry(); DocumentScanEntry(); VoiceInboxEntry(); AssistantPDFEntry() }
             }
         }
     }

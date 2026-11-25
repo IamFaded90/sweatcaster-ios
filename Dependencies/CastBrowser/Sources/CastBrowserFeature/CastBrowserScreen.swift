@@ -115,6 +115,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
     private let pcRelayWithContext: CastPCRelayWithContext?
     private let filmAnalysis: CastFilmAnalysis?
     private let filmSpeech: CastFilmSpeech?
+    private let phoneFilmHelp: (@MainActor () -> AnyView)?
     private let content: () -> Content
     @Environment(\.scenePhase) private var phase
     @State private var model: CastAppModel?
@@ -126,6 +127,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
                 pcRelayWithContext: CastPCRelayWithContext? = nil,
                 filmAnalysis: CastFilmAnalysis? = nil,
                 filmSpeech: CastFilmSpeech? = nil,
+                phoneFilmHelp: (@MainActor () -> AnyView)? = nil,
                 @ViewBuilder content: @escaping () -> Content) {
         self.isSelected = isSelected
         self.background = background
@@ -137,6 +139,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
         self.pcRelayWithContext = pcRelayWithContext
         self.filmAnalysis = filmAnalysis
         self.filmSpeech = filmSpeech
+        self.phoneFilmHelp = phoneFilmHelp
         self.content = content
     }
 
@@ -168,8 +171,23 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
                 controller.pcRelayWithContext = pcRelayWithContext
                 controller.filmAnalysis = filmAnalysis
                 controller.filmSpeech = filmSpeech
+                controller.phoneFilmHelp = phoneFilmHelp
                 model = controller
+                if let page = CastLibraryBridge.takePending() { controller.open(.init(title: page.host ?? "Film", url: page.absoluteString)) }
+                if CastLibraryBridge.takeControls() { controller.selectedTab = .remote }
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: CastLibraryBridge.openRequested)) { _ in
+            if let model, let page = CastLibraryBridge.takePending() {
+                model.open(.init(title: page.host ?? "Film", url: page.absoluteString))
+                onOpen()
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: CastLibraryBridge.controlsRequested)) { _ in
+            if let model, CastLibraryBridge.takeControls() { model.selectedTab = .remote; onOpen() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("FadedAIMusicPlaying"))) { _ in
+            if playingOnPhone { model?.browser.webView.pauseAllMediaPlayback(completionHandler: nil); playingOnPhone = false }
         }
         .onChange(of: pcRelayID) { _, _ in
             model?.pcSwitchID = nil
@@ -185,7 +203,10 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
                 if webView.url != nil {
                     let state = await webView.requestMediaPlaybackState()
                     let playing = state == .playing
-                    if !Task.isCancelled && playingOnPhone != playing { playingOnPhone = playing }
+                    if !Task.isCancelled && playingOnPhone != playing {
+                        playingOnPhone = playing
+                        if playing { NotificationCenter.default.post(name: Notification.Name("FadedAILocalVideoPlaying"), object: nil) }
+                    }
                 }
                 do { try await Task.sleep(for: .seconds(1)) }
                 catch { return }
@@ -208,6 +229,9 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
         Color.clear
             .allowsHitTesting(false)
             .onChange(of: phase == .active && model.needsPhoneAwake, initial: true) { _, value in update(value) }
+            .onChange(of: "\(model.hasActiveMedia)|\(model.nowPlayingTitle)|\(Int(model.playbackPosition.isFinite ? model.playbackPosition : 0))|\(model.isPlaying)", initial: true) { _, _ in
+                CastLibraryBridge.update(model)
+            }
             .onDisappear { update(false) }
     }
 }

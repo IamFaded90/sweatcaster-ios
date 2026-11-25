@@ -353,7 +353,8 @@ struct ChatPhotoPicker: View {
         let model: String
     }
 
-    static func answer(_ data: Data, question: String, agent: String, language: String, pc: LiveAPI?) async throws -> Result {
+    static func answer(_ data: Data, question: String, agent: String, language: String, pc: LiveAPI?,
+                       preferredModel: String? = nil) async throws -> Result {
         let image = try LocalImageText.checkedImage(data)
         let instruction = language == "en-US"
             ? "You are \(agent). Answer in English and distinguish what is visible from guesses."
@@ -370,10 +371,13 @@ struct ChatPhotoPicker: View {
                 return try result(text, source: "PC", model: model.label)
             }
         }
-        if let id = PhoneModels.readyVisionModelIDs.first {
+        await AgentVoiceDownload.releaseSynthesisResources()
+        try Task.checkCancellation()
+        if let id = PhoneModels.preferredVisionModel(preferred: preferredModel) {
             let text = try await PhoneModels.analyzeImage(modelID: id, image: image, prompt: prompt)
             return try result(text, source: "iPhone", model: PhoneModels.textModelName(id))
         }
+        if !PhoneModels.readyVisionModelIDs.isEmpty { throw LocalComputeError.lowMemory }
         let local = try await LocalImageText.read(data)
         let values = [local.text.isEmpty ? nil : "Tekst på billedet: " + local.text,
                       local.labels.isEmpty ? nil : "Mulige motiver: " + local.labels.joined(separator: ", ")]
@@ -381,6 +385,13 @@ struct ChatPhotoPicker: View {
         let detail = values.isEmpty ? "Jeg fandt ingen tydelig tekst eller genkendelige motiver." : values.joined(separator: "\n")
         return Result(text: detail + "\n\nAktivér en model til billedanalyse for at stille spørgsmål om fotoet.",
                       source: "iPhone", model: "Billedtekst")
+    }
+
+    static func documentEvidence(_ photo: Data) async throws -> [AgentDocumentSource] {
+        let read = try await LocalImageText.read(photo)
+        let document = AgentDocument(id: UUID(), name: "Dit foto", model: nil,
+                                     passages: [.init(page: nil, text: read.text, vector: nil)])
+        return AgentDocumentDeadline.sources(in: document)
     }
 
     private static func result(_ text: String, source: String, model: String) throws -> Result {

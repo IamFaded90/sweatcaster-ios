@@ -1,5 +1,26 @@
 # FadedAI · Hvad mangler vi?
 
+## De næste fem · 25. november
+
+Foto til produktfund, landsbyens stemninger og sagsopfølgning er nu kodet
+og kontrolleret lokalt, ét punkt ad gangen. Se [den præcise status](NEXT-FIVE.md)
+for funktioner, 58 Swift-prøver, 31 serverprøver og resterende iPhone-kontrol.
+Musik med ACE-Step er stadig beskrevet særskilt i [SONG-STUDIO.md](SONG-STUDIO.md):
+PC-sang/remix er prøvet, mens native Apple-kompilering, enhedsprøve og egen
+sangstemme er åbne. Kamerahjælp, værker i landsbyen, agentbrowser på iPhone og
+egne stemmer fra optagelse er valgt fra de efterfølgende forslag. De 40
+projektforslag (34 forskellige navne) er vurderet i NEXT-FIVE.md; vurdering
+er ikke det samme som implementering.
+Ingen PC-opdatering, push eller IPA er startet i denne omgang.
+
+## Det personlige univers · 24. november
+
+De ti nye punkter, Fortsæt-fanen, forside og indstillinger er kodet lokalt.
+Filmvennen har også opslag om skuespillere og deres andre film og serier.
+Se [status og de resterende telefonprøver](PERSONAL-HUB.md). 72 lokale
+Swift-tests bestod; fuld Xcode-test og fysisk iPhone/TV afventer. Ingen ny
+IPA eller push er startet i denne omgang.
+
 ## Seneste status · 22. november
 
 ### Klar til næste iPhone-prøve

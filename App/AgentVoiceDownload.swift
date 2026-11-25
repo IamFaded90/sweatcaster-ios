@@ -1,12 +1,19 @@
 import SwiftUI
 import CryptoKit
 import OfflineVoiceRuntime
+import FadedAICloneRuntime
 
 struct DownloadedAgentVoice: Identifiable, Equatable {
     let code: String
-    static let all = ["F1","F2","F3","F4","F5","M1","M2","M3","M4","M5"].map(Self.init(code:))
-    var id: String { "supertonic3-" + code }
-    var name: String { (code.hasPrefix("F") ? "Kvindelig stemme " : "Mandlig stemme ") + String(code.suffix(1)) }
+    static let presets = ["F1","F2","F3","F4","F5","M1","M2","M3","M4","M5"].map(Self.init(code:))
+    static var all: [Self] { presets + ((try? ClonedVoice.Store().list()) ?? []).filter { $0.previewApproved && ClonedVoice.Store().ready($0.id) }.map { Self(code: "clone." + $0.id.uuidString.lowercased()) } }
+    @MainActor static var playable: [Self] { all.filter { AgentVoiceDownload.available($0) } }
+    var cloneID: UUID? { code.hasPrefix("clone.") ? UUID(uuidString: String(code.dropFirst(6))) : nil }
+    var id: String { cloneID.map { "chatterbox-" + $0.uuidString.lowercased() } ?? ("supertonic3-" + code) }
+    var name: String {
+        if let cloneID { return (try? ClonedVoice.Store().list())?.first { $0.id == cloneID }?.name ?? "Egen stemme" }
+        return (code.hasPrefix("F") ? "Kvindelig stemme " : "Mandlig stemme ") + String(code.suffix(1))
+    }
     var label: String { name + " · dansk på iPhone" }
     static func selected(_ id: String) -> Self? { all.first { $0.id == id } }
 }
@@ -195,19 +202,28 @@ private actor LocalVoiceSynthesis {
         } catch { message = "Stemmepakken kunne ikke slettes. Prøv igen." }
     }
     static func audio(_ text: String, voice: DownloadedAgentVoice, language: String, rate: Double) async throws -> Data {
-        try await LocalVoiceSynthesis.shared.audio(text, voice: voice, language: language, rate: rate)
+        if let id = voice.cloneID { return try await ClonedVoiceManager.audio(text, id: id, language: language) }
+        return try await LocalVoiceSynthesis.shared.audio(text, voice: voice, language: language, rate: rate)
+    }
+    static func available(_ voice: DownloadedAgentVoice) -> Bool {
+        if let id = voice.cloneID { return ClonedVoiceManager.shared.installed && ClonedVoice.Store().ready(id) }
+        return shared.installed
+    }
+    static func ready(selection: String) -> Bool { DownloadedAgentVoice.selected(selection).map(available) ?? shared.installed }
+    static func releaseSynthesisResources() async {
+        // The actor finishes any active synthesis before releasing its cached sessions.
+        await LocalVoiceSynthesis.shared.unload()
+        await CloneVoiceEngine.shared.unload()
     }
 }
 
 struct DownloadedVoiceOptions: View {
     let selection: String
     @ObservedObject private var pack = AgentVoiceDownload.shared
+    @ObservedObject private var own = ClonedVoiceManager.shared
     var body: some View {
-        if pack.installed {
-            ForEach(DownloadedAgentVoice.all) { voice in Text(voice.label).tag(voice.id) }
-        } else if let voice = DownloadedAgentVoice.selected(selection) {
-            Text(voice.name + " · hent pakken igen").tag(voice.id)
-        }
+        ForEach(DownloadedAgentVoice.all.filter { AgentVoiceDownload.available($0) }) { voice in Text(voice.label).tag(voice.id) }
+        if let voice = DownloadedAgentVoice.selected(selection), !AgentVoiceDownload.available(voice) { Text(voice.name + " · hent modellen igen").tag(voice.id) }
     }
 }
 
@@ -223,7 +239,7 @@ struct AgentVoicePackSection: View {
     var body: some View {
         Section("Danske stemmer uden PC") {
             if pack.installed {
-                ForEach(DownloadedAgentVoice.all) { voice in
+                ForEach(DownloadedAgentVoice.presets) { voice in
                     HStack {
                         Button { choose(voice.id) } label: {
                             HStack {
@@ -256,5 +272,6 @@ struct AgentVoicePackSection: View {
             Button("Slet stemmepakken", role: .destructive) { stop(); pack.remove() }
             Button("Annuller", role: .cancel) {}
         } message: { Text("Agenter med en stemme fra pakken kan bruge den igen, når du henter pakken.") }
+        OwnVoiceSection(selected: selected, previewing: previewing, choose: choose, preview: preview, stop: stop)
     }
 }

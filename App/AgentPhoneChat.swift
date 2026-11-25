@@ -46,6 +46,9 @@ import UIKit
     @State var running: Task<Void, Never>?
     @State var pendingPrompt: String?
     @State var showModels = false
+    @State var showOfflineSetup = false
+    @State var showPhoneConnections = false
+    @State var startOfflineAfterSetup = false
     @State var showEverydayTools = false
     @State var showAgentShortcuts = false
     @State var selectedAgentShortcut: (() -> Void)?
@@ -213,7 +216,13 @@ import UIKit
             .sheet(isPresented: $showPCTools) {
                 if let api { AgentPCToolsView(api: api, botID: bot.id) }
             }
-            .sheet(item: $interactiveTool) { tool in interactiveToolSheet(tool) }
+            .sheet(item: $interactiveTool, onDismiss: {
+                if keepHistory, running == nil {
+                    let savedImages = Set(MigratedAppData.shared.regularStudioTurns()
+                        .filter { $0.botID == bot.id && $0.imageName != nil }.map(\.id))
+                    turns.removeAll { $0.imageName != nil && !savedImages.contains($0.id) }
+                }
+            }) { tool in interactiveToolSheet(tool) }
             .confirmationDialog("Hvad skal vi finde til " + bot.name + "?", isPresented: $showTasteChoices,
                                 titleVisibility: .visible) {
                 tasteChoices
@@ -235,6 +244,64 @@ import UIKit
 
     @ViewBuilder private func interactiveToolSheet(_ tool: AgentInteractiveTool) -> some View {
         switch tool {
+        case .dayPlan: DayPlanView(bot: bot)
+        case .scanDocument: DocumentScanView(bot: bot, model: selectedModel)
+        case .audioJournal: AudioJournalView(bot: bot, model: selectedModel)
+        case .capture: CaptureReviewView(bot: bot, model: selectedModel) { receipt in addAgentAction("Fang og følg op", kind: .workflow("Kilde og opfølgning"), receipt: receipt, source: "iPhone") }
+        case .memory(let sources): AgentMemoryView(bot: bot, highlighted: sources)
+        case .localCode(let query):
+            AgentLocalCodeView(bot: bot, model: selectedModel, initial: query) { receipt in addAgentAction("Lokal kode", kind: .workflow("Lokalt værktøj"), receipt: receipt, source: "iPhone") }
+        case .skills:
+            AgentSkillsView(bot: bot) { receipt in addAgentAction("Valgt kontakt", kind: .workflow("Telefonværktøjer"), receipt: receipt, source: "iPhone") }
+        case .contacts(let query):
+            AgentContactsView(bot: bot, initialQuery: query) { receipt in addAgentAction("Valgt kontakt", kind: .workflow("Telefonværktøjer"), receipt: receipt, source: "iPhone") }
+        case .browser(let task):
+            AgentBrowserView(bot: bot, model: selectedModel, initialTask: task) { receipt in
+                draft = ""
+                addAgentAction("Agentbrowser", kind: .workflow("Arbejde i browseren"), receipt: receipt, source: "iPhone")
+            }
+        case .cameraGuide(let question, let photo):
+            CameraGuideView(bot: bot, api: api, model: selectedModel, initialQuestion: question, initialPhoto: photo) { receipt in
+                attachedPhoto = nil; draft = ""
+                addAgentAction("Kamerahjælp", kind: .workflow("Kamerahjælp"), receipt: receipt, source: "Foto")
+            }
+        case .personalSearch(let query): PersonalHubSearchView(bot: bot, model: selectedModel, query: query)
+        case .creative(let project): CreativeProjectView(bot: bot, model: selectedModel, initial: project)
+        case .taskJourney:
+            AgentTaskJourneyView(bot: bot, model: selectedModel, api: api) { receipt, _ in
+                addAgentAction("Tag dig af min retursag", kind: .workflow("Retur og opfølgning"), receipt: receipt, source: "iPhone")
+            }
+        case .personality: AgentPersonalityView(bot: bot)
+        case .mystery: VillageMysteryView()
+        case .musicMix: MusicMixView()
+        case .ambience: VillageAmbienceView(scene: "village", title: "landsbyen")
+        case .caseTracker:
+            CaseTrackerView(bot: bot, api: api, model: selectedModel) { receipt in
+                addAgentAction("Følg sagen til dørs", kind: .workflow("Sagsopfølgning"), receipt: receipt, source: "iPhone")
+            }
+        case .songStudio(let initial): SongStudioView(api: api, initial: initial)
+        case .productHunt(let query, let photo):
+            ProductHuntView(bot: bot, api: api, model: selectedModel, query: query, photo: photo) { receipt in
+                attachedPhoto = nil
+                addAgentAction("Find fra et billede", kind: .workflow("Produktfund"), receipt: receipt, source: "Web")
+            }
+        case .evening(let request):
+            EveningPlanView(initial: request) { kind in
+                interactiveTool = nil; dismiss(); FadedHubRoute.open(kind)
+            }
+        case .images(let prompt, let reference):
+            AgentImageWorkbench(bot: bot, api: api, prompt: prompt, reference: reference) { turn in
+                turns.append(turn)
+                draft = ""
+                attachedPhoto = nil
+            }
+        case .workspace(let kind, let prompt):
+            AgentWorkspaceView(bot: bot, api: api, model: selectedModel, initialKind: kind, initialPrompt: prompt) { document in
+                nextDocument = document
+                if source == .composio { source = .phone }
+                interactiveTool = nil
+                notice = "Filen er vedhæftet. Skriv, hvad du vil bruge den til."
+            }
         case .milestone(let kind, let prompt):
             milestoneSheet(kind, prompt: prompt)
         case .appointmentChange(let prompt):
@@ -306,7 +373,7 @@ import UIKit
             .task {
                 loadModels()
                 if !loaded && keepHistory {
-                    turns = MigratedAppData.shared.regularStudioTurns().filter { $0.botID == bot.id && $0.imageName == nil }
+                    turns = MigratedAppData.shared.regularStudioTurns().filter { $0.botID == bot.id }
                     draft = MigratedAppData.shared.chatDraft(draftKey)
                     if let opensAction, turns.contains(where: { $0.id == opensAction }) { openAgentAction = opensAction }
                 }
@@ -354,6 +421,18 @@ import UIKit
 
     private var persistedConversation: some View {
         observedConversation
+            .sheet(isPresented: $showOfflineSetup, onDismiss: {
+                loadModels()
+                if startOfflineAfterSetup {
+                    startOfflineAfterSetup = false
+                    startHandsFree(offline: true)
+                }
+            }) {
+                OfflineAgentSetup(bot: bot, model: Binding(get: { selectedModel }, set: {
+                    selectedModel = $0; rememberedModel = $0
+                }), voice: $voiceOverride, language: $dictationLanguage, api: api) { startOfflineAfterSetup = true }
+            }
+            .sheet(isPresented: $showPhoneConnections) { AgentPhoneConnections(api: api) }
             .sheet(isPresented: $showVoice) { voiceSettings }
             .sheet(isPresented: $showTranscript) { AgentDictationTranscript(segments: whisper.segments) }
             .sheet(isPresented: $showRecordingTranscript) {

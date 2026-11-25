@@ -122,7 +122,9 @@ enum AgentRoomCache {
             creationFingerprint = nil
             boundServer = api?.queueTargetID
         }
+        let local = AgentRoomCache.list(botID: botID, server: "phone")
         rooms = AgentRoomCache.list(botID: botID, server: api?.queueTargetID)
+        if api != nil { rooms += local.filter { item in !rooms.contains { $0.id == item.id } } }
         offline = api == nil
         guard let api else {
             message = rooms.isEmpty ? "Forbind til PC’en for at bygge et rum fra din skitse." : "Viser dine gemte rum fra telefonen."
@@ -131,7 +133,7 @@ enum AgentRoomCache {
         do {
             let loaded = try await api.agentRooms(botID: botID, published: published)
             guard generation == id, !Task.isCancelled else { return }
-            rooms = loaded
+            rooms = loaded + local.filter { item in !loaded.contains { $0.id == item.id } }
             offline = false
             message = nil
         } catch {
@@ -145,6 +147,7 @@ enum AgentRoomCache {
 
     func refresh(api: LiveAPI?) async {
         guard let api, let room = current, !busy else { return }
+        if AgentPhoneRoomEditor.isLocal(room) { return }
         let id = generation
         do {
             let value = try await api.agentRoom(room.id)
@@ -173,7 +176,7 @@ enum AgentRoomCache {
             guard generation == id, !Task.isCancelled else { return }
             images[version.artwork] = image
             if images.count > 8, let victim = images.keys.first(where: { $0 != version.artwork }) { images[victim] = nil }
-            if let api, room.published?.artwork == version.artwork {
+            if let api, room.published?.artwork == version.artwork, !AgentPhoneRoomEditor.isLocal(room) {
                 try AgentRoomCache.save(room, server: api.queueTargetID, image: data, digest: version.artwork)
             }
         } catch {
@@ -205,6 +208,11 @@ enum AgentRoomCache {
     }
 
     func revise(api: LiveAPI?, revision: Int, figureID: UUID, scale: Double, instruction: String) async {
+        if let room = current, AgentPhoneRoomEditor.isLocal(room) {
+            do { current = try AgentPhoneRoomEditor.resize(room, figureID: figureID, scale: scale, instruction: instruction); message = "Figurstørrelsen er gemt på telefonen. Motivændringer laves i det kreative forløb." }
+            catch { message = "Figuren kunne ikke ændres. Vælg en størrelse mellem 0,7 og 1,65." }
+            return
+        }
         guard let api, let room = current else { return }
         await action(api) {
             try await api.reviseAgentRoom(room.id, revision: revision, figureID: figureID, scale: scale,
@@ -213,6 +221,7 @@ enum AgentRoomCache {
     }
 
     func publish(api: LiveAPI?, revision: Int) async {
+        if let room = current, AgentPhoneRoomEditor.isLocal(room) { message = "Rummet er allerede gemt på telefonen."; return }
         guard let api, let room = current else { return }
         await action(api) {
             try await api.publishAgentRoom(room.id, revision: revision)
@@ -229,6 +238,16 @@ enum AgentRoomCache {
     }
 
     func remove(api: LiveAPI?) async -> Bool {
+        if let room = current, AgentPhoneRoomEditor.isLocal(room) {
+            do {
+                try AgentRoomCache.remove(room, server: "phone")
+                rooms.removeAll { $0.id == room.id }; current = nil
+                do { try VillageAmbienceHub.shared.reset(VillageAmbience.room(room.id)) }
+                catch { message = "Rummet er fjernet. Stemningens filer kunne ikke ryddes helt." }
+                return true
+            }
+            catch { message = "Rummet kunne ikke slettes fra telefonen."; return false }
+        }
         guard let api, let room = current else { return false }
         var removed = false
         await action(api) { try await api.removeAgentRoom(room.id) } apply: { value in
@@ -238,6 +257,8 @@ enum AgentRoomCache {
             removed = true
         }
         if removed {
+            do { try VillageAmbienceHub.shared.reset(VillageAmbience.room(room.id)) }
+            catch { message = "Rummet er fjernet. Stemningens filer kunne ikke ryddes helt." }
             do { try AgentRoomCache.remove(room, server: api.queueTargetID) }
             catch { message = "Rummet er fjernet på PC’en. Telefonens kopi kunne ikke fjernes." }
         }

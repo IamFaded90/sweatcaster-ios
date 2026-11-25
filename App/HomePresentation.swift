@@ -78,6 +78,10 @@ extension Home {
         }
         .onOpenURL { url in
             guard url.scheme == "fadedai" else { return }
+            if url.host == "agent-shortcut" {
+                do { try AgentShortcutBridge.receive(url) } catch { AppDiagnostics.record(error) }
+                return
+            }
             switch url.host {
             case "video": openVideoJobs()
             case "code": selectSpace(.library)
@@ -111,7 +115,7 @@ extension Home {
     }
 
     private var homeNotices: some View {
-        homeStartup
+        hubPresentation(homeStartup)
         .overlay(alignment: .top) {
             if let studioToast {
                 Text(studioToast.text).font(.callout)

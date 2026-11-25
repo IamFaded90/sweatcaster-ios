@@ -158,6 +158,10 @@ import UniformTypeIdentifiers
                 }
                 FadedSecondaryButton("Find Qwen3 1.7B", icon: "arrow.down.circle") { showFiles("Qwen/Qwen3-1.7B-GGUF") }
                     .disabled(lookingUp)
+                if OfflineAgentModels.installedChat == nil {
+                    FadedSecondaryButton("Qwen3 4B · samtale · 2,5 GB", icon: "arrow.down.circle") { downloadChoice = OfflineAgentModels.chat }
+                        .disabled(lookingUp || downloads.pending != nil)
+                }
                 Button("Hugging Face-adgang", systemImage: "key") { showKey = true }
                     .frame(minHeight: 44)
                 if lookingUp { ProgressView("Henter modelliste…") }
@@ -322,11 +326,15 @@ import UniformTypeIdentifiers
                 if downloads.interrupted {
                     Text("Afbrudt hentning · \(entry.file.name)").font(.subheadline)
                     Button("Fortsæt download", systemImage: "arrow.clockwise") { downloads.resume() }
+                        .disabled(downloads.isPausing)
                         .frame(minHeight: 44)
                 } else if let progress = downloads.progress {
                     ProgressView(entry.file.name, value: progress)
                 } else { ProgressView("Klargør \(entry.file.name)…") }
                 Button("Stop download", role: .cancel) { downloads.cancel() }.frame(minHeight: 44)
+                if !downloads.interrupted {
+                    Button(downloads.isPausing ? "Sætter på pause…" : "Pause download", systemImage: "pause.circle") { downloads.pause() }.frame(minHeight: 44).disabled(downloads.isPausing)
+                }
             }
             if let message = downloads.notice { FadedDetailText(message) }
         }

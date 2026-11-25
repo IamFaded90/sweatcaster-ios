@@ -9,8 +9,9 @@ struct AgentDocumentSource: Codable, Identifiable, Sendable {
     let page: Int?
     var deadline: AgentDocumentDeadline? = nil
     var excerpt: String? = nil
+    var location: String? = nil
 
-    var citation: String { name + (page.map { ", side \($0)" } ?? "") }
+    var citation: String { name + (page.map { ", side \($0)" } ?? "") + (location.map { ", " + $0 } ?? "") }
 }
 
 struct AgentDocumentDeadline: Codable, Sendable {
@@ -44,18 +45,18 @@ struct AgentDocumentDeadline: Codable, Sendable {
         let date = #"(?:(20\d{2})-(\d{2})-(\d{2})|(\d{1,2})[./-](\d{1,2})[./-](20\d{2})|(\d{1,2})\.?[ \t]+("# + months.joined(separator: "|") + #")[ \t]+(20\d{2}))(?!\d)"#
         let clock = #"(?:[ \t,]+(?:kl(?:okken)?\.?[ \t]*)?(\d{1,2})[:.](\d{2})(?!\d))?"#
         guard let pattern = try? NSRegularExpression(pattern: marker + separators + date + clock, options: .caseInsensitive) else { return [] }
-        var pages: [(page: Int?, text: String)] = []
+        var pages: [(page: Int?, text: String, location: String?)] = []
         for passage in document.passages {
-            if pages.last?.page == passage.page, !pages.isEmpty {
+            if pages.last?.page == passage.page, pages.last?.location == passage.location, !pages.isEmpty {
                 pages[pages.count - 1].text += "\n" + passage.text
             } else {
-                pages.append((passage.page, passage.text))
+                pages.append((passage.page, passage.text, passage.location))
             }
         }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
         var result: [AgentDocumentSource] = []
-        for (page, text) in pages {
+        for (page, text, location) in pages {
             var quoted = Set<String>()
             for match in pattern.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
                 func group(_ index: Int) -> String? { Range(match.range(at: index), in: text).map { String(text[$0]) } }
@@ -79,7 +80,7 @@ struct AgentDocumentDeadline: Codable, Sendable {
                 bytes.14 ^= UInt8(ordinal >> 8)
                 bytes.15 ^= UInt8(truncatingIfNeeded: ordinal)
                 let evidence = AgentDocumentDeadline(reminderID: UUID(uuid: bytes), quote: quote, day: iso, time: time)
-                result.append(.init(id: result.count + 1, name: document.name, page: page, deadline: evidence))
+                result.append(.init(id: result.count + 1, name: document.name, page: page, deadline: evidence, location: location))
             }
         }
         return result
@@ -98,6 +99,7 @@ struct AgentDocument: Codable, Identifiable, Sendable {
         let page: Int?
         let text: String
         let vector: [Float]?
+        var location: String? = nil
     }
 
     let id: UUID
@@ -127,7 +129,8 @@ struct AgentDocumentMatch: Sendable {
         var prompt = question
         for match in matches {
             let proposed = question + "\n\n" + promptContext(included + [match])
-            guard proposed.unicodeScalars.count <= limit else { break }
+            // A later, shorter excerpt may still fit the remaining budget.
+            guard proposed.unicodeScalars.count <= limit else { continue }
             prompt = proposed
             included.append(match)
             var source = match.source
@@ -182,7 +185,7 @@ struct AgentDocumentMatch: Sendable {
 
 enum AgentDocumentIndex {
     static let officeExtensions = ["docx", "xlsx", "pptx"]
-    static let localTypes: [UTType] = [.plainText, .pdf, .commaSeparatedText] + ["md", "text"].compactMap { UTType(filenameExtension: $0) }
+    static let localTypes: [UTType] = [.plainText, .pdf, .commaSeparatedText, .json] + ["md", "text"].compactMap { UTType(filenameExtension: $0) }
     static let officeTypes = officeExtensions.compactMap { UTType(filenameExtension: $0) }
 
     enum Failure: LocalizedError {
@@ -199,7 +202,11 @@ enum AgentDocumentIndex {
     }
 
     static func ingest(_ url: URL) throws -> AgentDocument {
-        let pages = try textPages(read(url), type: url.pathExtension.lowercased())
+        let bytes = try read(url), type = url.pathExtension.lowercased()
+        let pages: [(Int?, String, String?)]
+        if ["csv", "json"].contains(type) {
+            pages = try StructuredDocumentLoader.load(bytes, type: type).map { (nil, $0.text, $0.location) }
+        } else { pages = try textPages(bytes, type: type).map { ($0.0, $0.1, nil) } }
         return try index(pages, name: url.lastPathComponent)
     }
 
@@ -220,7 +227,7 @@ enum AgentDocumentIndex {
         struct Converted: Decodable { let text: String }
         let result = try JSONDecoder().decode(Converted.self, from: body)
         guard result.text.unicodeScalars.count <= 24_000 else { throw Failure.tooLong }
-        return try index([(nil, result.text)], name: url.lastPathComponent)
+        return try index([(nil, result.text, nil)], name: url.lastPathComponent)
     }
 
     private static func read(_ url: URL) throws -> Data {
@@ -229,16 +236,16 @@ enum AgentDocumentIndex {
         return try LocalFileStore.readBytes(from: url, maximumBytes: 8_000_000)
     }
 
-    private static func index(_ pages: [(Int?, String)], name: String) throws -> AgentDocument {
+    private static func index(_ pages: [(Int?, String, String?)], name: String) throws -> AgentDocument {
         let model = LocalTextRanking.installedEmbedding()
         defer { model?.unload() }
         var passages: [AgentDocument.Passage] = []
-        for (page, text) in pages {
+        for (page, text, location) in pages {
             for part in chunks(text) {
                 try Task.checkCancellation()
                 guard passages.count < 100 else { throw Failure.tooLong }
                 let vector = model.flatMap { LocalTextRanking.vector(for: part, using: $0) }
-                passages.append(.init(page: page, text: part, vector: vector))
+                passages.append(.init(page: page, text: part, vector: vector, location: location))
             }
         }
         guard !passages.isEmpty else { throw Failure.noText }
@@ -333,6 +340,19 @@ enum AgentDocumentIndex {
         return excerpts(at: order, in: document)
     }
 
+    /// Library search is lexical and local; the selected document keeps its existing optional semantic index.
+    static func search(_ query: String, documents: [AgentDocument]) throws -> [(document: AgentDocument, match: AgentDocumentMatch)] {
+        let entries = documents.flatMap { document in document.passages.indices.map { (document, $0) } }
+        let texts = entries.map { document, index in document.name + "\n" + (document.passages[index].location ?? "") + "\n" + document.passages[index].text }
+        let order = try LocalTextRanking.lexicalOrder(query: String(query.prefix(400)), texts: texts)
+        return order.prefix(8).enumerated().map { rank, index in
+            let (document, passageIndex) = entries[index]
+            var hit = excerpts(at: [passageIndex], in: document)[0]
+            hit = AgentDocumentMatch(source: .init(id: rank + 1, name: document.name, page: hit.source.page, location: hit.source.location), text: hit.text)
+            return (document, hit)
+        }
+    }
+
     private static func requestsOverview(_ question: String) -> Bool {
         let text = AgentChatIntent.normalize(question).folding(options: .diacriticInsensitive, locale: Locale(identifier: "da_DK"))
         let subject = #"(?:(?:mit|min|dette|denne) )?(?:dokument(?:et)?|brev(?:et)?|tekst(?:en)?|fil(?:en)?|pdf(?:['’]?en)?)|det|den"#
@@ -347,7 +367,7 @@ enum AgentDocumentIndex {
     private static func excerpts(at indices: [Int], in document: AgentDocument) -> [AgentDocumentMatch] {
         indices.enumerated().map { rank, index in
             let passage = document.passages[index]
-            return AgentDocumentMatch(source: .init(id: rank + 1, name: document.name, page: passage.page),
+            return AgentDocumentMatch(source: .init(id: rank + 1, name: document.name, page: passage.page, location: passage.location),
                                       text: String(passage.text.unicodeScalars.prefix(480)))
         }
     }

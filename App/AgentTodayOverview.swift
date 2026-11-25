@@ -86,6 +86,7 @@ import UIKit
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if showsTitle { Text("Dagens overblik").font(.headline) }
+            DayPlanEntry()
             phoneSection(.calendar, state: events, empty: "Du har ingen aftaler i dag.", row: eventRow)
             Divider()
             phoneSection(.reminders, state: reminders, empty: "Du har ingen påmindelser med frist i dag eller tidligere.", row: reminderRow)

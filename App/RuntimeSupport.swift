@@ -6,59 +6,6 @@ import SwiftUI
 import UIKit
 import UserNotifications
 
-enum AppDiagnostics {
-    private static let lock = NSLock()
-    private static let key = AppStorageKeys.diagnosticsApiV1
-
-    @discardableResult
-    static func record<E: Error>(_ error: E) -> E {
-        let label: String
-        switch error {
-        case is CancellationError: return error
-        case let api as APIError:
-            switch api {
-            case .http(let status, _): label = "APIError HTTP \(status)"
-            case .transport(let code): label = "APIError transport \(code)"
-            case .addressLeadingZeros: label = "APIError: Ledende nuller i PC-adressen"
-            default: label = "APIError: " + api.title
-            }
-        case let v2 as V2Failure:
-            switch v2 {
-            case .http(let status, _, _): label = "V2Failure HTTP \(status)"
-            case .invalidInput: label = "V2Failure invalidInput"
-            case .invalidResponse: label = "V2Failure invalidResponse"
-            case .interrupted: label = "V2Failure interrupted"
-            }
-        case let network as URLError:
-            guard network.code != .cancelled else { return error }
-            label = "URLSession \(network.errorCode)"
-        case is DecodingError: label = "JSON: ugyldigt svarformat"
-        default: label = "App-fejl · " + String(describing: type(of: error))
-        }
-        lock.withLock {
-            var entries = UserDefaults.standard.stringArray(forKey: key) ?? []
-            let entry = "\(ISO8601DateFormatter().string(from: .now))  \(label)"
-            guard entries.last != entry else { return }
-            entries.append(entry)
-            UserDefaults.standard.set(Array(entries.suffix(50)), forKey: key)
-        }
-        return error
-    }
-
-    static func export(phoneModel: String? = nil, pcConnected: Bool? = nil) throws -> URL {
-        let entries = lock.withLock { UserDefaults.standard.stringArray(forKey: key) ?? [] }
-        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("FadedAI-diagnostics", isDirectory: true)
-        let url = folder.appendingPathComponent("FadedAI-fejllog.txt")
-        var header = ["FadedAI · API-fejllog", "Eksporteret \(ISO8601DateFormatter().string(from: .now))"]
-        if let phoneModel { header.append("Telefonmodel · \(phoneModel)") }
-        if let pcConnected { header.append(pcConnected ? "PC · Forbundet" : "PC · Ingen aktiv forbindelse") }
-        let content = entries.isEmpty ? "Ingen API-fejl registreret." : entries.joined(separator: "\n")
-        let data = Data((header.joined(separator: "\n") + "\n\n" + content + "\n").utf8)
-        try LocalFileStore.writeBytes(data, to: url, within: FileManager.default.temporaryDirectory)
-        return url
-    }
-}
-
 enum LocalComputeError: Error { case busy, lowMemory }
 
 @MainActor enum StudioScratch {
@@ -103,21 +50,22 @@ func pcBusyMessage(_ error: Error) -> String? {
 }
 
 @MainActor enum LocalCompute {
-    private static var busy = false
+    private static var queue = LocalComputeQueue()
+    private static var busy: Bool { queue.running != nil }
     private static var suspended = false
-    private static var backgroundRevision = 0
-    private static var pending: [UUID] = []
     private static var loadedSinceForeground = false
     private static var needsReloadNotice = false
     private static var cancelCurrent: (() -> Void)?
     private(set) static var isLoadingModel = false
     private static let mib: UInt64 = 1_048_576
-    static var headroom: UInt64 { UInt64(os_proc_available_memory()) }
+    nonisolated static var headroom: UInt64 { UInt64(os_proc_available_memory()) }
     static var isRunning: Bool { busy }
+    static var queuedCount: Int { queue.waiting.count }
+    static func stopAll() { queue.cancelWaiting(); cancelCurrent?() }
 
     static func suspend() {
         suspended = true
-        backgroundRevision += 1
+        queue.cancelWaiting()
         needsReloadNotice = needsReloadNotice || loadedSinceForeground
         loadedSinceForeground = false
         cancelCurrent?()
@@ -150,35 +98,37 @@ func pcBusyMessage(_ error: Error) -> String? {
     static func run<T>(minimumMiB: UInt64, work: @escaping @MainActor () async throws -> T) async throws -> T {
         guard !suspended else { throw CancellationError() }
         try Task.checkCancellation()
-        guard pending.count < 4 else { throw LocalComputeError.busy }
-        let ticket = UUID()
-        let revision = backgroundRevision
-        pending.append(ticket)
-        defer { pending.removeAll { $0 == ticket } }
-        while busy || pending.first != ticket {
+        let ticket: LocalComputeQueue.Ticket
+        do { ticket = try queue.enqueue() } catch { throw LocalComputeError.busy }
+        defer { queue.finish(ticket) }
+        while !queue.canStart(ticket) {
             try await Task.sleep(for: .milliseconds(100))
-            guard !suspended, revision == backgroundRevision else { throw CancellationError() }
+            guard !suspended, queue.valid(ticket) else { throw CancellationError() }
         }
         try Task.checkCancellation()
-        guard headroom >= minimumMiB * mib else { throw LocalComputeError.lowMemory }
-        pending.removeFirst()
-        busy = true
+        let available = headroom
+        guard LocalComputeQueue.fits(requiredMiB: minimumMiB, availableBytes: available) else {
+            AppDiagnostics.recordLowMemory(requiredMiB: minimumMiB, availableBytes: available, footprintBytes: footprint())
+            throw LocalComputeError.lowMemory
+        }
+        guard queue.start(ticket) else { throw CancellationError() }
         let operation = Task { @MainActor in
             try Task.checkCancellation()
             return try await work()
         }
         cancelCurrent = { operation.cancel() }
-        defer { setModelLoading(false); cancelCurrent = nil; busy = false }
+        defer { setModelLoading(false); cancelCurrent = nil }
         return try await withTaskCancellationHandler {
             let result = try await operation.value
             try Task.checkCancellation()
+            guard queue.acceptsResult(ticket, cancelled: operation.isCancelled) else { throw CancellationError() }
             return result
         } onCancel: {
             operation.cancel()
         }
     }
 
-    static func footprint() -> UInt64? {
+    nonisolated static func footprint() -> UInt64? {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.stride / MemoryLayout<integer_t>.stride)
         let capacity = Int(count)
@@ -503,14 +453,30 @@ struct ResourceMonitor: View {
     @State private var expanded = false
     @State private var footprint: UInt64?
     @State private var headroom: UInt64?
+    @State private var measuredAt: Date?
+    @State private var measurementCount = 0
+    @AppStorage(AppStorageKeys.qolHaptics) private var appHaptics = true
 
     var body: some View {
         DisclosureGroup("Ressourcer", isExpanded: $expanded) {
             LabeledContent("FadedAIs RAM", value: footprint.map(megabytes) ?? "Ikke målt")
             LabeledContent("Anslået RAM-råderum", value: headroom.map(megabytes) ?? "Ikke målt")
-            Text("PC’ens CPU/GPU-tal er ikke tilgængelige i den nuværende server-API.")
+            if let measuredAt {
+                LabeledContent("Måling \(measurementCount)",
+                               value: measuredAt.formatted(date: .omitted, time: .standard))
+                    .font(.caption).monospacedDigit().foregroundStyle(.secondary)
+            }
+            Text("Råderummet er den RAM, iOS lader FadedAI bruge lige nu. Mål igen opdaterer tallene; det frigør ikke RAM.")
                 .font(.caption).foregroundStyle(.secondary)
-            Button("Mål igen", action: measure).frame(minHeight: 44)
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                LabeledContent("Lokale AI-opgaver", value: (LocalCompute.isRunning ? "Én aktiv" : "Ingen aktiv") + " · \(LocalCompute.queuedCount) i kø")
+                Button("Stop lokale AI-opgaver", systemImage: "stop.circle") { LocalCompute.stopAll(); measure() }.frame(minHeight: 44)
+            }
+            Button(action: measure) {
+                Label("Mål igen", systemImage: "arrow.clockwise")
+            }
+            .buttonStyle(.bordered).frame(minHeight: 44)
+            .sensoryFeedback(.selection, trigger: measurementCount) { _, _ in appHaptics }
         }
         .onChange(of: expanded) { _, open in if open { measure() } }
     }
@@ -518,6 +484,9 @@ struct ResourceMonitor: View {
     private func measure() {
         footprint = LocalCompute.footprint()
         headroom = LocalCompute.headroom
+        measuredAt = .now
+        measurementCount += 1
+        UIAccessibility.post(notification: .announcement, argument: "RAM-tal opdateret. Måling \(measurementCount).")
     }
 
     private func megabytes(_ bytes: UInt64) -> String { "\(bytes / 1_048_576) MiB" }

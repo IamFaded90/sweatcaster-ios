@@ -52,5 +52,14 @@ workflows:
           zip -qr "$output/FadedAI-unsigned.ipa" Payload
           unzip -tq "$output/FadedAI-unsigned.ipa"
           python3 "$CM_BUILD_DIR/verify_ipa.py" "$output/FadedAI-unsigned.ipa"
+      - name: Prepare separate AltStore IPA with memory request
+        script: |
+          set -eu
+          cd "$CM_BUILD_DIR"
+          python3 tools/package_memory_request.py build/FadedAI-unsigned.ipa \
+            build/FadedAI-AltStore-memory-request.ipa --entitlements App/FadedAI.entitlements
+          python3 verify_ipa.py build/FadedAI-AltStore-memory-request.ipa
+          python3 tools/inspect_ipa_memory.py build/FadedAI-AltStore-memory-request.ipa --require-memory-request
     artifacts:
       - build/FadedAI-unsigned.ipa
+      - build/FadedAI-AltStore-memory-request.ipa

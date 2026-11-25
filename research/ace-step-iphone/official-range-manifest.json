@@ -1,0 +1,52 @@
+{
+  "purpose": "Research manifest for the extra ACE-Step 1.5 audio encoder and FSQ tokenizer; not used by the app.",
+  "verified_on": "2026-11-25",
+  "repository": "ACE-Step/Ace-Step1.5",
+  "revision": "571cee88618ae5ef3d3fcdf79c46068ce4e2d727",
+  "license": "MIT",
+  "format": "safetensors",
+  "components": [
+    {
+      "component": "vae_audio_encoder",
+      "official_url": "https://huggingface.co/ACE-Step/Ace-Step1.5/resolve/571cee88618ae5ef3d3fcdf79c46068ce4e2d727/vae/diffusion_pytorch_model.safetensors",
+      "model_card": "https://huggingface.co/ACE-Step/Ace-Step1.5/blob/571cee88618ae5ef3d3fcdf79c46068ce4e2d727/vae/diffusion_pytorch_model.safetensors",
+      "source_file_bytes": 337431388,
+      "source_file_sha256": "da17edb604c40deaf09e9b24974e590d1ca83a374070e5d0884cfa4bed9a99b0",
+      "safetensors_header_bytes": 40528,
+      "tensor_prefix": "encoder.",
+      "tensor_count": 183,
+      "tensor_dtype": "BF16",
+      "range_start_inclusive": 168868700,
+      "range_end_inclusive": 337431387,
+      "range_bytes": 168562688,
+      "range_sha256": "567ab143316b1af548536b0390e9cb83f67675498614f429bec4c8d4c6ec4a96"
+    },
+    {
+      "component": "audio_fsq_tokenizer",
+      "official_url": "https://huggingface.co/ACE-Step/Ace-Step1.5/resolve/571cee88618ae5ef3d3fcdf79c46068ce4e2d727/acestep-v15-turbo/model.safetensors",
+      "model_card": "https://huggingface.co/ACE-Step/Ace-Step1.5/blob/571cee88618ae5ef3d3fcdf79c46068ce4e2d727/acestep-v15-turbo/model.safetensors",
+      "source_file_bytes": 4787825604,
+      "source_file_sha256": "3f6e0797fad420a39bd33979eb6e840e30989e34a3794e843d23b60ec6e422d7",
+      "safetensors_header_bytes": 80560,
+      "tensor_prefix": "tokenizer.",
+      "tensor_count": 32,
+      "tensor_dtype": "BF16",
+      "range_start_inclusive": 4577761208,
+      "range_end_inclusive": 4787825603,
+      "range_bytes": 210064396,
+      "range_sha256": "ec42754b457748cd41a1b04f6ebcbc1f9e31e67c8677b28cff0b7193113f9c1d"
+    }
+  ],
+  "provenance": {
+    "source_file_sha256": "Both complete local files were hashed and matched the official Hugging Face API LFS SHA-256 metadata for the pinned revision.",
+    "range_sha256": "Computed locally from the corresponding complete source file after whole-file hash verification; these are not separately published official hashes.",
+    "remote_probe": "Each complete region was streamed directly from the pinned official revision without saving a file. Both returned HTTP 206, the expected Content-Range and Content-Length, and SHA-256 matching the locally derived range digest. This checks the remote bytes against our digest; the range digests are not separately published official metadata."
+  },
+  "limitations": [
+    "This file is research only: no model downloader, converter, or runtime is wired into the app.",
+    "A downloaded range is a raw tensor-data slice, not a complete safetensors file; validated headers, tensor shapes and offsets are still needed.",
+    "The VAE requires weight-normalization folding and Conv1d layout conversion; the tokenizer requires checked keys and a supported BF16 or converted dtype.",
+    "The precise per-tensor integrity, streaming conversion, peak iPhone memory, Swift/MLX correctness and end-to-end audio quality have not been tested.",
+    "A signed redirect or server may reject range requests or ignore Range; a future implementation must check status, Content-Range, length and digest and avoid silently downloading the full source."
+  ]
+}

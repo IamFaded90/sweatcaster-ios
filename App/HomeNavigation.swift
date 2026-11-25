@@ -12,6 +12,7 @@ extension Home {
 
     var spacesBar: some View {
         VStack(spacing: 6) {
+            if space != .music { MusicMiniPlayer { selectSpace(.music) } }
             Text(currentTabAccessibilityName)
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
@@ -36,7 +37,7 @@ extension Home {
     }
 
     private var dockSpaces: [Space] {
-        [.notes, .gallery, .brain, .tasks, .entertainment, .music, .library]
+        [.notes, .gallery, .brain, .resume, .tasks, .entertainment, .music, .library]
     }
 
     private var tabButtons: some View {
@@ -88,7 +89,7 @@ extension Home {
         case .connections: showConnections = true
         case .pcStatus: showPCStatus = true
         case .codeAddOns: showCodeAddOns = true
-        case .search: openSearch()
+        case .search: showPersonalSearch = true
         case .module(let id): selectModule("module:" + id)
         }
     }
@@ -96,6 +97,7 @@ extension Home {
     private func spaceTitle(_ item: Space) -> String {
         switch item {
         case .brain: "Hjem"
+        case .resume: "Fortsæt"
         case .notes: "Chat"
         case .gallery: "Video"
         case .tasks: "Agenter"
@@ -108,6 +110,7 @@ extension Home {
     private func spaceIcon(_ item: Space) -> String {
         switch item {
         case .brain: "house.fill"
+        case .resume: "play.circle.fill"
         case .notes: "bubble.left.fill"
         case .gallery: "play.rectangle.fill"
         case .tasks: "person.2.fill"

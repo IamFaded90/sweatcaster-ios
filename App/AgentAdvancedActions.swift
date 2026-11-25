@@ -38,6 +38,14 @@ extension AgentPhoneChat {
     }
 
     @ViewBuilder var advancedAgentShortcuts: some View {
+        agentShortcut("Kamerahjælp · vis mig stedet", icon: "viewfinder") { interactiveTool = .cameraGuide(cleanDraft, attachedPhoto) }
+        agentShortcut("Find ting fra et billede", icon: "viewfinder") { interactiveTool = .productHunt("", attachedPhoto) }
+        agentShortcut("Skift stemning i landsbyen", icon: "sun.haze") { interactiveTool = .ambience }
+        agentShortcut("Følg en sag til dørs", icon: "checkmark.bubble") { interactiveTool = .caseTracker }
+        agentShortcut("Dit kreative hold", icon: "paintbrush.pointed") { interactiveTool = .creative(nil) }
+        agentShortcut("Tag dig af en returvare", icon: "shippingbox.and.arrow.backward") { interactiveTool = .taskJourney }
+        agentShortcut("Gør min aften god", icon: "moon.stars") { interactiveTool = .evening(.init()) }
+        agentShortcut("Spil et mysterium", icon: "moon.stars") { interactiveTool = .mystery }
         ForEach(AgentMilestone.allCases) { kind in
             agentShortcut(kind.title, icon: kind.icon) { startAgentAction(.milestone(kind), prompt: kind.title) }
         }
@@ -59,6 +67,22 @@ extension AgentPhoneChat {
     }
 
     @ViewBuilder var agentComputerShortcuts: some View {
+        agentShortcut("Planlæg min dag", icon: "calendar.badge.clock") { interactiveTool = .dayPlan }
+        agentShortcut("Scan dokument, kvittering eller QR", icon: "doc.viewfinder") { interactiveTool = .scanDocument }
+        agentShortcut("Optagelser og dansk transskription", icon: "waveform") { interactiveTool = .audioJournal }
+        agentShortcut("Fang tekst, foto eller lyd", icon: "square.and.pencil") { interactiveTool = .capture }
+        agentShortcut("Agentens hukommelse", icon: "brain") { interactiveTool = .memory([]) }
+        agentShortcut("Lav et lokalt værktøj", icon: "curlybraces") { interactiveTool = .localCode(cleanDraft) }
+        agentShortcut("Færdigheder og telefonværktøjer", icon: "sparkles.rectangle.stack") { interactiveTool = .skills }
+        agentShortcut("Agentbrowser på iPhone", icon: "globe") { interactiveTool = .browser(cleanDraft) }
+        agentShortcut("Find i mit univers", icon: "magnifyingglass") { interactiveTool = .personalSearch("") }
+        agentShortcut("Personlighed og samtalestil", icon: "person.crop.circle.badge.sparkles") { interactiveTool = .personality }
+        agentShortcut("Lav eller redigér billeder", icon: "photo.badge.plus") {
+            interactiveTool = .images(cleanDraft, attachedPhoto)
+        }
+        agentShortcut("Arbejdsrum · filer, opgaver og genveje", icon: "laptopcomputer.and.iphone") {
+            interactiveTool = .workspace(nil, "")
+        }
         agentShortcut("Del min iPhone-skærm", icon: "iphone") {
             startAgentAction(.phoneScreen, prompt: "Se lige min skærm")
         }

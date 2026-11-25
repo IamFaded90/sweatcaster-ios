@@ -22,6 +22,7 @@ struct PrivateChatTurn: Codable, Identifiable {
     var webSources: [AgentWebSources.Source]? = nil
     var documentSources: [AgentDocumentSource]? = nil
     var agentAction: AgentChatAction? = nil
+    var memorySources: [UUID]? = nil
 }
 
 struct StudioPhotoInput: Transferable {

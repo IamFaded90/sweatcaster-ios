@@ -165,9 +165,8 @@ enum TeamActionPanel: String, Identifiable {
         var evidence = ""
         var sources: [AgentWebSources.Source] = []
         if let query = TeamChatPolicy.webQuery(prompt) {
-            guard let api else { throw APIError.offline }
             if let first = members.first { stage(first.id, first.name + " søger på nettet") }
-            let research = try await api.chatResearch(query: query)
+            let research = try await AgentInternetTools.research(query: query, api: api)
             sources = Array(research.sources.filter(\.isWeb).prefix(4))
             guard !sources.isEmpty, !research.context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 throw TeamRound.Failure.noSources

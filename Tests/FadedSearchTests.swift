@@ -38,6 +38,30 @@ final class FadedSearchTests: XCTestCase {
 }
 
 final class AgentDocumentSearchTests: XCTestCase {
+    func testOversizedPassagesDoNotHideLaterEvidenceOrExceedBudget() {
+        let question = "Hvad siger notatet?"
+        func hit(_ id: Int, _ text: String) -> AgentDocumentMatch {
+            .init(source: .init(id: id, name: "Notat", page: id), text: text)
+        }
+        let firstFit = hit(2, "Første relevante uddrag: øvelse.")
+        let secondFit = hit(3, "Andet relevante uddrag: 🟢.")
+        let exactLimit = (question + "\n\n" + AgentDocumentMatch.promptContext([firstFit, secondFit])).unicodeScalars.count
+        let oversized = hit(1, String(repeating: "x", count: exactLimit))
+        let overflow = hit(4, "Et uddrag mere, som ikke længere passer.")
+        let packet = AgentDocumentMatch.request(question: question, matches: [oversized, firstFit, secondFit, overflow], limit: exactLimit)
+        XCTAssertEqual(packet.sources.map(\.id), [2, 3])
+        XCTAssertEqual(packet.sources.compactMap(\.excerpt), [firstFit.text, secondFit.text])
+        XCTAssertEqual(packet.prompt.unicodeScalars.count, exactLimit)
+        XCTAssertFalse(packet.prompt.contains(overflow.text))
+        XCTAssertTrue(packet.prompt.contains("[2] " + firstFit.text))
+        XCTAssertTrue(packet.prompt.contains("[3] " + secondFit.text))
+
+        let roomForFirst = (question + "\n\n" + AgentDocumentMatch.promptContext([firstFit])).unicodeScalars.count
+        let priority = AgentDocumentMatch.request(question: question, matches: [firstFit, secondFit], limit: roomForFirst)
+        XCTAssertEqual(priority.sources.map(\.id), [2])
+        XCTAssertLessThanOrEqual(priority.prompt.unicodeScalars.count, roomForFirst)
+    }
+
     func testDocumentOverviewAndFollowUpKeepPageEvidence() throws {
         let texts = ["Prøveplan for november", "Adgangskoden er gråspurv.", "Første møde i Farsø",
                      "Revision i marts", "Året afsluttes i Odense."]

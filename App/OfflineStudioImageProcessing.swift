@@ -26,7 +26,9 @@ import UIKit
 
     static func whileDeviceReady(model: StudioImageModel, protectBattery: Bool,
                                  generate: @escaping @MainActor @Sendable () async throws -> Data?) async throws -> Data? {
-        try await LocalCompute.run(minimumMiB: model.minimumWorkingMemoryMiB) {
+        await AgentVoiceDownload.releaseSynthesisResources()
+        try Task.checkCancellation()
+        return try await LocalCompute.run(minimumMiB: model.minimumWorkingMemoryMiB) {
             try checkBattery(protect: protectBattery)
             guard !isHot else { throw StudioImageInterruption.heat }
             return try await withThrowingTaskGroup(of: Optional<Data>.self) { group in

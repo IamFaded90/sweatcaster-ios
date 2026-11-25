@@ -188,12 +188,10 @@ extension Home {
     var settingsSheet: some View {
         NavigationStack(path: $settingsPath) {
             ScrollView {
-                VStack(alignment: .leading, spacing: FadedSpacing.section) {
-                    ForEach(SettingsCategory.allCases, id: \.self) { category in
+                SettingsOverview(category: { category in
                         NavigationLink(value: category) { settingsRow(category) }
                             .buttonStyle(.plain)
-                    }
-                }
+                }, api: studioAPI)
                 .padding(FadedSpacing.edge)
                 .frame(maxWidth: 560)
                 .frame(maxWidth: .infinity)
@@ -206,7 +204,7 @@ extension Home {
             }
             .navigationDestination(for: SettingsCategory.self) { settingsPage($0) }
         }
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .presentationBackground(palette.background)
     }
@@ -274,6 +272,11 @@ extension Home {
                     FadedDetailText("Automatisk modelvalg bruger Telefon og PC. Grok vælges manuelt.")
                 }
                 Section("Grok") { CloudModelSettings() }
+                Section("AI og værktøjer på nettet") {
+                    ComposioCloudSetup(api: studioAPI)
+                    NvidiaCloudSetup(api: studioAPI)
+                    OpenRouterCloudSetup(api: studioAPI)
+                }
                 Section("Værktøjer") {
                     Button("Privat Studio") { closeSettings(for: .privateChat) }
                     Button("Mine bots") { closeSettings(for: .bots) }

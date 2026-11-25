@@ -74,6 +74,8 @@ extension PhoneModels {
     @MainActor static func reply(modelID: String, prompt: String, instructions: String = "",
                                  history: [ChatExchange] = [], prefixCache: PhonePromptCache.Scope? = nil,
                                  update: @escaping (String) -> Void) async throws {
+        await AgentVoiceDownload.releaseSynthesisResources()
+        try Task.checkCancellation()
         try await LocalCompute.run(minimumMiB: minimumMemory(for: modelID)) {
             try await streamReply(modelID: modelID, prompt: prompt, instructions: instructions, history: history,
                                   prefixCache: prefixCache, update: update)
@@ -160,6 +162,8 @@ extension PhoneModels {
     @MainActor static func benchmark(modelID: String, progress: @escaping (String) -> Void = { _ in }) async throws -> String {
         let prompt = "In one short English sentence, explain this message: I wud lik to boock a tabel for too on Fryday."
         let limit = 64
+        await AgentVoiceDownload.releaseSynthesisResources()
+        try Task.checkCancellation()
         return try await LocalCompute.run(minimumMiB: minimumMemory(for: modelID)) {
             progress("Indlæser modellen og venter på første tekst…")
             let start = ContinuousClock.now

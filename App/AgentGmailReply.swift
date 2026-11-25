@@ -21,7 +21,7 @@ import SwiftUI
         let threadID: String?
     }
 
-    private struct Intent {
+    struct Intent {
         let query, draft: String
         var booking = false
 

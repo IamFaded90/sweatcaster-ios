@@ -20,7 +20,7 @@ import SwiftUI
             VillageInteriorArtwork(name: artwork, label: zone.title, residents: residents, animateResidents: animated,
                                    speakingID: activeID, onHear: hear, onMoveSpeaker: { id, pan in
                 if activeID == id { player.updatePan(pan) }
-            })
+            }, ambienceScene: VillageAmbience.zone(zone.rawValue))
             .frame(height: 230).frame(maxWidth: .infinity)
             .background(palette.card, in: RoundedRectangle(cornerRadius: 18))
             .clipShape(RoundedRectangle(cornerRadius: 18))
@@ -30,6 +30,7 @@ import SwiftUI
             }
         }
         .onDisappear { player.stop() }
+        .modifier(VillageAmbienceLifecycle(scene: VillageAmbience.zone(zone.rawValue)))
         .onChange(of: phase) { _, next in if next != .active { player.stop() } }
         .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { event in
             if (event.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.began.rawValue {

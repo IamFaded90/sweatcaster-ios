@@ -77,6 +77,7 @@ struct AgentCaseRecord: Decodable, Identifiable {
     let incoming: [Incoming]
     let watch: Bool
     let lastChecked: Double?
+    let checkError: String?
 
     var editable: Bool { outgoing == nil && state != "closed" }
     var stateTitle: String {

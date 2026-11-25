@@ -60,6 +60,11 @@ assert all(kind in rule for kind in ("public.url", "public.image", "public.plain
 for path in ("App/FadedAI.entitlements", "ShareExtension/ShareExtension.entitlements", "BroadcastExtension/BroadcastExtension.entitlements"):
     entitlements = plistlib.loads((root / path).read_bytes())
     assert entitlements["com.apple.security.application-groups"] == ["group.dk.sweatcaster.ios.share"]
+    memory_key = "com.apple.developer.kernel.increased-memory-limit"
+    if path == "App/FadedAI.entitlements":
+        assert entitlements.get(memory_key) is True, "Main app must request the increased memory limit when signed"
+    else:
+        assert memory_key not in entitlements, "Extensions must not request the model engine's memory entitlement"
     assert sum(f"CODE_SIGN_ENTITLEMENTS = {path};" in row for row in rows.values()) == 2
 capture_info = plistlib.loads((root / "BroadcastExtension/Info.plist").read_bytes())["NSExtension"]
 assert capture_info["NSExtensionPointIdentifier"] == "com.apple.broadcast-services-upload"

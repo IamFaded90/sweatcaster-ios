@@ -33,18 +33,18 @@ struct Home: View {
 
         var detail: String {
             switch self {
-            case .connection: "Hjem, Tailscale og PC-status"
-            case .models: "Kåre, Core ML og Grok"
-            case .appearance: "Tema, tekst og bevægelse"
+            case .connection: "PC, netværk og dine tilsluttede konti"
+            case .models: "Telefonmodeller, hentning og AI på nettet"
+            case .appearance: "Tema, tekst, stemmer og lyd"
             case .diagnostics: "Ping, log og lokale data"
             }
         }
 
         var searchKeywords: String {
             switch self {
-            case .connection: "netværk forbindelse IP QR Hjem Tailscale"
-            case .models: "model download Core ML Apple Foundation Ollama Grok automatisk"
-            case .appearance: "tema mørk lys OLED skrifttype tekststørrelse animation haptik"
+            case .connection: "netværk forbindelse IP QR Hjem Tailscale Composio Gmail konti mobildata"
+            case .models: "model download hentning lagerplads offline Core ML Apple Foundation Ollama Grok automatisk"
+            case .appearance: "tema mørk lys OLED skrifttype tekststørrelse animation haptik stemmer tale lyd"
             case .diagnostics: "ping fejllog eksport ressourcer notifikationer Live Activity ryd"
             }
         }
@@ -80,6 +80,7 @@ struct Home: View {
     enum Space: String, CaseIterable, Identifiable {
         case brain = "Brain", notes = "Notes", gallery = "Gallery", tasks = "Tasks", library = "Library"
         case entertainment = "Entertainment", music = "Music"
+        case resume = "Continue"
         var id: Self { self }
     }
     private enum TabDestination: Equatable {
@@ -98,6 +99,11 @@ struct Home: View {
     @State var showDashboardActivity = false
     @State var showAgentAssistant = false
     @State var showMorningOverview = false
+    @State var showEvening = false
+    @State var showMystery = false
+    @State var showCreativeHub = false
+    @State var showPersonalSearch = false
+    @State var personalSearchAdvanced = false
     @State var showMoreDestinations = false
     @State var showCreativeStudioShortcut = false
     @State var showFadedCamera = false
@@ -333,10 +339,14 @@ struct Home: View {
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Code Bot", systemImage: "chevron.left.forwardslash.chevron.right") }.tag(Space.library.rawValue)
             DeferredHomeTab(isSelected: selectedHomeTab == Space.music.rawValue) {
-                AnyView(MusicView(onBack: goBack))
+                AnyView(MusicView(onBack: goBack, api: studioAPI))
             }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Musik", systemImage: "music.note") }.tag(Space.music.rawValue)
+            DeferredHomeTab(isSelected: selectedHomeTab == Space.resume.rawValue) {
+                AnyView(FadedContinueView(api: studioAPI, open: openEvening))
+            }.toolbarVisibility(.hidden, for: .tabBar)
+                .tabItem { Label("Fortsæt", systemImage: "play.circle") }.tag(Space.resume.rawValue)
             Color.clear
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Underholdning", systemImage: "play.tv") }.tag(Space.entertainment.rawValue)
@@ -427,7 +437,7 @@ struct Home: View {
                     }
                 }
                 ToolbarItemGroup(placement: .topBarTrailing) {
-                    Button("Søg i FadedAI", systemImage: "magnifyingglass", action: openSearch)
+                    Button("Søg i FadedAI", systemImage: "magnifyingglass") { showPersonalSearch = true }
                         .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
                         .keyboardShortcut("k", modifiers: .command)
                     Menu {

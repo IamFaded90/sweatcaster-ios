@@ -1,0 +1,148 @@
+import Foundation
+import MLX
+
+/// Safetensors weights used in place, straight from the file.
+///
+/// `loadArrays` reads a file into freshly allocated memory, and that memory
+/// is the app's: iOS counts every byte against the limit it kills apps at.
+/// Mapping the file instead leaves the weights as clean, file-backed pages —
+/// the system can drop and re-read them under pressure, so they are not
+/// charged to the app the way allocated memory is. llama.cpp runs large
+/// models on phones the same way.
+///
+/// The GPU reads the mapping directly: MLX wraps page-aligned memory in a
+/// Metal buffer without copying (`newBufferWithBytesNoCopy`), and each
+/// tensor is a view into that one buffer at its offset.
+///
+/// Files must be written with every tensor's data aligned (see
+/// `ports/acestep/convert_weights.py`); a view at an odd offset would work
+/// but read slowly.
+enum MappedWeights {
+    enum Failure: LocalizedError {
+        case unreadable(String)
+        case unmappable(String, Int32)
+        case badHeader(String)
+        case unsupportedType(String)
+
+        var errorDescription: String? {
+            switch self {
+            case .unreadable(let name):     return "Could not open \(name)."
+            case .unmappable(let name, let code):
+                return "Could not map \(name) into memory (\(String(cString: strerror(code)))). The model's files are larger than iOS lets this app address at once."
+            case .badHeader(let name):      return "\(name) is not a valid weights file."
+            case .unsupportedType(let type): return "Unsupported tensor type \(type)."
+            }
+        }
+    }
+
+    /// How much of the weights mapped right now is actually in memory, by
+    /// asking the kernel which pages are resident. iOS counts none of it in
+    /// the app's footprint, and the task's "external" figure did not see it
+    /// either (it read 0.0 GB with XL running), so this is what the memory
+    /// gauge shows for mapped models.
+    static var residentBytes: Int64 { Regions.residentBytes }
+
+    private enum Regions {
+        private static let lock = NSLock()
+        nonisolated(unsafe) private static var lengths: [UnsafeMutableRawPointer: Int] = [:]
+
+        static func add(_ base: UnsafeMutableRawPointer, _ length: Int) {
+            lock.withLock { lengths[base] = length }
+        }
+
+        static func remove(_ base: UnsafeMutableRawPointer) {
+            _ = lock.withLock { lengths.removeValue(forKey: base) }
+        }
+
+        static var residentBytes: Int64 {
+            lock.withLock {
+                let page = Int(vm_page_size)
+                var total: Int64 = 0
+                for (base, length) in lengths {
+                    var flags = [CChar](repeating: 0, count: (length + page - 1) / page)
+                    guard mincore(base, length, &flags) == 0 else { continue }
+                    total += Int64(flags.reduce(0) { $0 + Int($1 & 1) }) * Int64(page)
+                }
+                return total
+            }
+        }
+    }
+
+    static func load(url: URL) throws -> [String: MLXArray] {
+        let name = url.lastPathComponent
+        let descriptor = open(url.path, O_RDONLY)
+        guard descriptor >= 0 else { throw Failure.unreadable(name) }
+        defer { close(descriptor) }
+
+        var status = stat()
+        guard fstat(descriptor, &status) == 0, status.st_size > 8 else { throw Failure.unreadable(name) }
+        let size = Int(status.st_size)
+        // Metal wants whole pages; the tail past end-of-file reads as zeros.
+        let page = Int(vm_page_size)
+        let length = (size + page - 1) / page * page
+
+        // XL's transformer alone maps 8.1 GB; without the
+        // extended-virtual-addressing entitlement iOS ran out of address
+        // space partway through it and this failed.
+        guard let base = mmap(nil, length, PROT_READ, MAP_SHARED, descriptor, 0),
+              base != MAP_FAILED else { throw Failure.unmappable(name, errno) }
+
+        let declared = UInt64(littleEndian: base.load(as: UInt64.self))
+        guard declared > 0, declared <= min(UInt64(size - 8), 16_777_216) else {
+            munmap(base, length)
+            throw Failure.badHeader(name)
+        }
+        let headerLength = Int(declared)
+        guard 8 + headerLength <= size,
+              let header = try? JSONSerialization.jsonObject(
+                with: Data(bytesNoCopy: base + 8, count: headerLength, deallocator: .none))
+                as? [String: Any]
+        else {
+            munmap(base, length)
+            throw Failure.badHeader(name)
+        }
+        let dataStart = 8 + headerLength
+
+        // One array over the whole mapping; unmapped when the last tensor
+        // viewing it is released.
+        Regions.add(base, length)
+        let whole = MLXArray(rawPointer: base, [length], dtype: .uint8) {
+            Regions.remove(base)
+            munmap(base, length)
+        }
+
+        var tensors: [String: MLXArray] = [:]
+        for (key, value) in header where key != "__metadata__" {
+            guard let entry = value as? [String: Any],
+                  let type = entry["dtype"] as? String,
+                  let shape = entry["shape"] as? [Int],
+                  let offsets = entry["data_offsets"] as? [Int], offsets.count == 2
+            else { throw Failure.badHeader(name) }
+            let dtype: DType
+            switch type {
+            case "F16":  dtype = .float16
+            case "BF16": dtype = .bfloat16
+            case "F32":  dtype = .float32
+            case "U32":  dtype = .uint32
+            case "I32":  dtype = .int32
+            case "U8":   dtype = .uint8
+            default:     throw Failure.unsupportedType(type)
+            }
+            guard shape.count <= 8, shape.allSatisfy({ $0 > 0 }), offsets[0] >= 0,
+                  offsets[0] <= offsets[1], offsets[1] <= size - dataStart,
+                  offsets[0] % dtype.size == 0, (offsets[1] - offsets[0]) % dtype.size == 0 else {
+                throw Failure.badHeader(name)
+            }
+            var elements = 1
+            for dimension in shape {
+                let multiplied = elements.multipliedReportingOverflow(by: dimension)
+                guard !multiplied.overflow else { throw Failure.badHeader(name) }
+                elements = multiplied.partialValue
+            }
+            guard elements == (offsets[1] - offsets[0]) / dtype.size else { throw Failure.badHeader(name) }
+            let bytes = whole[(dataStart + offsets[0]) ..< (dataStart + offsets[1])]
+            tensors[key] = bytes.view(dtype: dtype).reshaped(shape)
+        }
+        return tensors
+    }
+}

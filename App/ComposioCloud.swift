@@ -56,6 +56,7 @@ enum ComposioPhoneKey {
     init(key: String) {
         self.key = key
         let config = URLSessionConfiguration.ephemeral
+        config.allowsCellularAccess = true
         config.timeoutIntervalForRequest = 180
         config.timeoutIntervalForResource = 240
         config.urlCache = nil
@@ -141,6 +142,7 @@ enum ComposioPhoneKey {
 
     func call(_ name: String, _ arguments: [String: Any]) async throws -> [String: Any] {
         let result = try await rpc("tools/call", params: ["name": name, "arguments": arguments])
+        guard result["isError"] as? Bool != true else { throw ComposioCloudError.invalidResponse }
         if let structured = result["structuredContent"] as? [String: Any] { return structured }
         guard let content = result["content"] as? [[String: Any]],
               let text = content.first(where: { $0["type"] as? String == "text" })?["text"] as? String else {

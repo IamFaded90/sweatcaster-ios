@@ -7,6 +7,8 @@ import Kingfisher
     }
 
     let onBack: () -> Void
+    let api: LiveAPI?
+    init(onBack: @escaping () -> Void, api: LiveAPI? = nil) { self.onBack = onBack; self.api = api }
     @Environment(\.fadedPalette) private var palette
     @Environment(\.dynamicTypeSize) private var typeSize
     @ObservedObject private var player = MusicPlayer.shared
@@ -21,6 +23,8 @@ import Kingfisher
     @FocusState private var searchFocused: Bool
     @ScaledMetric(relativeTo: .body) private var coverWidth: CGFloat = 144
     @State private var showPlayer = false
+    @State private var showMix = false
+    @State private var showSongs = false
     @State private var showPlaylistName = false
     @State private var playlistName = ""
 
@@ -53,6 +57,8 @@ import Kingfisher
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu("Musikvalg", systemImage: "ellipsis") {
+                            Button("Skab en sang", systemImage: "waveform") { showSongs = true }
+                            Button("Din musikvært", systemImage: "sparkles") { showMix = true }
                             Button("Ny playliste", systemImage: "text.badge.plus") { showPlaylistName = true }
                             Menu("Sovetimer", systemImage: "moon.zzz") {
                                 ForEach([15, 30, 45, 60], id: \.self) { minutes in
@@ -71,6 +77,8 @@ import Kingfisher
                     Button("Annuller", role: .cancel) {}
                 }
                 .sheet(isPresented: $showPlayer) { MusicPlayingView() }
+                .sheet(isPresented: $showMix) { MusicMixView() }
+                .sheet(isPresented: $showSongs) { SongStudioView(api: api) }
                 .onDisappear { search?.cancel(); searching = false }
         }.tint(MusicEdition.accent(palette))
     }
@@ -81,6 +89,8 @@ import Kingfisher
 
     private var overview: some View {
         VStack(alignment: .leading, spacing: 24) {
+            FadedPrimaryButton("Lav et miks til min stemning", icon: "sparkles") { showMix = true }
+            FadedSecondaryButton("Skab en sang eller et remix", icon: "waveform") { showSongs = true }
             Button {
                 section = .search
             } label: {

@@ -56,7 +56,9 @@ import SwiftUI
                 if let version {
                     AgentRoomCanvas(version: version, artwork: store.images[version.artwork],
                                     selectedFigure: selectedFigure, onSelectFigure: selectFigure,
-                                    onSelectHotspot: selectHotspot)
+                                    onSelectHotspot: selectHotspot, ambienceScene: VillageAmbience.room(current.id))
+                    VillageAmbienceButton(scene: VillageAmbience.room(current.id), title: current.title)
+                    RoomWorksPanel(scene: VillageAmbience.room(current.id))
                     FadedSecondaryButton("Åbn rummet i fuld størrelse", icon: "arrow.up.left.and.arrow.down.right") {
                         expanded = true
                     }
@@ -72,7 +74,7 @@ import SwiftUI
                     }
                 }
                 if let message = store.message { FadedDetailText(message) }
-                if api != nil && !store.offline {
+                if (api != nil && !store.offline) || AgentPhoneRoomEditor.isLocal(current) {
                     FadedSecondaryButton("Juster rummet", icon: "slider.horizontal.3") { editing = true }
                 }
             }
@@ -80,6 +82,7 @@ import SwiftUI
         }
         .background { FadedBackground(variant: .village) }
         .navigationTitle(current.title).navigationBarTitleDisplayMode(.inline)
+        .modifier(VillageAmbienceLifecycle(scene: VillageAmbience.room(current.id)))
         .task(id: "\(api?.queueTargetID ?? ""):\(attempt)") {
             await store.load(api: api, published: true)
             if api != nil && !store.offline && !store.rooms.contains(where: { $0.id == room.id }) {

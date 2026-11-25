@@ -207,13 +207,18 @@ struct VillageCharacterMotion: View {
     var speakingID: String?
     var onHear: ((VillageLifeBot, Float) -> Void)?
     var onMoveSpeaker: ((String, Float) -> Void)?
+    var ambienceScene: String? = nil
+    @ObservedObject private var ambience = VillageAmbienceHub.shared
 
     var body: some View {
         Group {
-            if let image = VillageProductionArt.image(name) {
+            if let image = ambienceScene.flatMap({ ambience.image($0) }) ?? VillageProductionArt.image(name) {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
+                    .brightness(ambienceScene.map { ambience.settings($0).brightness } ?? 0)
+                    .saturation(ambienceScene.map { ambience.settings($0).saturation } ?? 1)
+                    .overlay { if let ambienceScene { VillageAmbienceLight(settings: ambience.settings(ambienceScene)) } }
                     .overlay { roomFigures }
             } else {
                 Image(systemName: "house")
@@ -223,6 +228,7 @@ struct VillageCharacterMotion: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .overlay { if let ambienceScene { RoomWorksOverlay(scene: ambienceScene) } }
         .fadedGlassSurface(radius: 18)
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .accessibilityElement(children: .contain)

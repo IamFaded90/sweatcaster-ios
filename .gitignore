@@ -6,5 +6,9 @@ xcuserdata/
 .env
 .DS_Store
 __pycache__/
+.build/
 
 AI-Sweat-Caster-iOS.zip
+
+# Local device diagnostics; keep out of repository history.
+/docs/IOS-MEMORY-SIGNING.md

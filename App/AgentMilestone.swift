@@ -63,6 +63,8 @@ extension AgentPhoneChat {
     @Environment(\.villagePlannerAPI) private var api
 
     var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+        AgentMysteryShortcut()
         NavigationLink {
             AgentRoomPublishedView(api: api) { id in
                 if let bot = bots.first(where: { UUID(uuidString: $0.id) == id }) { openProfile(bot) }
@@ -74,5 +76,6 @@ extension AgentPhoneChat {
                 .fadedGlassSurface()
         }
         .buttonStyle(.plain)
+        }
     }
 }

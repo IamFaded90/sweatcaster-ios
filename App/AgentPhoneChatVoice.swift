@@ -20,6 +20,7 @@ extension AgentPhoneChat {
         let offlineReady = !AgentWhisper.availableModels(for: dictationLanguage, installed: installedModels.contains).isEmpty
         return HStack {
             Menu("Stemme", systemImage: "mic") {
+                Button("Klar uden PC · opsæt og start") { stopVoice(); showOfflineSetup = true }
                 Picker("Jeg taler", selection: $dictationLanguage) {
                     Text("Dansk").tag("da-DK")
                     Text("Engelsk").tag("en-US")
@@ -66,13 +67,9 @@ extension AgentPhoneChat {
             }
             .disabled(whisper.starting || whisper.active || whisper.processing || appleDictation.active || handsFree || running != nil)
             if handsFree {
-                if waitingForVoice {
-                    Button("Afbryd og tal", systemImage: "mic") {
-                        if kokoro.loading || kokoro.playing {
-                            kokoro.stop()
-                            finishPCReading()
-                        } else { speech.stop() }
-                    }
+                if waitingForVoice || running != nil {
+                    Button("Min tur", systemImage: "mic") { interruptHandsFree() }
+                        .accessibilityHint("Stopper svaret og lytter til din rettelse")
                 }
                 Button("Stop samtale", systemImage: "stop.circle") { stopVoice() }
             } else if whisper.active {
@@ -105,6 +102,7 @@ extension AgentPhoneChat {
     }
 
     func dictateWithApple() {
+        MusicPlayer.shared.pause()
         let prefix = draft.isEmpty ? "" : draft + " "
         speech.stop()
         let run = UUID()
@@ -145,6 +143,7 @@ extension AgentPhoneChat {
     }
 
     func dictateWithWhisper() {
+        MusicPlayer.shared.pause()
         speech.stop()
         let run = UUID()
         let language = dictationLanguage
@@ -174,7 +173,7 @@ extension AgentPhoneChat {
                 else if draft == prefix {
                     draft = String(([prefix, text].filter { !$0.isEmpty }.joined(separator: " ")).prefix(web ? 500 : 1_200))
                     if handsFreeOffline && handsFree {
-                        send(message: cleanDraft, source: .phone, model: selectedModel, asCard: answerAsCard)
+                        send()
                     }
                 } else {
                     if handsFreeOffline { handsFree = false; handsFreeOffline = false }
@@ -195,14 +194,29 @@ extension AgentPhoneChat {
         }
     }
 
-    private func startHandsFree(offline: Bool) {
+    func startHandsFree(offline: Bool) {
         let model = offline ? selectedModel : currentModel
         guard cleanDraft.isEmpty, !model.isEmpty, running == nil else {
             notice = "Vælg en model, og send eller ryd kladden, før du starter håndfri samtale."
             return
         }
+        if offline {
+            let identifier = voiceOverride.isEmpty ? bot.voice : voiceOverride
+            let readiness = OfflineAgentPolicy.voiceReadiness(chatReady: PhoneModels.isReady(model),
+                dictationReady: !AgentWhisper.availableModels(for: dictationLanguage).isEmpty,
+                pcVoice: AgentPCVoice(rawValue: identifier) != nil,
+                downloadedVoice: DownloadedAgentVoice.selected(identifier) != nil,
+                packReady: AgentVoiceDownload.ready(selection: identifier),
+                systemVoiceReady: AgentVoiceSelection.resolve(identifier: identifier, language: dictationLanguage) != nil)
+            if let message = readiness.message {
+                notice = message
+                showOfflineSetup = true
+                return
+            }
+        }
         speech.stop()
         kokoro.stop()
+        MusicPlayer.shared.pause()
         if offline { source = .phone; web = false }
         handsFreeOffline = offline
         handsFree = true
@@ -210,7 +224,8 @@ extension AgentPhoneChat {
     }
 
     func listenHandsFree() {
-        guard handsFree, phase == .active, !appleDictation.active,
+        guard handsFree, phase == .active, running == nil, !waitingForVoice,
+              speech.playback == nil, !kokoro.playing, !kokoro.loading, !appleDictation.active,
               !whisper.starting, !whisper.active, !whisper.processing else { return }
         let run = UUID()
         voiceRun = run
@@ -247,6 +262,40 @@ extension AgentPhoneChat {
         }
     }
 
+    func interruptHandsFree() {
+        guard handsFree else { return }
+        let pending = running
+        waitingForVoice = false
+        voiceRun = UUID()
+        voiceSilence?.cancel()
+        listeningTask?.cancel()
+        appleDictation.stop()
+        whisper.cancel()
+        speech.stop()
+        kokoro.stop()
+        pcVoiceReplyID = nil
+        pending?.cancel()
+        let run = voiceRun
+        listeningTask = Task {
+            await pending?.value
+            guard !Task.isCancelled, handsFree, phase == .active, voiceRun == run else { return }
+            // The interrupted request may have restored its old draft. It must not be dictated again.
+            draft = ""
+            listenHandsFree()
+        }
+    }
+
+    @ViewBuilder var handsFreeStatus: some View {
+        if handsFree {
+            let state = waitingForVoice ? "Taler · tryk Min tur for at afbryde"
+                : running != nil ? "Tænker · du kan afbryde"
+                : whisper.processing ? "Skriver det, du sagde…" : "Lytter · tal når du er klar"
+            Label(state, systemImage: waitingForVoice ? "speaker.wave.2" : "waveform")
+                .font(.caption).foregroundStyle(palette.cyan)
+                .accessibilityAddTraits(.updatesFrequently)
+        }
+    }
+
     func stopVoice() {
         voiceRun = UUID()
         handsFree = false
@@ -280,6 +329,7 @@ extension AgentPhoneChat {
             return
         }
         let text = LocalSpeechVoice.replyText(turn.reply)
+        MusicPlayer.shared.pause()
         let identifier = voiceOverride.isEmpty ? bot.voice : voiceOverride
         if let local = DownloadedAgentVoice.selected(identifier) {
             speech.stop()

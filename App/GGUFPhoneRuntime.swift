@@ -13,7 +13,10 @@ struct GGUFPhoneModel: Identifiable, Sendable {
     let url: URL
     let bytes: Int64
     var id: String { Self.prefix + uuid.uuidString.lowercased() }
-    var name: String { uuid == Self.miniCPMFolder ? "MiniCPM5 1B" : url.deletingPathExtension().lastPathComponent }
+    var name: String {
+        if uuid == Self.miniCPMFolder { return "MiniCPM5 1B" }
+        return OfflineAgentModels.matches(self) ? "Qwen3 4B · samtale" : url.deletingPathExtension().lastPathComponent
+    }
     var memoryEstimateMiB: UInt64 { UInt64((Double(bytes) * 1.25 / 1_048_576).rounded(.up)) + 420 }
 
     func chatPrompt(from formatted: String) -> String {
@@ -201,7 +204,7 @@ enum GGUFPhoneRuntime {
         guard let vocabulary = llama_model_get_vocab(model) else { throw Failure.unsupportedModel }
 
         var contextParameters = llama_context_default_params()
-        contextParameters.n_ctx = 2_048
+        contextParameters.n_ctx = OfflineAgentModels.matches(file) ? 4_096 : 2_048
         contextParameters.n_batch = 256
         contextParameters.n_ubatch = 256
         contextParameters.n_threads = 4
@@ -211,13 +214,22 @@ enum GGUFPhoneRuntime {
         await ready()
         try Task.checkCancellation()
 
-        let formatted = file.chatPrompt(from: try format(messages, model: model))
+        var fittedMessages = messages
+        var formatted = ""
         var tokens = [llama_token](repeating: 0, count: Int(contextParameters.n_ctx))
-        let tokenCount = tokens.withUnsafeMutableBufferPointer { buffer in
-            llama_tokenize(vocabulary, formatted, Int32(formatted.utf8.count), buffer.baseAddress,
-                           Int32(buffer.count), true, true)
+        var tokenCount: Int32 = 0
+        while true {
+            formatted = file.chatPrompt(from: try format(fittedMessages, model: model))
+            tokenCount = tokens.withUnsafeMutableBufferPointer { buffer in
+                llama_tokenize(vocabulary, formatted, Int32(formatted.utf8.count), buffer.baseAddress,
+                               Int32(buffer.count), true, true)
+            }
+            if tokenCount > 0, tokenCount + maximumTokens <= Int32(contextParameters.n_ctx) { break }
+            // Drop a complete oldest exchange, preserving the agent's instructions and current question.
+            let first = fittedMessages.first?.role == "system" ? 1 : 0
+            guard fittedMessages.count > first + 2 else { throw PhoneModelError.contextLimit }
+            fittedMessages.removeSubrange(first ..< first + 2)
         }
-        guard tokenCount > 0, tokenCount + maximumTokens <= Int32(contextParameters.n_ctx) else { throw PhoneModelError.contextLimit }
         let prefixCount: Int
         if let scope = prefixCache, file.uuid == GGUFPhoneModel.miniCPMFolder,
            file.bytes == GGUFHub.miniCPM.bytes, file.url.lastPathComponent == GGUFHub.miniCPM.name,
@@ -236,7 +248,7 @@ enum GGUFPhoneRuntime {
             guard code == 0 else { throw Failure.inference }
         }
 
-        guard let sampler = llama_sampler_init_greedy() else { throw Failure.inference }
+        let sampler = try makeSampler(conversation: OfflineAgentModels.matches(file))
         defer { llama_sampler_free(sampler) }
         var reply = ""
         var pendingUTF8: [UInt8] = []
@@ -319,6 +331,21 @@ enum GGUFPhoneRuntime {
     private static func interval(_ duration: Duration) -> Double {
         let parts = duration.components
         return Double(parts.seconds) + Double(parts.attoseconds) / 1e18
+    }
+
+    private static func makeSampler(conversation: Bool) throws -> UnsafeMutablePointer<llama_sampler> {
+        guard conversation else {
+            guard let sampler = llama_sampler_init_greedy() else { throw Failure.inference }
+            return sampler
+        }
+        guard let chain = llama_sampler_chain_init(llama_sampler_chain_default_params()) else { throw Failure.inference }
+        // Qwen's non-thinking sampling settings, restricted to the new curated chat model.
+        for factory in [{ llama_sampler_init_top_k(20) }, { llama_sampler_init_top_p(0.8, 1) },
+                        { llama_sampler_init_temp(0.7) }, { llama_sampler_init_dist(UInt32.max) }] {
+            guard let sampler = factory() else { llama_sampler_free(chain); throw Failure.inference }
+            llama_sampler_chain_add(chain, sampler)
+        }
+        return chain
     }
 
     private static func format(_ input: [Message], model: OpaquePointer) throws -> String {

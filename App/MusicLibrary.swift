@@ -62,6 +62,7 @@ import SwiftUI
     func toggleFavorite(_ track: MusicTrack) {
         if saved.favorites.contains(where: { $0.id == track.id }) { saved.favorites.removeAll { $0.id == track.id } }
         else { saved.favorites.append(track) }
+        MusicMix.update { $0.favorite(track.id, selected: saved.favorites.contains { $0.id == track.id }) }
         persist()
     }
 
@@ -98,8 +99,16 @@ import SwiftUI
     }
 
     func localURL(_ track: MusicTrack) -> URL? {
+        if track.id.hasPrefix("faded-song-") { return SongLibrary().localURL(track.id) }
         guard let url = downloadURL(track), FileManager.default.fileExists(atPath: url.path) else { return nil }
         return url
+    }
+
+    func addGenerated(_ track: MusicTrack) {
+        guard SongLibrary().localURL(track.id) != nil else { notice = "Sangfilen mangler på telefonen."; return }
+        saved.downloads.removeAll { $0.id == track.id }
+        saved.downloads.append(track)
+        persist()
     }
 
     private func downloadURL(_ track: MusicTrack) -> URL? {
@@ -138,6 +147,21 @@ import SwiftUI
     }
 
     func deleteDownload(_ track: MusicTrack) {
+        if track.id.hasPrefix("faded-song-"), let id = UUID(uuidString: String(track.id.dropFirst(11))) {
+            do {
+                try SongLibrary().remove(id)
+                saved.downloads.removeAll { $0.id == track.id }
+                saved.favorites.removeAll { $0.id == track.id }
+                for index in saved.playlists.indices { saved.playlists[index].tracks.removeAll { $0.id == track.id } }
+                recent.removeAll { $0.id == track.id }
+                try? JSONEncoder().encode(recent).write(to: folder.appending(path: "recent.json"), options: .atomic)
+                for index in MusicPlayer.shared.queue.indices.reversed() where MusicPlayer.shared.queue[index].id == track.id {
+                    MusicPlayer.shared.remove(at: index)
+                }
+                persist()
+            } catch { notice = "Sangen kunne ikke slettes. " + error.localizedDescription }
+            return
+        }
         guard let url = downloadURL(track) else { return }
         do {
             if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }

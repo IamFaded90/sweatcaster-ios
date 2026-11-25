@@ -31,6 +31,9 @@ enum AgentChatPreferences {
             guard !value.isEmpty else { return nil }
             return .remember(String(value.prefix(240)), shared: shared != nil)
         }
+        if let language = AgentReplyQuality.languageCorrection(wish) {
+            return .remember(language, shared: shared != nil)
+        }
         let ongoing = #"^(?:(?:svar|skriv|forklar|tal)\s+(?:(?:mig|det)\s+)?(?:altid|fremover)\s+|(?:fremover[, ]+)(?:(?:vil jeg gerne have,? at du|skal du|må du gerne)\s+)?(?:svar|skriv|forklar|tal)\w*\s+|kald mig\s+)"#
         if let prefix = wish.range(of: ongoing, options: [.regularExpression, .caseInsensitive]),
            prefix.upperBound < wish.endIndex, !wish.hasSuffix("?") {
@@ -73,9 +76,11 @@ enum AgentChatPreferences {
     }
 
     private static func write(_ value: String, to bot: UUID?, previous: [String], defaults: UserDefaults) {
+        let language = AgentReplyQuality.preferredLanguage(value)
         let name = isFormOfAddress(value)
         var updated = previous.filter { old in
             normalized(old) != normalized(value) && !(name && isFormOfAddress(old))
+                && !(language != nil && AgentReplyQuality.preferredLanguage(old) != nil)
         }
         updated.append(String(value.prefix(240)))
         defaults.set(Array(updated.suffix(8)), forKey: storageKey(bot))

@@ -124,6 +124,20 @@ jobs:
           name: FadedAI-unsigned
           path: ${{ runner.temp }}/FadedAI-unsigned.ipa
           if-no-files-found: error
+      - name: Prepare separate AltStore IPA with memory request
+        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
+        run: |
+          set -euo pipefail
+          python3 tools/package_memory_request.py "$RUNNER_TEMP/FadedAI-unsigned.ipa" \
+            "$RUNNER_TEMP/FadedAI-AltStore-memory-request.ipa" --entitlements App/FadedAI.entitlements
+          python3 verify_ipa.py "$RUNNER_TEMP/FadedAI-AltStore-memory-request.ipa"
+          python3 tools/inspect_ipa_memory.py "$RUNNER_TEMP/FadedAI-AltStore-memory-request.ipa" --require-memory-request
+      - uses: actions/upload-artifact@v4
+        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
+        with:
+          name: FadedAI-AltStore-memory-request
+          path: ${{ runner.temp }}/FadedAI-AltStore-memory-request.ipa
+          if-no-files-found: error
 
   repair-package:
     if: ${{ github.ref_name == 'codex/ipa-launch-repair-a78156f' }}

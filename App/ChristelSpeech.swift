@@ -195,12 +195,13 @@ enum PCSpeechPassages {
     func playDownloaded(text: String, voice: DownloadedAgentVoice, agentID: UUID?, language: String = "da-DK",
                         rate: Double = 1, pan: Float = 0) {
         stop()
-        guard AgentVoiceDownload.shared.installed else {
+        guard AgentVoiceDownload.available(voice) else {
             notice = "Hent stemmepakken under Vælg og hør stemmer."
             return
         }
         let parts = PCSpeechPassages.pieces(text, maximumScalars: 180)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        requestedRate = voice.cloneID == nil ? 1 : Float(min(1.8, max(0.6, rate.isFinite ? rate : 1)))
         start(parts: parts, agentID: agentID, pan: pan, failure: "Telefonen kunne ikke læse op med " + voice.name + ".") { part in
             try await AgentVoiceDownload.audio(part, voice: voice, language: language, rate: rate)
         }
@@ -214,6 +215,7 @@ enum PCSpeechPassages {
     }
 
     private var requestedPan: Float = 0
+    private var requestedRate: Float = 1
 
     func updatePan(_ value: Float) {
         requestedPan = min(1, max(-1, value))
@@ -276,6 +278,7 @@ enum PCSpeechPassages {
         audioPlayer.delegate = self
         audioPlayer.isMeteringEnabled = true
         audioPlayer.pan = requestedPan
+        audioPlayer.enableRate = true; audioPlayer.rate = requestedRate
         player = audioPlayer
         guard audioPlayer.play() else { throw APIError.malformed }
         playing = true
@@ -297,6 +300,7 @@ enum PCSpeechPassages {
     }
 
     func stop() {
+        requestedRate = 1
         metering?.cancel()
         metering = nil
         if let motionOwner { VillageSpeechMotion.shared.end(owner: motionOwner) }

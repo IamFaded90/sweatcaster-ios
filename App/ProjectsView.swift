@@ -46,6 +46,7 @@ struct FadedProjectExport: FileDocument {
 }
 
 struct FadedProjectsView: View {
+    var initialProjectID: UUID? = nil
     @Environment(\.dismiss) private var dismiss
     @Environment(\.fadedPalette) private var palette
     @State private var projects: [FadedProject] = []
@@ -140,6 +141,7 @@ struct FadedProjectsView: View {
     private func load() {
         do {
             projects = try FadedProjectStore.load()
+            if let initialProjectID { editing = projects.first { $0.id == initialProjectID } }
             loaded = true
             failure = nil
         } catch {

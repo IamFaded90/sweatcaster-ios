@@ -11,6 +11,7 @@ public typealias CastPCRelayWithContext = @MainActor (URL, URL?, String?) async 
 @MainActor
 final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSessionManagerListener {
     @Published var recentCasts: [RecentCast] = []
+    var phoneFilmHelp: (@MainActor () -> AnyView)?
     private var recordedRecentAttempt: UUID?
     @Published var selectedTab: AppTab = .home
     @Published var videos: [VideoCandidate] = []

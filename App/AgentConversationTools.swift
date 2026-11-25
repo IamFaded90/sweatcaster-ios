@@ -57,6 +57,8 @@ extension AgentPhoneChat {
         var isUnreadList: Bool { AgentGmailCheck.isUnreadList(prompt) }
         private(set) var status = "Tjekker Gmail…"
         private(set) var isChecking = false
+        private(set) var usedPhone = false
+        private(set) var failed = false
         private var started = false
 
         init(prompt: String, afterTurn: UUID?) {
@@ -67,19 +69,18 @@ extension AgentPhoneChat {
         func run(bot: VillageBot, api: LiveAPI?) async {
             guard !started else { return }
             started = true
-            guard let api else {
-                status = "Forbind FadedAI til PC’en for at tjekke Gmail."
-                return
-            }
+            failed = false
+            messages = []; latestMail = nil; latestContent = nil; latestThread = nil; state = nil
+            status = "Tjekker Gmail…"
             isChecking = true
             defer { isChecking = false }
             do {
                 if isLatest {
+                    usedPhone = AgentInternetTools.phoneAvailable
                     let lower = prompt.lowercased()
                     let query = lower.contains("ulæst") || isUnreadList ? "in:inbox is:unread" : "in:inbox"
-                    let result: BotMailMessages = try await api.moduleJSON(
-                        "composio/gmail/messages", timeout: 75, query: [URLQueryItem(name: "q", value: query)]
-                    )
+                    let result = try await AgentInternetTools.gmailMessages(query: query, api: api)
+                    try Task.checkCancellation()
                     guard let mail = result.messages.first else {
                         status = query.contains("unread") ? "Du har ingen ulæste mails i indbakken." : "Din indbakke er tom."
                         return
@@ -90,6 +91,10 @@ extension AgentPhoneChat {
                     } else {
                         try await load(mail, api: api)
                     }
+                    return
+                }
+                guard let api else {
+                    status = "Aftalesøgningen kører på PC’en. Du kan stadig bede om din seneste mail eller dine ulæste mails direkte på iPhone."
                     return
                 }
                 let initial = try await api.mailAppointments(bot.id)
@@ -115,36 +120,46 @@ extension AgentPhoneChat {
                 }
                 status = "Søgningen er sat i gang på PC’en. Se dens status i Gmail-aftaler."
             } catch is CancellationError {
-                status = "Se status for aftalesøgningen i Gmail-aftaler."
+                status = isLatest ? "Mailopslaget blev stoppet." : "Se status for aftalesøgningen i Gmail-aftaler."
             } catch {
+                failed = true
                 if case APIError.http(_, let problem) = error, let message = problem?.message { status = message }
                 else { status = AppErrorPresentation(error).title }
             }
         }
 
         func open(_ mail: BotMailMessages.Message, api: LiveAPI?) async {
-            guard let api, !isChecking else { return }
+            guard !isChecking else { return }
             isChecking = true
+            failed = false
+            status = "Læser mailen…"
             latestMail = nil
             latestContent = nil
             latestThread = nil
             defer { isChecking = false }
             do { try await load(mail, api: api) }
             catch {
+                failed = true
                 if case APIError.http(_, let problem) = error, let message = problem?.message { status = message }
-                else { status = "Kunne ikke læse mailen. Tjek PC-forbindelsen og prøv igen." }
+                else { status = AppErrorPresentation(error).title }
             }
         }
 
-        private func load(_ mail: BotMailMessages.Message, api: LiveAPI) async throws {
-            let content: BotMailContent = try await api.moduleJSON(
-                "composio/gmail/message/\(Server.segment(mail.id))", timeout: 75
-            )
+        private func load(_ mail: BotMailMessages.Message, api: LiveAPI?) async throws {
+            usedPhone = AgentInternetTools.phoneAvailable
+            let content = try await AgentInternetTools.gmailMessage(id: mail.id, api: api)
+            try Task.checkCancellation()
             if let id = content.messageID, id != mail.id { throw APIError.malformed }
             latestThread = content.messageID == mail.id ? content.threadID : nil
             latestMail = mail
             latestContent = content.text.isEmpty ? "Mailen indeholder ingen læsbar tekst." : content.text
             status = isUnreadList ? "Her er den valgte mail:" : "Her er din seneste mail:"
+        }
+
+        func retry(bot: VillageBot, api: LiveAPI?) async {
+            guard !isChecking else { return }
+            started = false
+            await run(bot: bot, api: api)
         }
     }
 
@@ -181,9 +196,13 @@ extension AgentPhoneChat {
             AgentChatBubble(user: true, title: "Dig", pc: false) {
                 Text(request.prompt).textSelection(.enabled)
             }
-            AgentChatBubble(user: false, title: "\(bot.name) · Gmail", pc: true) {
+            AgentChatBubble(user: false, title: "\(bot.name) · Gmail" + (request.usedPhone ? " · iPhone" : ""), pc: !request.usedPhone) {
                 if request.isChecking { ProgressView(request.status) }
                 else { Text(request.status) }
+                if request.isLatest && !request.isChecking {
+                    if request.failed { ComposioCloudSetup(api: api) }
+                    Button("Tjek Gmail igen") { Task { await request.retry(bot: bot, api: api) } }
+                }
                 if !request.messages.isEmpty {
                     ForEach(request.messages) { mail in
                         Button {

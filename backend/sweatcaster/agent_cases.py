@@ -131,6 +131,15 @@ class AgentCases:
                 case["draft"] = model.reviewed(body, case) if "body" in body else model.draft(case, body.get("recipient", ""))
                 case["note"] = "Kladde klar. Tjek modtager, tekst og de fotos, der sendes med. Intet er sendt."
                 model.event(case, "draft", "Mailforslaget bruger dine oplysninger og den kvittering, du har valgt.")
+            elif action == "adoptSent":
+                if case.get("outgoing"):
+                    raise ApiError(409, "NOT_READY", "Sagen er allerede knyttet til en sendt mail. Opdatér status i stedet.")
+                from sweatcaster.case_thread_adoption import adopt
+                provider = self.bound(case)
+                case["outgoing"] = adopt(provider, case, body)
+                case.update(state="waiting", watch=True, nextCheck=0,
+                            note="Den allerede sendte mail er genlæst hos Gmail. PC’en følger samme tråd. Ingen ny mail er sendt.")
+                model.event(case, "adopted", "Telefonens sendte mail er tilknyttet. Eventuelle originale vedhæftninger bliver i Gmail.")
             elif action == "send":
                 return self.send(case, body)
             elif action == "removePhoto":
@@ -247,6 +256,7 @@ class AgentCases:
     def refresh(self, case, provider=None):
         if case["state"] == "closed" or not case.get("outgoing"):
             return self.public(case)
+        case["checkError"] = None
         try:
             provider = provider or self.bound(case)
             outgoing = case["outgoing"]
@@ -277,8 +287,10 @@ class AgentCases:
                     case.update(state="reply", note="Der er svar i den rigtige Gmail-tråd. Læs svaret og vælg selv næste skridt.")
                 elif result.get("state") == "unknown":
                     case["note"] = "Mailen er sendt, men hele trådens nye svar kunne ikke bekræftes. Prøv Tjek status igen."
+                    case["checkError"] = case["note"]
         except (ApiError, OSError, ValueError, AttributeError, KeyError) as exc:
             case["note"] = str(exc) if isinstance(exc, ApiError) else "Gmail kunne ikke kontrolleres. Intet bliver gensendt."
+            case["checkError"] = case["note"]
             if not case["outgoing"].get("verified"):
                 case["state"] = "uncertain"
         case["lastChecked"], case["nextCheck"] = time(), time() + 300

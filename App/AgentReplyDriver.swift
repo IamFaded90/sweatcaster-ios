@@ -10,11 +10,43 @@ import Foundation
 
     let provider: Provider
     let model: String
+    var fallbackModel: String? = nil
+    var onFallback: (@MainActor (String) -> Void)? = nil
     var onModel: (@MainActor (String) -> Void)? = nil
 
     func respond(to prompt: String, original: String, instructions: String, history: [PhoneModels.ChatExchange],
                  usesTools: Bool, showsPartialText: Bool, readCalendar: (@MainActor (Date) -> String)? = nil,
                  update: @escaping @MainActor (String) -> Void) async throws -> String {
+        do {
+            if case .computer(let api) = provider, fallbackModel != nil { _ = try await api.health() }
+            let answer = try await respondOnProvider(to: prompt, original: original, instructions: instructions, history: history,
+                usesTools: usesTools, showsPartialText: showsPartialText, readCalendar: readCalendar, update: update)
+            let explicitlyRepeated = AgentReplyQuality.words(original) == history.last.map { AgentReplyQuality.words($0.prompt) }
+                || original.lowercased().range(of: #"\b(?:gentag|repeat|igen ordret)\b"#, options: .regularExpression) != nil
+            guard !explicitlyRepeated, !answer.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("{"),
+                  AgentReplyQuality.repeats(answer, previous: history.map(\.reply)) else { return answer }
+            update("Jeg retter et gentaget svar…")
+            let repaired = try await respondOnProvider(to: prompt, original: original,
+                instructions: AgentReplyQuality.repairInstructions(original: instructions), history: history,
+                usesTools: usesTools, showsPartialText: showsPartialText, readCalendar: readCalendar, update: update)
+            if AgentReplyQuality.repeats(repaired, previous: history.map(\.reply)) {
+                return "Jeg sidder fast i et gentaget svar. Jeg har ikke udført en ny handling. Prøv en anden model, eller bed mig begynde forfra med netop denne opgave."
+            }
+            return repaired
+        } catch {
+            try Task.checkCancellation()
+            guard case .computer = provider, let fallbackModel, PhoneModels.isReady(fallbackModel),
+                  AgentInternetTools.isConnectionFailure(error) else { throw error }
+            onFallback?(fallbackModel)
+            let phone = AgentReplyDriver(provider: .phone, model: fallbackModel)
+            return try await phone.respond(to: prompt, original: original, instructions: instructions, history: history,
+                usesTools: usesTools, showsPartialText: showsPartialText, readCalendar: readCalendar, update: update)
+        }
+    }
+
+    private func respondOnProvider(to prompt: String, original: String, instructions: String, history: [PhoneModels.ChatExchange],
+                                   usesTools: Bool, showsPartialText: Bool, readCalendar: (@MainActor (Date) -> String)?,
+                                   update: @escaping @MainActor (String) -> Void) async throws -> String {
         let text = try await request(prompt, instructions: instructions, history: history) { partial in
             guard showsPartialText, !Task.isCancelled else { return }
             let first = partial.trimmingCharacters(in: .whitespacesAndNewlines).first
@@ -38,7 +70,8 @@ import Foundation
             let rule = final ? "Afslut nu med almindelig tekst." : "Bed kun om et nyt opslag, hvis du mangler oplysninger."
             let evidence = "\n\nVerificerede læseopslag:\n" + results.joined(separator: "\n")
             let budget = max(0, 2_000 - evidence.unicodeScalars.count)
-            let context = String((prompt.hasPrefix(original) ? prompt : original).unicodeScalars.prefix(budget))
+            guard original.unicodeScalars.count <= budget else { throw AgentModelContract.Failure.question }
+            let context = prompt.hasPrefix(original) && prompt.unicodeScalars.count <= budget ? prompt : original
             return try await request(context + evidence, instructions: rule + " Du har kun læst oplysninger.\n" + instructions,
                                      history: history) { _ in }
         }
@@ -86,19 +119,23 @@ import Foundation
     private func request(_ prompt: String, instructions: String, history: [PhoneModels.ChatExchange],
                          update: @escaping @MainActor (String) -> Void) async throws -> String {
         try Task.checkCancellation()
+        let route: AgentModelContract.Route
+        switch provider { case .phone: route = .phone; case .computer: route = .computer; case .cloud: route = .cloud }
+        try AgentModelContract.validate(prompt: prompt, instructions: instructions, route: route)
+        let boundedHistory = AgentModelContract.history(history.map { ($0.prompt, $0.reply) })
+            .map { PhoneModels.ChatExchange(prompt: $0.prompt, reply: $0.reply) }
         var text = ""
         switch provider {
         case .phone:
-            try await PhoneModels.reply(modelID: model, prompt: prompt, instructions: instructions, history: history) {
+            try await PhoneModels.reply(modelID: model, prompt: prompt, instructions: instructions, history: boundedHistory) {
                 text = $0
                 update($0)
             }
         case .computer(let api):
-            text = try await api.agentChat(model: model, prompt: String(prompt.unicodeScalars.prefix(2_000)),
-                                           instructions: String(instructions.unicodeScalars.prefix(3_000)), history: history)
+            text = try await api.agentChat(model: model, prompt: prompt, instructions: instructions, history: boundedHistory)
         case .cloud:
             var messages = [["role": "system", "content": instructions]]
-            for item in history {
+            for item in boundedHistory {
                 messages.append(["role": "user", "content": item.prompt])
                 messages.append(["role": "assistant", "content": item.reply])
             }
@@ -119,11 +156,7 @@ import Foundation
 
     nonisolated static func computerInstructions(_ instructions: String, previous: String) -> String {
         // The PC accepts at most 3,000 Unicode scalars for both the agent profile and conversation context.
-        let current = String(instructions.unicodeScalars.prefix(3_000))
-        let heading = "\nTidligere samtale:\n"
-        let remaining = 3_000 - current.unicodeScalars.count - heading.unicodeScalars.count
-        guard !previous.isEmpty, remaining > 0 else { return current }
-        return current + heading + String(previous.unicodeScalars.suffix(remaining))
+        AgentModelContract.legacyHistory(instructions: instructions, previous: previous)
     }
 }
 

@@ -6,7 +6,7 @@ struct AgentShareAttachment {
 
     static func starterPassages(in document: AgentDocument) -> [AgentDocumentMatch] {
         document.passages.prefix(2).enumerated().map { offset, passage in
-            AgentDocumentMatch(source: .init(id: offset + 1, name: document.name, page: passage.page),
+            AgentDocumentMatch(source: .init(id: offset + 1, name: document.name, page: passage.page, location: passage.location),
                                text: String(passage.text.unicodeScalars.prefix(440)))
         }
     }
@@ -126,6 +126,7 @@ extension View {
     @State private var chat: Chat?
     @State private var form: Data?
     @State private var showingForm = false
+    @State private var showingCapture = false
 
     var body: some View {
         NavigationStack {
@@ -135,7 +136,7 @@ extension View {
                     if let prepared {
                         if let address = prepared.url {
                             Link(address.host ?? "Åbn linket", destination: address)
-                            if api != nil, webDocument == nil {
+                            if api != nil || AgentInternetTools.phoneAvailable, webDocument == nil {
                                 Button("Hent tekst fra siden", systemImage: "doc.text.magnifyingglass") { Task { await readLink(address) } }
                                     .disabled(readingLink)
                             }
@@ -149,6 +150,7 @@ extension View {
                 }
                 if let document = chatDocument {
                     Section {
+                        Button("Fang noter og opfølgning", systemImage: "square.and.pencil") { showingCapture = true }
                         Button("Spørg assistenten", systemImage: "bubble.left.and.bubble.right") {
                             let bots = ((try? MigratedAppData.shared.loadBots().get()) ?? []).filter { $0.id != VillageBot.lumiID }
                             if let bot = bots.first(where: { $0.name.caseInsensitiveCompare("Adam") == .orderedSame }) ?? bots.first {
@@ -176,6 +178,13 @@ extension View {
             .sheet(isPresented: $showingForm, onDismiss: { form = nil }) {
                 if let form { AssistantPDFForm(initial: form, title: item.title) }
             }
+            .sheet(isPresented: $showingCapture) {
+                let bots = ((try? MigratedAppData.shared.loadBots().get()) ?? []).filter { $0.id != VillageBot.lumiID }
+                if let bot = bots.first(where: { $0.name.caseInsensitiveCompare("Adam") == .orderedSame }) ?? bots.first, let document = chatDocument {
+                    CaptureReviewView(bot: bot, model: UserDefaults.standard.string(forKey: AppStorageKeys.phoneModel) ?? "apple",
+                                      initial: String(document.passages.map(\.text).joined(separator: "\n").prefix(6_000)), initialSource: item.title)
+                } else { Text("Opret en agent i Landsbyen først.").padding() }
+            }
         }
         .privacySensitive()
     }
@@ -198,12 +207,12 @@ extension View {
     }
 
     private func readLink(_ url: URL) async {
-        guard let api, !readingLink else { return }
+        guard !readingLink else { return }
         notice = nil
         readingLink = true
         defer { readingLink = false }
         do {
-            let result = try await api.chatResearch(query: url.absoluteString)
+            let result = try await AgentInternetTools.research(query: url.absoluteString, api: api)
             try Task.checkCancellation()
             guard !result.context.isEmpty, result.sources.contains(where: { $0.readPage && $0.url == url }) else {
                 notice = "FadedAI fandt ingen læsbar tekst på siden. Del gerne den markerede tekst fra Safari."

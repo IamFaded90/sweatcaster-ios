@@ -2,6 +2,29 @@ import Foundation
 import SwiftUI
 
 enum AgentInteractiveTool: Identifiable {
+    case evening(EveningPlan.Request)
+    case musicMix
+    case songStudio(SongDraft)
+    case productHunt(String, Data?)
+    case ambience
+    case caseTracker
+    case cameraGuide(String, Data?)
+    case browser(String)
+    case skills
+    case contacts(String)
+    case localCode(String)
+    case memory([UUID])
+    case capture
+    case audioJournal
+    case scanDocument
+    case dayPlan
+    case mystery
+    case personality
+    case taskJourney
+    case creative(CreativeProject?)
+    case personalSearch(String)
+    case images(String, Data?)
+    case workspace(AgentWorkspace.Kind?, String)
     case window(String)
     case phoneScreen(String)
     case sales(String)
@@ -16,6 +39,29 @@ enum AgentInteractiveTool: Identifiable {
 
     var id: String {
         switch self {
+        case .evening: return "evening"
+        case .musicMix: return "music-mix"
+        case .songStudio: return "song-studio"
+        case .productHunt: return "product-hunt"
+        case .ambience: return "village-ambience"
+        case .caseTracker: return "case-tracker"
+        case .cameraGuide: return "camera-guide"
+        case .browser: return "agent-browser"
+        case .skills: return "agent-skills"
+        case .contacts: return "agent-contacts"
+        case .localCode: return "local-code"
+        case .memory: return "agent-memory"
+        case .capture: return "capture-review"
+        case .audioJournal: return "audio-journal"
+        case .scanDocument: return "scan-document"
+        case .dayPlan: return "day-plan"
+        case .mystery: return "village-mystery"
+        case .personality: return "agent-personality"
+        case .taskJourney: return "agent-task-journey"
+        case .creative: return "creative-project"
+        case .personalSearch: return "personal-hub-search"
+        case .images: return "images"
+        case .workspace: return "workspace"
         case .window: return "window"
         case .phoneScreen: return "phone-screen"
         case .sales: return "sales"

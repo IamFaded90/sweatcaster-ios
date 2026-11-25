@@ -20,6 +20,8 @@ import UIKit
 
     @GestureState private var magnification: CGFloat = 1
     @GestureState private var translation: CGSize = .zero
+    @ObservedObject private var ambience = VillageAmbienceHub.shared
+    @State private var ambienceOpen = false
 
     var body: some View {
         GeometryReader { geometry in
@@ -103,6 +105,8 @@ import UIKit
         .shadow(color: .black.opacity(0.38), radius: 16, y: 7)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Landsbykort")
+        .modifier(VillageAmbienceLifecycle(scene: "village"))
+        .sheet(isPresented: $ambienceOpen) { VillageAmbienceView(scene: "village", title: "landsbyen") }
     }
 
     private var villageHUD: some View {
@@ -120,6 +124,7 @@ import UIKit
 
     private var placesMenu: some View {
         Menu {
+            Button("Lys, lyd og stemning", systemImage: "sun.haze") { ambienceOpen = true }
             Section("Steder") {
                 ForEach(VillageZoneID.allCases, id: \.self) { zone in
                     Button(zone.title) { onSelectBuilding(zone) }
@@ -145,10 +150,12 @@ import UIKit
     private func mapContent(size: CGSize) -> some View {
         let placements = botPlacements(size: size)
         return ZStack {
-            if let map = VillageProductionArt.image(night ? "map-night" : "map-day") {
+            if let map = ambience.image("village") ?? VillageProductionArt.image(night ? "map-night" : "map-day") {
                 Image(uiImage: map)
                     .resizable().scaledToFit()
                     .frame(width: size.width, height: size.height)
+                    .brightness(ambience.settings("village").brightness).saturation(ambience.settings("village").saturation)
+                    .overlay { VillageAmbienceLight(settings: ambience.settings("village")) }
                     .allowsHitTesting(false).accessibilityHidden(true)
             }
             ForEach(VillageZoneID.allCases, id: \.self) { zone in
@@ -175,7 +182,11 @@ import UIKit
             ForEach(placements) { placement in
                 botNode(placement.bot, at: placement.foot)
             }
-            VillageMapForeground(night: night)
+            if ambience.image("village") == nil {
+                VillageMapForeground(night: night)
+                    .brightness(ambience.settings("village").brightness).saturation(ambience.settings("village").saturation)
+                    .overlay { VillageAmbienceLight(settings: ambience.settings("village")) }
+            }
             VillageWindowLights(night: night)
         }
         .frame(width: size.width, height: size.height)

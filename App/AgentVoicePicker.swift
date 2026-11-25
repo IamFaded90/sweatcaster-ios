@@ -187,6 +187,7 @@ struct AgentVoicePicker: View {
     let api: LiveAPI?
     @Binding var selection: String
     @Binding var language: String
+    var offlineOnly = false
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
     @StateObject private var speech = SpeechBox()
@@ -243,7 +244,7 @@ struct AgentVoicePicker: View {
                 } else {
                     AgentVoicePackSection(selected: selectedID, previewing: pcSpeech.playing || pcSpeech.loading ? previewID : nil,
                                           choose: choose, preview: previewLocal, stop: stopPreview)
-                    pcVoiceSection
+                    if !offlineOnly { pcVoiceSection }
                     Section("Apple-stemmer på din iPhone · \(voices.count)") {
                         ForEach(voices, id: \.identifier) { voice in
                             appleVoiceRow(voice)

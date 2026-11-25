@@ -186,6 +186,7 @@ enum GGUFHubKey {
     private(set) var pending: Pending?
     private(set) var progress: Double?
     private(set) var interrupted = false
+    private(set) var isPausing = false
     private(set) var notice: String?
     private(set) var noticeFile: GGUFHub.File?
     private(set) var revision = 0
@@ -243,8 +244,24 @@ enum GGUFHubKey {
     }
 
     func resume() {
-        guard interrupted, let pending else { return }
+        guard interrupted, !isPausing, preparing == nil, let pending else { return }
         enqueue(pending)
+    }
+
+    func pause() {
+        guard let pending, !isPausing, !interrupted else { return }
+        isPausing = true; preparing?.cancel(); notice = "Gemmer downloadposition…"
+        Task {
+            for task in await session.allTasks where task.taskDescription == pending.uuid.uuidString {
+                if let download = task as? URLSessionDownloadTask {
+                    let data: Data? = await withCheckedContinuation { continuation in download.cancel { continuation.resume(returning: $0) } }
+                    if let data { delegate.saveResumeData(data, id: pending.uuid) }
+                } else { task.cancel() }
+            }
+            guard self.pending == pending else { return }
+            isPausing = false; interrupted = true
+            notice = "Hentningen er på pause. Tryk Fortsæt. Serveren afgør, om den afbrudte fil kan fortsættes fra samme sted."
+        }
     }
 
     func cancel() {
@@ -271,6 +288,7 @@ enum GGUFHubKey {
                 if let data = delegate.takeResumeData(entry.uuid) {
                     task = session.downloadTask(withResumeData: data)
                 } else {
+                    progress = 0
                     let url = try await GGUFHub.signedLink(for: entry.file)
                     try Task.checkCancellation()
                     task = session.downloadTask(with: url)
@@ -323,6 +341,7 @@ enum GGUFHubKey {
         pending = nil
         progress = nil
         interrupted = false
+        isPausing = false
         noticeFile = entry.file
         self.notice = notice
         revision += 1
@@ -352,12 +371,20 @@ private final class GGUFDownloadDelegate: NSObject, URLSessionDownloadDelegate, 
         }
     }
 
+    func saveResumeData(_ data: Data, id: UUID) {
+        lock.withLock {
+            guard active?.uuid == id, ModelTransferPolicy.keepResumeData(bytes: data.count, status: nil) else { return }
+            try? FileManager.default.createDirectory(at: GGUFPhoneModel.root, withIntermediateDirectories: true)
+            try? data.write(to: resumeURL(id), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        }
+    }
+
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64,
                     totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         guard let id = UUID(uuidString: downloadTask.taskDescription ?? ""),
               let expected = lock.withLock({ active?.uuid == id ? active?.file.bytes : nil }) else { return }
-        if totalBytesWritten > expected { downloadTask.cancel(); return }
-        deliver?(.progress(id, Double(totalBytesWritten) / Double(expected)))
+        guard let value = ModelTransferPolicy.progress(written: totalBytesWritten, expected: expected) else { downloadTask.cancel(); return }
+        deliver?(.progress(id, value))
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
@@ -391,7 +418,10 @@ private final class GGUFDownloadDelegate: NSObject, URLSessionDownloadDelegate, 
         guard let error, let id = UUID(uuidString: task.taskDescription ?? "") else { return }
         let tracked = lock.withLock {
             guard active?.uuid == id else { return false }
-            if let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data, data.count < 4_000_000 {
+            let status = (task.response as? HTTPURLResponse)?.statusCode
+            if [401,403,416].contains(status ?? 0) { try? FileManager.default.removeItem(at: resumeURL(id)) }
+            if let data = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data,
+               ModelTransferPolicy.keepResumeData(bytes: data.count, status: status) {
                 try? FileManager.default.createDirectory(at: GGUFPhoneModel.root, withIntermediateDirectories: true)
                 try? data.write(to: resumeURL(id), options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
             }

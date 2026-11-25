@@ -1,19 +1,6 @@
 import Foundation
 import YouTubeKit
 
-struct MusicTrack: Codable, Equatable, Identifiable, Sendable {
-    let id: String
-    let title: String
-    let artist: String
-    var artwork: URL?
-    var duration: Double = 0
-
-    var durationLabel: String {
-        guard duration.isFinite, duration > 0 else { return "" }
-        return "\(Int(duration) / 60):" + String(format: "%02d", Int(duration) % 60)
-    }
-}
-
 enum MusicCatalog {
     enum Failure: LocalizedError {
         case unavailable, noAudio, badResponse
@@ -94,6 +81,7 @@ enum MusicCatalog {
     }
 
     static func audio(_ track: MusicTrack) async throws -> URL {
+        guard track.id.range(of: #"^[A-Za-z0-9_-]{11}$"#, options: .regularExpression) != nil else { throw Failure.noAudio }
         // Spotube selects audio streams separately from video. Use an iPhone-compatible
         // extractor and AAC/MP4 selection so AVPlayer handles background playback.
         let streams = try await YouTube(videoID: track.id).streams

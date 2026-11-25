@@ -30,10 +30,11 @@
     <key>NSBonjourServices</key>
     <array><string>_googlecast._tcp</string><string>_CC1AD845._googlecast._tcp</string></array>
     <key>NSFaceIDUsageDescription</key><string>Face ID beskytter dit lokale studie og godkender mailafsendelse, kodeforslag og gendannelse af dine data.</string>
-    <key>NSCameraUsageDescription</key><string>Kameraet bruges til videooptagelse, PC-parring og rumscanning, når du vælger det.</string>
+    <key>NSCameraUsageDescription</key><string>Kameraet bruges til kamerahjælp, videooptagelse, PC-parring og rumscanning, når du vælger det.</string>
     <key>NSPhotoLibraryAddUsageDescription</key><string>FadedAI gemmer billeder i Fotos, når du trykker Gem eller slår automatisk lagring til.</string>
     <key>NSMicrophoneUsageDescription</key><string>Mikrofonen bruges til chatdiktering og lyd på dine videooptagelser.</string>
     <key>NSSpeechRecognitionUsageDescription</key><string>FadedAI bruger lokal talegenkendelse til at skrive din chatkladde.</string>
+    <key>NSContactsUsageDescription</key><string>FadedAI finder de kontakter, du beder om, så din agent kan bruge den rigtige person i næste opgave.</string>
     <key>NSCalendarsFullAccessUsageDescription</key><string>FadedAI læser din kalender for at finde, tjekke og ændre de aftaler, du vælger.</string>
     <key>NSCalendarsWriteOnlyAccessUsageDescription</key><string>FadedAI tilføjer kalenderaftaler, som du godkender.</string>
     <key>NSRemindersFullAccessUsageDescription</key><string>FadedAI kan vise, oprette og flytte de påmindelser, du vælger.</string>

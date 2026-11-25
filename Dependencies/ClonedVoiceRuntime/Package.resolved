@@ -1,0 +1,113 @@
+{
+  "originHash" : "30f75a74390dc11cfffa100a57e1d5cafa980015d097feb963cdfe623c3c6413",
+  "pins" : [
+    {
+      "identity" : "chatterbox-coreml",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/iliasaz/chatterbox-coreml",
+      "state" : {
+        "revision" : "b8288834e783f3a6210757fbaf62f9014220bff9"
+      }
+    },
+    {
+      "identity" : "eventsource",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/mattt/EventSource.git",
+      "state" : {
+        "revision" : "bb4b61273b5a976bb571859c17f903ebc3439df1",
+        "version" : "1.6.0"
+      }
+    },
+    {
+      "identity" : "perth-coreml",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/iliasaz/perth-coreml.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "85e99b1583b790fbfc283aaa4e67bd070d9b2913"
+      }
+    },
+    {
+      "identity" : "ruaccent-coreml",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/iliasaz/ruaccent-coreml.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "fbf86aaa01a6c7ee104c1ecff19ae317579203a3"
+      }
+    },
+    {
+      "identity" : "swift-asn1",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-asn1.git",
+      "state" : {
+        "revision" : "97fd57437fc94cfa6b62f2b8f84c50f433534e17",
+        "version" : "1.7.5"
+      }
+    },
+    {
+      "identity" : "swift-collections",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-collections.git",
+      "state" : {
+        "revision" : "88754449ab766a739610b660e117762115fabc9c",
+        "version" : "1.7.6"
+      }
+    },
+    {
+      "identity" : "swift-crypto",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-crypto.git",
+      "state" : {
+        "revision" : "95ba0316a9b733e92bb6b071255ff46263bbe7dc",
+        "version" : "3.15.1"
+      }
+    },
+    {
+      "identity" : "swift-huggingface",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/huggingface/swift-huggingface.git",
+      "state" : {
+        "revision" : "f0a0cb43cb1b402d2bbf6fb10d8981328c449c48",
+        "version" : "0.13.0"
+      }
+    },
+    {
+      "identity" : "swift-jinja",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/huggingface/swift-jinja.git",
+      "state" : {
+        "revision" : "3104efda56131c37dda52e9142f02cc2425c02e6",
+        "version" : "3.2.1"
+      }
+    },
+    {
+      "identity" : "swift-safetensors",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/jkrukowski/swift-safetensors.git",
+      "state" : {
+        "revision" : "3852f0bd561071588361c26c49c016d344234c60",
+        "version" : "0.1.1"
+      }
+    },
+    {
+      "identity" : "swift-transformers",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/huggingface/swift-transformers.git",
+      "state" : {
+        "revision" : "402a8a1105f52038b0949d9596981fc9e32bed17",
+        "version" : "1.4.0"
+      }
+    },
+    {
+      "identity" : "yyjson",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/ibireme/yyjson.git",
+      "state" : {
+        "revision" : "6447536015f3d600f3d65323b10976103b337ca7",
+        "version" : "0.13.0"
+      }
+    }
+  ],
+  "version" : 3
+}
