@@ -396,7 +396,7 @@ struct ACEGenerator {
             MLX.Memory.cacheLimit = previousCacheLimit
             release()
         }
-        let silenceBed = try load(File.silence)["silence"]!
+        guard let silenceBed = try load(File.silence)["silence"] else { throw PhoneSongFailure.invalidModel }
         let silence = Self.silence(silenceBed, covering: max(renderFrames, ACEPipeline.timbreFrames))
         // Encode source and optional timbre while this one stage owns the VAE.
         // Both are sampled independently, as the reference VAE posterior is.

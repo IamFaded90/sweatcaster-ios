@@ -8,6 +8,8 @@ final class AssetsTests: XCTestCase {
         XCTAssertEqual(files.count, 30)
         XCTAssertEqual(Set(files.map(\.path)).count, files.count)
         XCTAssertTrue(files.allSatisfy { $0.bytes > 0 && !$0.path.hasPrefix("/") && !$0.path.contains("..") })
+        XCTAssertTrue(files.allSatisfy { $0.sha256?.count == 64 })
+        XCTAssertEqual(Set(files.compactMap(\.sha256)).count, files.count)
         let chunk = files.first { $0.path == "ace_dit_ane_c2.mlmodelc/weights/weight.bin" }
         XCTAssertEqual(chunk?.bytes, 755_752_384)
         XCTAssertEqual(chunk?.url.absoluteString,

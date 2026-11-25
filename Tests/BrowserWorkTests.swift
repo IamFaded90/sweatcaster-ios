@@ -8,6 +8,14 @@ final class BrowserWorkTests: XCTestCase {
         XCTAssertThrowsError(try BrowserWork.Proof.decode(valid, observed: "Closed today"))
         XCTAssertThrowsError(try BrowserWork.Proof.decode(#"{"verified":true,"reason":"Done","quote":"OK"}"#, observed: "OK"))
     }
+    func testProofRejectsBlankOrInventedEvidence() throws {
+        let spaces = #"{"verified":true,"reason":"Fundet","quote":"        "}"#
+        XCTAssertThrowsError(try BrowserWork.Proof.decode(spaces, observed: "Velkommen til butikken"))
+        let invented = #"{"verified":false,"reason":"Siden er uklar","quote":"En opfundet åbningstid"}"#
+        XCTAssertThrowsError(try BrowserWork.Proof.decode(invented, observed: "Butikken lukker klokken 18"))
+        let blankReason = #"{"verified":true,"reason":"   ","quote":"Lukker klokken 18"}"#
+        XCTAssertThrowsError(try BrowserWork.Proof.decode(blankReason, observed: "Lukker klokken 18"))
+    }
     func testUnconfirmedResultStaysUnconfirmedInReceipt() throws {
         var record = BrowserWork.Record(); record.answer = "Jeg fandt et forslag."
         record.proof = try BrowserWork.Proof.decode(#"{"verified":false,"reason":"Åbningstiden mangler.","quote":""}"#, observed: "Shop")

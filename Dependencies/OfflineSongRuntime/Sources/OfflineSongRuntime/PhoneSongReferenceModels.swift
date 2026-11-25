@@ -1,7 +1,7 @@
 import Foundation
 
-/// Availability of the optional reference-audio weights. This is independent
-/// of the existing text-to-song model and does not enable reference generation.
+/// Availability of optional reference-audio weights. Preparing them is separate
+/// from the text-to-song model and does not establish device compatibility.
 public enum PhoneSongReferenceModelStatus: Sendable {
     case notInstalled, preparing, ready
 }
@@ -19,9 +19,8 @@ public enum PhoneSongReferenceModelFailure: LocalizedError {
     }
 }
 
-/// An optional model preparer. Nothing calls this from the existing song path;
-/// callers must opt in explicitly, and a successful preparation alone does not
-/// mean audio-reference generation is implemented or tested on a device.
+/// An optional model preparer. The reference song path opts in explicitly;
+/// successful preparation alone does not establish quality or device fitness.
 public actor PhoneSongReferenceModels {
     public static let shared = PhoneSongReferenceModels()
     private var worker: Task<Void, Error>?
@@ -39,7 +38,7 @@ public actor PhoneSongReferenceModels {
 
     /// The optional weights live separately from the existing text-song root.
     /// This checks integrity before returning the version directory; it does
-    /// not imply that reference-audio generation is available or verified.
+    /// not imply that reference-audio generation has been verified on-device.
     public func preparedDirectory(at base: URL) throws -> URL {
         guard worker == nil, try Self.isReady(base: base),
               let receipt = try Self.currentReceipt(base: base) else {

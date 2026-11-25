@@ -1,6 +1,37 @@
 # Sangstudie · lokal status
 
-25. november 2026. Ingen push, IPA eller cloudbygning bestilt.
+25. november 2026. Ældre opfølgninger nedenfor beskriver tilstanden på det
+tidspunkt, de blev skrevet; den aktuelle tilstand står først.
+
+## Aktuel status efter GitHub-build 94
+
+Build 94 fejlede under Apple-kompilering af sangmotoren: Float16-indlæsning
+var ikke kompatibel med Intel-simulatoren, og planlæggerens sprogliste manglede.
+Begge er rettet i den lokale kode. Den faktiske konverteringsfunktion er
+typekontrolleret på x86 med en isoleret Core ML/MLX-testfacade, og prøverne
+dækker både tæt lagring og udfyldning mellem rækker og ydre dimensioner.
+Dette er ikke en Apple-kompilering eller test af MLX på iPhone.
+
+Et gammelt resume til modelhentningen kan nu starte den berørte fil forfra én
+gang ved en udløbet adresse eller et vellykket, men ufuldstændigt svar.
+Midlertidige serverfejl bevarer resume-data. Politikken og downloadkodens
+Swift-typer er prøvet lokalt; den rigtige iPhone-download afventer.
+
+Nye modelfiler kontrolleres mod udgiverens SHA-256, inden de installeres.
+De 30 kontrolsummer er sammenlignet med GitHubs officielle udgivelser, og en
+lokal prøve afviser en beskadiget fil med den korrekte størrelse. Filer fra
+ældre installationer bliver fortsat kun kontrolleret for størrelse.
+
+Sangstudiets PC-kode er aktiv efter genstart med kontrolleret tomme jobkøer.
+Den parrede rute svarede, og en reel ti sekunders instrumental blev lavet og
+hentet gennem den kørende FadedAI-server. Testlyden blev fjernet igen. Det
+viser, at PC-ruten og motoren fungerer, ikke at iPhone-generering virker.
+Gmail-listen og læsning af én mail er også prøvet gennem PC-serveren uden at
+vise indhold eller sende mail.
+
+iPhone-koden for sang, lydreference og remix er koblet sammen, inklusive en
+ekstra, separat modelhentning til reference. Xcode/IPA, reel lyd, kvalitet,
+egen sangstemme og hukommelsesforbrug er ikke verificeret på iPhone.
 
 ACE-Step 1.5 beholdes. Windows bruger den officielle API; iPhone-koden bruger
 den åbne 2B-konvertering fra [WhisperKit](https://github.com/yu314-coder/WhisperKit).
@@ -22,8 +53,9 @@ upstream bruger 0.31.6. Første Core ML-klargøring, RAM-top, korrekt lyd og
 afbrydelse skal prøves på rigtig enhed. Foreløbig kræver generation forgrund.
 
 Favorittens navn kan give stilinspiration efter research. Navnet er ikke
-adgang til musikken. Et faktisk lydremix og egen optagelse som stemmereference
-bruger foreløbig PC-valget. Ingen skjult netværksfallback fra iPhone-valget.
+adgang til musikken. En valgt lydfil kan bruges som musik- eller stemmereference
+også på iPhone efter særskilt modelklargøring; denne vej er endnu ikke prøvet
+på enheden. Ingen skjult netværksfallback fra iPhone-valget.
 Apple Personlig stemme er til tale og er ikke dokumenteret som sangstemme.
 Der er endnu ingen prøve, der beviser brugerens egen sangstemme.
 

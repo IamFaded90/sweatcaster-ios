@@ -180,20 +180,15 @@ final class ACENeuralTransformer {
     static func array(_ m: MLMultiArray) -> MLXArray {
         let shape = m.shape.map(\.intValue)
         let strides = m.strides.map(\.intValue)
-        let width = shape.last!
-        let rows = shape.dropLast().reduce(1, *)
-        let rowStride = shape.count > 1 ? strides[shape.count - 2] : width
+        let layout = ACEStridedTensor(shape: shape, strides: strides)
         return m.withUnsafeBufferPointer(ofType: Float16.self) { source in
-            if rowStride == width, strides.last == 1 {
-                return MLXArray(UnsafeBufferPointer(start: source.baseAddress, count: rows * width), shape)
+            if layout.isContiguous {
+                let dense = UnsafeBufferPointer(start: source.baseAddress, count: layout.count)
+                return MLXArray(Data(buffer: dense), shape, dtype: .float16)
             }
-            var values = [Float16](repeating: 0, count: rows * width)
-            for row in 0 ..< rows {
-                for column in 0 ..< width {
-                    values[row * width + column] = source[row * rowStride + column * strides.last!]
-                }
-            }
-            return MLXArray(values, shape)
+            let values = layout.copy(from: source)
+            let bytes = values.withUnsafeBufferPointer { Data(buffer: $0) }
+            return MLXArray(bytes, shape, dtype: .float16)
         }
     }
 }

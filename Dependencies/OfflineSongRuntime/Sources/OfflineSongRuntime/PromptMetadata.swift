@@ -92,8 +92,11 @@ struct PromptMetadata: Equatable {
         // A "1 minute 21 seconds" also contains a bare "21 seconds"; the
         // earliest match is the whole phrase.
         guard let first = found.min(by: { $0.position < $1.position }) else { return nil }
-        let rounded = Int(first.seconds.rounded())
-        return min(max(rounded, secondsRange.lowerBound), secondsRange.upperBound)
+        // Bound while still a Double: converting an unusually large number
+        // to Int first traps before the existing length limit can be applied.
+        guard !first.seconds.isNaN else { return nil }
+        let bounded = min(max(first.seconds, Double(secondsRange.lowerBound)), Double(secondsRange.upperBound))
+        return Int(bounded.rounded())
     }
 
     // MARK: - Timeline

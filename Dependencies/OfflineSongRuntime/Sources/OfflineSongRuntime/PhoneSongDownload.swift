@@ -36,11 +36,17 @@ enum PhoneSongDownload {
                                 (failure.domain == NSURLErrorDomain && transient.contains(failure.code)) { throw error }
                         }
                     }
-                    if let partial, let http = partial.1 as? HTTPURLResponse,
-                       ![401, 403, 416].contains(http.statusCode) {
-                        result = partial
+                    if let partial {
+                        let status = (partial.1 as? HTTPURLResponse)?.statusCode
+                        let size = (try? partial.0.resourceValues(forKeys: [.fileSizeKey]).fileSize).map { Int64($0) }
+                        if SongDownloadPolicy.restartAfterResume(status: status, received: size, expected: file.bytes) {
+                            try? manager.removeItem(at: partial.0)
+                            try? manager.removeItem(at: resume)
+                            result = try await fresh(file, session: session, observer: observer)
+                        } else {
+                            result = partial
+                        }
                     } else {
-                        if let partial { try? manager.removeItem(at: partial.0) }
                         try? manager.removeItem(at: resume)
                         result = try await fresh(file, session: session, observer: observer)
                     }
@@ -48,6 +54,11 @@ enum PhoneSongDownload {
                     guard let response = result.1 as? HTTPURLResponse, [200, 206].contains(response.statusCode),
                           let size = try result.0.resourceValues(forKeys: [.fileSizeKey]).fileSize,
                           Int64(size) == file.bytes else {
+                        throw PhoneSongFailure.download
+                    }
+                    progress("Kontrollerer sangmodel · fil \(index + 1)/\(missing.count)…")
+                    guard let expected = file.sha256, try SongFileIntegrity.matches(result.0, sha256: expected) else {
+                        try? manager.removeItem(at: resume)
                         throw PhoneSongFailure.download
                     }
                     if manager.fileExists(atPath: path.path) { try manager.removeItem(at: path) }

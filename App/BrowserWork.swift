@@ -19,9 +19,13 @@ enum BrowserWork {
             let json = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard json.utf8.count < 8_000, let data = json.data(using: .utf8),
                   let result = try? JSONDecoder().decode(Self.self, from: data), result.reason.count <= 800,
-                  !result.reason.isEmpty, result.quote.count <= 500 else { throw Failure.proof }
-            if result.verified {
-                guard result.quote.count >= 8, normalize(observed).contains(normalize(result.quote)) else { throw Failure.proof }
+                  !normalize(result.reason).isEmpty, result.quote.count <= 500 else { throw Failure.proof }
+            let quote = normalize(result.quote)
+            if result.verified { guard quote.count >= 8 else { throw Failure.proof } }
+            // Even an unverified response can be displayed with a quotation.
+            // Never attribute invented or whitespace-only evidence to a page.
+            if !result.quote.isEmpty {
+                guard !quote.isEmpty, normalize(observed).contains(quote) else { throw Failure.proof }
             }
             return result
         }

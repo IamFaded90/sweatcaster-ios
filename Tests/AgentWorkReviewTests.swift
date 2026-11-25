@@ -18,6 +18,15 @@ final class AgentWorkReviewTests: XCTestCase {
         XCTAssertTrue(AgentWorkReview.isCurrent(report, job: job, file: file)); XCTAssertFalse(report.excerptOnly)
         XCTAssertThrowsError(try AgentWorkReview.decode(reply.replacingOccurrences(of: "Katten sover", with: "Hunden løber"), job: job, file: file, inputExcerpt: AgentWorkReview.input(job), outputExcerpt: file.text))
     }
+    func testModelJudgmentRejectsWhitespaceInsteadOfEvidence() throws {
+        let job = job(), file = AgentWorkspace.File(id: UUID(), name: "kat", text: "Katten  sover.", updated: Date())
+        let blankQuote = #"{"summary":"Undersøgt","checks":[{"title":"Kat","status":"pass","source":"output","quote":"  ","reason":"Passer"}]}"#
+        XCTAssertThrowsError(try AgentWorkReview.decode(blankQuote, job: job, file: file, inputExcerpt: AgentWorkReview.input(job), outputExcerpt: file.text))
+        let blankSummary = #"{"summary":"   ","checks":[{"title":"Kat","status":"unknown","source":"output","quote":"","reason":"Ukendt"}]}"#
+        XCTAssertThrowsError(try AgentWorkReview.decode(blankSummary, job: job, file: file, inputExcerpt: AgentWorkReview.input(job), outputExcerpt: file.text))
+        let blankReason = #"{"summary":"Undersøgt","checks":[{"title":"Kat","status":"pass","source":"output","quote":"Katten","reason":"  "}]}"#
+        XCTAssertThrowsError(try AgentWorkReview.decode(blankReason, job: job, file: file, inputExcerpt: AgentWorkReview.input(job), outputExcerpt: file.text))
+    }
     func testChangedOutputOrInputInvalidatesPreviousReview() throws {
         var job = job(); job.inputSnapshot = "Original source"
         var file = AgentWorkspace.File(id: UUID(), name: "kat", text: "Katten sover i solen.", updated: Date())

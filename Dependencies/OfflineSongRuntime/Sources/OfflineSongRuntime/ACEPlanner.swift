@@ -220,7 +220,7 @@ struct ACEPlanner {
         let keyscale = field("keyscale", known.keyscale, limit: 8)
         result.keyscale = Self.isValidKeyscale(keyscale) ? keyscale : nil
         let language = field("language", known.language, limit: 6)
-        result.language = (Languages.aceStepCodes + ["unknown"]).contains(language) ? language : nil
+        result.language = ACESongLanguages.validated(language)
         result.timeSignature = Int(field("timesignature", known.timeSignature.map(String.init), limit: 4))
             .flatMap { [2, 3, 4, 6].contains($0) ? $0 : nil }
         force("</think>")

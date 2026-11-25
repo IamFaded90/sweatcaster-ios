@@ -18,7 +18,7 @@ public struct PhoneSongInput: Sendable {
 }
 
 public enum PhoneSongFailure: LocalizedError {
-    case unsupported, missing, busy, input, download
+    case unsupported, missing, busy, input, download, invalidModel
     public var errorDescription: String? {
         switch self {
         case .unsupported: "ACE-Step kræver en rigtig iPhone med iOS 18 eller nyere og understøttet grafik."
@@ -26,6 +26,7 @@ public enum PhoneSongFailure: LocalizedError {
         case .busy: "Telefonen arbejder allerede på en sang eller hentning."
         case .input: "Sangens beskrivelse, tekst eller længde kunne ikke bruges."
         case .download: "En modelfil var ufuldstændig. Prøv hentningen igen; færdige filer bevares."
+        case .invalidModel: "En af sangmodellens filer kunne ikke læses. Slet sangmodellen, og hent den igen. Dine færdige sange bevares."
         }
     }
 }

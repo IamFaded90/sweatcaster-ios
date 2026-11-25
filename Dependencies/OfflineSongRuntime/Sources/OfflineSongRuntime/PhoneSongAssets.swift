@@ -1,13 +1,14 @@
 import Foundation
 
-/// Pinned ACE-Step 1.5 2B releases. Exact sizes detect incomplete files.
-/// Upstream publishes no SHA256 manifest; these are not cryptographic checksums.
+/// Pinned ACE-Step 1.5 2B releases. New downloads also use the publisher's
+/// GitHub release-asset SHA-256 digests in PhoneSongHashes.
 struct PhoneSongAsset {
     let path: String
     let bytes: Int64
     let release: String
     var assetName: String? = nil
     var url: URL { URL(string: "https://github.com/yu314-coder/WhisperKit/releases/download/\(release)/\(assetName ?? path)")! }
+    var sha256: String? { PhoneSongHashes.values[release + "/" + (assetName ?? path)] }
     func present(at root: URL) -> Bool {
         let values = try? root.appendingPathComponent(path).resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
         return values?.isSymbolicLink != true && Int64(values?.fileSize ?? -1) == bytes

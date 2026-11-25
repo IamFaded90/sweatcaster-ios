@@ -48,12 +48,19 @@ enum AgentWorkReview {
         var clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard clean.utf8.count <= 12_000 else { throw Failure.invalid }
         if clean.hasPrefix("```"), clean.hasSuffix("```"), let start = clean.firstIndex(of: "\n") { clean = String(clean[clean.index(after: start)..<clean.index(clean.endIndex, offsetBy: -3)]) }
-        guard let result = try? JSONDecoder().decode(Envelope.self, from: Data(clean.utf8)), (1...800).contains(result.summary.count), (1...6).contains(result.checks.count) else { throw Failure.invalid }
+        guard let result = try? JSONDecoder().decode(Envelope.self, from: Data(clean.utf8)), (1...800).contains(result.summary.count),
+              !result.summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, (1...6).contains(result.checks.count) else { throw Failure.invalid }
         for check in result.checks {
             let source: String
             switch check.source { case "input": source = inputExcerpt; case "output": source = outputExcerpt; default: throw Failure.invalid }
-            guard (1...160).contains(check.title.count), (1...500).contains(check.reason.count), check.quote.count <= 500 else { throw Failure.invalid }
-            if check.status != .unknown || !check.quote.isEmpty { guard !check.quote.isEmpty, source.contains(check.quote) else { throw Failure.invalid } }
+            guard (1...160).contains(check.title.count), (1...500).contains(check.reason.count),
+                  !check.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !check.reason.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  check.quote.count <= 500 else { throw Failure.invalid }
+            if check.status != .unknown || !check.quote.isEmpty {
+                guard !check.quote.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      source.contains(check.quote) else { throw Failure.invalid }
+            }
         }
         return .init(created: Date(), outputSignature: signature(file.text), inputSignature: signature(input(job)), excerptOnly: inputExcerpt != input(job) || outputExcerpt != file.text, summary: result.summary, checks: result.checks)
     }

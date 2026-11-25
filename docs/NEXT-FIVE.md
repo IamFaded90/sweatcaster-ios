@@ -1,7 +1,10 @@
 # FadedAI · De næste fem oplevelser
 
 Godkendt 24. november 2026. Arbejdes igennem i denne rækkefølge.
-Ingen push, IPA eller cloudbygning er bestilt.
+Nedenstående tidsstemplede noter er historiske. Build 94 blev startet efter
+kodegennemgangen og fejlede under Apple-kompilering; rettelserne og den nye
+faktiske PC-prøve er beskrevet i starten af SONG-STUDIO.md. En efterfølgende
+Apple-kompilering og de fysiske iPhone-/TV-prøver er stadig nødvendige.
 
 1. **I gang:** Egne sange, favorit som inspiration, remix fra lydfil og
    særskilt prøve med brugerens egen optagede stemme. Apple Personlig stemme
