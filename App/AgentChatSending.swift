@@ -201,7 +201,7 @@ extension AgentPhoneChat {
         let skills = keepHistory && document == nil ? AgentSkillLibrary.Store().instructions(bot: bot.id, question: message) : ""
         let phoneContext = keepHistory && document == nil ? AgentPhoneContext.Store().instructions(bot.id, question: message) : ""
         let savedLanguage = keepHistory ? AgentChatPreferences.entries(for: bot.id).compactMap { AgentReplyQuality.preferredLanguage($0.value) }.first : nil
-        let language = savedLanguage ?? (bot.language.hasPrefix("en") ? "en" : "da")
+        let language = savedLanguage ?? (bot.language?.hasPrefix("en") == true ? "en" : "da")
         let allowCalendar = keepHistory && document == nil && !internet && !asCard && source != .composio &&
             AgentLocalTool.asksAboutOwnCalendar(message)
         let behavior = asCard
