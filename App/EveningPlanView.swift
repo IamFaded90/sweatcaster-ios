@@ -87,7 +87,7 @@ import SwiftUI
                               detail: "Tag en rolig tur i landsbyen, eller start en samtale med en agent.", offline: true))
             choices = EveningPlan.choices(pool, request: selected)
             if selected.offlineOnly && tracks.isEmpty { notice = "Der er ingen hentede sange endnu. Landsbyen er klar uden internet." }
-            else if pages.isEmpty && !selected.offlineOnly { notice = "Gem en filmkilde i Underholdning for også at få filmvalg her." }
+            else if pages.isEmpty && !selected.offlineOnly { notice = "Gem en filmkilde i Film for også at få filmvalg her." }
         }
     }
     private func start(_ item: EveningPlan.Candidate) {

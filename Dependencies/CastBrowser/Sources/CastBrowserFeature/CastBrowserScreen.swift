@@ -10,17 +10,25 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
 @MainActor public struct CastBrowserScreen: View {
     @StateObject private var model: CastAppModel
     @State private var browserOpened = false
+    @State private var showSettings = false
     @Environment(\.scenePhase) private var phase
     @Environment(\.colorScheme) private var hostColorScheme
-    @AppStorage("castbrowser.appearance") private var appearance = "Mørk"
+    @Environment(\.dynamicTypeSize) private var typeSize
+    @AppStorage(FilmAppearance.storageKey) private var appearance = FilmAppearance.followApp.rawValue
+    private let onBack: (() -> Void)?
+    private let isVisible: Bool
     private let timer = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     public init() {
+        onBack = nil
+        isVisible = true
         _ = Self.castContext
         _model = StateObject(wrappedValue: CastAppModel())
     }
 
-    init(model: CastAppModel) {
+    init(model: CastAppModel, onBack: (() -> Void)? = nil, isVisible: Bool = true) {
+        self.onBack = onBack
+        self.isVisible = isVisible
         _ = Self.castContext
         _model = StateObject(wrappedValue: model)
     }
@@ -42,19 +50,35 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
     }()
 
     public var body: some View {
-        VStack(spacing: 0) {
-            selectedPage
-            Picker("CastBrowser-fane", selection: $model.selectedTab) {
-                Text("Hjem").tag(AppTab.home)
-                Text("Browser").tag(AppTab.browser)
-                Text("Videoer").tag(AppTab.videos)
-                Text("TV").tag(AppTab.remote)
+        NavigationStack {
+            VStack(spacing: 0) {
+                Group {
+                    if typeSize.isAccessibilitySize { sections.pickerStyle(.menu) }
+                    else { sections.pickerStyle(.segmented) }
+                }
+                .frame(minHeight: 44)
+                .padding(.horizontal, Style.space).padding(.vertical, Style.small)
+                selectedPage
             }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
-            .background(.thinMaterial)
+            .background(Style.canvas)
+            .navigationTitle("Film").navigationBarTitleDisplayMode(.inline)
+            .navigationBarBackButtonHidden(true)
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .toolbar {
+                if let onBack {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Tilbage", systemImage: "chevron.left", action: onBack)
+                    }
+                }
+                ToolbarItemGroup(placement: .topBarTrailing) {
+                    Button("Indstillinger til Film", systemImage: "gearshape") { showSettings = true }
+                        .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44)
+                    CastButton().frame(width: 44, height: 44).accessibilityLabel("Vælg Chromecast")
+                }
+            }
+            .sheet(isPresented: $showSettings) { SettingsSheet(model: model) }
         }
+        .background(Style.canvas)
         .onAppear { model.observeCastSession() }
         .onChange(of: model.selectedTab, initial: true) {
             if model.selectedTab == .browser { browserOpened = true }
@@ -66,7 +90,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
             if value == .active { model.refreshAfterReconnect() }
         }
         .tint(Style.accent)
-        .environment(\.colorScheme, appearance == "System" ? hostColorScheme : (appearance == "Lys" ? .light : .dark))
+        .environment(\.colorScheme, FilmAppearance(storedValue: appearance).colorScheme(following: hostColorScheme))
         .alert("Fortsæt afspilning?", isPresented: Binding(
             get: { model.resumePromptVideo != nil },
             set: { if !$0 { model.cancelResumePrompt() } }
@@ -79,11 +103,20 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
         }
     }
 
+    private var sections: some View {
+        Picker("Vis i Film", selection: $model.selectedTab) {
+            Text("Overblik").tag(AppTab.home)
+            Text("Browser").tag(AppTab.browser)
+            Text("Videoer").tag(AppTab.videos)
+            Text("TV").tag(AppTab.remote)
+        }
+    }
+
     private var selectedPage: some View {
         let browserSelected = model.selectedTab == .browser
         return ZStack {
             if browserOpened || browserSelected {
-                BrowserScreen(model: model)
+                BrowserScreen(model: model, isVisible: browserSelected && isVisible)
                     .allowsHitTesting(browserSelected)
                     .accessibilityHidden(!browserSelected)
             }
@@ -109,6 +142,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
     private let background: AnyView
     private let showsPlaybackControls: Bool
     private let onOpen: () -> Void
+    private let onBack: (() -> Void)?
     private let onPhoneCastWake: (Bool) -> Void
     private let pcRelayID: String?
     private let pcRelay: CastPCRelay?
@@ -122,7 +156,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
     @State private var playingOnPhone = false
 
     public init(isSelected: Bool, background: AnyView, showsPlaybackControls: Bool = true,
-                onOpen: @escaping () -> Void, onPhoneCastWake: @escaping (Bool) -> Void = { _ in },
+                onOpen: @escaping () -> Void, onBack: (() -> Void)? = nil, onPhoneCastWake: @escaping (Bool) -> Void = { _ in },
                 pcRelayID: String? = nil, pcRelay: CastPCRelay? = nil,
                 pcRelayWithContext: CastPCRelayWithContext? = nil,
                 filmAnalysis: CastFilmAnalysis? = nil,
@@ -133,6 +167,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
         self.background = background
         self.showsPlaybackControls = showsPlaybackControls
         self.onOpen = onOpen
+        self.onBack = onBack
         self.onPhoneCastWake = onPhoneCastWake
         self.pcRelayID = pcRelayID
         self.pcRelay = pcRelay
@@ -146,7 +181,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
     public var body: some View {
         ZStack {
             if let model {
-                CastBrowserScreen(model: model)
+                CastBrowserScreen(model: model, onBack: onBack, isVisible: isSelected)
                     .allowsHitTesting(isSelected)
                     .accessibilityHidden(!isSelected)
                     .background(CastWakeObserver(model: model, update: onPhoneCastWake))
@@ -291,16 +326,19 @@ enum Style {
     })
     static let canvas = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.12, green: 0.17, blue: 0.23, alpha: 1)
+            ? UIColor(red: 0.13, green: 0.18, blue: 0.21, alpha: 1)
             : UIColor(red: 0.975, green: 0.965, blue: 0.95, alpha: 1)
     })
     static let card = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.18, green: 0.24, blue: 0.31, alpha: 1)
+            ? UIColor(red: 0.18, green: 0.23, blue: 0.26, alpha: 1)
             : UIColor.white
     })
     static let muted = Color(uiColor: .secondaryLabel)
-    static let title = Font.system(.title2, design: .rounded, weight: .bold)
+    static let heroInk = Color(red: 0.094, green: 0.16, blue: 0.19)
+    static let heroStart = Color(red: 1, green: 0.95, blue: 0.83)
+    static let heroEnd = Color(red: 0.97, green: 0.69, blue: 0.52)
+    static let title = Font.system(.title2, design: .default, weight: .bold)
     static let body = Font.system(.body, design: .default)
     static let meta = Font.system(.caption, design: .default)
     static let small: CGFloat = 8

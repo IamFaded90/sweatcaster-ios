@@ -31,7 +31,7 @@ final class CastAppModel: NSObject, ObservableObject, @preconcurrency GCKSession
     @Published var hasSubtitleTracks = false
     @Published var diagnostics: [String] = [] { didSet { persist(diagnostics, key: "streamDiagnostics") } }
     @Published var is404TestRunning = false
-    @Published var copy404TestMessage = "Start en video, og kopiér derefter 404-testen."
+    @Published var copy404TestMessage = "Start en video for at teste videokilden og kopiere fejlloggen."
     @Published var resumePromptVideo: VideoCandidate?
     @Published var resumePromptPosition: Double = 0
     let browser = BrowserController()

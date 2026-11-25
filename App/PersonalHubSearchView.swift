@@ -83,7 +83,7 @@ import UIKit
                     }.buttonStyle(.borderedProminent).frame(minHeight: 44)
                 }
                 if let page = source.page {
-                    Button("Åbn i Underholdning", systemImage: "play.tv") { CastLibraryBridge.open(page); dismiss(); FadedHubRoute.open(.film) }.frame(minHeight: 44)
+                    Button("Åbn i Film", systemImage: "play.tv") { CastLibraryBridge.open(page); dismiss(); FadedHubRoute.open(.film) }.frame(minHeight: 44)
                 }
                 if let item = source.creative {
                     NavigationLink("Arbejd videre med forløbet") { CreativeProjectView(bot: source.bot ?? VillageBot(id: item.botID, name: "Tidligere agent"), model: model, initial: item) }.frame(minHeight: 44)

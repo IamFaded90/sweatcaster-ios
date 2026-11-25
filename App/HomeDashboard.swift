@@ -81,7 +81,7 @@ extension Home {
 
     private func openDashboardVillage() {
         UserDefaults.standard.set(false, forKey: AppStorageKeys.villageShowOffice)
-        selectSpace(.tasks)
+        selectSpace(.village)
     }
 
     var experimentalVillageWork: ExperimentalVillageWork {
@@ -466,8 +466,7 @@ extension Home {
             showFadedCamera = true
         case OpenFadedAIVillage.destination:
             guard !privateStudioPresented else { return }
-            UserDefaults.standard.set(false, forKey: AppStorageKeys.villageBasicMode)
-            selectSpace(.tasks)
+            selectSpace(.village)
             if model.needsPairing { enteredWithoutPC = true }
         case OpenFadedAIVideoBrief.destination:
             guard !privateStudioPresented else { return }

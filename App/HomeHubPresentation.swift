@@ -32,7 +32,7 @@ extension Home {
         switch kind {
         case .film: selectSpace(.entertainment)
         case .music: selectSpace(.music)
-        case .village: selectSpace(.tasks)
+        case .village: selectSpace(.village)
         }
     }
 }

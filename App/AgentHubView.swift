@@ -13,6 +13,7 @@ import SwiftUI
     let onBack: () -> Void
     var experimentalWork = ExperimentalVillageWork()
     var onExperimentalAction: (ExperimentalVillageAction) -> Void = { _ in }
+    var villageOnly = false
     @State private var selectedRoom = "research"
     @State private var showOffice = false
     @State private var showCemetery = false
@@ -85,8 +86,8 @@ import SwiftUI
         let request = botActivityRequest
         NavigationStack {
             VStack(spacing: 0) {
-                workspaceSwitcher
-                if basicMode {
+                if !villageOnly { workspaceSwitcher }
+                if !villageOnly && basicMode {
                     basicAgentWorkspace
                 } else {
                     ScrollView {
@@ -97,7 +98,9 @@ import SwiftUI
             }
             .background { FadedBackground(variant: .village) }
             .foregroundStyle(palette.text)
-            .navigationTitle("Agenter")
+            .navigationTitle(villageOnly ? "Landsbyen" : "Agenter")
+            .navigationBarBackButtonHidden(true)
+            .toolbarBackground(.hidden, for: .navigationBar)
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(isPresented: $showOffice) { office }
             .navigationDestination(isPresented: $showCemetery) { VillageCemeteryView() }
@@ -145,6 +148,11 @@ import SwiftUI
             .onChange(of: villageVisible, initial: true) { _, visible in
                 life.setActive(visible)
             }
+            .onChange(of: villageOnly) { _, village in
+                guard village else { return }
+                showOffice = false; showCemetery = false; showTasks = false
+                showVillageSettings = false; showBuilding = false
+            }
             .onChange(of: villagePause, initial: true) { _, paused in life.setPaused(paused) }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -173,7 +181,7 @@ import SwiftUI
         let selected = bots.first { $0.id == basicBotID } ?? bots.first
         let remoteSelection = remoteAgents.first { $0.id == basicRemoteAgentID }
             ?? (selected == nil ? remoteAgents.first : nil)
-        return HStack(spacing: 0) {
+        return HStack(alignment: .top, spacing: 8) {
             ScrollView {
                 VStack(spacing: 8) {
                     ForEach(bots) { bot in
@@ -187,9 +195,11 @@ import SwiftUI
                                     .multilineTextAlignment(.center)
                             }
                             .frame(maxWidth: .infinity, minHeight: 62)
-                            .fadedGlassSurface(radius: 10,
-                                               tint: remoteSelection == nil && selected?.id == bot.id
-                                               ? palette.cyan.opacity(0.3) : nil)
+                            .background {
+                                if remoteSelection == nil && selected?.id == bot.id {
+                                    RoundedRectangle(cornerRadius: 14).fill(palette.text.opacity(0.09))
+                                }
+                            }
                         }
                         .buttonStyle(.plain)
                         .accessibilityAddTraits(remoteSelection == nil && selected?.id == bot.id ? .isSelected : [])
@@ -206,8 +216,11 @@ import SwiftUI
                                         .multilineTextAlignment(.center)
                                 }
                                 .frame(maxWidth: .infinity, minHeight: 62)
-                                .fadedGlassSurface(radius: 10,
-                                                   tint: remoteSelection?.id == agent.id ? palette.cyan.opacity(0.3) : nil)
+                                .background {
+                                    if remoteSelection?.id == agent.id {
+                                        RoundedRectangle(cornerRadius: 14).fill(palette.text.opacity(0.09))
+                                    }
+                                }
                             }
                             .buttonStyle(.plain)
                             .accessibilityAddTraits(remoteSelection?.id == agent.id ? .isSelected : [])
@@ -224,29 +237,38 @@ import SwiftUI
                 .padding(8)
             }
             .frame(width: 84)
-            .background(palette.card)
-            Divider()
+            .background(palette.text.opacity(0.025), in: RoundedRectangle(cornerRadius: 20))
             ScrollView {
                 if let agent = remoteSelection {
-                    agentCard(agent).padding()
+                    agentCard(agent).padding(.vertical, 8).padding(.horizontal, 4)
                 } else if let bot = selected {
-                    VStack(alignment: .leading, spacing: 16) {
-                        VillageBotAvatar(bot: bot, size: 78, radius: 22)
-                        Text(bot.name).font(FadedTypography.title)
-                        if let specialty = bot.specialty, !specialty.isEmpty {
-                            FadedDetailText(specialty)
+                    VStack(alignment: .leading, spacing: 20) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            VillageBotAvatar(bot: bot, size: 88, radius: 22)
+                            Text(bot.name).font(.title.bold())
+                            if let specialty = bot.specialty, !specialty.isEmpty {
+                                Text(specialty).font(.subheadline).foregroundStyle(MusicEdition.ink.opacity(0.8))
+                            }
                         }
-                        FadedPrimaryButton("Opgaver og computer", icon: "desktopcomputer") { openBotComputer(bot) }
-                        FadedSecondaryButton("Chat med \(bot.name)", icon: "bubble.left") { villageChatBot = bot }
-                        FadedSecondaryButton("Profil", icon: "person.crop.circle") { localBot = bot }
+                        .padding(20).frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(MusicEdition.ink)
+                        .background(LinearGradient(colors: [MusicEdition.mint, MusicEdition.sky],
+                                                   startPoint: .topLeading, endPoint: .bottomTrailing),
+                                    in: RoundedRectangle(cornerRadius: 22))
+                        FadedPrimaryButton("Chat med \(bot.name)", icon: "bubble.left") { villageChatBot = bot }
+                        VStack(alignment: .leading, spacing: 12) {
+                            FadedSecondaryButton("Opgaver og computer", icon: "desktopcomputer") { openBotComputer(bot) }
+                            FadedSecondaryButton("Profil", icon: "person.crop.circle") { localBot = bot }
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding()
+                    .padding(.vertical, 8).padding(.horizontal, 4)
                 } else {
                     ContentUnavailableView("Ingen agenter", systemImage: "person.2")
                 }
             }
         }
+        .padding(.horizontal, 16).padding(.top, 8)
     }
 
     private var workspaceSwitcher: some View {
@@ -257,8 +279,6 @@ import SwiftUI
             }
             .pickerStyle(.segmented)
             .frame(minHeight: 44)
-            .padding(.horizontal, 8)
-            .fadedGlassSurface(radius: FadedRadius.medium)
         }
         .padding(.horizontal, FadedSpacing.edge)
         .padding(.vertical, FadedSpacing.s)

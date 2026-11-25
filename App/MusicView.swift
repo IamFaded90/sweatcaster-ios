@@ -51,6 +51,8 @@ import Kingfisher
                 .foregroundStyle(palette.text)
                 .background { MusicBackdrop() }
                 .navigationTitle("Musik")
+                .navigationBarBackButtonHidden(true)
+                .toolbarBackground(.hidden, for: .navigationBar)
                 .toolbar {
                     ToolbarItem(placement: .topBarLeading) {
                         Button("Tilbage", systemImage: "chevron.left", action: onBack)
@@ -81,6 +83,7 @@ import Kingfisher
                 .sheet(isPresented: $showSongs) { SongStudioView(api: api) }
                 .onDisappear { search?.cancel(); searching = false }
         }.tint(MusicEdition.accent(palette))
+            .navigationBarBackButtonHidden(true)
     }
 
     private var sections: some View {

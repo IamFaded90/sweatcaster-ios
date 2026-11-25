@@ -10,24 +10,16 @@ permissions:
   actions: read
 
 jobs:
-  build:
-    if: ${{ github.ref_name != 'codex/ipa-launch-repair-a78156f' }}
-    # ARM hosts twice failed before acquiring a runner. Keep Xcode 26.3 on the Intel pool.
+  test:
+    if: ${{ github.ref_name != 'codex/ipa-launch-repair-a78156f' && github.ref_name != 'codex/ipa-bus-package-65e772a' }}
+    # Separate runners prevent Release XCTest from consuming the device build's budget.
     runs-on: macos-26-intel
-    # Release simulator tests and the separate device compile share this budget.
     timeout-minutes: 120
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
       - uses: actions/checkout@v4
-      - name: Verify unchanged source for the packaging-only retry
-        if: ${{ github.ref_name == 'codex/ipa-bus-package-65e772a' }}
-        run: |
-          set -euo pipefail
-          git fetch --no-tags --depth=1 origin 65e772a0c609c1e55b83f368a718ffe0a1e09989
-          git diff --exit-code FETCH_HEAD HEAD -- . ':(exclude).github/workflows/build.yml'
       - name: Run Release XCTest on an iPhone simulator
-        if: ${{ github.ref_name != 'codex/ipa-bus-package-65e772a' }}
         run: |
           set -o pipefail
           xcodebuild -version
@@ -51,8 +43,26 @@ jobs:
             -destination "platform=iOS Simulator,id=$simulator" \
             -parallel-testing-enabled NO ARCHS="$simulator_arch" ONLY_ACTIVE_ARCH=YES CODE_SIGNING_ALLOWED=NO test \
             2>&1 | tee "$RUNNER_TEMP/FadedAI-XCTest.log"
+      - name: Show actionable Xcode errors
+        if: ${{ failure() }}
+        run: python3 tools/report_xcode_errors.py --workspace "$GITHUB_WORKSPACE" "$RUNNER_TEMP/FadedAI-XCTest.log" "$RUNNER_TEMP/FadedAI-Device.log"
+
+  build:
+    if: ${{ github.ref_name != 'codex/ipa-launch-repair-a78156f' && github.ref_name != 'codex/fadedai-village-integration' }}
+    # ARM hosts twice failed before acquiring a runner. Keep Xcode 26.3 on the Intel pool.
+    runs-on: macos-26-intel
+    timeout-minutes: 120
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify unchanged source for the packaging-only retry
+        if: ${{ github.ref_name == 'codex/ipa-bus-package-65e772a' }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 65e772a0c609c1e55b83f368a718ffe0a1e09989
+          git diff --exit-code FETCH_HEAD HEAD -- . ':(exclude).github/workflows/build.yml'
       - name: Build for iPhone without signing
-        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
         run: |
           set -o pipefail
           xcodebuild -project SweatCaster.xcodeproj -scheme SweatCaster \
@@ -62,45 +72,8 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/FadedAI-Device.log"
       - name: Show actionable Xcode errors
         if: ${{ failure() }}
-        run: |
-          python3 - "$RUNNER_TEMP" <<'PY'
-          import os
-          import re
-          import sys
-          from pathlib import Path
-
-          workspace = Path(os.environ["GITHUB_WORKSPACE"]).resolve()
-          directory = Path(sys.argv[1])
-          diagnostics = re.compile(r"^(.+?\.swift):(\d+)(?::\d+)?:\s+(?:fatal )?error:\s+(.*)$")
-          summary = re.compile(r"^(?:(?:xcodebuild|clang(?:\+\+)?): )?(?:fatal )?error:|^Undefined symbols for architecture|^ld: ")
-          secrets = re.compile(r"https?://[^/\s@]+@|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+")
-          seen = set()
-          for log in (directory / "FadedAI-XCTest.log", directory / "FadedAI-Device.log"):
-              if not log.is_file():
-                  continue
-              with log.open(encoding="utf-8", errors="replace") as lines:
-                  for raw in lines:
-                      line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", raw).strip()
-                      match = diagnostics.match(line)
-                      if match:
-                          file, number, message = match.groups()
-                          path = (workspace / file).resolve()
-                          relative = path.relative_to(workspace).as_posix() if path.is_relative_to(workspace) else ""
-                          location = f" file={relative},line={number}" if re.fullmatch(r"[\w./+-]+", relative) else ""
-                      elif summary.search(line):
-                          message, location = line, ""
-                      else:
-                          continue
-                      message = secrets.sub("[skjult]", message)[:500].replace("%", "%25")
-                      key = (location, message)
-                      if key not in seen:
-                          print(f"::error{location}::{message}")
-                          seen.add(key)
-                      if len(seen) >= 12:
-                          sys.exit(0)
-          PY
+        run: python3 tools/report_xcode_errors.py --workspace "$GITHUB_WORKSPACE" "$RUNNER_TEMP/FadedAI-XCTest.log" "$RUNNER_TEMP/FadedAI-Device.log"
       - name: Package IPA
-        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
         run: |
           set -euxo pipefail
           app="$RUNNER_TEMP/SweatCasterBuild/Build/Products/Release-iphoneos/FadedAI.app"
@@ -118,14 +91,7 @@ jobs:
           zip -qr "$RUNNER_TEMP/FadedAI-unsigned.ipa" Payload
           unzip -tq "$RUNNER_TEMP/FadedAI-unsigned.ipa"
           python3 "$GITHUB_WORKSPACE/verify_ipa.py" "$RUNNER_TEMP/FadedAI-unsigned.ipa"
-      - uses: actions/upload-artifact@v4
-        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
-        with:
-          name: FadedAI-unsigned
-          path: ${{ runner.temp }}/FadedAI-unsigned.ipa
-          if-no-files-found: error
       - name: Prepare separate AltStore IPA with memory request
-        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
         run: |
           set -euo pipefail
           python3 tools/package_memory_request.py "$RUNNER_TEMP/FadedAI-unsigned.ipa" \
@@ -133,10 +99,37 @@ jobs:
           python3 verify_ipa.py "$RUNNER_TEMP/FadedAI-AltStore-memory-request.ipa"
           python3 tools/inspect_ipa_memory.py "$RUNNER_TEMP/FadedAI-AltStore-memory-request.ipa" --require-memory-request
       - uses: actions/upload-artifact@v4
-        if: ${{ github.ref_name != 'codex/fadedai-village-integration' }}
+        with:
+          name: FadedAI-device-candidate
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/FadedAI-unsigned.ipa
+            ${{ runner.temp }}/FadedAI-AltStore-memory-request.ipa
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    # Never publish an installable release when either compile or tests failed.
+    needs: [test, build]
+    if: ${{ always() && needs.build.result == 'success' && (needs.test.result == 'success' || (needs.test.result == 'skipped' && github.ref_name == 'codex/ipa-bus-package-65e772a')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: FadedAI-device-candidate
+          path: ready
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FadedAI-unsigned
+          path: ready/FadedAI-unsigned.ipa
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
         with:
           name: FadedAI-AltStore-memory-request
-          path: ${{ runner.temp }}/FadedAI-AltStore-memory-request.ipa
+          path: ready/FadedAI-AltStore-memory-request.ipa
+          compression-level: 0
           if-no-files-found: error
 
   repair-package:

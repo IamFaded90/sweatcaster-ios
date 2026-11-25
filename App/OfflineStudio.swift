@@ -157,7 +157,9 @@ struct OfflineStudio: View {
 
     init(api: LiveAPI?, sessionUnlocked: Binding<Bool>, onPrivateSessionEnded: @escaping () -> Void = {},
          initialPage: Page? = nil, initialImagePrompt: String = "", initialBotID: UUID? = nil,
-         ephemeralOnly: Bool = false, imageOnly: Bool = false, privateImagePC: LiveAPI? = nil) {
+         ephemeralOnly: Bool = false, imageOnly: Bool = false, privateImagePC: LiveAPI? = nil,
+         onBack: (() -> Void)? = nil) {
+        self.onBack = onBack
         self.api = ephemeralOnly ? nil : api
         self.privateImagePC = ephemeralOnly ? (privateImagePC ?? api) : nil
         _regularStudioUnlocked = sessionUnlocked
@@ -174,6 +176,7 @@ struct OfflineStudio: View {
     }
 
     var privateSession: Bool { ephemeralOnly }
+    private let onBack: (() -> Void)?
     var agentImageStyle: AgentImageTasteStyle? {
         guard let openingImageAgent else { return nil }
         let owner = selectedPrivateBot?.id ?? openingImageAgent
@@ -249,6 +252,7 @@ struct OfflineStudio: View {
 
     var body: some View {
         NavigationStack { studioNavigation }
+            .navigationBarBackButtonHidden(true)
             .interactiveDismissDisabled(privateSession && !imageOnly && sessionUnlocked)
             .task {
                 if privateSession && !imageOnly { authenticate() }
@@ -259,10 +263,11 @@ struct OfflineStudio: View {
         // Keep concrete view types shallow at presentation boundaries. Building the
         // full nested type here exhausted the Swift runtime stack on iPhone.
         AnyView(studioContent)
+            .navigationBarBackButtonHidden(true)
             .background { FadedBackground(variant: privateSession ? .privateChat : .standard) }
-            .navigationTitle(ephemeralOnly ? (imageOnly ? "Lumi · iPhone" : "NSFW") : (sessionUnlocked ? studioPage.rawValue : "Privat område"))
-            .toolbarBackground(palette.background, for: .navigationBar)
-            .toolbarBackground(.visible, for: .navigationBar)
+            .navigationTitle(ephemeralOnly ? (imageOnly ? "Lumi · iPhone" : "Privat chat") : (sessionUnlocked ? studioPage.rawValue : "Privat område"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
             .overlay(alignment: .top) {
                 if reloadNotice && sessionUnlocked {
                     Text("Lokal model genindlæst for at spare hukommelse")
@@ -292,7 +297,7 @@ struct OfflineStudio: View {
                     Button("Tilbage", systemImage: "chevron.left") {
                         stopStudioImageQueue()
                         closeChatSession()
-                        dismiss()
+                        if let onBack { onBack() } else { dismiss() }
                     }
                 }
                 if sessionUnlocked && studioPage == .chat {
@@ -482,12 +487,12 @@ struct OfflineStudio: View {
 
     @ViewBuilder private var studioContent: some View {
         if studioPhase != .active {
-            palette.background.ignoresSafeArea()
+            FadedBackground(variant: privateSession ? .privateChat : .standard)
         } else if canShowStudio {
             VStack(spacing: 0) {
                 if privateSession {
                     Label("Privat session. Gemmes ikke.", systemImage: "lock.fill")
-                        .font(.subheadline.weight(.semibold)).foregroundStyle(palette.isDark ? palette.purple : palette.text)
+                        .font(.caption).foregroundStyle(palette.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 16).padding(.vertical, 8)
                         .accessibilityHint("Samtaler og billeder ryddes, når sessionen slutter.")
@@ -497,8 +502,6 @@ struct OfflineStudio: View {
                     else { studioPicker.pickerStyle(.segmented) }
                 }
                 .frame(minHeight: 44)
-                .padding(.horizontal, 8)
-                .fadedGlassSurface(radius: FadedRadius.medium)
                 .padding(.horizontal, 16).padding(.vertical, 8)
                 if !privateSession || studioPage == .gallery { studioOperationStatus }
                 studioPageContent
@@ -549,7 +552,7 @@ struct OfflineStudio: View {
         .accessibilityHint("Fjerner denne sessions samtaler, noter og billeder. Bevarer modeller.")
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, FadedSpacing.edge).padding(.vertical, FadedSpacing.s)
-        .background(palette.background)
+        .background(.ultraThinMaterial)
     }
 
     private var studioPicker: some View {

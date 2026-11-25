@@ -185,28 +185,34 @@ struct FadedBackground: View {
         case (.day, .privateChat): Color(red: 0.95, green: 0.92, blue: 0.96)
         case (.day, _): Color(red: 0.93, green: 0.95, blue: 0.92)
         case (.faded, .standard): palette.background
-        case (.faded, .privateChat): Color(red: 0.19, green: 0.15, blue: 0.23)
-        case (.faded, .village): Color(red: 0.21, green: 0.18, blue: 0.16)
-        case (.faded, .terminal): Color(red: 0.11, green: 0.16, blue: 0.23)
+        case (.faded, .privateChat): Color(red: 0.17, green: 0.16, blue: 0.21)
+        case (.faded, .village): Color(red: 0.17, green: 0.19, blue: 0.18)
+        case (.faded, .terminal): Color(red: 0.14, green: 0.18, blue: 0.22)
         }
     }
 
     var body: some View {
         surface
+            .overlay {
+                if palette.theme != .oled {
+                    LinearGradient(colors: [palette.text.opacity(0.025), .clear],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                }
+            }
             .overlay { if palette.theme != .oled && variant != .standard { texture } }
             .overlay {
                 if palette.theme == .faded && variant == .standard && lookPreset == nil {
                     Canvas { context, size in
                         var grid = Path()
-                        for x in stride(from: CGFloat.zero, through: size.width, by: 24) {
+                        for x in stride(from: CGFloat.zero, through: size.width, by: 40) {
                             grid.move(to: CGPoint(x: x, y: 0))
                             grid.addLine(to: CGPoint(x: x, y: size.height))
                         }
-                        for y in stride(from: CGFloat.zero, through: size.height, by: 24) {
+                        for y in stride(from: CGFloat.zero, through: size.height, by: 40) {
                             grid.move(to: CGPoint(x: 0, y: y))
                             grid.addLine(to: CGPoint(x: size.width, y: y))
                         }
-                        context.stroke(grid, with: .color(FadedBrand.mint.opacity(0.065)), lineWidth: 1)
+                        context.stroke(grid, with: .color(FadedBrand.mint.opacity(0.025)), lineWidth: 0.5)
                     }
                 }
             }
@@ -223,7 +229,7 @@ struct FadedBackground: View {
     private var texture: some View {
         Canvas { context, size in
             var path = Path()
-            let step: CGFloat = variant == .terminal ? 24 : 12
+            let step: CGFloat = variant == .terminal ? 28 : 18
             let columns = Int(size.width / step)
             let rows = Int(size.height / step)
             for row in 0...rows {
@@ -238,7 +244,7 @@ struct FadedBackground: View {
                     }
                 }
             }
-            context.fill(path, with: .color(palette.text.opacity(variant == .terminal ? 0.12 : 0.07)))
+            context.fill(path, with: .color(palette.text.opacity(0.035)))
         }
     }
 }

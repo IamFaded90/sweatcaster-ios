@@ -25,18 +25,28 @@ extension OfflineStudio {
                     if privateSession { studioOperationStatus }
                     if !privateSession { privateHeader }
                     if currentBotTurns.isEmpty {
-                        FadedEmptyState(icon: "bubble.left", title: "Klar til en samtale",
-                                        detail: privateSession ? "Skriv en besked til din bot. Samtalen slettes, når du lukker studiet."
-                                                               : "Skriv en besked. Chatten kører på telefonen.")
+                        VStack(alignment: .leading, spacing: 12) {
+                            Image(systemName: "bubble.left.and.bubble.right")
+                                .font(.title2).foregroundStyle(palette.secondary)
+                            Text("Klar til en samtale").font(.title2.bold()).accessibilityAddTraits(.isHeader)
+                            Text(privateSession ? "Dit eget rum til en uforstyrret samtale."
+                                                : "Skriv en besked. Chatten kører på telefonen.")
+                                .font(.subheadline).foregroundStyle(palette.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 24)
                     }
+                    if privateSession && (!textReady || privateModelDownload != nil) { privateTextModelSetup }
                     ForEach(currentBotTurns) { turn in privateTurn(turn) }
                     Color.clear.frame(height: 1).id("private-bottom")
                 }.padding(16)
             }
-            .background(chatBackdrop.opacity(0.22))
+            .background {
+                LinearGradient(colors: [.clear, chatBackdrop.opacity(0.22), .clear],
+                               startPoint: .top, endPoint: .bottom)
+            }
             .scrollDismissesKeyboard(.interactively)
             .onScrollPhaseChange { _, phase in if phase == .interacting { resetIdleTimer() } }
-            .defaultScrollAnchor(.bottom)
+            .defaultScrollAnchor(currentBotTurns.isEmpty ? .top : .bottom)
             .onChange(of: currentBotTurns.last?.id) { scrollPrivate(proxy) }
             .onChange(of: privateBotID) { scrollPrivate(proxy) }
             .onChange(of: answer) { scrollPrivate(proxy) }
@@ -134,11 +144,9 @@ extension OfflineStudio {
                 FadedDetailText(progress).accessibilityAddTraits(.updatesFrequently)
             } else if let problem = dictation.problem, !dictation.active {
                 Text(problem).font(.footnote).foregroundStyle(palette.secondary)
-            } else if (!textReady || privateModelDownload != nil) && !promptFocused {
-                privateTextModelSetup
             } else if hasPrompt && !messageFitsContext {
                 Text("Beskeden er for lang til den valgte model.").font(.footnote).foregroundStyle(palette.secondary)
-            } else if !promptFocused {
+            } else if textReady && !promptFocused {
                 Label(studioTextModelName(effectiveTextModel), systemImage: "iphone")
                     .font(.caption).foregroundStyle(palette.secondary)
             }
@@ -168,8 +176,9 @@ extension OfflineStudio {
                 .opacity(canSendPrivateMessage ? 1 : 0.5)
             }
         }
-        .padding(10).background(palette.card, in: RoundedRectangle(cornerRadius: 22))
-        .overlay { RoundedRectangle(cornerRadius: 22).strokeBorder(palette.purple).allowsHitTesting(false) }
+        .padding(10)
+        .background(palette.text.opacity(0.045), in: RoundedRectangle(cornerRadius: 22))
+        .overlay { RoundedRectangle(cornerRadius: 22).strokeBorder(palette.text.opacity(0.10)).allowsHitTesting(false) }
         .padding(.horizontal, 12).padding(.vertical, 6)
     }
 

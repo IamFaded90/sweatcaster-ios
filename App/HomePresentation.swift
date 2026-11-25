@@ -228,7 +228,7 @@ extension Home {
         }
         .sheet(isPresented: $showAttentionQueue) {
             NavigationStack {
-                DashboardAttentionView(api: studioAPI) {
+                DashboardAttentionView(api: foregroundShortcutAPI) {
                     showAttentionQueue = false
                     openVideoJobs()
                 }
@@ -242,7 +242,7 @@ extension Home {
     private var homeStudioSheets: some View {
         homeWorkspaceSheets
         .sheet(isPresented: $showOfflineStudio, onDismiss: openShortcut) {
-            OfflineStudio(api: studioAPI, sessionUnlocked: $nsfwSessionUnlocked,
+            OfflineStudio(api: studioPage == .images ? foregroundShortcutAPI : studioAPI, sessionUnlocked: $nsfwSessionUnlocked,
                           onPrivateSessionEnded: showPrivateSessionNotice,
                           initialPage: studioPage == .chat ? nil : studioPage, initialImagePrompt: studioImagePrompt,
                           ephemeralOnly: studioPage == .chat, imageOnly: studioPage == .images,
@@ -394,7 +394,17 @@ extension Home {
         privateStudioPresented || model.isDemo || !model.connected ? nil : model.api as? LiveAPI
     }
 
+    // Explicit foreground shortcuts keep their PC access when opened from Privat chat.
+    // The chat and its background work still use studioAPI's private-session gate.
+    private var foregroundShortcutAPI: LiveAPI? {
+        model.isDemo || model.needsPairing || !model.connected ? nil : model.api as? LiveAPI
+    }
+
     func openStudio(_ page: OfflineStudio.Page, prompt: String = "") {
+        if page == .chat {
+            selectSpace(.privateChat)
+            return
+        }
         studioPage = page
         studioImagePrompt = prompt
         showOfflineStudio = true

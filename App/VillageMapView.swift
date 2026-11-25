@@ -347,11 +347,10 @@ import UIKit
     }
 
     private func botNode(_ bot: VillageLifeBot, at foot: CGPoint) -> some View {
-        let young = UUID(uuidString: bot.id).map { VillageHistory.shared.isYoung($0) } ?? false
         return Button {
             onSelect(bot)
         } label: {
-            VillageBotSprite(bot: bot, size: young ? 34 : 48, animateWalk: !paused && !reduceMotion)
+            VillageBotSprite(bot: bot, size: 48, animateWalk: !paused && !reduceMotion)
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
                 .overlay(alignment: .topTrailing) {
@@ -402,7 +401,7 @@ import UIKit
         .buttonStyle(.plain)
         .foregroundStyle(.white)
         // Normalized artwork feet sit at y=114 of 128; keep their contact point on the path.
-        .position(x: foot.x, y: foot.y - (young ? 13 : 19))
+        .position(x: foot.x, y: foot.y - 19)
         .accessibilityLabel(accessibilityText(for: bot))
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.35), value: bot.zoneID)
         .animation(reduceMotion ? nil : .linear(duration: 0.25), value: bot.pathProgress)

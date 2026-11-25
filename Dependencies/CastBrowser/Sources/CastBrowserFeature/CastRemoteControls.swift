@@ -161,7 +161,7 @@ extension CastAppModel {
             await MainActor.run {
                 UIPasteboard.general.string = report.joined(separator: "\n")
                 self.is404TestRunning = false
-                self.copy404TestMessage = "404-test kopieret. Indsæt teksten i din besked."
+                self.copy404TestMessage = "Fejllog kopieret. Indsæt teksten i din besked."
             }
         }
     }

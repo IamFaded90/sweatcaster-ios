@@ -5,23 +5,21 @@ import WebKit
 // Presentation only: media discovery, authentication and HLS proxying stay in CastAppModel.
 struct HomeScreen: View {
     @ObservedObject var model: CastAppModel
-    @AppStorage("castbrowser.appearance") private var appearance = "Mørk"
-    @State private var showSettings = false
     @State private var showAddFavorite = false
     private let columns = [GridItem(.flexible(), spacing: Style.space), GridItem(.flexible(), spacing: Style.space)]
 
     var body: some View {
-        NavigationStack {
+        Group {
             ScrollView {
                 VStack(alignment: .leading, spacing: Style.space) {
                     HStack(alignment: .center, spacing: Style.space) {
                         VStack(alignment: .leading, spacing: Style.small) {
-                            Text("Underholdning")
-                                .font(.system(.largeTitle, design: .rounded, weight: .bold))
+                            Text("Din næste filmaften")
+                                .font(.system(.title, design: .serif, weight: .bold))
                                 .fixedSize(horizontal: false, vertical: true)
                                 .accessibilityAddTraits(.isHeader)
                             Text("Se film og serier på dit TV")
-                                .font(Style.body).foregroundStyle(Style.muted)
+                                .font(Style.body).foregroundStyle(Style.heroInk.opacity(0.8))
                         }
                         Spacer(minLength: 0)
                         Image("AppMascot", bundle: .module)
@@ -32,7 +30,11 @@ struct HomeScreen: View {
                             .accessibilityHidden(true)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.vertical, Style.space)
+                    .padding(20)
+                    .foregroundStyle(Style.heroInk)
+                    .background(LinearGradient(colors: [Style.heroStart, Style.heroEnd],
+                                               startPoint: .topLeading, endPoint: .bottomTrailing),
+                                in: RoundedRectangle(cornerRadius: Style.radius))
 
                     ConnectionCard(model: model)
                     if model.hasActiveMedia {
@@ -88,17 +90,6 @@ struct HomeScreen: View {
                 }.padding(Style.space)
             }
             .background(Style.canvas)
-            .navigationTitle("IamFaded")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { showSettings = true } label: { Image(systemName: "gearshape") }
-                        .accessibilityLabel("Indstillinger")
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    CastButton().frame(width: 44, height: 44).accessibilityLabel("Vælg Chromecast")
-                }
-            }
-            .sheet(isPresented: $showSettings) { SettingsSheet(model: model, appearance: $appearance) }
             .sheet(isPresented: $showAddFavorite) { AddFavoriteSheet(model: model) }
         }
     }
@@ -213,7 +204,7 @@ struct VideosScreen: View {
     @ObservedObject var model: CastAppModel
 
     var body: some View {
-        NavigationStack {
+        Group {
             ScrollView {
                 VStack(alignment: .leading, spacing: Style.space) {
                     Text("Klar til dit TV").font(Style.title)
@@ -231,12 +222,7 @@ struct VideosScreen: View {
                     }
                 }.padding(Style.space)
             }
-            .background(Style.canvas).navigationTitle("Videoer")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    CastButton().frame(width: 44, height: 44).accessibilityLabel("Vælg Chromecast")
-                }
-            }
+            .background(Style.canvas)
         }
     }
 }
@@ -293,7 +279,7 @@ struct RemoteScreen: View {
     @State private var showsFilmCompanion = false
 
     var body: some View {
-        NavigationStack {
+        Group {
             ScrollView {
                 VStack(spacing: Style.space) {
                     ConnectionCard(model: model)
@@ -350,7 +336,7 @@ struct RemoteScreen: View {
                     }
                 }.padding(Style.space)
             }
-            .background(Style.canvas).navigationTitle("Fjernbetjening")
+            .background(Style.canvas)
             .sheet(isPresented: $showsFilmCompanion) { FilmCompanionView(model: model) }
         }
     }
@@ -496,6 +482,7 @@ struct LinkListSheet: View {
                                 .font(Style.meta).foregroundStyle(Style.muted).lineLimit(1)
                         }.padding(.vertical, Style.small)
                     }
+                    .listRowBackground(Style.card)
                     .swipeActions {
                         if allowsDelete {
                             Button(role: .destructive) { onDelete(link) } label: { Label("Fjern", systemImage: "trash") }
@@ -503,9 +490,11 @@ struct LinkListSheet: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden).background(Style.canvas)
             .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Færdig") { dismiss() } } }
-        }.presentationDetents([.medium, .large])
+        }.presentationDetents([.medium, .large]).presentationBackground(Style.canvas)
     }
 }
 
@@ -523,10 +512,12 @@ struct AddFavoriteSheet: View {
                     TextField("Navn", text: $title)
                     TextField("Webadresse", text: $address)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
-                }
+                }.listRowBackground(Style.card)
                 if invalidAddress { Text("Indtast en gyldig webadresse, fx example.com.").foregroundStyle(Style.accent) }
             }
+            .scrollContentBackground(.hidden).background(Style.canvas)
             .navigationTitle("Ny favorit").navigationBarTitleDisplayMode(.inline)
+            .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) { Button("Annuller") { dismiss() } }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -536,61 +527,6 @@ struct AddFavoriteSheet: View {
                     }.disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-        }.presentationDetents([.medium, .large])
-    }
-}
-
-struct SettingsSheet: View {
-    @ObservedObject var model: CastAppModel
-    @Binding var appearance: String
-    @State private var showingDirectDiagnostics = false
-    @State private var directSourceURL: URL?
-    @Environment(\.dismiss) private var dismiss
-
-    private var version: String {
-        let info = Bundle.main.infoDictionary ?? [:]
-        return "\(info["CFBundleShortVersionString"] as? String ?? "?") (\(info["CFBundleVersion"] as? String ?? "?"))"
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section("Udseende") {
-                    Picker("Tema", selection: $appearance) {
-                        Text("System").tag("System")
-                        Text("Lyst").tag("Lyst")
-                        Text("Mørkt").tag("Mørk")
-                    }.pickerStyle(.segmented)
-                }
-                Section("Sådan caster du") {
-                    Text("Åbn en hjemmeside i browseren, start videoen, og vælg den under Videoer.")
-                    Text("Din iPhone og Chromecast skal være på samme Wi-Fi.")
-                }.font(Style.body)
-                Section("Fejlfinding") {
-                    Button(model.is404TestRunning ? "Tester 404…" : "Kopiér 404-test") {
-                        model.copy404Test()
-                    }
-                    .disabled(!model.canRun404Test)
-                    Text(model.copy404TestMessage).font(Style.meta)
-                    Button("Test Chromecast direkte") {
-                        directSourceURL = model.directDiagnosticSourceURL
-                        model.prepareDirectDiagnostics()
-                        showingDirectDiagnostics = true
-                    }
-                    .disabled(model.directDiagnosticSourceURL == nil)
-                    Text("Start først en websitevideo. Direkte test afbryder den aktuelle afspilning.")
-                        .font(Style.meta)
-                }
-                Section("Om appen") {
-                    LabeledContent("Version", value: version).font(Style.body)
-                }
-            }
-            .navigationTitle("Indstillinger").navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Færdig") { dismiss() } } }
-        }
-        .sheet(isPresented: $showingDirectDiagnostics) {
-            DirectCastDiagnosticsView(sourceURL: directSourceURL)
-        }
-        .presentationDetents([.medium, .large])
+        }.presentationDetents([.medium, .large]).presentationBackground(Style.canvas)
     }
 }

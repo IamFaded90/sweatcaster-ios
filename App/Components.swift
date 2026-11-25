@@ -35,13 +35,13 @@ private struct FadedMaterialLayer: View {
         let shape = RoundedRectangle(cornerRadius: radius)
         Group {
             if #available(iOS 26.0, *) {
-                Color.clear.glassEffect(.regular.tint(tint.opacity(0.64)), in: shape)
+                Color.clear.glassEffect(.regular.tint(tint.opacity(0.38)), in: shape)
             } else {
                 shape.fill(.regularMaterial)
             }
         }
         .overlay {
-            shape.fill(LinearGradient(colors: [highlight.opacity(0.13), tint.opacity(0.35), FadedBrand.blue.opacity(0.07)],
+            shape.fill(LinearGradient(colors: [highlight.opacity(0.045), tint.opacity(0.18), FadedBrand.blue.opacity(0.025)],
                                       startPoint: .topLeading, endPoint: .bottomTrailing))
         }
         .allowsHitTesting(false)
@@ -155,7 +155,7 @@ struct FadedButtonStyle: ButtonStyle {
                 else { shape.fill(fill) }
             }
             .overlay { shape.strokeBorder(destructive && enabled ? palette.coral : palette.border, lineWidth: primary && enabled ? 0 : 1) }
-            .shadow(color: enabled && primary ? palette.lime.opacity(0.25) : .clear, radius: 12, y: 4)
+            .shadow(color: enabled && primary ? palette.lime.opacity(0.10) : .clear, radius: 8, y: 3)
             .scaleEffect(enabled && configuration.isPressed && !reduceMotion && !calmMotion ? 0.97 : 1)
             .animation(reduceMotion || calmMotion ? nil : .easeOut(duration: 0.1), value: configuration.isPressed)
             .sensoryFeedback(.impact(weight: primary ? .medium : .light), trigger: configuration.isPressed) { _, pressed in

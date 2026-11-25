@@ -81,6 +81,8 @@ struct Home: View {
         case brain = "Brain", notes = "Notes", gallery = "Gallery", tasks = "Tasks", library = "Library"
         case entertainment = "Entertainment", music = "Music"
         case resume = "Continue"
+        case privateChat = "PrivateChat"
+        case village = "Village"
         var id: Self { self }
     }
     private enum TabDestination: Equatable {
@@ -240,7 +242,7 @@ struct Home: View {
 
     @State var shareResult: Media?
 
-    var privateStudioPresented: Bool { showOfflineStudio && studioPage == .chat }
+    var privateStudioPresented: Bool { space == .privateChat || (showOfflineStudio && studioPage == .chat) }
 
     var visibleModuleTarget: String? {
         guard !privateStudioPresented, !model.isDemo, moduleAddress == model.address,
@@ -262,13 +264,11 @@ struct Home: View {
                               showsPlaybackControls: !privateStudioPresented,
                               api: model.isDemo ? nil : model.api as? LiveAPI,
                               savedHomeAddress: model.savedAddresses[.home],
-                              onOpen: { selectTab(.entertainment) }) {
+                              onOpen: { selectTab(.entertainment) }, onBack: goBack) {
                 homeTabs
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if currentDestination != .fixed(.notes) {
-                spacesBar
-            }
+            spacesBar.modifier(FadedDockKeyboardVisibility())
         }
         .onChange(of: showJobs) {
             navigate(to: .video(.jobs))
@@ -304,12 +304,13 @@ struct Home: View {
 
     private var selectedHomeTab: String {
         if case .module(let selection, _) = currentDestination { return selection }
-        return space.rawValue
+        // Both entries use one live village engine and preserve its map and selection.
+        return (space == .village ? Space.tasks : space).rawValue
     }
 
     private var homeTabs: some View {
         TabView(selection: Binding(get: { selectedHomeTab }, set: { value in
-            guard !privateStudioPresented else { return }
+            guard !privateStudioPresented, value != selectedHomeTab else { return }
             if let fixed = Space(rawValue: value) { selectTab(fixed) }
             else { selectModule(value) }
         })) {
@@ -319,6 +320,13 @@ struct Home: View {
             DeferredHomeTab(isSelected: selectedHomeTab == Space.notes.rawValue) { AnyView(chatTab) }
                 .toolbarVisibility(.hidden, for: .tabBar)
                 .tabItem { Label("Chat", systemImage: "bubble.left.fill") }.tag(Space.notes.rawValue)
+            DeferredHomeTab(isSelected: selectedHomeTab == Space.privateChat.rawValue, keepAlive: false) {
+                AnyView(OfflineStudio(api: nil, sessionUnlocked: $nsfwSessionUnlocked,
+                    onPrivateSessionEnded: showPrivateSessionNotice, initialPage: .chat,
+                    ephemeralOnly: true, privateImagePC: model.isDemo || model.needsPairing ? nil : model.api as? LiveAPI,
+                    onBack: goBack))
+            }.toolbarVisibility(.hidden, for: .tabBar)
+                .tabItem { Label("Privat chat", systemImage: "lock.bubble") }.tag(Space.privateChat.rawValue)
             DeferredHomeTab(isSelected: selectedHomeTab == Space.gallery.rawValue, keepAlive: false) {
                 AnyView(videoStudio.onAppear { if videoPage == .clips { onScreenAppeared?(.videoClips) } })
             }
@@ -328,7 +336,8 @@ struct Home: View {
                 AnyView(AgentHub(api: studioAPI, isVisible: selectedHomeTab == Space.tasks.rawValue,
                                  studioUnlocked: $nsfwSessionUnlocked,
                                  onPrivateSessionEnded: showPrivateSessionNotice, onBack: goBack,
-                                 experimentalWork: experimentalVillageWork, onExperimentalAction: openExperimentalVillageWork)
+                                 experimentalWork: experimentalVillageWork, onExperimentalAction: openExperimentalVillageWork,
+                                 villageOnly: space == .village)
                     .environment(\.villagePlannerAPI, studioAPI))
             }
                 .toolbarVisibility(.hidden, for: .tabBar)
@@ -349,7 +358,7 @@ struct Home: View {
                 .tabItem { Label("Fortsæt", systemImage: "play.circle") }.tag(Space.resume.rawValue)
             Color.clear
                 .toolbarVisibility(.hidden, for: .tabBar)
-                .tabItem { Label("Underholdning", systemImage: "play.tv") }.tag(Space.entertainment.rawValue)
+                .tabItem { Label("Film", systemImage: "play.tv") }.tag(Space.entertainment.rawValue)
             if visibleModuleTarget != nil, let api = model.api as? LiveAPI {
                 ForEach(moduleTabs) { tab in
                     DeferredHomeTab(isSelected: selectedHomeTab == "module:" + tab.id) {
@@ -423,7 +432,6 @@ struct Home: View {
                 .frame(maxWidth: .infinity)
                 .padding(.horizontal, FadedSpacing.edge)
                 .padding(.vertical, 8)
-                .background { ChatGlassSurface(radius: FadedRadius.card, colors: [FadedBrand.mint, FadedBrand.blue]) }
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -462,7 +470,7 @@ struct Home: View {
                     }.accessibilityLabel("Flere muligheder")
                 }
             }
-            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
+            .toolbarBackground(.hidden, for: .navigationBar)
         }
     }
 
@@ -556,7 +564,7 @@ struct Home: View {
     }
 
     var homeBackground: some View {
-        FadedBackground().overlay {
+        tabBackground.overlay {
             if motion && !reduceMotion && !calmMotion && phase == .active && palette.theme == .faded && space == .brain {
                 TimelineView(.animation(minimumInterval: 1.0 / 12)) { clock in
                     let strength = 0.04 + 0.02 * sin(clock.date.timeIntervalSinceReferenceDate / 2)

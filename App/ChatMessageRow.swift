@@ -121,12 +121,12 @@ struct ChatGlassSurface: View {
         ZStack {
             if #available(iOS 26.0, *), !reduceTransparency {
                 Color.clear.glassEffect(.regular.tint(colors.first?.opacity(0.18)), in: shape)
-                shape.fill(palette.card.opacity(0.76))
+                shape.fill(palette.card.opacity(0.42))
             } else {
                 shape.fill(palette.card)
             }
-            shape.fill(gradient).opacity(palette.isDark ? 0.10 : 0.06)
-            shape.strokeBorder(gradient).opacity(palette.isDark ? 0.48 : 0.35)
+            shape.fill(gradient).opacity(palette.isDark ? 0.06 : 0.04)
+            shape.strokeBorder(gradient).opacity(palette.isDark ? 0.20 : 0.16)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

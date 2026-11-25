@@ -8,16 +8,18 @@ struct BrowserScreen: View {
     @State private var isOpeningPictureInPicture = false
     @State private var pictureInPictureUnavailable = false
     @FocusState private var addressFocused: Bool
+    private let isVisible: Bool
 
-    init(model: CastAppModel) {
+    init(model: CastAppModel, isVisible: Bool = true) {
         self.model = model
+        self.isVisible = isVisible
         _browser = ObservedObject(wrappedValue: model.browser)
     }
 
     private var isBookmarked: Bool { model.bookmarks.contains { $0.url == browser.address } }
 
     var body: some View {
-        NavigationStack {
+        Group {
             VStack(spacing: Style.small) {
                 HStack(spacing: Style.small) {
                     Image(systemName: "magnifyingglass").foregroundStyle(Style.muted)
@@ -94,13 +96,9 @@ struct BrowserScreen: View {
             }
             .padding(.horizontal, Style.space).padding(.top, Style.small)
             .background(Style.canvas)
-            .navigationTitle("Browser").navigationBarTitleDisplayMode(.inline)
+            .onChange(of: isVisible) { _, visible in if !visible { addressFocused = false } }
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button { model.selectedTab = .home } label: { Image(systemName: "house") }
-                        .accessibilityLabel("Gå til forsiden")
-                }
-                ToolbarItem(placement: .topBarTrailing) {
+                if isVisible { ToolbarItem(placement: .topBarTrailing) {
                     HStack(spacing: 0) {
                         Button("Billede i billede", systemImage: "pip.enter") {
                             openPictureInPicture()
@@ -108,9 +106,8 @@ struct BrowserScreen: View {
                         .labelStyle(.iconOnly)
                         .frame(width: 44, height: 44)
                         .disabled(isOpeningPictureInPicture || browser.isLoading)
-                        CastButton().frame(width: 44, height: 44).accessibilityLabel("Vælg Chromecast")
                     }
-                }
+                } }
             }
             .onAppear { model.openHome() }
             .sheet(isPresented: $showBookmarks) {

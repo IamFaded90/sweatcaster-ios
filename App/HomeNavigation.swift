@@ -2,6 +2,17 @@ import SwiftUI
 import UIKit
 
 extension Home {
+    @ViewBuilder var tabBackground: some View {
+        switch space {
+        case .music: MusicBackdrop()
+        case .entertainment: EntertainmentBackdrop()
+        case .privateChat: FadedBackground(variant: .privateChat)
+        case .tasks, .village: FadedBackground(variant: .village)
+        case .library: FadedBackground(variant: .terminal)
+        default: FadedBackground()
+        }
+    }
+
     var v0LookPreset: V0LookPreset? {
         V0LookPreset.all.first { $0.id == v0LookPresetID }
     }
@@ -12,20 +23,18 @@ extension Home {
 
     var spacesBar: some View {
         VStack(spacing: 6) {
-            if space != .music { MusicMiniPlayer { selectSpace(.music) } }
-            Text(currentTabAccessibilityName)
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(palette.isDark ? FadedBrand.mint : palette.text)
-                .frame(maxWidth: .infinity)
-                .accessibilityLabel("Aktiv fane · \(currentTabAccessibilityName)")
-                .accessibilityAddTraits(.isHeader)
+            if space != .music && !privateStudioPresented { MusicMiniPlayer { selectSpace(.music) } }
             tabButtons
-            .padding(6)
+            .padding(4)
             .fadedGlassSurface(radius: FadedRadius.media, tint: v0LookPreset?.cardColor(in: palette),
                                border: v0LookPreset?.borderColor(in: palette))
+            .shadow(color: .black.opacity(palette.isDark ? 0.14 : 0.06), radius: 18, y: 7)
         }
         .frame(maxWidth: 570)
-        .padding(.horizontal, 12).padding(.bottom, 4)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background { Rectangle().fill(.ultraThinMaterial).mask {
+            LinearGradient(colors: [.clear, .black.opacity(0.85)], startPoint: .top, endPoint: .bottom)
+        }.ignoresSafeArea(edges: .bottom) }
         .sheet(isPresented: $showMoreDestinations, onDismiss: openMoreDestination) {
             FadedMoreScreen(modules: visibleModuleTarget == nil ? [] : moduleTabs,
                             api: studioAPI, lookPreset: lookPresetBinding,
@@ -37,7 +46,7 @@ extension Home {
     }
 
     private var dockSpaces: [Space] {
-        [.notes, .gallery, .brain, .resume, .tasks, .entertainment, .music, .library]
+        [.notes, .privateChat, .gallery, .brain, .resume, .tasks, .village, .entertainment, .music, .library]
     }
 
     private var tabButtons: some View {
@@ -45,19 +54,26 @@ extension Home {
         let modules = (visibleModuleTarget == nil ? [] : moduleTabs).map {
             FadedWheelItem(id: "module:" + $0.id, title: $0.title, icon: "info.circle")
         }
-        return FadedNavigationWheel(items: fixed + modules + [.init(id: "more", title: "Mere", icon: "ellipsis")],
-                                    selectedID: showMoreDestinations ? "more" : selectedModuleTab ?? space.rawValue,
+        let shortcuts = [
+            FadedWheelItem(id: "images", title: "Billeder", icon: "photo.stack"),
+            FadedWheelItem(id: "attention", title: "Afventer dig", icon: "tray.full")
+        ]
+        return FadedNavigationWheel(items: fixed + shortcuts + modules + [.init(id: "more", title: "Mere", icon: "ellipsis")],
+                                    selectedID: dockSelection,
                                     reduceMotion: reduceMotion || calmMotion) { id in
             if id == "more" { showMoreDestinations = true }
+            else if id == "images" { openStudio(.images) }
+            else if id == "attention" { showAttentionQueue = true }
             else if let destination = Space(rawValue: id) { selectTab(destination) }
             else { selectModule(id) }
         }
     }
 
-    private var currentTabAccessibilityName: String {
-        if let selectedModuleTab,
-           let module = moduleTabs.first(where: { "module:" + $0.id == selectedModuleTab }) { return module.title }
-        return spaceTitle(space)
+    private var dockSelection: String {
+        if showMoreDestinations { return "more" }
+        if showOfflineStudio { return "images" }
+        if showAttentionQueue { return "attention" }
+        return selectedModuleTab ?? space.rawValue
     }
 
     private func openMoreDestination() {
@@ -68,7 +84,7 @@ extension Home {
         case .chat: selectSpace(.notes)
         case .code: selectSpace(.library)
         case .entertainment: selectSpace(.entertainment)
-        case .village: selectSpace(.tasks)
+        case .village: selectSpace(.village)
         case .video: openVideoClips()
         case .images: openStudio(.images)
         case .imageBrief(let prompt): openStudio(.images, prompt: prompt)
@@ -99,11 +115,13 @@ extension Home {
         case .brain: "Hjem"
         case .resume: "Fortsæt"
         case .notes: "Chat"
+        case .privateChat: "Privat chat"
         case .gallery: "Video"
         case .tasks: "Agenter"
+        case .village: "Landsbyen"
         case .library: "Code Bot"
         case .music: "Musik"
-        case .entertainment: "Underholdning"
+        case .entertainment: "Film"
         }
     }
 
@@ -112,12 +130,28 @@ extension Home {
         case .brain: "house.fill"
         case .resume: "play.circle.fill"
         case .notes: "bubble.left.fill"
+        case .privateChat: "lock.bubble"
         case .gallery: "play.rectangle.fill"
         case .tasks: "person.2.fill"
+        case .village: "house.lodge"
         case .library: "chevron.left.forwardslash.chevron.right"
         case .music: "music.note"
         case .entertainment: "play.tv"
         }
+    }
+}
+
+/// Leave the transcript and composer room while the keyboard is open.
+struct FadedDockKeyboardVisibility: ViewModifier {
+    @State private var typing = false
+
+    func body(content: Content) -> some View {
+        content
+            .frame(height: typing ? 0 : nil).clipped()
+            .allowsHitTesting(!typing)
+            .accessibilityHidden(typing)
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in typing = true }
+            .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in typing = false }
     }
 }
 
@@ -214,7 +248,7 @@ private struct FadedMoreScreen: View {
                     row("Noter", "Skriv og genfind noter", "note.text", .notes)
                     row("Projekter", "Find og redigér dine kladder", "folder", .projects)
                     row("Gemte videoer", "Afspil dine færdige videoer", "film.stack", .savedVideos)
-                    row("Underholdning", "Browser, videoer og Chromecast", "play.tv", .entertainment)
+                    row("Film", "Browser, videoer og Chromecast", "play.tv", .entertainment)
                 }
                 Section("Gør det til dit") {
                     link("Fælles Vault", "Gem logins til dig selv og dine agenter", "lock.doc", .vault)
