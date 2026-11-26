@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import plistlib
 import posixpath
+import re
 import struct
 import sys
 import zipfile
@@ -23,6 +24,22 @@ VILLAGE_REQUIRED = (
     "vrm/LICENSE-three.txt",
     "vrm/LICENSE-three-vrm.txt",
 )
+
+# These runtimes are supplied by iOS. Other @rpath dependencies still need an
+# embedded binary; a /usr/lib/swift search path must never excuse a missing framework.
+SYSTEM_SWIFT_RUNTIMES = {
+    "/usr/lib/swift/libswiftCore.dylib": (12, 2, 0),
+    "/usr/lib/swift/libswift_Concurrency.dylib": (15, 0, 0),
+}
+
+
+def system_swift_candidate(candidates, minimum_os):
+    if not isinstance(minimum_os, str) or not re.fullmatch(r"\d+(?:\.\d+){0,2}", minimum_os):
+        return False
+    parts = tuple(int(part) for part in minimum_os.split("."))
+    version = parts + (0,) * (3 - len(parts))
+    return any(path in SYSTEM_SWIFT_RUNTIMES and version >= SYSTEM_SWIFT_RUNTIMES[path]
+               for path in candidates)
 
 
 def load_commands(data):
@@ -143,7 +160,7 @@ def verify(archive):
             resolved = next((candidate for candidate in candidates if candidate in files), None)
             if resolved is not None:
                 pending.append((resolved, executable_root, expanded))
-            elif not weak:
+            elif not system_swift_candidate(candidates, info.get("MinimumOSVersion")) and not weak:
                 raise ValueError(f"{binary} cannot load {dependency}")
     print(f"OK: build {info['CFBundleVersion']}, {len(visited)} arm64 binaries and embedded dependencies.")
 

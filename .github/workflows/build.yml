@@ -2,6 +2,12 @@ name: Build unsigned iOS IPA
 
 on:
   workflow_dispatch:
+    inputs:
+      repackage_build_102:
+        description: Repackage tested build 102 without recompiling unchanged app sources
+        type: boolean
+        required: false
+        default: false
   push:
     branches: [main, 'codex/ipa-*', 'codex/fadedai-village-integration']
 
@@ -11,7 +17,7 @@ permissions:
 
 jobs:
   test:
-    if: ${{ github.ref_name != 'codex/ipa-launch-repair-a78156f' && github.ref_name != 'codex/ipa-bus-package-65e772a' }}
+    if: ${{ github.event.inputs.repackage_build_102 != 'true' && github.ref_name != 'codex/ipa-launch-repair-a78156f' && github.ref_name != 'codex/ipa-bus-package-65e772a' }}
     # Separate runners prevent Release XCTest from consuming the device build's budget.
     runs-on: macos-26-intel
     timeout-minutes: 120
@@ -50,7 +56,7 @@ jobs:
         run: python3 tools/report_xcode_errors.py --workspace "$GITHUB_WORKSPACE" "$RUNNER_TEMP/FadedAI-XCTest.log" "$RUNNER_TEMP/FadedAI-Device.log"
 
   build:
-    if: ${{ github.ref_name != 'codex/ipa-launch-repair-a78156f' && github.ref_name != 'codex/fadedai-village-integration' }}
+    if: ${{ github.event.inputs.repackage_build_102 != 'true' && github.ref_name != 'codex/ipa-launch-repair-a78156f' && github.ref_name != 'codex/fadedai-village-integration' }}
     # ARM hosts twice failed before acquiring a runner. Keep Xcode 26.3 on the Intel pool.
     runs-on: macos-26-intel
     timeout-minutes: 120
@@ -124,10 +130,71 @@ jobs:
           if-no-files-found: ignore
           retention-days: 1
 
+  repackage_102:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.repackage_build_102 == 'true' && github.ref_name == 'codex/ipa-ui-polish-20261120' }}
+    runs-on: macos-26-intel
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify native sources still match the tested build
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 03663416a76ee2743d1398bbc251cd83506eb424
+          git diff --exit-code FETCH_HEAD HEAD -- . \
+            ':(exclude).github/workflows/build.yml' ':(exclude)verify_ipa.py' \
+            ':(exclude)tools/test_verify_ipa.py' ':(exclude)tools/repackage_ipa.py' \
+            ':(exclude)tools/test_repackage_ipa.py'
+          python3 verify_project.py
+      - name: Verify original simulator tests and device compile succeeded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import json, os, urllib.request
+          base = "https://api.github.com/repos/IamFaded90/sweatcaster-ios/actions/runs/45728970758"
+          headers = {"Authorization": "Bearer " + os.environ["GH_TOKEN"], "Accept": "application/vnd.github+json", "User-Agent": "FadedAI-package-recovery"}
+          def get(url):
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                  return json.load(response)
+          run = get(base)
+          assert run["head_sha"] == "03663416a76ee2743d1398bbc251cd83506eb424", "Unexpected source commit"
+          jobs = get(base + "/jobs?per_page=100")["jobs"]
+          assert any(j["name"] == "test" and j["conclusion"] == "success" for j in jobs), "Original tests did not pass"
+          assert any(j["name"] == "build" and any(s["name"] == "Build for iPhone without signing" and s["conclusion"] == "success" for s in j["steps"]) for j in jobs), "Original device compile did not pass"
+          print("Verified simulator tests and device compile for build 102.")
+          PY
+      - uses: actions/download-artifact@v4
+        with:
+          name: FadedAI-packaging-diagnostics
+          path: recovered
+          run-id: 45728970758
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Repackage verified app and prepare AltStore memory request
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tools -p 'test_verify_ipa.py' -q
+          python3 -m unittest discover -s tools -p 'test_repackage_ipa.py' -q
+          python3 tools/repackage_ipa.py recovered/FadedAI-unsigned.ipa "$RUNNER_TEMP/FadedAI-unsigned.ipa" \
+            --version "$GITHUB_RUN_NUMBER" --expected-sha256 248791630dfd83b9a2e35d1cacc341b1b92bcb97c0978674b0f38b0a70c757eb
+          python3 verify_ipa.py "$RUNNER_TEMP/FadedAI-unsigned.ipa"
+          python3 tools/package_memory_request.py "$RUNNER_TEMP/FadedAI-unsigned.ipa" \
+            "$RUNNER_TEMP/FadedAI-AltStore-memory-request.ipa" --entitlements App/FadedAI.entitlements
+          python3 verify_ipa.py "$RUNNER_TEMP/FadedAI-AltStore-memory-request.ipa"
+          python3 tools/inspect_ipa_memory.py "$RUNNER_TEMP/FadedAI-AltStore-memory-request.ipa" --require-memory-request
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FadedAI-device-candidate
+          compression-level: 0
+          path: |
+            ${{ runner.temp }}/FadedAI-unsigned.ipa
+            ${{ runner.temp }}/FadedAI-AltStore-memory-request.ipa
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     # Never publish an installable release when either compile or tests failed.
-    needs: [test, build]
-    if: ${{ always() && needs.build.result == 'success' && (needs.test.result == 'success' || (needs.test.result == 'skipped' && github.ref_name == 'codex/ipa-bus-package-65e772a')) }}
+    needs: [test, build, repackage_102]
+    if: ${{ always() && ((needs.build.result == 'success' && (needs.test.result == 'success' || (needs.test.result == 'skipped' && github.ref_name == 'codex/ipa-bus-package-65e772a'))) || (needs.repackage_102.result == 'success' && needs.test.result == 'skipped' && needs.build.result == 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
