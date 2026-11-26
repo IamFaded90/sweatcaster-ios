@@ -6,6 +6,7 @@ import re
 import xml.etree.ElementTree as ET
 
 from verify_ipa import VILLAGE_REQUIRED
+from tools.verify_dynamic_packages import verify_dynamic_packages
 
 root = Path(__file__).resolve().parent
 project = root / "SweatCaster.xcodeproj"
@@ -41,6 +42,7 @@ assert "StaticConfiguration(" not in extension_source and "AppIntentConfiguratio
 assert {path.name for path in (root / "App").rglob("*.appiconset")} == {"AppIcon.appiconset"}
 
 app_target, = [row for row in rows.values() if 'productType = "com.apple.product-type.application"' in row]
+verify_dynamic_packages(root, rows, app_target)
 app_phases = [rows[phase] for phase in re.findall(r"[0-9A-F]{24}", app_target.split("buildPhases = (", 1)[1].split(")", 1)[0])]
 resource_phase, = [row for row in app_phases if "isa = PBXResourcesBuildPhase" in row]
 village_ref, = [key for key, row in rows.items() if "lastKnownFileType = folder;" in row and "path = Assets/Village;" in row]
