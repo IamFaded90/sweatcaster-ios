@@ -5,6 +5,7 @@ struct BrowserScreen: View {
     @ObservedObject private var browser: BrowserController
     @State private var showBookmarks = false
     @State private var showHistory = false
+    @State private var showVidora = false
     @State private var isOpeningPictureInPicture = false
     @State private var pictureInPictureUnavailable = false
     @FocusState private var addressFocused: Bool
@@ -35,6 +36,13 @@ struct BrowserScreen: View {
                 }
                 .padding(.leading, Style.space)
                 .background(Style.card, in: RoundedRectangle(cornerRadius: 16))
+
+                if let page = browser.webView.url, page.host?.hasSuffix("themoviedb.org") == true,
+                   VidoraReference(input: page.absoluteString) != nil {
+                    Button("Afspil i FadedAI", systemImage: "play.circle.fill") { showVidora = true }
+                        .frame(maxWidth: .infinity, minHeight: 44).buttonStyle(.borderedProminent).tint(Style.accent)
+                        .foregroundStyle(Style.heroInk)
+                }
 
                 VStack(alignment: .leading, spacing: Style.small) {
                     Toggle(isOn: Binding(get: { browser.adBlockingEnabled }, set: browser.setAdBlocking)) {
@@ -95,7 +103,7 @@ struct BrowserScreen: View {
                 }
             }
             .padding(.horizontal, Style.space).padding(.top, Style.small)
-            .background(Style.canvas)
+            .background { FilmBackground() }
             .onChange(of: isVisible) { _, visible in if !visible { addressFocused = false } }
             .toolbar {
                 if isVisible { ToolbarItem(placement: .topBarTrailing) {
@@ -112,6 +120,11 @@ struct BrowserScreen: View {
             .onAppear { model.openHome() }
             .sheet(isPresented: $showBookmarks) {
                 LinkListSheet(title: "Favoritsider", links: model.bookmarks, onOpen: model.open, onDelete: model.removeBookmark)
+            }
+            .sheet(isPresented: $showVidora) {
+                VidoraOpenSheet(input: browser.webView.url?.absoluteString ?? "") {
+                    model.open(BrowserLink(title: "Afspiller", url: $0.absoluteString))
+                }
             }
             .sheet(isPresented: $showHistory) {
                 LinkListSheet(title: "Historik", links: model.history, onOpen: model.open, onDelete: { _ in }, allowsDelete: false)

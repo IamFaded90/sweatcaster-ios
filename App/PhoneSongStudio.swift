@@ -8,6 +8,8 @@ import SwiftUI
     @Published private(set) var installed = PhoneSongEngine.installed(at: root)
     @Published private(set) var busy = false
     @Published private(set) var progress = ""
+    @Published private(set) var downloadFraction: Double?
+    @Published private(set) var downloadSize = ""
     @Published var notice: String?
     @Published private(set) var songs: [SongJob] = []
     @Published private(set) var referenceReady = false
@@ -16,6 +18,7 @@ import SwiftUI
     @Published private(set) var deletingModel = false
     @Published private(set) var deletingReferenceModel = false
     private var operation: Task<Void, Never>?
+    private var downloadID: UUID?
     private var referenceOperation: Task<Void, Never>?
     private let journal = URL.applicationSupportDirectory.appending(path: "FadedAI/Songs/local-jobs.json")
     private init() {
@@ -36,9 +39,13 @@ import SwiftUI
     }
     func download() {
         guard !busy, !referenceBusy else { return }
-        busy = true; notice = nil
+        busy = true; notice = nil; progress = "Gør modelhentningen klar…"
+        let id = UUID(); downloadID = id; downloadFraction = 0; downloadSize = ""
         operation = Task {
-            defer { busy = false; installed = PhoneSongEngine.installed(at: Self.root) }
+            defer {
+                busy = false; installed = PhoneSongEngine.installed(at: Self.root)
+                downloadID = nil; downloadFraction = nil; downloadSize = ""
+            }
             do {
                 try FileManager.default.createDirectory(at: Self.root.deletingLastPathComponent(), withIntermediateDirectories: true)
                 let space = try Self.root.deletingLastPathComponent().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
@@ -46,12 +53,25 @@ import SwiftUI
                 guard (space.volumeAvailableCapacityForImportantUsage ?? 0) > required else {
                     notice = String(format: "ACE-Step skal bruge cirka %.1f GB ledig plads til de manglende filer og arbejdet.", Double(required) / 1e9); return
                 }
-                try await PhoneSongEngine.shared.download(to: Self.root) { value in Task { @MainActor in self.progress = value } }
+                try await PhoneSongEngine.shared.download(to: Self.root) { value in
+                    Task { @MainActor in
+                        guard self.downloadID == id else { return }
+                        self.progress = value.message
+                        self.downloadFraction = value.fraction
+                        self.downloadSize = value.byteSummary
+                    }
+                }
                 notice = "Sangmodellen er hentet. Den første prøve skal køres på denne iPhone."
             } catch {
                 if Task.isCancelled || error is CancellationError {
                     notice = "Hentningen er stoppet. Færdige modelfiler er bevaret."
-                } else { notice = "Hentningen kunne ikke afsluttes. " + error.localizedDescription }
+                } else {
+                    let detail = (error as? URLError)?.code == .timedOut
+                        ? "Der kom ingen data fra modelserveren i 30 sekunder."
+                        : error.localizedDescription
+                    notice = "Hentningen kunne ikke afsluttes. " + detail +
+                        " Tryk Hent igen for at fortsætte; færdige filer bevares."
+                }
             }
         }
     }

@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import SwiftUI
 import UIKit
+import PhotosUI
 
 struct ChatView: View {
     struct RemovedTurn {
@@ -54,14 +55,26 @@ struct ChatView: View {
     private let embedded: Bool
     private let newConversationRequest: UUID?
     private let onConsumeNewConversation: (() -> Void)?
-    private let openBots: (() -> Void)?
+    let openBots: (() -> Void)?
+    let openDestination: ((ChatHubDestination) -> Void)?
     private let onConsumeSearch: (() -> Void)?
     private let onConsumePhonePreference: (() -> Void)?
     private let onComposerFocusChange: ((Bool) -> Void)?
     @Environment(\.horizontalSizeClass) private var chatSizeClass
     @Environment(\.scenePhase) var chatScenePhase
     @State private var chatPortraitIndex = 0
-    @State private var showHistory = false
+    @State var showHistory = false
+    @State var agentMode = false
+    @State var selectedTaskAgent: UUID?
+    @State var showSongStudio = false
+    @State var pendingHubDestination: ChatHubDestination?
+    @State var pendingMusic = false
+    @State var pickedPhoto: PhotosPickerItem?
+    @State var recentPickedPhotos: [DroppedPhoto] = []
+    @State var photoImportBusy = false
+    @State var pendingCamera = false
+    @State var showChatCamera = false
+    @State var capturedPhotoData: Data?
     @State var showChatSettings = false
     @State private var handledNewConversation: UUID?
     @State var sessionID = UUID()
@@ -184,7 +197,8 @@ struct ChatView: View {
          initialSearch: String = "", openPrivateStudio: (() -> Void)? = nil, preferPhone: Bool = false,
          embedded: Bool = false, newConversationRequest: UUID? = nil, onConsumeNewConversation: (() -> Void)? = nil,
          openBots: (() -> Void)? = nil, onConsumeSearch: (() -> Void)? = nil, onConsumePhonePreference: (() -> Void)? = nil,
-         onComposerFocusChange: ((Bool) -> Void)? = nil) {
+         onComposerFocusChange: ((Bool) -> Void)? = nil,
+         openDestination: ((ChatHubDestination) -> Void)? = nil) {
         self.api = api
         self.demo = demo
         self.initialDraft = initialDraft
@@ -204,6 +218,7 @@ struct ChatView: View {
         self.newConversationRequest = newConversationRequest
         self.onConsumeNewConversation = onConsumeNewConversation
         self.openBots = openBots
+        self.openDestination = openDestination
         self.onConsumeSearch = onConsumeSearch
         self.onConsumePhonePreference = onConsumePhonePreference
         self.onComposerFocusChange = onComposerFocusChange
@@ -239,6 +254,13 @@ struct ChatView: View {
             }
         }
         .sheet(isPresented: $showChatSettings) { chatSettingsSheet }
+        .sheet(isPresented: $showSongStudio) { SongStudioView(api: api as? LiveAPI) }
+        .fullScreenCover(isPresented: $showChatCamera, onDismiss: {
+            if let data = capturedPhotoData { capturedPhotoData = nil; stageChatPhoto(data) }
+        }) {
+            CameraGuideCapture(captured: { capturedPhotoData = $0 }, failed: { chatNotice = $0 })
+                .ignoresSafeArea()
+        }
         .sheet(isPresented: $showComposerTools, onDismiss: finishComposerTools) { composerToolsSheet }
         .sheet(item: $agentTaskDraft) { input in
             agentHandoff(input.text)
@@ -256,7 +278,11 @@ struct ChatView: View {
         .sheet(item: $droppedPhoto) { photo in
             LocalImageAnalysisView(data: photo.data, onChooseNote: attachPhotoExcerpt, api: api as? LiveAPI)
         }
-        .onChange(of: sessionID) { stagedPhoto = nil; messageJumpID = nil }
+        .onChange(of: sessionID) { stagedPhoto = nil; messageJumpID = nil; recentPickedPhotos = [] }
+        .onChange(of: agentMode) {
+            composerFocused = false
+            if agentMode && effectiveReplySource != .phone && effectiveReplySource != .pc { chooseSource(.phone) }
+        }
         .task(id: removedTurns.last?.turn.id) { await expireUndo() }
     }
     private var chatLayout: some View {
@@ -264,7 +290,8 @@ struct ChatView: View {
             let wide = chatSizeClass == .regular && geometry.size.width >= 740
             let sidebarWidth: CGFloat = 300
             let width = geometry.size.width - (wide ? sidebarWidth : 0)
-            HStack(spacing: 0) {
+            ZStack(alignment: .leading) {
+              HStack(spacing: 0) {
                 if wide {
                     historySidebar.frame(width: sidebarWidth)
                     Divider()
@@ -272,28 +299,36 @@ struct ChatView: View {
                 chatContent(userBubbleWidth: max(1, (width - 32) * 0.8), wide: wide,
                             compactHeight: geometry.size.height < 360)
             }
-            .sheet(isPresented: Binding(
-                get: { showHistory && !wide }, set: { showHistory = $0 }
-            )) {
-                NavigationStack {
+              .offset(x: showHistory && !wide ? 28 : 0)
+              .allowsHitTesting(wide || !showHistory)
+              .accessibilityHidden(showHistory && !wide)
+              if showHistory && !wide {
+                Color.black.opacity(0.35).ignoresSafeArea()
+                    .onTapGesture { showHistory = false }
+                    .accessibilityLabel("Luk sidemenu").accessibilityAddTraits(.isButton)
+                VStack(spacing: 0) {
+                    HStack {
+                        Text("FadedAI").font(.title2.bold())
+                        Spacer()
+                        Button("Luk menu", systemImage: "xmark") { showHistory = false }
+                            .labelStyle(.iconOnly).frame(width: 44, height: 44)
+                    }.padding(.horizontal, 20)
                     historySidebar
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button {
-                                    showHistory = false
-                                } label: {
-                                    Text("Luk")
-                                        .font(FadedTypography.action)
-                                        .padding(.horizontal, FadedSpacing.m)
-                                        .frame(minHeight: 44)
-                                        .fadedGlassSurface()
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
                 }
+                .frame(width: min(360, geometry.size.width * 0.88))
+                .background { FadedBackground() }
+                .clipShape(.rect(bottomTrailingRadius: 26, topTrailingRadius: 26))
+                .shadow(color: .black.opacity(0.2), radius: 24, x: 8)
+                .transition(.move(edge: .leading))
+                .gesture(DragGesture(minimumDistance: 25).onEnded { value in
+                    if value.translation.width < -60 && abs(value.translation.width) > abs(value.translation.height) {
+                        showHistory = false
+                    }
+                })
+                .accessibilityAction(.escape) { showHistory = false }
+              }
             }
+            .animation(reduceMotion || calmMotion ? nil : .easeInOut(duration: 0.25), value: showHistory)
         }
         .background {
             FadedBackground()
@@ -301,7 +336,8 @@ struct ChatView: View {
     }
 
     private var historySidebar: some View {
-        ChatSidebarView(query: $chatSearch, mascot: chatPortraitName, sessions: historySessions, selectedID: sessionID,
+        VStack(spacing: 0) {
+          ChatSidebarView(query: $chatSearch, mascot: chatPortraitName, sessions: historySessions, selectedID: sessionID,
                         isBusy: task != nil, activeTurns: turns) {
             let previous = sessionID
             newConversation()
@@ -312,6 +348,8 @@ struct ChatView: View {
             favoritesOnly = false
             showHistory = false
             messageJumpID = id
+          }
+          chatSidebarDestinations
         }
     }
 
@@ -362,10 +400,11 @@ struct ChatView: View {
                     }
                 }
             }
-            transcriptScroll(userBubbleWidth: userBubbleWidth)
-            composer(compact: compactEditing, showHistoryShortcut: !wide).layoutPriority(1)
-            if !composerFocused && !compactHeight {
-                chatBrandFooter
+            if agentMode {
+                chatAgentWorkspace
+            } else {
+                transcriptScroll(userBubbleWidth: userBubbleWidth)
+                composer(compact: compactEditing, showHistoryShortcut: !wide).layoutPriority(1)
             }
         }
         return column
@@ -487,40 +526,30 @@ struct ChatView: View {
     }
 
     private func chatHeading(wide: Bool, revealOutbox: @escaping () -> Void) -> some View {
-        VStack(alignment: .leading, spacing: FadedSpacing.xs) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: FadedSpacing.xs) {
-                if !embedded || onBack != nil {
-                    headerButton("Tilbage", icon: "chevron.left", action: goBack)
-                        .fadedGlassSurface()
+                if !wide {
+                    headerButton("Åbn sidemenu", icon: "line.3.horizontal", action: openChatHistory)
+                        .fadedGlassSurface().accessibilityIdentifier("open-chat-history")
                 }
-                chatBrand
                 Spacer(minLength: FadedSpacing.xs)
-                if composerFocused && wide {
-                    headerButton("Skjul tastatur", icon: "keyboard.chevron.compact.down") {
-                        composerFocused = false
+                Menu {
+                    Picker("Samtale eller agentopgaver", selection: $agentMode) {
+                        Text("Chat").tag(false)
+                        Text("Agent").tag(true)
                     }
-                }
-                if !chatTypeSize.isAccessibilitySize {
-                    quickModelPicker
-                }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(agentMode ? "Agent" : "Chat").font(.headline)
+                        Image(systemName: "chevron.down").font(.caption.weight(.semibold))
+                    }.frame(minWidth: 100, minHeight: 44)
+                }.buttonStyle(.plain).disabled(task != nil || dictation.active)
+                    .accessibilityLabel("Skift mellem chat og agentopgaver")
+                    .accessibilityValue(agentMode ? "Agent" : "Chat")
+                Spacer(minLength: FadedSpacing.xs)
+                headerButton("Chatindstillinger", icon: "slider.horizontal.3", action: openComposerSettings)
             }
-            if chatTypeSize.isAccessibilitySize { quickModelPicker }
-            if !wide { chatHistoryShortcut }
             if !composerFocused {
-                HStack(spacing: FadedSpacing.xs) {
-                    Text(connection).font(.caption).foregroundStyle(palette.secondary)
-                    Spacer(minLength: FadedSpacing.xs)
-                    if !wide {
-                        headerButton("Ny samtale", icon: "square.and.pencil") { newConversation() }
-                            .disabled(task != nil)
-                    }
-                }
-                if chatTypeSize.isAccessibilitySize { chatNavigationMenu }
-                else {
-                    if !demo { sourcePicker }
-                    ScrollView(.horizontal) { HStack(spacing: FadedSpacing.m) { chatShortcuts } }
-                        .scrollIndicators(.hidden)
-                }
                 if !outboxEntries.isEmpty {
                     Button(action: revealOutbox) {
                         Label("Udbakke · \(outboxEntries.count)", systemImage: "tray")
@@ -528,7 +557,6 @@ struct ChatView: View {
                     }
                 }
             }
-            FadedSignature()
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, FadedSpacing.edge).padding(.bottom, FadedSpacing.s)

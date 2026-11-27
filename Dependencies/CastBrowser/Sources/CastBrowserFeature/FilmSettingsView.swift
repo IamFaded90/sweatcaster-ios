@@ -68,12 +68,12 @@ struct SettingsSheet: View {
                     LabeledContent("Version", value: version).font(Style.meta)
                 }.listRowBackground(Style.card)
             }
-            .scrollContentBackground(.hidden).background(Style.canvas)
+            .scrollContentBackground(.hidden).background { FilmBackground() }
             .navigationTitle("Indstillinger · Film").navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Færdig") { dismiss() } } }
         }
         .sheet(isPresented: $showingDirectDiagnostics) { DirectCastDiagnosticsView(sourceURL: directSourceURL) }
-        .presentationDetents([.large]).presentationBackground(Style.canvas)
+        .presentationDetents([.large]).presentationBackground { FilmBackground() }
     }
 }

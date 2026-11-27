@@ -60,7 +60,17 @@ import UIKit
             throw V2Failure.invalidInput
         }
         LocalCompute.beginModelLoad()
-        var pipeline = try await MediaGenerationPipeline.fromPretrained(model.id, backend: .local)
+        // An explicit directory creates a new SDK environment per run, rather
+        // than retaining the process-wide generator and its caches after edits
+        // or cancellation. Model files remain on disk and are never re-downloaded.
+        let roots = MediaGenerationEnvironment.default.externalUrls
+        defer { MediaGenerationEnvironment.default.externalUrls = roots }
+        let directory = roots.first { root in
+            model.downloadFiles.allSatisfy { $0.matchesSize(at: root.appendingPathComponent($0.name)) } &&
+                (lora.isEmpty || FileManager.default.fileExists(atPath: root.appendingPathComponent(lora).path))
+        }
+        var pipeline = try await MediaGenerationPipeline.fromPretrained(model.id,
+            backend: directory.map { .local(directory: $0.path) } ?? .local)
         LocalCompute.didLoadModel()
         try Task.checkCancellation()
         try onLoaded()
@@ -72,7 +82,7 @@ import UIKit
         var inputs: [MediaGenerationPipeline.Input] = []
         if let source {
             inputs = [MediaGenerationPipeline.data(source)]
-            pipeline.configuration.strength = variation ? 0.32 : (referenceMode?.strength ?? 0.55)
+            pipeline.configuration.strength = model.referenceStrength(mode: referenceMode, masked: false, variation: variation)
             if let referenceMode {
                 let photo = referenceSize(source)
                 let frame = StudioReferenceMode.dimensions(width: Int(photo.width), height: Int(photo.height), edge: model.renderSize)
@@ -82,7 +92,7 @@ import UIKit
                 if let referenceMask {
                     let mask = try referenceMask.encoded(source: photo, width: frame.width, height: frame.height)
                     inputs.append(MediaGenerationPipeline.data(mask).mask())
-                    pipeline.configuration.strength = referenceMode.maskedStrength
+                    pipeline.configuration.strength = model.referenceStrength(mode: referenceMode, masked: true, variation: variation)
                     pipeline.configuration.preserveOriginalAfterInpaint = true
                     pipeline.configuration.maskBlur = 0
                     pipeline.configuration.maskBlurOutset = 0

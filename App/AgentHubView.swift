@@ -30,7 +30,6 @@ import SwiftUI
     @State private var computerBot: VillageBot?
     @State private var villageChatBot: VillageBot?
     var villagePause: Bool { simulation.isPaused }
-    @AppStorage(AppStorageKeys.villageBasicMode) private var basicMode = true
     @State private var basicBotID: UUID?
     @State private var basicRemoteAgentID: String?
     @State private var cinematic = true
@@ -86,8 +85,7 @@ import SwiftUI
         let request = botActivityRequest
         NavigationStack {
             VStack(spacing: 0) {
-                if !villageOnly { workspaceSwitcher }
-                if !villageOnly && basicMode {
+                if !villageOnly {
                     basicAgentWorkspace
                 } else {
                     ScrollView {
@@ -269,21 +267,6 @@ import SwiftUI
             }
         }
         .padding(.horizontal, 16).padding(.top, 8)
-    }
-
-    private var workspaceSwitcher: some View {
-        VStack(alignment: .leading, spacing: FadedSpacing.s) {
-            Picker("Visning af agenter", selection: $basicMode) {
-                Text("Agentliste").tag(true)
-                Text("Landsbyen").tag(false)
-            }
-            .pickerStyle(.segmented)
-            .frame(minHeight: 44)
-        }
-        .padding(.horizontal, FadedSpacing.edge)
-        .padding(.vertical, FadedSpacing.s)
-        .frame(maxWidth: 640)
-        .frame(maxWidth: .infinity)
     }
 
     private var hubContent: some View {

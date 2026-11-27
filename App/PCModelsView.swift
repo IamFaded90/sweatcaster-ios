@@ -334,7 +334,8 @@ struct ChatModelSelectionButton: View {
             HStack(spacing: FadedSpacing.xs) {
                 if smartSelected && !showCurrentModel { Image(systemName: "brain.head.profile").accessibilityHidden(true) }
                 else { modelIcon(current) }
-                Text(smartSelected && !showCurrentModel ? "Faded Smart" : current.title).lineLimit(typeSize.isAccessibilitySize ? nil : 1)
+                Text(smartSelected && !showCurrentModel ? "Faded Smart" : displayTitle)
+                    .lineLimit(typeSize.isAccessibilitySize ? nil : 2)
                 if (!smartSelected || showCurrentModel) && current.isAdultRoleplay {
                     Text("18+").fixedSize().foregroundStyle(palette.secondary)
                 }
@@ -343,13 +344,21 @@ struct ChatModelSelectionButton: View {
             .font(.caption.bold())
             .padding(.horizontal, FadedSpacing.s)
             .frame(minWidth: 44, minHeight: 44, alignment: .leading)
-            .fadedGlassSurface()
+            .background {
+                if !showCurrentModel { ChatGlassSurface(radius: FadedRadius.small, colors: [palette.cyan]) }
+            }
         }
         .buttonStyle(.plain)
         .disabled(blocked)
         .accessibilityLabel("Model for næste besked")
         .accessibilityValue(currentAccessibilityValue)
         .sheet(isPresented: $showing, onDismiss: finishSetup) { selectionSheet }
+    }
+
+    private var displayTitle: String {
+        guard showCurrentModel else { return current.title }
+        let device = current.source == .phone ? "iPhone" : current.source.rawValue
+        return device + " · " + current.title
     }
 
     private var currentAccessibilityValue: String {

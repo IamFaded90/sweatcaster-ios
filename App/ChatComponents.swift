@@ -402,13 +402,25 @@ extension ChatView {
 
     var chatWelcome: some View {
         VStack(spacing: FadedSpacing.m) {
-            Text("Hvad tænker du på?")
+            Text("Hvad skal vi finde på?")
                 .font(FadedTypography.title)
                 .foregroundStyle(palette.text)
                 .accessibilityAddTraits(.isHeader)
             Text("Stil et spørgsmål, skriv en kladde, eller få hjælp til noget i hverdagen.")
                 .font(.subheadline)
                 .foregroundStyle(palette.secondary)
+            if let openDestination {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) {
+                        Button("Lav en sang", systemImage: "music.note") { showSongStudio = true }
+                        Button("Find en film", systemImage: "play.rectangle") { openDestination(.film) }
+                    }
+                    VStack(spacing: 12) {
+                        Button("Lav en sang", systemImage: "music.note") { showSongStudio = true }
+                        Button("Find en film", systemImage: "play.rectangle") { openDestination(.film) }
+                    }
+                }.buttonStyle(FadedButtonStyle(kind: .secondary)).controlSize(.large)
+            }
             if draft.isEmpty && stagedPhoto == nil && attachedNote == nil && attachedQuote == nil {
                 chatSuggestions
             }

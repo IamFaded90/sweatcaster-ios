@@ -9,6 +9,7 @@ import UniformTypeIdentifiers
     }
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var phase
+    @Environment(\.fadedPalette) private var palette
     @ObservedObject private var library = MusicLibrary.shared
     @ObservedObject private var phone = PhoneSongStudio.shared
     @State private var onPhone = true
@@ -37,13 +38,19 @@ import UniformTypeIdentifiers
         return value.problem
     }
     @State private var catalogRevision = 0
+    @State private var lastPCUpdate: Date?
+    @State private var pcStatusUnavailable = false
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
                     Text("Musik, du selv er med til at skabe").font(.title2.bold())
                     Text("Lav en ny sang, brug en favorit som inspiration, eller giv en lydfil en ny stil. Originalen bliver bevaret.").foregroundStyle(.secondary)
-                    Toggle("Skab på denne iPhone", isOn: $onPhone).disabled(busy || phone.busy || phone.referenceBusy)
+                    Picker("Skab sangen på", selection: $onPhone) {
+                        Label("iPhone", systemImage: "iphone").tag(true)
+                        Label("PC", systemImage: "desktopcomputer").tag(false)
+                    }.pickerStyle(.segmented).disabled(busy || phone.busy || phone.referenceBusy)
+                    if !onPhone { activePCSongs }
                     if onPhone {
                         Label("ACE-Step 1.5 · musik med vokal · uden PC efter hentning", systemImage: "iphone")
                         Text("Første prøve kræver en rigtig iPhone. Bliv i appen, mens sangen skabes; den første klargøring kan tage ekstra tid. Start med 30 sekunder.").font(.caption).foregroundStyle(.secondary)
@@ -67,9 +74,20 @@ import UniformTypeIdentifiers
                             }
                         }
                         if phone.busy {
-                            ProgressView(phone.deletingModel ? "Sletter sangmodellen…" : phone.progress)
+                            if let fraction = phone.downloadFraction {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    ProgressView(value: fraction)
+                                    Text(phone.progress).font(.subheadline)
+                                    if !phone.downloadSize.isEmpty {
+                                        Text(phone.downloadSize + " · \(Int(fraction * 100)) %")
+                                            .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                    }
+                                }.accessibilityElement(children: .combine)
+                            } else {
+                                ProgressView(phone.deletingModel ? "Sletter sangmodellen…" : phone.progress)
+                            }
                             if !phone.deletingModel {
-                                Button("Stop forsøget", systemImage: "stop.circle") { phone.cancel() }.frame(minHeight: 44)
+                                Button(phone.downloadFraction == nil ? "Stop forsøget" : "Stop hentning", systemImage: "stop.circle") { phone.cancel() }.frame(minHeight: 44)
                             }
                         }
                         if let notice = phone.notice { Text(notice).foregroundStyle(.secondary) }
@@ -83,8 +101,12 @@ import UniformTypeIdentifiers
                             Picker("Hvad vil du lave?", selection: $draft.mode) {
                                 ForEach(SongMode.allCases) { Text($0.title).tag($0) }
                             }.pickerStyle(.segmented)
-                            TextField("Sangens titel", text: $draft.title).textFieldStyle(.roundedBorder)
-                            TextField("Fx mørk house, varm vokal og et stort omkvæd", text: $draft.prompt, axis: .vertical).lineLimit(3...7)
+                            TextField("Sangens titel", text: $draft.title)
+                                .textFieldStyle(.plain).foregroundStyle(palette.text).padding(12).frame(minHeight: 48)
+                                .background(palette.raised, in: .rect(cornerRadius: FadedRadius.small))
+                            TextField("Fx mørk house, varm vokal og et stort omkvæd", text: $draft.prompt, axis: .vertical)
+                                .textFieldStyle(.plain).foregroundStyle(palette.text).lineLimit(3...7).padding(12)
+                                .background(palette.raised, in: .rect(cornerRadius: FadedRadius.small))
                             Toggle("Giv min beskrivelse flere musikdetaljer", isOn: $draft.enhancePrompt)
                             if draft.enhancePrompt && !draft.prompt.isEmpty {
                                 DisclosureGroup("Se beskrivelsen, motoren får") {
@@ -168,7 +190,7 @@ import UniformTypeIdentifiers
                     let jobs = phone.songs + (catalog?.jobs ?? [])
                     if !jobs.isEmpty {
                         Text("Dine sange og forsøg").font(.title3.bold())
-                        ForEach(jobs.filter { $0.state != "removed" }) { job in
+                        ForEach(jobs.filter { $0.state != "removed" && (onPhone || $0.finished) }) { job in
                             FadedCard {
                                 VStack(alignment: .leading, spacing: 10) {
                                     Text(job.title).font(.headline)
@@ -221,6 +243,46 @@ import UniformTypeIdentifiers
                 .onDisappear { task?.cancel(); phone.cancel() }
         }
     }
+    private var activePCSongs: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach((catalog?.jobs ?? []).filter { !$0.finished }) { job in
+                FadedCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            Image(systemName: "waveform").foregroundStyle(palette.cyan)
+                            Text(job.title).font(.headline)
+                            Spacer()
+                            ProgressView().accessibilityLabel(job.progressTitle)
+                        }
+                        Text(job.progressTitle).font(.subheadline.weight(.semibold))
+                        HStack(spacing: 6) {
+                            ForEach(0..<4) { step in
+                                Capsule().fill(step <= job.progressStep ? palette.cyan : palette.border)
+                                    .frame(height: 4)
+                            }
+                        }.accessibilityLabel("Trin \(min(4, job.progressStep + 1)) af 4. Ingen tidsprognose.")
+                        Text(job.notice).font(.subheadline).foregroundStyle(palette.secondary)
+                        TimelineView(.periodic(from: .now, by: 1)) { context in
+                            let elapsed = max(0, Int(context.date.timeIntervalSince1970 - job.created))
+                            Text("Tid siden bestilling · \(elapsed / 60) min \(elapsed % 60) sek")
+                                .font(.caption.monospacedDigit()).foregroundStyle(palette.secondary)
+                        }
+                        if pcStatusUnavailable {
+                            Label("Status kunne ikke opdateres. Jeg prøver igen; sangen sendes ikke en gang til.", systemImage: "wifi.exclamationmark")
+                                .font(.caption).foregroundStyle(palette.secondary)
+                        }
+                        if let lastPCUpdate {
+                            Text("Senest kontakt med PC · " + lastPCUpdate.formatted(date: .omitted, time: .standard))
+                                .font(.caption).foregroundStyle(palette.secondary)
+                        }
+                        Button("Slet forsøg", systemImage: "trash", role: .destructive) { remove(job) }
+                            .frame(minHeight: 44).disabled(busy)
+                    }
+                }
+            }
+        }
+    }
+
     private func chooseFavorite() {
         referenceSources = []
         guard let track = library.saved.favorites.first(where: { $0.id == favoriteID }) else {
@@ -284,7 +346,7 @@ import UniformTypeIdentifiers
         busy = true
         task = Task {
             defer { busy = false }
-            do { catalog = try await api.songStudio() }
+            do { catalog = try await api.songStudio(); lastPCUpdate = .now; pcStatusUnavailable = false }
             catch { if !Task.isCancelled { notice = AppErrorPresentation(error).title } }
         }
     }
@@ -297,15 +359,17 @@ import UniformTypeIdentifiers
             do { try await Task.sleep(for: .seconds(5)) }
             catch { return }
             guard !Task.isCancelled else { return }
+            guard phase == .active else { continue }
             guard !busy, catalog?.hasActiveJobs == true else { continue }
             do {
                 let revision = catalogRevision
                 let updated = try await api.songStudio()
                 guard !Task.isCancelled else { return }
-                if !busy && catalogRevision == revision { catalog = updated }
+                if !busy && catalogRevision == revision {
+                    catalog = updated; lastPCUpdate = .now; pcStatusUnavailable = false
+                }
             } catch {
-                // Keep the previous status; the next check retries without
-                // resubmitting or changing the user's song job.
+                if !Task.isCancelled { pcStatusUnavailable = true }
             }
         }
     }
@@ -347,8 +411,15 @@ import UniformTypeIdentifiers
                     if comparison != previous { draft.id = UUID() }
                 }
                 previous = draft; let input = draft
+                notice = "Sender din sang til PC’en…"
                 let result = try await api.createSong(input)
-                notice = result.notice; catalog = try await api.songStudio()
+                // Keep the accepted job even if the following catalog request fails.
+                catalog = SongStudioCatalog(ready: true, voiceReference: catalog?.voiceReference ?? true,
+                    jobs: [result] + (catalog?.jobs ?? []).filter { $0.id != result.id })
+                lastPCUpdate = .now; pcStatusUnavailable = false
+                notice = result.notice
+                do { catalog = try await api.songStudio(); lastPCUpdate = .now }
+                catch { pcStatusUnavailable = true }
             } catch {
                 if !Task.isCancelled {
                     if let failure = error as? APIError, case let .http(422, problem) = failure,

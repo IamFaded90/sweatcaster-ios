@@ -2,6 +2,31 @@ import FoundationModels
 import XCTest
 @testable import SweatCaster
 
+final class StudioImageSamplingTests: XCTestCase {
+    func testKleinKeepsAllFourStepsForOneOrTwoReferencesAndMaskedEdits() {
+        let model = StudioImageModel.fluxKlein
+        XCTAssertEqual(model.renderSteps, 4)
+        let modes: [StudioReferenceMode?] = [nil] + StudioReferenceMode.allCases.map { Optional($0) }
+        for mode in modes {
+            for masked in [false, true] {
+                for variation in [false, true] {
+                    XCTAssertEqual(model.referenceStrength(mode: mode, masked: masked, variation: variation), 1,
+                                   "Klein references must not truncate the distilled sampling schedule")
+                }
+            }
+        }
+    }
+
+    func testStableDiffusionKeepsItsExistingImg2ImgStrengths() {
+        let model = StudioImageModel.stableDiffusion
+        XCTAssertEqual(model.referenceStrength(mode: .preserve, masked: false, variation: false), 0.24)
+        XCTAssertEqual(model.referenceStrength(mode: .edit, masked: false, variation: false), 0.40)
+        XCTAssertEqual(model.referenceStrength(mode: .creative, masked: false, variation: false), 0.58)
+        XCTAssertEqual(model.referenceStrength(mode: .edit, masked: true, variation: false), 0.68, accuracy: 0.001)
+        XCTAssertEqual(model.referenceStrength(mode: .creative, masked: false, variation: true), 0.32)
+    }
+}
+
 final class MiniCPMCatalogTests: XCTestCase {
     func testRetryKeepsOneModelWhileTransfersRemainIndependent() throws {
         let file = GGUFHub.miniCPM

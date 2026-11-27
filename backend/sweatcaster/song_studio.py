@@ -94,7 +94,13 @@ class SongStudio:
 
     @staticmethod
     def public(value):
-        return {k: v for k, v in value.items() if k not in {"hash", "engineID"}}
+        result = {k: v for k, v in value.items() if k not in {"hash", "engineID"}}
+        result["progress"] = {
+            "stage": value.get("stage", value["state"]),
+            "updated": value.get("updated", value["created"]),
+            "lastChecked": value.get("lastChecked"),
+        }
+        return result
 
     def submit(self, key, body):
         key = identifier(key)
@@ -231,7 +237,13 @@ class SongStudio:
             rows = self.list()["jobs"]
             row = next((x for x in reversed(rows) if x["state"] in {"queued", "rendering", "submitting"}
                         and x["id"] not in self.working), None)
-            if row is None or not self.idle():
+            if row is None:
+                return False
+            if not self.idle():
+                if row["state"] == "queued":
+                    waiting = self.load(row["id"])
+                    waiting.update(notice="I kø · venter på, at PC’ens andre opgaver bliver færdige.", updated=time.time())
+                    self.save(waiting)
                 return False
             value = self.load(row["id"])
             self.working.add(value["id"])
@@ -240,11 +252,16 @@ class SongStudio:
                 raise SongEngineError("Afsendelsen blev afbrudt. Jobbet gentages ikke automatisk; tjek musikmotoren først.")
             if value["state"] == "queued":
                 if not self.engine.available():
+                    with self.lock:
+                        if self.load(value["id"])["state"] != "removed":
+                            value.update(notice="Venter på, at ACE-Step svarer på PC’en.", updated=time.time())
+                            self.save(value)
                     return False
                 with self.lock:
                     if self.load(value["id"])["state"] == "removed":
                         return True
-                    value["state"], value["notice"] = "submitting", "Sender til musikmotoren…"
+                    value.update(state="submitting", stage="preparing", updated=time.time(),
+                                 notice="Klargør ACE-Step på PC’en. Første indlæsning kan tage flere minutter.")
                     self.save(value)
                 source = self.folder(value["id"]) / "source.wav"
                 voice = self.folder(value["id"]) / "voice.wav"
@@ -265,9 +282,18 @@ class SongStudio:
                 with self.lock:
                     if self.load(value["id"])["state"] == "removed":
                         return True
-                    value.update(engineID=task, state="rendering", notice="PC’en skaber sangen.")
+                    value.update(engineID=task, state="rendering", stage="rendering", updated=time.time(),
+                                 notice="ACE-Step har modtaget sangen og arbejder på den.")
                     self.save(value)
             path = self.engine.poll(value["engineID"])
+            with self.lock:
+                if self.load(value["id"])["state"] == "removed":
+                    return True
+                value.update(lastChecked=time.time(), updated=time.time(),
+                             stage="saving" if path is not None else "rendering",
+                             notice="Henter og kontrollerer den færdige lyd på PC’en…" if path is not None
+                             else "ACE-Step arbejder stadig. Sangen fortsætter på PC’en, hvis du lukker dette vindue.")
+                self.save(value)
             if path is None:
                 return False
             destination = self.folder(value["id"]) / "song.tmp"
@@ -283,7 +309,7 @@ class SongStudio:
                     destination.unlink(missing_ok=True)
                     return True
                 destination.replace(destination.with_name("song.wav"))
-                value.update(state="completed", notice="Sangen er klar.", seconds=duration)
+                value.update(state="completed", stage="completed", updated=time.time(), notice="Sangen er klar.", seconds=duration)
                 self.save(value)
             return True
         except SongEngineOffline as exc:

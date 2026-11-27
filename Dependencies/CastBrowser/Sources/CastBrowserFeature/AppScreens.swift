@@ -6,6 +6,8 @@ import WebKit
 struct HomeScreen: View {
     @ObservedObject var model: CastAppModel
     @State private var showAddFavorite = false
+    @State private var showVidora = false
+    @State private var filmQuery = ""
     private let columns = [GridItem(.flexible(), spacing: Style.space), GridItem(.flexible(), spacing: Style.space)]
 
     var body: some View {
@@ -15,16 +17,15 @@ struct HomeScreen: View {
                     HStack(alignment: .center, spacing: Style.space) {
                         VStack(alignment: .leading, spacing: Style.small) {
                             Text("Din næste filmaften")
-                                .font(.system(.title, design: .serif, weight: .bold))
+                                .font(.system(.title, design: .default, weight: .bold))
                                 .fixedSize(horizontal: false, vertical: true)
                                 .accessibilityAddTraits(.isHeader)
-                            Text("Se film og serier på dit TV")
+                            Text("På din iPhone eller dit TV")
                                 .font(Style.body).foregroundStyle(Style.heroInk.opacity(0.8))
                         }
                         Spacer(minLength: 0)
-                        Image("AppMascot", bundle: .module)
-                            .resizable()
-                            .scaledToFill()
+                        Image(systemName: "play.rectangle.on.rectangle")
+                            .font(.system(size: 40, weight: .light))
                             .frame(width: 66, height: 66)
                             .clipShape(RoundedRectangle(cornerRadius: 20))
                             .accessibilityHidden(true)
@@ -36,6 +37,27 @@ struct HomeScreen: View {
                                                startPoint: .topLeading, endPoint: .bottomTrailing),
                                 in: RoundedRectangle(cornerRadius: Style.radius))
 
+                    HStack(spacing: 12) {
+                        Image(systemName: "magnifyingglass").foregroundStyle(Style.accent)
+                        TextField("Find en film eller serie", text: $filmQuery).textFieldStyle(.plain)
+                            .submitLabel(.search).onSubmit(searchFilm)
+                        Button("Søg", systemImage: "arrow.right", action: searchFilm)
+                            .labelStyle(.iconOnly).frame(width: 44, height: 44)
+                            .disabled(filmQuery.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }.padding(.leading, 16).background(Style.card, in: RoundedRectangle(cornerRadius: 20))
+                    Text("Søgningen åbner TMDB. På en film vælger du Afspil i FadedAI.")
+                        .font(Style.meta).foregroundStyle(Style.muted)
+                    Button { showVidora = true } label: {
+                        HStack(spacing: 14) {
+                            Image(systemName: "play.circle.fill").font(.title2).foregroundStyle(Style.accent)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Har du et filmlink?").font(.headline)
+                                Text("Åbn direkte i Film · afspiller fra Vidora").font(Style.meta).foregroundStyle(Style.muted)
+                            }
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right")
+                        }.padding(16).background(Style.card, in: RoundedRectangle(cornerRadius: Style.radius))
+                    }.buttonStyle(.plain)
                     ConnectionCard(model: model)
                     if model.hasActiveMedia {
                         Button { model.selectedTab = .remote } label: {
@@ -89,8 +111,23 @@ struct HomeScreen: View {
                     }
                 }.padding(Style.space)
             }
-            .background(Style.canvas)
+            .background { FilmBackground() }
             .sheet(isPresented: $showAddFavorite) { AddFavoriteSheet(model: model) }
+            .sheet(isPresented: $showVidora) {
+                VidoraOpenSheet { model.open(BrowserLink(title: "Afspiller", url: $0.absoluteString)) }
+            }
+        }
+    }
+
+    private func searchFilm() {
+        let text = filmQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        if let reference = VidoraReference(input: text) {
+            model.open(BrowserLink(title: "Afspiller", url: reference.playerURL.absoluteString))
+        } else {
+            var url = URLComponents(string: "https://www.themoviedb.org/search")!
+            url.queryItems = [.init(name: "query", value: String(text.prefix(200)))]
+            if let url = url.url { model.open(BrowserLink(title: "Find film", url: url.absoluteString)) }
         }
     }
 }
@@ -222,7 +259,7 @@ struct VideosScreen: View {
                     }
                 }.padding(Style.space)
             }
-            .background(Style.canvas)
+            .background { FilmBackground() }
         }
     }
 }
@@ -336,7 +373,7 @@ struct RemoteScreen: View {
                     }
                 }.padding(Style.space)
             }
-            .background(Style.canvas)
+            .background { FilmBackground() }
             .sheet(isPresented: $showsFilmCompanion) { FilmCompanionView(model: model) }
         }
     }
@@ -389,7 +426,7 @@ struct RemoteTransport: View {
                 Button { model.togglePlayback() } label: {
                     Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
                         .font(.system(size: 28)).frame(width: 80, height: 80)
-                        .background(Style.accent, in: Circle()).foregroundStyle(.white)
+                        .background(Style.accent, in: Circle()).foregroundStyle(Style.heroInk)
                 }.accessibilityLabel(model.isPlaying ? "Pause" : "Afspil")
                 Spacer(minLength: 0)
                 Button {
@@ -490,11 +527,11 @@ struct LinkListSheet: View {
                     }
                 }
             }
-            .scrollContentBackground(.hidden).background(Style.canvas)
+            .scrollContentBackground(.hidden).background { FilmBackground() }
             .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Færdig") { dismiss() } } }
-        }.presentationDetents([.medium, .large]).presentationBackground(Style.canvas)
+        }.presentationDetents([.medium, .large]).presentationBackground { FilmBackground() }
     }
 }
 
@@ -515,7 +552,7 @@ struct AddFavoriteSheet: View {
                 }.listRowBackground(Style.card)
                 if invalidAddress { Text("Indtast en gyldig webadresse, fx example.com.").foregroundStyle(Style.accent) }
             }
-            .scrollContentBackground(.hidden).background(Style.canvas)
+            .scrollContentBackground(.hidden).background { FilmBackground() }
             .navigationTitle("Ny favorit").navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
@@ -527,6 +564,6 @@ struct AddFavoriteSheet: View {
                     }.disabled(address.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
             }
-        }.presentationDetents([.medium, .large]).presentationBackground(Style.canvas)
+        }.presentationDetents([.medium, .large]).presentationBackground { FilmBackground() }
     }
 }

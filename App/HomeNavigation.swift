@@ -130,7 +130,7 @@ extension Home {
         case .brain: "house.fill"
         case .resume: "play.circle.fill"
         case .notes: "bubble.left.fill"
-        case .privateChat: "lock.bubble"
+        case .privateChat: "lock.shield.fill"
         case .gallery: "play.rectangle.fill"
         case .tasks: "person.2.fill"
         case .village: "house.lodge"
@@ -176,8 +176,43 @@ struct DeferredHomeTab: View {
                 Color.clear
             }
         }
+        .background { FadedTabOverflowNavigation() }
         .onChange(of: isSelected, initial: true) {
             if isSelected && keepAlive { hasOpened = true }
+        }
+    }
+}
+
+/// The app supplies its own dock. UIKit still wraps tab five and onward in
+/// More's navigation controller, even when the native tab bar is hidden.
+/// Hide only that outer bar; each page's real NavigationStack keeps its toolbar.
+private struct FadedTabOverflowNavigation: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> Controller { Controller() }
+    func updateUIViewController(_ controller: Controller, context: Context) { controller.hideOverflowBar() }
+
+    final class Controller: UIViewController {
+        override func loadView() {
+            view = UIView()
+            view.isUserInteractionEnabled = false
+        }
+        override func didMove(toParent parent: UIViewController?) {
+            super.didMove(toParent: parent)
+            hideOverflowBar()
+        }
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+            hideOverflowBar()
+        }
+        override func viewDidLayoutSubviews() {
+            super.viewDidLayoutSubviews()
+            hideOverflowBar()
+        }
+        func hideOverflowBar() {
+            guard let overflow = tabBarController?.moreNavigationController else { return }
+            if !overflow.isNavigationBarHidden { overflow.setNavigationBarHidden(true, animated: false) }
+            // This outer stack must not swipe back to an invisible More list.
+            // Edge-back inside the page's NavigationStack remains available.
+            overflow.interactivePopGestureRecognizer?.isEnabled = false
         }
     }
 }

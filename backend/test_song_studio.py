@@ -44,7 +44,7 @@ def test_cold_submit_waits_for_model_load_without_extending_health_checks():
     engine = SongEngine(session=session)
     assert engine.available()
     assert engine.submit(draft()) == "one"
-    assert session.calls[0][1]["timeout"] == (5, 60)
+    assert session.calls[0][1]["timeout"] == (2, 3)
     assert session.calls[1][1]["timeout"] == (5, 360)
 
 
@@ -400,3 +400,42 @@ def test_too_short_output_is_not_reported_as_completed(tmp_path):
     assert store.work_once()
     assert store.load(key)["state"] == "failed"
     assert not (store.folder(key) / "song.wav").exists()
+
+
+def test_progress_tracks_confirmed_engine_stages_without_resubmitting(tmp_path):
+    engine = Engine()
+    engine.answer = None
+    store = SongStudio(tmp_path, engine=engine)
+    key = str(uuid4())
+    accepted = store.submit(key, draft())
+    assert accepted["progress"]["stage"] == "queued"
+    assert accepted["progress"]["lastChecked"] is None
+    assert not store.work_once()
+    running = store.public(store.load(key))
+    assert running["progress"]["stage"] == "rendering"
+    assert running["progress"]["lastChecked"] >= accepted["created"]
+    assert "engineID" not in running
+    old_download = engine.download
+    def download(path, destination):
+        assert store.public(store.load(key))["progress"]["stage"] == "saving"
+        old_download(path, destination)
+    engine.download = download
+    engine.answer = "/v1/audio?path=song.wav"
+    assert store.work_once()
+    assert store.public(store.load(key))["progress"]["stage"] == "completed"
+    assert len(engine.calls) == 1
+
+
+def test_queue_explains_unavailable_engine_and_busy_pc(tmp_path):
+    engine = Engine()
+    engine.ready = False
+    store = SongStudio(tmp_path, engine=engine)
+    key = str(uuid4())
+    store.submit(key, draft())
+    assert not store.work_once()
+    assert "ACE-Step svarer" in store.load(key)["notice"]
+    store.idle = lambda: False
+    assert not store.work_once()
+    assert "andre opgaver" in store.load(key)["notice"]
+    assert store.load(key)["state"] == "queued"
+    assert engine.calls == []

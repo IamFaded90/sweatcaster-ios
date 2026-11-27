@@ -22,14 +22,18 @@ extension ChatView {
     var quickModelPicker: some View { chatModelSelectionButton }
 
     func composer(compact: Bool, showHistoryShortcut: Bool) -> some View {
-        let inputLayout = compact
-            ? AnyLayout(HStackLayout(spacing: FadedSpacing.xs))
-            : AnyLayout(VStackLayout(alignment: .leading, spacing: FadedSpacing.xs))
+        let inputLayout = AnyLayout(HStackLayout(spacing: FadedSpacing.xs))
         return VStack(alignment: .leading, spacing: 6) {
             if !compact { composerNotices }
             ChatComposer {
+                if !compact && !demo {
+                    chatModelSelectionButton(showCurrentModel: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if !compact { composerAttachments }
                 inputLayout {
+                    composerIconButton("Tilføj billeder og værktøjer", icon: "plus", action: openAttachmentTools)
+                        .disabled(task != nil || dictation.active)
                     TextField("Skriv til FadedAI…", text: $draft, axis: .vertical)
                         .lineLimit(1...(compact ? 1 : 4)).frame(minHeight: 44).focused($composerFocused)
                         .padding(.horizontal, FadedSpacing.xs)
@@ -43,12 +47,9 @@ extension ChatView {
                         composerIconButton("Skjul tastatur", icon: "keyboard.chevron.compact.down") {
                             composerFocused = false
                         }
-                        if dictation.active { dictationAction }
-                        else if !demo { imageControl }
-                        sendControl
-                    } else {
-                        composerActions
                     }
+                    dictationAction.disabled(task != nil)
+                    sendControl
                 }
                 if let status = dictation.offlineStatus {
                     Text(status).font(.caption).foregroundStyle(palette.secondary).accessibilityAddTraits(.updatesFrequently)
@@ -61,7 +62,7 @@ extension ChatView {
             if !compact { composerStatus }
         }
         .padding(.horizontal, FadedSpacing.m).padding(.vertical, 6)
-        .background(palette.background)
+        .background(.ultraThinMaterial)
     }
 
     @ViewBuilder private var composerNotices: some View {
@@ -124,8 +125,6 @@ extension ChatView {
             if demo {
                 Label(destination, systemImage: "testtube.2").font(.caption.weight(.semibold))
                     .foregroundStyle(palette.secondary)
-            } else {
-                chatModelSelectionButton(showCurrentModel: true)
             }
             if effectiveReplySource == .phone, phoneBatteryLevel >= 0, phoneBatteryLevel < 0.20,
                PhoneModels.liteModeActive(for: phoneModel), resolvedRoute.modelID == PhoneModels.effectiveModelID(phoneModel) {
@@ -160,6 +159,16 @@ extension ChatView {
             if !demo { imageControl }
             Spacer(minLength: 0)
             sendControl
+        }
+    }
+
+    var additionalComposerControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            voicePicker
+            ChatDepthButton(length: $aiLength).disabled(task != nil)
+            ChatPhoneContextButton(onOpen: { composerFocused = false }, onChooseNote: contextAttachment)
+                .disabled(demo || task != nil)
+            if !demo { imageControl }
         }
     }
 

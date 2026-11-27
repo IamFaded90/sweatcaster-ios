@@ -3,6 +3,8 @@ import SwiftUI
 struct SettingsOverview<Destination: View>: View {
     let category: (Home.SettingsCategory) -> Destination
     let api: LiveAPI?
+    @Environment(\.fadedPalette) private var palette
+    @FocusState private var searchFocused: Bool
     @State private var query = ""
     @State private var showModels = false
     @State private var showVoices = false
@@ -13,8 +15,24 @@ struct SettingsOverview<Destination: View>: View {
             Text("Gør FadedAI til din").font(.title2.bold())
             Text("Start med det, du vil ændre. Telefonen kan bruges selvstændigt, og din PC kan tilføjes, når du har brug for den.")
                 .font(.subheadline).foregroundStyle(.secondary)
-            TextField("Søg: stemmer, tema, modeller, fejl…", text: $query)
-                .textFieldStyle(.roundedBorder).accessibilityLabel("Søg i indstillinger")
+            HStack(spacing: 10) {
+                Image(systemName: "magnifyingglass").foregroundStyle(palette.secondary).accessibilityHidden(true)
+                TextField("Søg i indstillinger", text: $query,
+                          prompt: Text("Stemmer, tema, modeller…").foregroundStyle(palette.secondary))
+                    .textFieldStyle(.plain).foregroundStyle(palette.text)
+                    .focused($searchFocused).submitLabel(.search)
+                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    .onSubmit { searchFocused = false }
+                    .accessibilityLabel("Søg i indstillinger")
+                if !query.isEmpty {
+                    Button("Ryd søgning", systemImage: "xmark.circle.fill") { query = ""; searchFocused = true }
+                        .labelStyle(.iconOnly).buttonStyle(.plain)
+                        .foregroundStyle(palette.secondary).frame(width: 44, height: 44)
+                }
+            }
+            .padding(.leading, 14).padding(.trailing, query.isEmpty ? 14 : 4)
+            .frame(minHeight: 52)
+            .fadedGlassSurface(radius: FadedRadius.small)
             if query.isEmpty {
                 FadedCard {
                     VStack(alignment: .leading, spacing: 12) {

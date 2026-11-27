@@ -52,34 +52,9 @@ struct ChatSidebarView: View {
     }
 
     private var historyHeader: some View {
-        let layout = typeSize.isAccessibilitySize
-            ? AnyLayout(VStackLayout(alignment: .leading, spacing: FadedSpacing.m))
-            : AnyLayout(HStackLayout(alignment: .center, spacing: FadedSpacing.m))
-        return VStack(alignment: .leading, spacing: FadedSpacing.m) {
-            layout {
-                ZStack {
-                    Image(mascot)
-                        .resizable()
-                        .scaledToFill()
-                        .frame(width: 62, height: 62)
-                        .id(mascot)
-                        .transition(.opacity)
-                }
-                .clipShape(Circle())
-                .overlay { Circle().strokeBorder(brandGradient, lineWidth: 2) }
-                .animation(.easeInOut(duration: 0.3), value: mascot)
-                .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: FadedSpacing.xs) {
-                    Text("Samtaler").font(FadedTypography.title)
-                        .foregroundStyle(brandGradient)
-                        .accessibilityAddTraits(.isHeader)
-                    Text("Find en samtale, eller start en ny.")
-                        .font(.subheadline)
-                        .foregroundStyle(palette.secondary)
-                }
-            }
+        VStack(alignment: .leading, spacing: FadedSpacing.m) {
             Button(action: newChat) {
-                Label("Ny chat", systemImage: "square.and.pencil")
+                Label("Ny samtale", systemImage: "square.and.pencil")
                     .font(FadedTypography.action)
                     .foregroundStyle(brandGradient)
                     .padding(.horizontal, FadedSpacing.m)
@@ -90,13 +65,7 @@ struct ChatSidebarView: View {
             .accessibilityIdentifier("history-new-chat")
             .disabled(isBusy)
         }
-        .padding(FadedSpacing.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background {
-            let shape = RoundedRectangle(cornerRadius: FadedRadius.card)
-            shape.fill(brandGradient).opacity(palette.isDark ? 0.22 : 0.10)
-        }
-        .fadedGlassSurface(radius: FadedRadius.card, border: palette.cyan.opacity(0.38))
     }
 
     private var searchField: some View {

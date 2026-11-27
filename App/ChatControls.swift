@@ -3,6 +3,7 @@
 import Foundation
 import SwiftUI
 import UIKit
+import PhotosUI
 
 extension ChatView {
     func goBack() {
@@ -31,7 +32,7 @@ extension ChatView {
 
     private var sourceChips: some View {
         ForEach([ReplySource.phone, .pc], id: \.self) { source in
-            FadedChip(source.rawValue, accent: sourceColor(source),
+            FadedChip(source == .phone ? "iPhone" : "PC", accent: palette.cyan,
                       selected: effectiveReplySource == source && (!usesAutomaticRouting || automaticSelection != nil), icon: source.icon) {
                 chooseSource(source)
             }
@@ -367,24 +368,57 @@ extension ChatView {
                     if choosingNote {
                         noteChoices
                     } else {
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 10) {
+                                PhotosPicker(selection: $pickedPhoto, matching: .images) {
+                                    ChatAttachmentTile(title: "Billeder", icon: "photo")
+                                }.buttonStyle(.plain).disabled(photoImportBusy)
+                                if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                                    Button {
+                                        pendingCamera = true; showComposerTools = false
+                                    } label: { ChatAttachmentTile(title: "Kamera", icon: "camera") }
+                                        .buttonStyle(.plain)
+                                }
+                                ForEach(recentPickedPhotos) { photo in
+                                    Button { stagedPhoto = photo; showComposerTools = false } label: {
+                                        Image(uiImage: photo.preview).resizable().scaledToFill()
+                                            .frame(width: 88, height: 88).clipped().clipShape(.rect(cornerRadius: 20))
+                                    }.accessibilityLabel("Vedhæft tidligere valgt foto")
+                                }
+                            }
+                        }.task(id: pickedPhoto) { await pickChatPhoto(pickedPhoto) }
+                        if photoImportBusy { ProgressView("Åbner billedet…") }
+                        if let chatNotice { Text(chatNotice).font(.caption).foregroundStyle(palette.secondary) }
                         NavigationLink {
                             everydayTools(close: { showComposerTools = false })
                         } label: {
-                            Label("Hverdagsværktøjer", systemImage: "wrench.and.screwdriver").frame(minHeight: 44)
-                        }
+                            ChatToolRow(title: "Hjælp og research", detail: "Søg, planlæg og brug dine værktøjer", icon: "sparkle.magnifyingglass")
+                        }.buttonStyle(.plain)
                         if openImageStudio != nil {
-                            FadedSecondaryButton("Lav billede", icon: "photo") {
+                            Button {
                                 imageHandoff = draft
                                 showComposerTools = false
-                            }
+                            } label: { ChatToolRow(title: "Opret billede", detail: "Skab eller redigér et motiv", icon: "photo.badge.plus") }
+                                .buttonStyle(.plain)
                         }
+                        if openDestination != nil {
+                            Button {
+                                pendingHubDestination = .video; showComposerTools = false
+                            } label: { ChatToolRow(title: "Lav video", detail: "Giv din idé bevægelse", icon: "video") }
+                                .buttonStyle(.plain)
+                        }
+                        Button { pendingMusic = true; showComposerTools = false } label: {
+                            ChatToolRow(title: "Skab musik", detail: "En sang eller et remix · iPhone eller PC", icon: "music.note")
+                        }.buttonStyle(.plain)
                         if openPrivateStudio != nil {
                             FadedSecondaryButton("Åbn privat chat", icon: "lock.shield") {
                                 privateHandoff = true
                                 showComposerTools = false
                             }
                         }
-                        FadedSecondaryButton("Vedhæft note", icon: "note.text") { choosingNote = true }
+                        Button { choosingNote = true } label: {
+                            ChatToolRow(title: "Vedhæft note", detail: "Brug dine egne ord som kontekst", icon: "note.text")
+                        }.buttonStyle(.plain)
                         NavigationLink {
                             ConnectionsView(onChooseNote: effectiveReplySource == .grok ? nil : { excerpt in
                                 guard effectiveReplySource != .grok else { return }
@@ -393,11 +427,12 @@ extension ChatView {
                                 showComposerTools = false
                             })
                         } label: {
-                            Label("Forbindelser", systemImage: "link")
-                                .frame(minHeight: 44)
+                            ChatToolRow(title: "Dokumenter og forbindelser", detail: "Vælg indhold til samtalen", icon: "paperclip")
                         }
+                            .buttonStyle(.plain)
                             .disabled(demo)
                         DisclosureGroup("Flere chatværktøjer") {
+                            additionalComposerControls
                             promptTemplates
                             Button("Vis nyeste besked", systemImage: "arrow.down") {
                                 scrollRequest += 1
@@ -414,11 +449,13 @@ extension ChatView {
                 }.padding(20)
             }
             .background { FadedBackground() }
-            .navigationTitle(choosingNote ? "Vedhæft note" : "Chatværktøjer")
+            .navigationTitle(choosingNote ? "Vedhæft note" : "Hvad vil du tilføje?")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("Luk") { showComposerTools = false } }
         }
         .presentationDetents(choosingNote ? [.large] : [.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(palette.background)
     }
 
     private var noteChoices: some View {
@@ -466,6 +503,17 @@ extension ChatView {
 
     func finishComposerTools() {
         newNote = ""
+        if pendingCamera {
+            pendingCamera = false; showChatCamera = true; return
+        }
+        if pendingMusic {
+            pendingMusic = false; showSongStudio = true; return
+        }
+        if let destination = pendingHubDestination {
+            pendingHubDestination = nil
+            openDestination?(destination)
+            return
+        }
         if privateHandoff {
             privateHandoff = false
             goToPrivateStudio()

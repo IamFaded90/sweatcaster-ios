@@ -94,9 +94,14 @@ import SwiftUI
                             description: Text("Når du starter en samtale, et projekt eller noget underholdning, finder du det igen her."))
                     }
                     if let notice { Text(notice).foregroundStyle(.secondary) }
-                }.padding()
-            }.background { FadedBackground() }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(FadedSpacing.edge)
+            }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background { FadedBackground() }
                 .navigationTitle("Fortsæt")
+                .toolbarBackground(.hidden, for: .navigationBar)
                 .toolbar { Button("Opdatér", systemImage: "arrow.clockwise") { refresh() } }
                 .onAppear { refresh() }
                 .onReceive(NotificationCenter.default.publisher(for: CastLibraryBridge.playbackChanged)) { _ in cast = CastLibraryBridge.nowPlaying }
@@ -130,6 +135,8 @@ import SwiftUI
                     CaseTrackerView(bot: bot, api: api, model: UserDefaults.standard.string(forKey: PhoneModels.agentModelKey(bot.id)) ?? "apple")
                 }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background { FadedBackground() }
     }
     private func row(_ title: String, detail: String, icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {

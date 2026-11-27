@@ -84,6 +84,13 @@ enum StudioImageModel: String, CaseIterable, Identifiable, Sendable {
     }
     var renderSize: Int { self == .fluxKlein ? 1024 : 512 }
     var renderSteps: Int { self == .fluxKlein ? 4 : 16 }
+    func referenceStrength(mode: StudioReferenceMode?, masked: Bool, variation: Bool) -> Float {
+        // Klein is a four-step instruction editor. Truncating its noise schedule
+        // like SD img2img can leave no useful editing steps and reproduce the input.
+        if self == .fluxKlein { return 1 }
+        if variation { return 0.32 }
+        return masked ? (mode?.maskedStrength ?? 0.78) : (mode?.strength ?? 0.55)
+    }
     var minimumWorkingMemoryMiB: UInt64 { self == .fluxKlein ? 4_096 : 2_048 }
     var downloadFiles: [StudioImageDownloadFile] {
         // Match the model filenames and hashes from the pinned Draw Things ModelZoo catalog.

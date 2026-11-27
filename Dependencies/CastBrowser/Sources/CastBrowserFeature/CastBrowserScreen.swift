@@ -60,7 +60,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
                 .padding(.horizontal, Style.space).padding(.vertical, Style.small)
                 selectedPage
             }
-            .background(Style.canvas)
+            .background { FilmBackground() }
             .navigationTitle("Film").navigationBarTitleDisplayMode(.inline)
             .navigationBarBackButtonHidden(true)
             .toolbarBackground(.hidden, for: .navigationBar)
@@ -78,7 +78,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
             }
             .sheet(isPresented: $showSettings) { SettingsSheet(model: model) }
         }
-        .background(Style.canvas)
+        .background { FilmBackground() }
         .onAppear { model.observeCastSession() }
         .onChange(of: model.selectedTab, initial: true) {
             if model.selectedTab == .browser { browserOpened = true }
@@ -130,7 +130,7 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
                     }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Style.canvas)
+                .background { FilmBackground() }
             }
         }
     }
@@ -318,26 +318,26 @@ let castWebsiteProfile = UUID(uuidString: "81462E40-5CCA-41CF-A5CE-AE1CD75E6A48"
 }
 
 enum Style {
-    // Paper's cyan accent is darker in light mode for readable controls.
+    // Matches FadedAI's blue theme, including readable controls in light mode.
     static let accent = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.43, green: 0.87, blue: 0.91, alpha: 1)
-            : UIColor(red: 0.0, green: 0.42, blue: 0.47, alpha: 1)
+            ? UIColor(red: 0.62, green: 0.80, blue: 1, alpha: 1)
+            : UIColor(red: 0.12, green: 0.32, blue: 0.65, alpha: 1)
     })
     static let canvas = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.13, green: 0.18, blue: 0.21, alpha: 1)
-            : UIColor(red: 0.975, green: 0.965, blue: 0.95, alpha: 1)
+            ? UIColor(red: 18/255, green: 31/255, blue: 58/255, alpha: 1)
+            : UIColor(red: 0.93, green: 0.96, blue: 1, alpha: 1)
     })
     static let card = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.18, green: 0.23, blue: 0.26, alpha: 1)
+            ? UIColor(red: 28/255, green: 45/255, blue: 76/255, alpha: 0.8)
             : UIColor.white
     })
     static let muted = Color(uiColor: .secondaryLabel)
     static let heroInk = Color(red: 0.094, green: 0.16, blue: 0.19)
-    static let heroStart = Color(red: 1, green: 0.95, blue: 0.83)
-    static let heroEnd = Color(red: 0.97, green: 0.69, blue: 0.52)
+    static let heroStart = Color(red: 0.79, green: 0.88, blue: 1)
+    static let heroEnd = Color(red: 0.57, green: 0.70, blue: 0.99)
     static let title = Font.system(.title2, design: .default, weight: .bold)
     static let body = Font.system(.body, design: .default)
     static let meta = Font.system(.caption, design: .default)

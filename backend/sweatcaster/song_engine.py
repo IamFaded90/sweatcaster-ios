@@ -32,7 +32,8 @@ class SongEngine:
             # The first submission after a lazy server start loads ACE-Step before
             # it returns a task ID. Keep that one request open long enough for a
             # cold load; retrying an uncertain submit could create a second song.
-            kwargs = {"timeout": (5, 360 if path == "/release_task" else 60), "allow_redirects": False}
+            timeout = (2, 3) if path == "/health" else (5, 360 if path == "/release_task" else 60)
+            kwargs = {"timeout": timeout, "allow_redirects": False}
             if body is not None:
                 kwargs["json"] = body
             if files is not None:

@@ -71,7 +71,7 @@ struct FilmCompanionView: View {
                 }.frame(maxWidth: .infinity, alignment: .leading).padding(Style.space)
             }
             .scrollDismissesKeyboard(.interactively)
-            .background(Style.canvas)
+            .background { FilmBackground() }
             .navigationTitle("Filmven uden spoilers").navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Luk") { dismiss() } } }
             .onChange(of: model.filmFrame) { _, newFrame in

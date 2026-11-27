@@ -1,4 +1,5 @@
 import SwiftUI
+import CastBrowserFeature
 
 enum FadedTheme: String, CaseIterable, Identifiable {
     case faded = "Faded"
@@ -102,17 +103,19 @@ struct FadedPalette {
 }
 
 enum FadedBrand {
-    static let canvas = Color(red: 28 / 255, green: 47 / 255, blue: 51 / 255)
-    static let panel = Color(red: 34 / 255, green: 55 / 255, blue: 60 / 255)
-    static let raised = Color(red: 47 / 255, green: 69 / 255, blue: 75 / 255)
-    static let border = Color(red: 212 / 255, green: 240 / 255, blue: 236 / 255, opacity: 0.1)
+    static let canvas = Color(red: 18 / 255, green: 31 / 255, blue: 58 / 255)
+    static let panel = Color(red: 28 / 255, green: 45 / 255, blue: 76 / 255)
+    static let raised = Color(red: 40 / 255, green: 60 / 255, blue: 94 / 255)
+    static let border = Color(red: 202 / 255, green: 222 / 255, blue: 255 / 255, opacity: 0.14)
     static let text = Color(red: 245 / 255, green: 247 / 255, blue: 247 / 255)
-    static let secondary = Color(red: 192 / 255, green: 209 / 255, blue: 210 / 255)
+    static let secondary = Color(red: 189 / 255, green: 207 / 255, blue: 233 / 255)
     static let actionText = Color(red: 6 / 255, green: 28 / 255, blue: 36 / 255)
-    static let mint = Color(red: 87 / 255, green: 242 / 255, blue: 204 / 255)
+    static let sky = Color(red: 157 / 255, green: 205 / 255, blue: 255 / 255)
+    // Kept as a source-compatible token for existing controls; the brand is now blue.
+    static let mint = sky
     static let blue = Color(red: 69 / 255, green: 150 / 255, blue: 251 / 255)
     static let phone = Color(red: 94 / 255, green: 231 / 255, blue: 139 / 255)
-    static let pc = Color(red: 64 / 255, green: 224 / 255, blue: 255 / 255)
+    static let pc = Color(red: 129 / 255, green: 190 / 255, blue: 255 / 255)
     static let destructive = Color(red: 255 / 255, green: 114 / 255, blue: 98 / 255)
 
     static let gradient = LinearGradient(colors: [mint, blue], startPoint: .leading, endPoint: .trailing)
@@ -183,10 +186,10 @@ struct FadedBackground: View {
         case (.oled, _): .black
         case (.day, .village): Color(red: 0.97, green: 0.93, blue: 0.85)
         case (.day, .privateChat): Color(red: 0.95, green: 0.92, blue: 0.96)
-        case (.day, _): Color(red: 0.93, green: 0.95, blue: 0.92)
+        case (.day, _): Color(red: 0.93, green: 0.96, blue: 1)
         case (.faded, .standard): palette.background
         case (.faded, .privateChat): Color(red: 0.17, green: 0.16, blue: 0.21)
-        case (.faded, .village): Color(red: 0.17, green: 0.19, blue: 0.18)
+        case (.faded, .village): Color(red: 0.12, green: 0.17, blue: 0.25)
         case (.faded, .terminal): Color(red: 0.14, green: 0.18, blue: 0.22)
         }
     }
@@ -201,19 +204,8 @@ struct FadedBackground: View {
             }
             .overlay { if palette.theme != .oled && variant != .standard { texture } }
             .overlay {
-                if palette.theme == .faded && variant == .standard && lookPreset == nil {
-                    Canvas { context, size in
-                        var grid = Path()
-                        for x in stride(from: CGFloat.zero, through: size.width, by: 40) {
-                            grid.move(to: CGPoint(x: x, y: 0))
-                            grid.addLine(to: CGPoint(x: x, y: size.height))
-                        }
-                        for y in stride(from: CGFloat.zero, through: size.height, by: 40) {
-                            grid.move(to: CGPoint(x: 0, y: y))
-                            grid.addLine(to: CGPoint(x: size.width, y: y))
-                        }
-                        context.stroke(grid, with: .color(FadedBrand.mint.opacity(0.025)), lineWidth: 0.5)
-                    }
+                if palette.theme != .oled && lookPreset == nil {
+                    FadedBlueWallpaper()
                 }
             }
             .overlay {
@@ -246,5 +238,12 @@ struct FadedBackground: View {
             }
             context.fill(path, with: .color(palette.text.opacity(0.035)))
         }
+    }
+}
+
+/// The same static smoked-glass artwork used by Film.
+struct FadedBlueWallpaper: View {
+    var body: some View {
+        BlueGlassSmoke()
     }
 }

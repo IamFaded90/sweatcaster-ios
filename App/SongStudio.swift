@@ -62,7 +62,30 @@ struct SongJob: Codable, Identifiable, Equatable {
     let state: String
     let notice: String
     let created: Double
+    var progress: SongJobProgress? = nil
     var finished: Bool { ["completed", "failed", "removed"].contains(state) }
+}
+
+struct SongJobProgress: Codable, Equatable {
+    let stage: String
+    let updated: Double
+    let lastChecked: Double?
+}
+
+extension SongJob {
+    var progressStep: Int {
+        if state == "completed" { return 4 }
+        switch progress?.stage ?? state {
+        case "preparing", "submitting": return 1
+        case "rendering": return 2
+        case "saving": return 3
+        default: return 0
+        }
+    }
+    var progressTitle: String {
+        if state == "failed" { return "Sangen kunne ikke laves" }
+        return ["I kø på PC’en", "Klargør musikmotoren", "Skaber din sang", "Gør lyden klar", "Sangen er klar"][progressStep]
+    }
 }
 
 struct SongStudioCatalog: Decodable {

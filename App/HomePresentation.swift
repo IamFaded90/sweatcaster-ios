@@ -386,7 +386,20 @@ extension Home {
                             }
                         }, onConsumeSearch: { searchChatQuery = "" },
                         onConsumePhonePreference: { preferPhoneInChat = false },
-                        onComposerFocusChange: onComposerFocusChange)
+                        onComposerFocusChange: onComposerFocusChange, openDestination: { destination in
+                            showChat = false
+                            switch destination {
+                            case .home: selectSpace(.brain)
+                            case .music: selectSpace(.music)
+                            case .film: selectSpace(.entertainment)
+                            case .images:
+                                if embedded { openStudio(.images) }
+                                else { openImagesFromChat("") }
+                            case .video: selectSpace(.gallery)
+                            case .agents: selectSpace(.tasks)
+                            case .village: selectSpace(.village)
+                            }
+                        })
             .id(session)
     }
 

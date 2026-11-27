@@ -19,6 +19,7 @@ public struct PhoneSongInput: Sendable {
 
 public enum PhoneSongFailure: LocalizedError {
     case unsupported, missing, busy, input, download, invalidModel
+    case downloadHTTP(Int)
     public var errorDescription: String? {
         switch self {
         case .unsupported: "ACE-Step kræver en rigtig iPhone med iOS 18 eller nyere og understøttet grafik."
@@ -26,6 +27,10 @@ public enum PhoneSongFailure: LocalizedError {
         case .busy: "Telefonen arbejder allerede på en sang eller hentning."
         case .input: "Sangens beskrivelse, tekst eller længde kunne ikke bruges."
         case .download: "En modelfil var ufuldstændig. Prøv hentningen igen; færdige filer bevares."
+        case .downloadHTTP(let status):
+            status == 429
+                ? "Modelserveren begrænser hentninger lige nu. Vent lidt, og prøv igen."
+                : "Modelserveren kunne ikke levere filen (HTTP \(status)). Prøv igen senere."
         case .invalidModel: "En af sangmodellens filer kunne ikke læses. Slet sangmodellen, og hent den igen. Dine færdige sange bevares."
         }
     }
@@ -53,7 +58,7 @@ public actor PhoneSongEngine {
     public nonisolated static func installed(at root: URL) -> Bool {
         PhoneSongAsset.all.allSatisfy { $0.present(at: root) }
     }
-    public func download(to root: URL, progress: @Sendable @escaping (String) -> Void) async throws {
+    public func download(to root: URL, progress: @Sendable @escaping (PhoneSongDownloadUpdate) -> Void) async throws {
         guard !busy else { throw PhoneSongFailure.busy }
         busy = true; defer { busy = false }
         try await PhoneSongDownload.fetch(to: root, progress: progress)

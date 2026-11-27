@@ -411,7 +411,7 @@ enum MusicEdition {
     static func paper(_ palette: FadedPalette) -> Color {
         switch palette.theme {
         case .day: Color(red: 246 / 255, green: 239 / 255, blue: 224 / 255)
-        case .faded: Color(red: 34 / 255, green: 49 / 255, blue: 54 / 255)
+        case .faded: FadedBrand.canvas
         case .oled: .black
         }
     }
@@ -428,6 +428,7 @@ struct MusicBackdrop: View {
             if palette.theme == .faded, let lookPreset {
                 lookPreset.background(in: palette)
             } else if palette.theme != .oled && contrast == .standard {
+                FadedBlueWallpaper()
                 Canvas { context, size in
                     let center = CGPoint(x: size.width * 1.12, y: size.height * 0.78)
                     var grooves = Path()

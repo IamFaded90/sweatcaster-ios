@@ -326,7 +326,7 @@ struct Home: View {
                     ephemeralOnly: true, privateImagePC: model.isDemo || model.needsPairing ? nil : model.api as? LiveAPI,
                     onBack: goBack))
             }.toolbarVisibility(.hidden, for: .tabBar)
-                .tabItem { Label("Privat chat", systemImage: "lock.bubble") }.tag(Space.privateChat.rawValue)
+                .tabItem { Label("Privat chat", systemImage: "lock.shield.fill") }.tag(Space.privateChat.rawValue)
             DeferredHomeTab(isSelected: selectedHomeTab == Space.gallery.rawValue, keepAlive: false) {
                 AnyView(videoStudio.onAppear { if videoPage == .clips { onScreenAppeared?(.videoClips) } })
             }
